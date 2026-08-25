@@ -1,0 +1,81 @@
+{% load bookmark_display %}
+<li role="none" data-tree-item>
+    <div
+        class="tree-node-row{% if item.selected %} is-selected{% endif %}{% if item.located %} is-located{% endif %}{% if not item.matches %} is-context-only{% endif %}"
+        role="treeitem"
+        aria-level="{{ item.depth }}"
+        aria-selected="{% if item.selected %}true{% else %}false{% endif %}"
+        {% if item.children %}aria-expanded="true"{% endif %}
+        tabindex="{% if item.selected or item.located %}0{% else %}-1{% endif %}"
+        data-tree-row
+    >
+        <span class="tree-node-disclosure">
+            {% if item.children %}
+            <button
+                class="tree-toggle"
+                type="button"
+                aria-label="Expand or collapse {{ item.node.title }}"
+                aria-expanded="true"
+                aria-controls="tree-group-{{ item.node.pk }}"
+                data-tree-toggle
+                data-node-key="{% if item.node.page_id %}page:{{ item.node.page_id }}{% else %}provisional:{{ item.node.provisional_key }}{% endif %}"
+            ><span aria-hidden="true">›</span></button>
+            {% else %}
+            <span class="tree-toggle-spacer" aria-hidden="true"></span>
+            {% endif %}
+        </span>
+        {% if item.bookmark %}
+        <label class="tree-select-check" title="Select bookmark #{{ item.bookmark.pk }} for a later bulk action">
+            <input type="checkbox" value="{{ item.bookmark.pk }}" data-bookmark-check aria-label="Select bookmark #{{ item.bookmark.pk }}">
+        </label>
+        <span class="tree-node-number">#{{ item.bookmark.pk }}</span>
+        <a
+            class="tree-node-link"
+            href="?selected={{ item.bookmark.pk }}{% if current_query_string %}&amp;{{ current_query_string }}{% endif %}"
+            {% if item.selected %}aria-current="true"{% endif %}
+            {% if item.located %}data-located-bookmark{% endif %}
+            data-tree-select
+            data-bookmark-id="{{ item.bookmark.pk }}"
+        >{{ item.node.title }}</a>
+        <span class="tree-personal-actions">
+            <form method="post" action="{% url 'bookmark_manager:favorite' item.bookmark.pk %}" data-productivity-form data-favorite-form>
+                {% csrf_token %}
+                <button class="tree-star" type="submit" aria-label="{% if item.bookmark.favorite %}Remove bookmark #{{ item.bookmark.pk }} from favorites{% else %}Add bookmark #{{ item.bookmark.pk }} to favorites{% endif %}" aria-pressed="{% if item.bookmark.favorite %}true{% else %}false{% endif %}" data-favorite-state="{{ item.bookmark.favorite|yesno:'true,false' }}" data-bookmark-id="{{ item.bookmark.pk }}">{% if item.bookmark.favorite %}★{% else %}☆{% endif %}</button>
+            </form>
+            <form method="post" action="{% url 'bookmark_manager:pin' item.bookmark.pk %}" data-productivity-form data-pin-form>
+                {% csrf_token %}
+                <button class="tree-pin" type="submit" aria-label="{% if item.bookmark.pinned %}Unpin bookmark #{{ item.bookmark.pk }}{% else %}Pin bookmark #{{ item.bookmark.pk }}{% endif %}" aria-pressed="{% if item.bookmark.pinned %}true{% else %}false{% endif %}" data-pin-state="{{ item.bookmark.pinned|yesno:'true,false' }}" data-bookmark-id="{{ item.bookmark.pk }}">{% if item.bookmark.pinned %}Pinned{% else %}Pin{% endif %}</button>
+            </form>
+        </span>
+        <span class="tree-status" data-availability="{{ item.bookmark.availability_status }}">
+            {% if item.bookmark.availability_status != "active" %}{{ item.bookmark.get_availability_status_display }}{% else %}{{ item.bookmark.recency_status.label }}{% endif %}
+        </span>
+        <time class="tree-date" datetime="{{ item.bookmark.created_at|date:'c' }}" title="{{ item.bookmark.created_at|date:'c' }}" tabindex="0">{{ item.bookmark.created_at|relative_datetime }}</time>
+        <time class="tree-date" datetime="{{ item.bookmark.updated_at|date:'c' }}" title="{{ item.bookmark.updated_at|date:'c' }}" tabindex="0">{{ item.bookmark.updated_at|relative_datetime }}</time>
+        <time class="tree-date" datetime="{{ item.bookmark.saved_at|date:'c' }}" title="{{ item.bookmark.saved_at|date:'c' }}" tabindex="0">{{ item.bookmark.saved_at|relative_datetime }}</time>
+        <span class="tree-tags" data-tags-display data-bookmark-id="{{ item.bookmark.pk }}">{% for tag in item.bookmark.tags.all %}<span class="tag-chip">{{ tag.name }}</span>{% empty %}<span class="muted-value">No tags</span>{% endfor %}</span>
+        <details class="tree-quick-note">
+            <summary>Quick note</summary>
+            <form method="post" action="{% url 'bookmark_manager:organise' item.bookmark.pk %}" data-productivity-form>
+                {% csrf_token %}
+                <label for="quick-note-{{ item.bookmark.pk }}" class="visually-hidden">Quick note for {{ item.bookmark.title }}</label>
+                <textarea id="quick-note-{{ item.bookmark.pk }}" name="notes" rows="2" maxlength="50000">{{ item.bookmark.notes }}</textarea>
+                <input type="hidden" name="tags" value="{% for tag in item.bookmark.tags.all %}{{ tag.name }}{% if not forloop.last %}, {% endif %}{% endfor %}">
+                <button class="button button--small" type="submit">Save note</button>
+            </form>
+        </details>
+        {% else %}
+        <span class="tree-select-check" aria-hidden="true"></span>
+        <span class="tree-node-number" aria-hidden="true">↳</span>
+        <span class="tree-node-link tree-node-link--path">{{ item.node.title }}</span>
+        <span class="tree-node-kind">Hierarchy path</span>
+        {% endif %}
+    </div>
+    {% if item.children %}
+    <ul role="group" id="tree-group-{{ item.node.pk }}">
+        {% for child in item.children %}
+            {% include "bookmark_manager/_tree_node.html" with item=child current_query_string=current_query_string csrf_token=csrf_token only %}
+        {% endfor %}
+    </ul>
+    {% endif %}
+</li>

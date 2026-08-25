@@ -1,0 +1,8 @@
+{% extends "owl/base.html" %}
+
+{% block content %}
+<div class="page-stack page-stack--centered">
+    {% include "owl/foundation_panel.html" %}
+    <p class="quiet-action"><a href="{% url 'core:dashboard' %}">Return to the app launcher</a></p>
+</div>
+{% endblock %}

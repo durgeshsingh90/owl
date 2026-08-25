@@ -1,0 +1,121 @@
+<div class="app-sidebar-shell" data-app-sidebar-shell>
+<button class="app-sidebar-toggle" type="button" aria-expanded="false" aria-controls="bookmark-app-sidebar" data-app-sidebar-toggle>Bookmark Manager menu</button>
+<aside class="app-sidebar bookmark-app-sidebar" id="bookmark-app-sidebar" aria-labelledby="bookmark-app-sidebar-heading">
+    <header class="app-sidebar__header">
+        <p class="eyebrow">Bookmark Manager</p>
+        <h2 id="bookmark-app-sidebar-heading">Bookmark tools</h2>
+    </header>
+
+    <nav class="app-side-nav" aria-label="Bookmark Manager functions">
+        <section class="app-side-nav__group" aria-labelledby="bookmark-browse-heading">
+            <h3 id="bookmark-browse-heading">Browse</h3>
+            <a href="{% url 'bookmark_manager:index' %}"{% if active_section == 'all' %} aria-current="page" class="is-active"{% endif %}>All bookmarks</a>
+            <a href="{% url 'bookmark_manager:index' %}?favorite=on&amp;sort=added_newest"{% if active_section == 'favorites' %} aria-current="page" class="is-active"{% endif %}>Favorites</a>
+            <a href="{% url 'bookmark_manager:index' %}?pinned=on&amp;sort=added_newest"{% if active_section == 'pinned' %} aria-current="page" class="is-active"{% endif %}>Pinned</a>
+            <a href="{% url 'bookmark_manager:index' %}?sort=recently_opened"{% if active_section == 'recent' %} aria-current="page" class="is-active"{% endif %}>Recently viewed</a>
+            <a href="{% url 'bookmark_manager:index' %}?sort=most_opened"{% if active_section == 'frequent' %} aria-current="page" class="is-active"{% endif %}>Frequently viewed</a>
+            <a href="{% url 'bookmark_manager:index' %}?max_open=0&amp;sort=added_newest"{% if active_section == 'never' %} aria-current="page" class="is-active"{% endif %}>Never viewed</a>
+        </section>
+
+        <section class="app-side-nav__group" aria-labelledby="bookmark-data-heading">
+            <h3 id="bookmark-data-heading">Data</h3>
+            <a href="{% url 'bookmark_manager:index' %}#bookmark-import">Import JSON</a>
+            <a href="{% url 'bookmark_manager:export' %}">Export JSON</a>
+        </section>
+
+        <section class="app-side-nav__group" aria-labelledby="bookmark-connection-heading">
+            <h3 id="bookmark-connection-heading">Connection</h3>
+            <a href="{% url 'bookmark_manager:settings' %}"{% if active_section == 'settings' %} aria-current="page" class="is-active"{% endif %}>Confluence settings</a>
+            <a href="{% url 'core:system_status' %}">System status</a>
+        </section>
+    </nav>
+
+    {% if not compact %}
+    <div class="app-sidebar__workspace">
+        <div class="pane-heading">
+            <h2 id="bookmark-overview-heading">Find and organise</h2>
+        </div>
+        <dl class="bookmark-overview-counts">
+            <div><dt>Saved bookmarks</dt><dd>{{ total_bookmarks }}</dd></div>
+            <div><dt>Visible results</dt><dd>{{ result_count }}</dd></div>
+            <div><dt>Favorites</dt><dd>{{ query_result.counts.favorites }}</dd></div>
+            <div><dt>Pinned</dt><dd>{{ query_result.counts.pinned }}</dd></div>
+        </dl>
+
+        <details class="filter-section" open>
+            <summary>Filters <span>{{ active_filters|length }} active</span></summary>
+            <div class="filter-grid">
+                <label class="check-field">{{ filter_form.favorite }} <span>Favorite only</span></label>
+                <label class="check-field">{{ filter_form.pinned }} <span>Pinned only</span></label>
+                <label class="check-field">{{ filter_form.changed }} <span>Changed since viewed</span></label>
+                <label class="check-field">{{ filter_form.broken }} <span>Broken or inaccessible</span></label>
+                <label>Tags <small>Selected tags use ALL</small>{{ filter_form.tags }}</label>
+                <label>Person{{ filter_form.person }}</label>
+                <label>Space{{ filter_form.space }}</label>
+                <label>Availability{{ filter_form.availability }}</label>
+                <label>NEW / UPDATED / NORMAL{{ filter_form.recency }}</label>
+                <div class="paired-fields"><label>Minimum opens{{ filter_form.min_open }}</label><label>Maximum opens{{ filter_form.max_open }}</label></div>
+            </div>
+        </details>
+
+        <details class="filter-section">
+            <summary>Date and sort</summary>
+            <div class="filter-grid">
+                <label>Date field{{ filter_form.date_field }}</label>
+                <label>Range{{ filter_form.date_preset }}</label>
+                <div class="paired-fields"><label>From{{ filter_form.date_from }}</label><label>To{{ filter_form.date_to }}</label></div>
+                <label>Sort{{ filter_form.sort }}</label>
+                <p class="field-help">Global sorts switch to a flat result list and retain each breadcrumb. The stored hierarchy never changes.</p>
+            </div>
+        </details>
+        <div class="filter-actions">
+            <button class="button button--primary" type="submit" form="bookmark-filter-form">Apply filters</button>
+            <a class="button button--secondary" href="{% url 'bookmark_manager:index' %}">Clear filters</a>
+        </div>
+
+        <details class="filter-section"{% if active_saved_view %} open{% endif %}>
+            <summary>Saved views</summary>
+            <form class="saved-view-form" method="post" action="{% url 'bookmark_manager:view_save' %}" data-productivity-form>
+                {% csrf_token %}
+                <label for="{{ saved_view_form.name.id_for_label }}">View name</label>
+                {{ saved_view_form.name }}
+                <input type="hidden" name="query_string" value="{{ current_query_string }}">
+                <button class="button button--secondary" type="submit">Save current view</button>
+            </form>
+            <ul class="saved-view-list">
+                {% for view in saved_views %}
+                <li>
+                    <a href="?saved_view={{ view.pk }}"{% if active_saved_view.pk == view.pk %} aria-current="true"{% endif %}>{{ view.name }}</a>
+                    <form method="post" action="{% url 'bookmark_manager:view_delete' view.pk %}" data-confirm-message="Delete this saved bookmark view? Bookmarks will not be changed." data-local-redirect-form>
+                        {% csrf_token %}<input type="hidden" name="confirm" value="delete"><button type="submit" class="text-button">Delete</button>
+                    </form>
+                </li>
+                {% empty %}<li class="muted-value">No saved views yet.</li>{% endfor %}
+            </ul>
+        </details>
+
+        <details class="filter-section" id="bookmark-import">
+            <summary>Import a backup</summary>
+            <form class="import-form" method="post" action="{% url 'bookmark_manager:import' %}" enctype="multipart/form-data" data-local-redirect-form>
+                {% csrf_token %}
+                <label for="{{ import_form.import_file.id_for_label }}">{{ import_form.import_file.label }}</label>
+                {{ import_form.import_file }}
+                {% if import_form.import_file.errors %}<div class="field-error" role="alert">{{ import_form.import_file.errors|striptags }}</div>{% endif %}
+                <p class="field-help">{{ import_form.import_file.help_text }} Existing personal values win.</p>
+                <button class="button button--secondary" type="submit">Import JSON</button>
+            </form>
+        </details>
+
+        {% if not configuration.complete %}
+        <div class="first-use-callout" id="bookmark-connection-help">
+            <h3>Connect Confluence first</h3>
+            <p>{{ configuration.detail }} Existing bookmarks, notes, filters, and exports remain available offline.</p>
+            <button class="button button--secondary" type="button" data-settings-open data-settings-fallback="{% url 'bookmark_manager:settings' %}">Open settings</button>
+        </div>
+        {% else %}
+        <p class="field-help">Shortcuts: <kbd>/</kbd> search, arrows navigate, <kbd>E</kbd> expand, <kbd>F</kbd> favorite, <kbd>P</kbd> pin, and Enter opens details.</p>
+        {% endif %}
+    </div>
+    {% endif %}
+</aside>
+</div>

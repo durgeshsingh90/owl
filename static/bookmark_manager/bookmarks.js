@@ -1,0 +1,656 @@
+(() => {
+    "use strict";
+
+    const settingsDialog = document.querySelector("[data-settings-dialog]");
+    const settingsButtons = document.querySelectorAll("[data-settings-open]");
+    const settingsHeading = document.querySelector("[data-settings-heading]");
+    let activeSettingsButton = null;
+
+    const openSettings = (trigger = settingsButtons[0]) => {
+        activeSettingsButton = trigger || settingsButtons[0] || null;
+        if (!settingsDialog || typeof settingsDialog.showModal !== "function") {
+            const fallbackUrl = activeSettingsButton?.dataset.settingsFallback;
+            if (fallbackUrl) {
+                window.location.assign(fallbackUrl);
+            }
+            return;
+        }
+        settingsDialog.showModal();
+        settingsHeading?.focus();
+    };
+
+    settingsButtons.forEach((button) => {
+        button.addEventListener("click", () => openSettings(button));
+    });
+
+    const settingsForm = document.querySelector("[data-confluence-settings-form]");
+    const patInput = settingsForm?.querySelector("input[type='password'], input[data-pat-input]");
+    const showPatButton = settingsForm?.querySelector("[data-show-pat]");
+    const verificationReceipt = settingsForm?.querySelector("[name='verification_receipt']");
+    const testButton = settingsForm?.querySelector("[data-test-connection]");
+    const saveSettingsButton = settingsForm?.querySelector("[data-save-settings]");
+    const testResult = settingsForm?.querySelector("[data-connection-test-result]");
+
+    const resetSettingsForm = () => {
+        settingsForm?.reset();
+        if (patInput) {
+            patInput.type = "password";
+        }
+        if (showPatButton) {
+            showPatButton.textContent = "Show";
+            showPatButton.setAttribute("aria-pressed", "false");
+        }
+        if (verificationReceipt) {
+            verificationReceipt.value = "";
+        }
+        if (testResult) {
+            testResult.textContent = "No connection test has run for the current values.";
+            testResult.dataset.state = "idle";
+        }
+    };
+
+    document.querySelectorAll("[data-settings-close]").forEach((button) => {
+        button.addEventListener("click", () => {
+            resetSettingsForm();
+            settingsDialog?.close();
+        });
+    });
+    settingsDialog?.addEventListener("cancel", resetSettingsForm);
+    settingsDialog?.addEventListener("close", () => activeSettingsButton?.focus());
+    if (settingsDialog?.dataset.openOnLoad === "true") {
+        openSettings();
+    }
+
+    showPatButton?.addEventListener("click", () => {
+        if (!patInput) {
+            return;
+        }
+        const showing = patInput.type === "text";
+        patInput.type = showing ? "password" : "text";
+        showPatButton.textContent = showing ? "Show" : "Hide";
+        showPatButton.setAttribute("aria-pressed", String(!showing));
+        patInput.focus();
+    });
+
+    settingsForm?.querySelectorAll("[data-settings-cancel]").forEach((button) => {
+        button.addEventListener("click", () => {
+            resetSettingsForm();
+            settingsDialog?.close();
+        });
+    });
+
+    testButton?.addEventListener("click", async (event) => {
+        if (!settingsForm || !testResult) {
+            return;
+        }
+        event.preventDefault();
+        if (!settingsForm.reportValidity()) {
+            return;
+        }
+
+        testButton.disabled = true;
+        testButton.setAttribute("aria-busy", "true");
+        testResult.textContent = "Testing one read-only Confluence request…";
+        testResult.dataset.state = "progress";
+        if (verificationReceipt) {
+            verificationReceipt.value = "";
+        }
+
+        try {
+            const response = await fetch(settingsForm.dataset.testUrl, {
+                method: "POST",
+                body: new FormData(settingsForm),
+                credentials: "same-origin",
+                headers: {
+                    Accept: "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+            });
+            const payload = await response.json();
+            testResult.textContent = `${payload.label} — ${payload.detail}`;
+            testResult.dataset.state = payload.state || "error";
+            if (response.ok && payload.verification_receipt && verificationReceipt) {
+                verificationReceipt.value = payload.verification_receipt;
+            }
+        } catch (_error) {
+            testResult.textContent = "Unreachable — OWL could not complete the connection test.";
+            testResult.dataset.state = "unreachable";
+        } finally {
+            testButton.disabled = false;
+            testButton.removeAttribute("aria-busy");
+        }
+    });
+
+    const submitLocalForm = async (
+        form,
+        statusTarget,
+        busyButton,
+        actionUrl = form.action,
+        formData = new FormData(form),
+    ) => {
+        busyButton?.setAttribute("aria-busy", "true");
+        if (busyButton) {
+            busyButton.disabled = true;
+        }
+        try {
+            const response = await fetch(actionUrl, {
+                method: "POST",
+                body: formData,
+                credentials: "same-origin",
+                headers: {
+                    Accept: "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+            });
+            if (response.redirected) {
+                const target = new URL(response.url, window.location.href);
+                if (target.origin === window.location.origin) {
+                    window.location.assign(target.href);
+                    return;
+                }
+            }
+            let payload = null;
+            if ((response.headers.get("content-type") || "").includes("application/json")) {
+                payload = await response.json();
+            }
+            if (payload?.redirect) {
+                const target = new URL(payload.redirect, window.location.href);
+                if (target.origin === window.location.origin) {
+                    window.location.assign(target.href);
+                    return;
+                }
+            }
+            if (statusTarget) {
+                statusTarget.hidden = false;
+                statusTarget.textContent = payload
+                    ? `${payload.label} — ${payload.detail}`
+                    : "The action could not be completed. Review the form and try again.";
+                statusTarget.dataset.state = payload?.state || "error";
+            }
+        } catch (_error) {
+            if (statusTarget) {
+                statusTarget.hidden = false;
+                statusTarget.textContent = "The local action could not be completed.";
+                statusTarget.dataset.state = "unreachable";
+            }
+        } finally {
+            busyButton?.removeAttribute("aria-busy");
+            if (busyButton) {
+                busyButton.disabled = false;
+            }
+        }
+    };
+
+    settingsForm?.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (!settingsForm.reportValidity()) {
+            return;
+        }
+        await submitLocalForm(settingsForm, testResult, saveSettingsButton);
+    });
+
+    const bookmarkUnifiedForm = document.querySelector("[data-bookmark-unified-form]");
+    const bookmarkSaveResult = document.querySelector("[data-bookmark-save-result]");
+    bookmarkUnifiedForm?.addEventListener("submit", async (event) => {
+        const submitter = event.submitter;
+        if (!(submitter instanceof HTMLElement) || !submitter.matches("[data-bookmark-save]")) {
+            return;
+        }
+        event.preventDefault();
+        if (!bookmarkUnifiedForm.reportValidity()) {
+            return;
+        }
+        const saveAction = submitter.getAttribute("formaction") || bookmarkUnifiedForm.action;
+        const formData = new FormData(bookmarkUnifiedForm);
+        formData.set("csrfmiddlewaretoken", bookmarkUnifiedForm.dataset.csrfToken || "");
+        await submitLocalForm(
+            bookmarkUnifiedForm,
+            bookmarkSaveResult,
+            submitter,
+            saveAction,
+            formData,
+        );
+    });
+
+    document.querySelectorAll("[data-remove-credential-form]").forEach((form) => {
+        form.addEventListener("submit", async (event) => {
+            const confirmed = window.confirm(
+                "Remove the securely stored Confluence PAT? Local bookmarks will remain available.",
+            );
+            if (!confirmed) {
+                event.preventDefault();
+                return;
+            }
+            event.preventDefault();
+            await submitLocalForm(
+                form,
+                testResult,
+                form.querySelector("button[type='submit']"),
+            );
+        });
+    });
+
+    const locatedBookmark = document.querySelector("[data-located-bookmark]");
+    if (locatedBookmark) {
+        const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        locatedBookmark.scrollIntoView({
+            block: "center",
+            behavior: reduceMotion ? "auto" : "smooth",
+        });
+        locatedBookmark.focus({ preventScroll: true });
+    }
+
+    const bookmarkSearch = document.querySelector("[data-bookmark-search]");
+    document.addEventListener("keydown", (event) => {
+        const target = event.target;
+        const isTyping =
+            target instanceof HTMLInputElement ||
+            target instanceof HTMLTextAreaElement ||
+            target instanceof HTMLSelectElement ||
+            target?.isContentEditable;
+        if (event.key === "/" && !isTyping && bookmarkSearch) {
+            event.preventDefault();
+            bookmarkSearch.focus();
+        } else if (event.key === "Escape" && document.activeElement === bookmarkSearch) {
+            bookmarkSearch.blur();
+        }
+    });
+
+    const statusText = document.querySelector("[data-global-status-text]");
+    const announce = (message) => {
+        if (statusText && message) {
+            statusText.textContent = message;
+        }
+    };
+
+    const safeStorage = {
+        get(key, fallback = null) {
+            try {
+                const value = window.localStorage.getItem(key);
+                return value === null ? fallback : value;
+            } catch (_error) {
+                return fallback;
+            }
+        },
+        set(key, value) {
+            try {
+                window.localStorage.setItem(key, value);
+            } catch (_error) {
+                // The core interface remains usable when browser storage is disabled.
+            }
+        },
+    };
+
+    const expansionStorageKey = "owl.bookmark-manager.tree-expansion.v1";
+    const selectionStorageKey = "owl.bookmark-manager.selection.v1";
+    const checkedStorageKey = "owl.bookmark-manager.checked.v1";
+    const treeScrollStorageKey = "owl.bookmark-manager.tree-scroll.v1";
+
+    const readJsonObject = (key) => {
+        try {
+            return JSON.parse(safeStorage.get(key, "{}")) || {};
+        } catch (_error) {
+            return {};
+        }
+    };
+
+    const setTreeExpanded = (button, expanded, persist = true) => {
+        const groupId = button.getAttribute("aria-controls");
+        const group = groupId ? document.getElementById(groupId) : null;
+        button.setAttribute("aria-expanded", String(expanded));
+        button.closest("[role='treeitem']")?.setAttribute("aria-expanded", String(expanded));
+        if (group) {
+            group.hidden = !expanded;
+        }
+        if (persist) {
+            const states = readJsonObject(expansionStorageKey);
+            states[button.dataset.nodeKey] = expanded;
+            safeStorage.set(expansionStorageKey, JSON.stringify(states));
+        }
+    };
+
+    const storedExpansion = readJsonObject(expansionStorageKey);
+    document.querySelectorAll("[data-tree-toggle]").forEach((button) => {
+        const key = button.dataset.nodeKey;
+        const expanded = Object.hasOwn(storedExpansion, key) ? storedExpansion[key] : true;
+        setTreeExpanded(button, Boolean(expanded), false);
+        button.addEventListener("click", () => {
+            setTreeExpanded(button, button.getAttribute("aria-expanded") !== "true");
+        });
+    });
+
+    document.querySelectorAll("[data-tree-expand-all]").forEach((button) => {
+        button.addEventListener("click", () => {
+            document
+                .querySelectorAll("[data-tree-toggle]")
+                .forEach((toggle) => setTreeExpanded(toggle, true));
+            announce("All bookmark branches expanded");
+        });
+    });
+    document.querySelectorAll("[data-tree-collapse-all]").forEach((button) => {
+        button.addEventListener("click", () => {
+            document
+                .querySelectorAll("[data-tree-toggle]")
+                .forEach((toggle) => setTreeExpanded(toggle, false));
+            announce("All bookmark branches collapsed");
+        });
+    });
+
+    const treeScroll = document.querySelector("[data-tree-scroll]");
+    if (treeScroll) {
+        const previousScroll = Number.parseInt(safeStorage.get(treeScrollStorageKey, "0"), 10);
+        if (Number.isFinite(previousScroll)) {
+            treeScroll.scrollTop = previousScroll;
+        }
+        treeScroll.addEventListener("scroll", () => {
+            safeStorage.set(treeScrollStorageKey, String(treeScroll.scrollTop));
+        });
+    }
+
+    document.querySelectorAll("[data-tree-select][data-bookmark-id]").forEach((link) => {
+        link.addEventListener("click", () => {
+            safeStorage.set(selectionStorageKey, link.dataset.bookmarkId);
+        });
+    });
+
+    const treeRoot = document.querySelector("[data-bookmark-tree]");
+    const storedSelection = safeStorage.get(selectionStorageKey, "");
+    if (
+        treeRoot &&
+        !treeRoot.dataset.selectedBookmark &&
+        storedSelection &&
+        !window.location.search
+    ) {
+        const storedLink = treeRoot.querySelector(
+            `[data-tree-select][data-bookmark-id="${CSS.escape(storedSelection)}"]`,
+        );
+        if (storedLink) {
+            window.location.replace(storedLink.href);
+        }
+    }
+
+    const checkedBookmarks = readJsonObject(checkedStorageKey);
+    document.querySelectorAll("[data-bookmark-check]").forEach((checkbox) => {
+        checkbox.checked = Boolean(checkedBookmarks[checkbox.value]);
+        checkbox.addEventListener("change", () => {
+            checkedBookmarks[checkbox.value] = checkbox.checked;
+            safeStorage.set(checkedStorageKey, JSON.stringify(checkedBookmarks));
+            announce(
+                checkbox.checked
+                    ? `Bookmark #${checkbox.value} selected`
+                    : `Bookmark #${checkbox.value} unselected`,
+            );
+        });
+    });
+
+    const refreshBookmarkPresentation = (payload) => {
+        if (!payload.bookmark_id) {
+            return;
+        }
+        document
+            .querySelectorAll(`[data-bookmark-id="${CSS.escape(String(payload.bookmark_id))}"]`)
+            .forEach((element) => {
+                if (payload.favorite !== undefined && element.matches("[data-favorite-state]")) {
+                    element.dataset.favoriteState = String(payload.favorite);
+                    element.setAttribute("aria-pressed", String(payload.favorite));
+                    element.textContent = element.classList.contains("tree-star")
+                        ? payload.favorite
+                            ? "★"
+                            : "☆"
+                        : payload.favorite
+                          ? "★ Favorite"
+                          : "☆ Favorite";
+                }
+                if (payload.pinned !== undefined && element.matches("[data-pin-state]")) {
+                    element.dataset.pinState = String(payload.pinned);
+                    element.setAttribute("aria-pressed", String(payload.pinned));
+                    element.textContent = payload.pinned ? "Pinned" : "Pin";
+                }
+            });
+    };
+
+    const submitProductivityForm = async (form) => {
+        const button = form.querySelector("button[type='submit']");
+        button?.setAttribute("aria-busy", "true");
+        if (button) {
+            button.disabled = true;
+        }
+        try {
+            const response = await fetch(form.action, {
+                method: "POST",
+                body: new FormData(form),
+                credentials: "same-origin",
+                headers: {
+                    Accept: "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload.detail || "The change could not be saved.");
+            }
+            announce(payload.detail || payload.label || "Bookmark updated");
+            refreshBookmarkPresentation(payload);
+
+            if (payload.notes !== undefined) {
+                document
+                    .querySelectorAll(
+                        `[data-notes-display][data-bookmark-id="${CSS.escape(String(payload.bookmark_id))}"]`,
+                    )
+                    .forEach((element) => {
+                        element.textContent = payload.notes || "No personal note yet.";
+                    });
+            }
+            if (Array.isArray(payload.tags)) {
+                const text = payload.tags.length ? payload.tags.join(", ") : "No tags";
+                document
+                    .querySelectorAll(
+                        `[data-tags-display][data-bookmark-id="${CSS.escape(String(payload.bookmark_id))}"]`,
+                    )
+                    .forEach((element) => {
+                        element.textContent = text;
+                    });
+            }
+            if (payload.redirect) {
+                window.location.assign(payload.redirect);
+            }
+        } catch (error) {
+            announce(error instanceof Error ? error.message : "The change could not be saved.");
+        } finally {
+            button?.removeAttribute("aria-busy");
+            if (button) {
+                button.disabled = false;
+            }
+        }
+    };
+
+    document.querySelectorAll("[data-productivity-form]").forEach((form) => {
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            await submitProductivityForm(form);
+        });
+    });
+
+    document.querySelectorAll("[data-confirm-message]").forEach((form) => {
+        form.addEventListener("submit", (event) => {
+            if (!window.confirm(form.dataset.confirmMessage)) {
+                event.preventDefault();
+            }
+        });
+    });
+
+    document.querySelectorAll("[data-local-redirect-form]").forEach((form) => {
+        form.addEventListener("submit", async (event) => {
+            if (event.defaultPrevented) {
+                return;
+            }
+            event.preventDefault();
+            const button = form.querySelector("button[type='submit']");
+            await submitLocalForm(form, statusText, button);
+        });
+    });
+
+    document.querySelectorAll("[data-external-open-form]").forEach((form) => {
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const button = form.querySelector("button[type='submit']");
+            const externalWindow = window.open("about:blank", "_blank");
+            if (externalWindow) {
+                externalWindow.opener = null;
+            }
+            button?.setAttribute("aria-busy", "true");
+            if (button) {
+                button.disabled = true;
+            }
+            try {
+                const response = await fetch(form.action, {
+                    method: "POST",
+                    body: new FormData(form),
+                    credentials: "same-origin",
+                    headers: {
+                        Accept: "application/json",
+                        "X-Requested-With": "XMLHttpRequest",
+                    },
+                });
+                const payload = await response.json();
+                if (!response.ok || !payload.url) {
+                    throw new Error(payload.detail || "The page could not be opened safely.");
+                }
+                announce(payload.detail || "Opened in Confluence");
+                if (externalWindow) {
+                    externalWindow.location.replace(payload.url);
+                } else {
+                    window.open(payload.url, "_blank", "noopener,noreferrer");
+                }
+            } catch (error) {
+                externalWindow?.close();
+                announce(
+                    error instanceof Error ? error.message : "The page could not be opened safely.",
+                );
+            } finally {
+                button?.removeAttribute("aria-busy");
+                if (button) {
+                    button.disabled = false;
+                }
+            }
+        });
+    });
+
+    const copyText = async (value) => {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(value);
+            return;
+        }
+        const fallback = document.createElement("textarea");
+        fallback.value = value;
+        fallback.setAttribute("readonly", "");
+        fallback.style.position = "fixed";
+        fallback.style.opacity = "0";
+        document.body.append(fallback);
+        fallback.select();
+        const copied = document.execCommand("copy");
+        fallback.remove();
+        if (!copied) {
+            throw new Error("Copy unavailable");
+        }
+    };
+
+    document.querySelectorAll("[data-copy-value]").forEach((button) => {
+        button.addEventListener("click", async () => {
+            try {
+                await copyText(button.dataset.copyValue || "");
+                announce(button.dataset.copySuccess || "Copied");
+            } catch (_error) {
+                announce("Copy was not available. Select the value and copy it manually.");
+            }
+        });
+    });
+
+    let searchTimer = null;
+    bookmarkSearch?.addEventListener("input", (event) => {
+        window.clearTimeout(searchTimer);
+        const value = event.target.value.trim();
+        const delay = /^\d+$/.test(value) || /^https?:\/\//i.test(value) ? 0 : 350;
+        searchTimer = window.setTimeout(() => event.target.form?.requestSubmit(), delay);
+    });
+
+    const visibleTreeRows = () =>
+        Array.from(document.querySelectorAll("[data-tree-row]")).filter(
+            (row) => row.getClientRects().length > 0,
+        );
+
+    document.querySelector("[data-bookmark-tree]")?.addEventListener("keydown", (event) => {
+        const keyTarget = event.target;
+        if (
+            keyTarget instanceof HTMLInputElement ||
+            keyTarget instanceof HTMLTextAreaElement ||
+            keyTarget instanceof HTMLSelectElement ||
+            keyTarget?.isContentEditable
+        ) {
+            return;
+        }
+        const row = event.target.closest("[data-tree-row]");
+        if (!row) {
+            return;
+        }
+        const rows = visibleTreeRows();
+        const index = rows.indexOf(row);
+        const toggle = row.querySelector("[data-tree-toggle]");
+        const selectLink = row.querySelector("[data-tree-select]");
+        const shortcut = event.key.toLowerCase();
+
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            const offset = event.key === "ArrowDown" ? 1 : -1;
+            rows[Math.max(0, Math.min(rows.length - 1, index + offset))]?.focus();
+        } else if (event.key === "ArrowRight" && toggle) {
+            event.preventDefault();
+            if (toggle.getAttribute("aria-expanded") !== "true") {
+                setTreeExpanded(toggle, true);
+            } else {
+                const currentLevel = Number.parseInt(row.getAttribute("aria-level") || "1", 10);
+                const nextRow = rows[index + 1];
+                const nextLevel = Number.parseInt(nextRow?.getAttribute("aria-level") || "0", 10);
+                if (nextRow && nextLevel > currentLevel) {
+                    nextRow.focus();
+                }
+            }
+        } else if (event.key === "ArrowLeft") {
+            event.preventDefault();
+            if (toggle?.getAttribute("aria-expanded") === "true") {
+                setTreeExpanded(toggle, false);
+            } else {
+                const currentLevel = Number.parseInt(row.getAttribute("aria-level") || "1", 10);
+                for (let candidateIndex = index - 1; candidateIndex >= 0; candidateIndex -= 1) {
+                    const candidate = rows[candidateIndex];
+                    const candidateLevel = Number.parseInt(
+                        candidate.getAttribute("aria-level") || "1",
+                        10,
+                    );
+                    if (candidateLevel < currentLevel) {
+                        candidate.focus();
+                        break;
+                    }
+                }
+            }
+        } else if (event.key === "Enter" && selectLink) {
+            event.preventDefault();
+            selectLink.click();
+        } else if (shortcut === "e" && toggle) {
+            event.preventDefault();
+            toggle.click();
+        } else if (shortcut === "f") {
+            const favoriteForm = row.querySelector("[data-favorite-form]");
+            if (favoriteForm) {
+                event.preventDefault();
+                favoriteForm.requestSubmit();
+            }
+        } else if (shortcut === "p") {
+            const pinForm = row.querySelector("[data-pin-form]");
+            if (pinForm) {
+                event.preventDefault();
+                pinForm.requestSubmit();
+            }
+        }
+    });
+})();

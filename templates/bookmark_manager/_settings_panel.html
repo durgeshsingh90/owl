@@ -1,0 +1,90 @@
+<section class="settings-panel{% if panel_mode == 'page' %} settings-panel--page{% endif %}">
+    <header class="settings-panel__header">
+        <div>
+            <p class="eyebrow">Secure local connection</p>
+            <h2 id="confluence-settings-heading" data-settings-heading tabindex="-1">Confluence Settings</h2>
+            <p>Connect Bookmark Manager to one trusted Confluence Data Center origin.</p>
+        </div>
+        {% if panel_mode == "dialog" %}
+        <button class="icon-button" type="button" aria-label="Close Confluence settings" data-settings-close>×</button>
+        {% endif %}
+    </header>
+
+    <div class="settings-panel__body">
+        <div class="configuration-summary" data-state="{{ configuration.state }}">
+            <span class="configuration-summary__icon" aria-hidden="true">{% if configuration.state == "connected" %}✓{% else %}i{% endif %}</span>
+            <div>
+                <h3>{{ configuration.label }}</h3>
+                <p>{{ configuration.detail }}</p>
+                {% if configuration.last_verified_at %}<p>Last verified {{ configuration.last_verified_at|date:"j M Y, H:i" }}</p>{% endif %}
+            </div>
+        </div>
+
+        {% if settings_form.non_field_errors %}
+        <div class="form-errors" role="alert">{{ settings_form.non_field_errors|striptags }}</div>
+        {% endif %}
+
+        <form
+            class="settings-form"
+            method="post"
+            action="{% url 'bookmark_manager:settings_save' %}"
+            data-confluence-settings-form
+            data-test-url="{% url 'bookmark_manager:settings_test' %}"
+        >
+            {% csrf_token %}
+            <input type="hidden" name="return_to" value="{{ return_to }}">
+            {{ settings_form.verification_receipt }}
+
+            <div class="form-field">
+                {{ settings_form.base_url.label_tag }}
+                {{ settings_form.base_url }}
+                <p class="field-help">Use the exact trusted origin and context path, for example <code>https://confluence.company.example/wiki</code>.</p>
+                {% for error in settings_form.base_url.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+            </div>
+
+            <div class="form-field">
+                {{ settings_form.personal_access_token.label_tag }}
+                <div class="secret-entry">
+                    {{ settings_form.personal_access_token }}
+                    {% if not configuration.managed_externally %}<button class="button button--secondary" type="button" aria-pressed="false" data-show-pat>Show</button>{% endif %}
+                </div>
+                {% if settings_form.personal_access_token.help_text %}<p class="field-help">{{ settings_form.personal_access_token.help_text }}</p>{% endif %}
+                {% for error in settings_form.personal_access_token.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+            </div>
+
+            <details class="advanced-settings">
+                <summary>Advanced</summary>
+                <div class="form-field">
+                    {{ settings_form.auth_mode.label_tag }}
+                    {{ settings_form.auth_mode }}
+                    <p class="field-help">OWL uses the standard read-only Bearer PAT flow.</p>
+                </div>
+            </details>
+
+            <p class="test-result" role="status" aria-live="polite" data-connection-test-result data-state="idle">No connection test has run for the current values.</p>
+
+            <div class="form-actions">
+                <button class="button button--secondary" type="button" data-test-connection{% if configuration.managed_externally %} disabled{% endif %}>Test connection</button>
+                <button class="button button--primary" type="submit" data-save-settings{% if configuration.managed_externally %} disabled{% endif %}>Save settings</button>
+                {% if panel_mode == "dialog" %}
+                <button class="button button--secondary" type="button" data-settings-cancel>Cancel</button>
+                {% else %}
+                <a class="button button--secondary" href="{% url 'bookmark_manager:index' %}">Cancel</a>
+                {% endif %}
+            </div>
+        </form>
+
+        {% if configuration.source == "keyring" and not configuration.managed_externally %}
+        <div class="danger-zone">
+            <h3>Remove connection</h3>
+            <p>This removes the securely stored PAT and local connection profile. Saved bookmarks stay in OWL.</p>
+            <form method="post" action="{% url 'bookmark_manager:settings_remove' %}" data-remove-credential-form>
+                {% csrf_token %}
+                <input type="hidden" name="return_to" value="{{ return_to }}">
+                <input type="hidden" name="confirm" value="remove">
+                <button class="button button--danger" type="submit">Remove credential</button>
+            </form>
+        </div>
+        {% endif %}
+    </div>
+</section>

@@ -149,6 +149,8 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -195,9 +197,9 @@ cython_debug/
 .abstra/
 
 # Visual Studio Code
-#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
+#   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore
 #   that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#   and can be added to the global gitignore or merged into this file. However, if you prefer, 
+#   and can be added to the global gitignore or merged into this file. However, if you prefer,
 #   you could uncomment the following to ignore the entire vscode folder
 # .vscode/
 # Temporary file for partial code execution
@@ -205,6 +207,33 @@ tempCodeRunnerFile.py
 
 # Ruff stuff:
 .ruff_cache/
+
+# OWL local runtime and private data
+.DS_Store
+/media/
+/var/
+/data/
+/repositories/
+/indexes/
+/backups/
+/logs/
+/imports/
+/exports/
+/screenshots/
+/qa_artifacts/
+/test-results/
+/test_artifacts/
+/traces/
+/secrets/
+/tmp/
+/staticfiles/
+/database/
+/playwright-report/
+/work_prompts/local/
+*.sqlite3
+*.sqlite3-*
+*.db-wal
+*.db-shm
 
 # PyPI configuration file
 .pypirc

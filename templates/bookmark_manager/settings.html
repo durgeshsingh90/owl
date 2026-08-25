@@ -1,0 +1,21 @@
+{% extends "owl/base.html" %}
+{% load static %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'bookmark_manager/bookmarks.css' %}">
+{% endblock %}
+
+{% block app_sidebar %}
+{% include "bookmark_manager/_app_sidebar.html" with compact=True %}
+{% endblock %}
+
+{% block content %}
+<div class="page-stack page-stack--narrow">
+    <a class="text-link" href="{% url 'bookmark_manager:index' %}">← Back to Bookmark Manager</a>
+    {% include "bookmark_manager/_settings_panel.html" with panel_mode="page" return_to="settings" configuration=configuration settings_form=settings_form csrf_token=csrf_token only %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'bookmark_manager/bookmarks.js' %}" defer></script>
+{% endblock %}

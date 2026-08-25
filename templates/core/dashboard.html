@@ -1,0 +1,30 @@
+{% extends "owl/base.html" %}
+
+{% block content %}
+<div class="home-page">
+    <section class="home-welcome" aria-labelledby="dashboard-heading">
+        <div>
+            <p class="eyebrow">WISE · TRUSTED · KNOWLEDGEABLE</p>
+            <h1 id="dashboard-heading">Your trusted knowledge owl</h1>
+            <p class="lede">A friendly knowledge nerd with a clear view of your Confluence pages and repository PDFs.</p>
+            <ul class="home-values" aria-label="OWL values"><li>Wisdom</li><li>Trust</li><li>Knowledge</li></ul>
+        </div>
+        <div class="home-sun" aria-hidden="true"><span>OWL</span></div>
+    </section>
+
+    <section class="home-app-grid" aria-label="OWL applications">
+        <a class="home-app-card home-app-card--bookmarks" href="{% url 'bookmark_manager:index' %}">
+            <span class="home-card-icon" aria-hidden="true">⌘</span>
+            <span class="home-card-copy"><strong>Bookmark Manager</strong><small>Browse your real Confluence hierarchy, then organise what matters.</small></span>
+            <span class="home-card-arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="home-app-card home-app-card--bitbucket" href="{% url 'bitbucket_search:index' %}">
+            <span class="home-card-icon" aria-hidden="true">⌕</span>
+            <span class="home-card-copy"><strong>Bitbucket Search</strong><small>Prepare local PDF discovery across approved repositories.</small></span>
+            <span class="home-card-arrow" aria-hidden="true">→</span>
+        </a>
+    </section>
+
+    <p class="home-hierarchy-note">Your saved pages appear as a real expandable hierarchy inside Bookmark Manager.</p>
+</div>
+{% endblock %}

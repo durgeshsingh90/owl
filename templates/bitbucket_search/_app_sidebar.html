@@ -1,0 +1,23 @@
+<div class="app-sidebar-shell" data-app-sidebar-shell>
+<button class="app-sidebar-toggle" type="button" aria-expanded="false" aria-controls="bitbucket-app-sidebar" data-app-sidebar-toggle>Bitbucket Search menu</button>
+<aside class="app-sidebar bitbucket-app-sidebar" id="bitbucket-app-sidebar" aria-labelledby="bitbucket-app-sidebar-heading">
+    <header class="app-sidebar__header">
+        <p class="eyebrow">Bitbucket Search</p>
+        <h2 id="bitbucket-app-sidebar-heading">PDF tools</h2>
+    </header>
+
+    <nav class="app-side-nav" aria-label="Bitbucket Search functions">
+        <section class="app-side-nav__group" aria-labelledby="bitbucket-discover-heading">
+            <h3 id="bitbucket-discover-heading">Discover</h3>
+            <a href="{% url 'bitbucket_search:index' %}"{% if active_section == 'search' %} aria-current="page" class="is-active"{% endif %}>Search PDFs</a>
+            <a href="{% url 'bitbucket_search:repositories' %}"{% if active_section == 'repositories' %} aria-current="page" class="is-active"{% endif %}>Repositories</a>
+        </section>
+
+        <section class="app-side-nav__group" aria-labelledby="bitbucket-status-heading">
+            <h3 id="bitbucket-status-heading">Diagnostics</h3>
+            <a href="{% url 'bitbucket_search:index_status' %}"{% if active_section == 'index_status' %} aria-current="page" class="is-active"{% endif %}>Index &amp; refresh status</a>
+            <a href="{% url 'core:system_status' %}">System status</a>
+        </section>
+    </nav>
+</aside>
+</div>
