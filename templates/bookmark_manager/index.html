@@ -159,12 +159,12 @@
             <div class="pane-heading detail-panel-heading"><h2 id="bookmark-details-heading">Page details</h2><span>Local &amp; Confluence metadata</span></div>
             {% if selected_bookmark %}
                 {% if similar_bookmarks %}
-                <div class="similar-warning" role="status"><strong>Similar title found.</strong> This page was saved separately because its Confluence Page ID is different.<ul>{% for bookmark in similar_bookmarks %}<li><a href="?selected={{ bookmark.pk }}">#{{ bookmark.pk }} {{ bookmark.title }}</a></li>{% endfor %}</ul></div>
+                <div class="similar-warning" role="status"><strong>Similar title found.</strong> This page was saved separately because its Confluence Page ID is different.<ul>{% for bookmark in similar_bookmarks %}<li><a href="?selected={{ bookmark.pk }}">{{ bookmark.outline_number }} {{ bookmark.title }}</a></li>{% endfor %}</ul></div>
                 {% endif %}
                 {% if request.GET.open_error == "1" %}<div class="form-errors" role="alert">This bookmark was not opened because its URL is outside the active Confluence origin.</div>{% endif %}
                 {% if request.GET.open_parent_error == "1" %}<div class="form-errors" role="alert">The parent was not opened because it is unavailable or outside the active Confluence origin.</div>{% endif %}
                 <div class="detail-heading-row">
-                    <div><h3 class="bookmark-detail-title">{{ selected_bookmark.title }}</h3><p class="bookmark-detail-id">OWL #{{ selected_bookmark.pk }}{% if selected_bookmark.source_type == 'confluence' %} · Confluence Page ID {{ selected_bookmark.page_id }}{% else %} · Web bookmark{% endif %}</p></div>
+                    <div><h3 class="bookmark-detail-title"><span class="bookmark-detail-outline">{{ selected_outline_number }}</span> {{ selected_bookmark.title }}</h3><p class="bookmark-detail-id">Bookmark {{ selected_outline_number }} · OWL ID #{{ selected_bookmark.pk }}{% if selected_bookmark.source_type == 'confluence' %} · Confluence Page ID {{ selected_bookmark.page_id }}{% else %} · Web bookmark{% endif %}</p></div>
                     <span class="detail-status" data-availability="{{ selected_bookmark.availability_status }}">{% if selected_bookmark.availability_status != "active" %}{{ selected_bookmark.get_availability_status_display }}{% else %}{{ selected_bookmark.recency_status.label }}{% endif %}</span>
                 </div>
                 {% if selected_bookmark.changed_since_viewed %}<div class="changed-notice" role="status"><strong>Changed since you last opened it</strong><span>Last viewed version {{ selected_bookmark.last_viewed_version }} · Current version {{ selected_bookmark.version }}</span></div>{% endif %}

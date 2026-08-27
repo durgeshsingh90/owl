@@ -478,7 +478,7 @@ def test_tree_opens_titles_shows_usage_and_keeps_quick_note_in_details(loopback_
 
     assert response.status_code == 200
     assert f'class="tree-open-form" method="post" action="/bookmarks/{bookmark.pk}/open/"' in html
-    assert f'aria-label="Open {bookmark.title}"' in html
+    assert f'aria-label="Open bookmark 1.1.1, {bookmark.title}"' in html
     assert "Open link ↗" not in html
     assert 'class="tree-quick-note"' not in html
     assert "<strong>2</strong> opens" in html

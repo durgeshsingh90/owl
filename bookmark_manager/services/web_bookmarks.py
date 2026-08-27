@@ -16,6 +16,10 @@ from bookmark_manager.models import (
     ConfluencePageNode,
 )
 from bookmark_manager.services.bookmark_domain import BookmarkSaveResult
+from bookmark_manager.services.bookmark_outline import (
+    ensure_outline_position,
+    next_outline_position,
+)
 
 
 class WebBookmarkError(ValueError):
@@ -84,8 +88,14 @@ def save_web_bookmark(value: str) -> BookmarkSaveResult:
     digest = hashlib.sha256(canonical_url.encode("utf-8")).hexdigest()
     category_node, _created = ConfluencePageNode.objects.get_or_create(
         provisional_key=f"domain:{hashlib.sha256(hostname.encode('utf-8')).hexdigest()}",
-        defaults={"title": category.name, "url": "", "space_key": hostname},
+        defaults={
+            "title": category.name,
+            "url": "",
+            "space_key": hostname,
+            "outline_position": next_outline_position(parent_id=None),
+        },
     )
+    ensure_outline_position(category_node, parent_id=None)
     node, _created = ConfluencePageNode.objects.update_or_create(
         provisional_key=f"url:{digest}",
         defaults={
@@ -94,7 +104,15 @@ def save_web_bookmark(value: str) -> BookmarkSaveResult:
             "space_key": hostname,
             "parent": category_node,
         },
+        create_defaults={
+            "title": _default_bookmark_title(canonical_url, hostname),
+            "url": canonical_url,
+            "space_key": hostname,
+            "parent": category_node,
+            "outline_position": next_outline_position(parent_id=category_node.pk),
+        },
     )
+    ensure_outline_position(node, parent_id=category_node.pk)
     bookmark = Bookmark.objects.create(
         page_id=f"w{digest[:63]}",
         tree_node=node,

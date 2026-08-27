@@ -56,6 +56,7 @@ from bookmark_manager.services.bookmark_domain import (
     find_similar_title_bookmarks,
     record_successful_open,
 )
+from bookmark_manager.services.bookmark_outline import outline_number_map
 from bookmark_manager.services.bookmark_productivity import (
     BookmarkProductivityError,
     save_bookmark_view,
@@ -99,6 +100,7 @@ class BookmarkTreeItem:
     located: bool = False
     matches: bool = True
     depth: int = 1
+    outline_number: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,12 +300,13 @@ def _tree_items(
     *,
     selected_pk: int | None,
     located_pk: int | None,
-) -> list[BookmarkTreeItem]:
+) -> tuple[list[BookmarkTreeItem], dict[int, str]]:
     all_nodes = list(
         ConfluencePageNode.objects.select_related("bookmark", "parent").order_by(
-            "parent_id", "sibling_position", "title", "id"
+            "parent_id", "outline_position", "sibling_position", "title", "id"
         )
     )
+    outline_numbers = outline_number_map(all_nodes)
     visible_nodes = [node for node in all_nodes if node.pk in query_result.visible_node_ids]
 
     items_by_id: dict[int, BookmarkTreeItem] = {}
@@ -318,6 +321,7 @@ def _tree_items(
             selected=bool(bookmark and bookmark.pk == selected_pk),
             located=bool(bookmark and bookmark.pk == located_pk),
             matches=node.pk in query_result.matched_node_ids,
+            outline_number=outline_numbers.get(node.pk, ""),
         )
 
     roots: list[BookmarkTreeItem] = []
@@ -329,7 +333,17 @@ def _tree_items(
         else:
             item.depth = parent_item.depth + 1
             parent_item.children.append(item)
-    return roots
+    return roots, outline_numbers
+
+
+def _attach_outline_numbers(
+    bookmarks: Iterable[Bookmark],
+    outline_numbers: dict[int, str],
+) -> None:
+    """Expose one consistent display number on every template bookmark instance."""
+
+    for bookmark in bookmarks:
+        bookmark.outline_number = outline_numbers.get(bookmark.tree_node_id, str(bookmark.pk))
 
 
 def _confluence_contacts() -> tuple[ConfluenceContactSummary, ...]:
@@ -611,7 +625,7 @@ def _index_context(
         selected_pk = None
         located_pk = None
 
-    tree_items = _tree_items(
+    tree_items, outline_numbers = _tree_items(
         query_result,
         selected_pk=selected_pk,
         located_pk=located_pk,
@@ -621,6 +635,11 @@ def _index_context(
         if selected and request.GET.get("similar") == "1"
         else ()
     )
+    numbered_bookmarks = list(query_result.bookmarks)
+    if selected is not None:
+        numbered_bookmarks.append(selected)
+    numbered_bookmarks.extend(similar_bookmarks)
+    _attach_outline_numbers(numbered_bookmarks, outline_numbers)
     timeline_page = _bookmark_timeline_page(
         query_result.bookmarks,
         page_number=_positive_query_integer(request, "timeline_page") or 1,
@@ -638,11 +657,11 @@ def _index_context(
         f"Ready · {query_result.matching_count} of {query_result.counts.all_bookmarks} bookmarks"
     )
     if request.GET.get("saved") == "new" and selected:
-        status_message = f"Saved bookmark #{selected.pk} · {selected.title}"
+        status_message = f"Saved bookmark {selected.outline_number} · {selected.title}"
     elif request.GET.get("saved") == "existing" and selected:
-        status_message = f"Already saved as bookmark #{selected.pk}"
+        status_message = f"Already saved as bookmark {selected.outline_number}"
     elif request.GET.get("opened") == "1" and selected:
-        status_message = f"Opened bookmark #{selected.pk}"
+        status_message = f"Opened bookmark {selected.outline_number}"
     elif last_import_run:
         status_message = last_import_run.outcome
     elif request.GET.get("action") == "deleted":
@@ -652,7 +671,7 @@ def _index_context(
     elif request.GET.get("action") == "view_deleted":
         status_message = "Saved bookmark view deleted · Bookmarks were not changed"
     elif request.GET.get("action") == "organised" and selected:
-        status_message = f"Notes and tags saved for bookmark #{selected.pk}"
+        status_message = f"Notes and tags saved for bookmark {selected.outline_number}"
     elif request.GET.get("action") == "favorite" and selected:
         status_message = "Added to favorites" if selected.favorite else "Removed from favorites"
     elif request.GET.get("action") == "pinned" and selected:
@@ -712,6 +731,7 @@ def _index_context(
         if query.category_ids
         else None,
         "selected_bookmark": selected,
+        "selected_outline_number": selected.outline_number if selected else "",
         "selected_breadcrumb": selected_breadcrumb,
         "selected_parent": selected_breadcrumb[-2] if len(selected_breadcrumb) > 1 else None,
         "similar_bookmarks": similar_bookmarks,
@@ -972,7 +992,7 @@ def remove_settings(request: HttpRequest) -> HttpResponse:
 @sensitive_post_parameters("personal_access_token")
 @never_cache
 def save_bookmark(request: HttpRequest) -> HttpResponse:
-    """Save one unique web URL or Confluence Page ID and reveal its OWL number."""
+    """Save one unique web URL or Confluence Page ID and reveal its outline number."""
 
     local_error = _require_local_action(request)
     if local_error:

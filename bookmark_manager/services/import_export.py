@@ -30,6 +30,10 @@ from bookmark_manager.models import (
     Tag,
 )
 from bookmark_manager.services.bookmark_domain import InvalidPageIdentity, normalize_page_id
+from bookmark_manager.services.bookmark_outline import (
+    ensure_outline_position,
+    next_outline_position,
+)
 from core.logging import redact_log_text
 
 DOCUMENT_TYPE = "owl.bookmark-export"
@@ -804,6 +808,9 @@ def _resolve_hierarchy_node(
             space_key=data.space_key,
             parent=parent,
             sibling_position=data.sibling_position,
+            outline_position=next_outline_position(
+                parent_id=parent.pk if parent is not None else None
+            ),
         )
 
     changed: list[str] = []
@@ -816,12 +823,18 @@ def _resolve_hierarchy_node(
             changed.append(field_name)
     if node.parent_id is None and parent is not None and node.pk != parent.pk:
         node.parent = parent
+        node.outline_position = next_outline_position(parent_id=parent.pk)
         changed.append("parent")
+        changed.append("outline_position")
     if node.sibling_position is None and data.sibling_position is not None:
         node.sibling_position = data.sibling_position
         changed.append("sibling_position")
     if changed:
         node.save(update_fields=[*changed, "metadata_updated_at"])
+    ensure_outline_position(
+        node,
+        parent_id=node.parent_id,
+    )
     return node
 
 

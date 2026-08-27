@@ -4,6 +4,7 @@ from django.urls import reverse
 from bookmark_manager.models import Bookmark, BookmarkCategory, BookmarkSource
 from bookmark_manager.services import bookmark_application
 from bookmark_manager.services.bookmark_application import save_bookmark_input, validated_open_url
+from bookmark_manager.services.bookmark_outline import outline_number_map
 from bookmark_manager.services.bookmark_query import BookmarkQuery, query_bookmarks
 from bookmark_manager.services.configuration import ConfigurationUnavailable
 from bookmark_manager.services.web_bookmarks import rename_bookmark_category, save_web_bookmark
@@ -32,7 +33,27 @@ def test_any_http_url_is_saved_once_and_grouped_by_domain_without_fetching(monke
     assert bookmark.category.domain == "www.example.com"
     assert bookmark.category.name == "example.com"
     assert bookmark.tree_node.parent.title == "example.com"
+    assert bookmark.tree_node.parent.outline_position == 1
+    assert bookmark.tree_node.outline_position == 1
     assert validated_open_url(bookmark) == bookmark.canonical_url
+
+
+def test_web_bookmarks_receive_stable_word_style_tree_numbers():
+    first = save_web_bookmark("https://docs.example.org/first").bookmark
+    second = save_web_bookmark("https://docs.example.org/second").bookmark
+    another_domain = save_web_bookmark("https://support.example.net/start").bookmark
+    duplicate = save_web_bookmark("https://docs.example.org/first").bookmark
+
+    nodes = list(first.tree_node.__class__.objects.order_by("id"))
+    numbers = outline_number_map(nodes)
+
+    assert numbers[first.tree_node.parent_id] == "1"
+    assert numbers[first.tree_node_id] == "1.1"
+    assert numbers[second.tree_node_id] == "1.2"
+    assert numbers[another_domain.tree_node.parent_id] == "2"
+    assert numbers[another_domain.tree_node_id] == "2.1"
+    assert duplicate.pk == first.pk
+    assert numbers[duplicate.tree_node_id] == "1.1"
 
 
 def test_domain_category_can_be_renamed_without_changing_domain_identity():

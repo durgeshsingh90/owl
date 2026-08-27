@@ -22,6 +22,7 @@ from bookmark_manager.models import (
     BookmarkAvailability,
     ConfluencePageNode,
 )
+from bookmark_manager.services.bookmark_outline import next_outline_position
 
 type PageIdentity = str | int
 type MetadataLoader = Callable[[str], "ConfluencePageSnapshot"]
@@ -381,8 +382,19 @@ def _upsert_node(
         "sibling_position": snapshot.sibling_position,
     }
     if node is None:
-        node = ConfluencePageNode.objects.create(page_id=page_id, **values)
+        node = ConfluencePageNode.objects.create(
+            page_id=page_id,
+            outline_position=next_outline_position(
+                parent_id=parent.pk if parent is not None else None
+            ),
+            **values,
+        )
         return node, None
+
+    if node.outline_position is None or node.parent_id != (parent.pk if parent else None):
+        values["outline_position"] = next_outline_position(
+            parent_id=parent.pk if parent is not None else None
+        )
 
     changed_fields: list[str] = []
     for field_name, value in values.items():

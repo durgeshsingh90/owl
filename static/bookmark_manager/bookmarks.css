@@ -2124,7 +2124,7 @@
 }
 
 .bookmark-manager-shell .tree-node-row {
-    grid-template-columns: 20px 18px 24px minmax(150px, 1fr) auto auto;
+    grid-template-columns: 20px minmax(32px, auto) 18px 24px minmax(150px, 1fr) auto auto;
     gap: 0.38rem;
     min-height: 38px;
     margin: 0;
@@ -2132,6 +2132,21 @@
     border: 0;
     border-radius: 5px;
     background: transparent;
+}
+
+.bookmark-manager-shell .tree-outline-number {
+    min-width: 2rem;
+    grid-column: 2;
+    align-self: center;
+    color: var(--bookmark-accent);
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 780;
+    letter-spacing: 0.01em;
+}
+
+.bookmark-manager-shell .tree-select-check {
+    grid-column: 3;
 }
 
 .bookmark-manager-shell .tree-node-row:hover {
@@ -2159,7 +2174,7 @@
     display: grid;
     width: 22px;
     height: 22px;
-    grid-column: 3;
+    grid-column: 4;
     place-items: center;
     color: var(--muted);
 }
@@ -2180,7 +2195,7 @@
 
 .bookmark-manager-shell .tree-open-form {
     min-width: 0;
-    grid-column: 4;
+    grid-column: 5;
     margin: 0;
 }
 
@@ -2207,7 +2222,7 @@
 }
 
 .bookmark-manager-shell .tree-node-link--path {
-    grid-column: 4;
+    grid-column: 5;
     align-self: center;
     color: var(--muted-strong);
     cursor: default;
@@ -2220,17 +2235,17 @@
 }
 
 .bookmark-manager-shell .tree-personal-actions {
-    grid-column: 5;
+    grid-column: 6;
 }
 
 .bookmark-manager-shell .tree-status {
-    grid-column: 6;
+    grid-column: 7;
 }
 
 .bookmark-manager-shell .tree-node-metrics {
     display: flex;
     min-width: 0;
-    grid-column: 4 / -1;
+    grid-column: 5 / -1;
     grid-row: 2;
     flex-wrap: wrap;
     align-items: center;
@@ -2256,10 +2271,16 @@
 }
 
 .bookmark-manager-shell .tree-node-kind {
+    grid-column: 6 / -1;
     justify-self: end;
     padding: 0.18rem 0.35rem;
     border-radius: 999px;
     background: var(--surface-strong);
+}
+
+.bookmark-manager-shell .bookmark-detail-outline {
+    color: var(--bookmark-accent);
+    font-variant-numeric: tabular-nums;
 }
 
 .bookmark-manager-shell .tree-empty,

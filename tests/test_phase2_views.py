@@ -433,7 +433,11 @@ def test_bookmark_tree_and_selected_details_render_source_hierarchy(loopback_cli
     assert "Engineering" in html
     assert "Networking" in html
     assert "Private DNS Architecture" in html
-    assert f"OWL #{bookmark.pk}" in html
+    assert "Outline number 1" in html
+    assert "Outline number 1.1" in html
+    assert "Outline number 1.1.1" in html
+    assert "Bookmark 1.1.1" in html
+    assert f"OWL ID #{bookmark.pk}" in html
     assert "Confluence Page ID 300" in html
     assert "Synthetic Author" in html
     assert "Synthetic Modifier" in html
@@ -516,8 +520,9 @@ def test_similar_title_save_remains_distinct_and_shows_non_blocking_warning(
     assert new_result.bookmark.pk != existing.pk
     assert "Similar title found" in html
     assert "saved separately" in html
-    assert f"#{existing.pk} Private DNS Architecture" in html
-    assert f"OWL #{new_result.bookmark.pk}" in html
+    assert "1.1.1 Private DNS Architecture" in html
+    assert "Bookmark 2" in html
+    assert f"OWL ID #{new_result.bookmark.pk}" in html
 
 
 def test_unified_bookmark_input_can_save_a_page_from_its_search_field(

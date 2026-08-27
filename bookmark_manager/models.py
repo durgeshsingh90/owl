@@ -174,7 +174,9 @@ class ConfluencePageNode(models.Model):
     """One real node in the locally reconstructed Confluence hierarchy.
 
     A node is source-owned hierarchy metadata. It can exist solely because it is an
-    ancestor of a saved bookmark, in which case it deliberately has no OWL number.
+    ancestor of a saved bookmark, in which case it deliberately has no bookmark row.
+    Every node still receives a local outline position so the whole tree can use
+    Word-style dotted numbering.
     """
 
     page_id = models.CharField(max_length=64, null=True, blank=True, unique=True)
@@ -195,6 +197,12 @@ class ConfluencePageNode(models.Model):
         related_name="children",
     )
     sibling_position = models.PositiveIntegerField(null=True, blank=True)
+    outline_position = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        editable=False,
+        help_text="Stable local position used for Word-style bookmark numbering.",
+    )
     metadata_updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -215,7 +223,11 @@ class ConfluencePageNode(models.Model):
             models.Index(
                 fields=["parent", "sibling_position", "title"],
                 name="bookmark_node_tree_order",
-            )
+            ),
+            models.Index(
+                fields=["parent", "outline_position"],
+                name="bookmark_node_outline_order",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -451,10 +463,11 @@ class BookmarkImportRun(models.Model):
 
 
 class Bookmark(models.Model):
-    """A saved Confluence page with a permanent OWL number.
+    """A saved page with a permanent internal OWL ID.
 
-    The primary key is the displayed OWL number. Source synchronization must update
-    only the Confluence-owned fields and diagnostic state; OWL-owned fields remain
+    The primary key remains the immutable internal identity. The user-facing bookmark
+    number comes from the saved node's local outline path. Source synchronization must
+    update only source-owned fields and diagnostic state; OWL-owned fields remain
     independent.
     """
 
