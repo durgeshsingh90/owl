@@ -10,9 +10,10 @@
     <link rel="stylesheet" href="{% static 'owl/owl.css' %}">
     {% block extra_head %}{% endblock %}
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}" data-theme="{% block theme_default %}light{% endblock %}">
     <a class="skip-link" href="#main-content">Skip to main content</a>
 
+    {% block app_header %}
     <header class="app-header">
         <div class="header-inner">
             <a class="brand" href="{% url 'core:dashboard' %}" aria-label="OWL Home">
@@ -29,10 +30,16 @@
                     <small>Organised Workspace Locator</small>
                 </span>
             </a>
-            <span class="local-badge">
-                <span class="local-badge__dot" aria-hidden="true"></span>
-                Local workspace
-            </span>
+            <div class="header-actions">
+                <span class="local-badge">
+                    <span class="local-badge__dot" aria-hidden="true"></span>
+                    Local workspace
+                </span>
+                <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark mode" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M19 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
+                    <span data-theme-toggle-label>Theme</span>
+                </button>
+            </div>
         </div>
 
         <nav class="primary-nav" aria-label="Applications">
@@ -43,16 +50,20 @@
             </div>
         </nav>
     </header>
+    {% endblock %}
 
-    <main class="app-main{% if active_app %} app-main--app{% endif %}">
+    <main class="{% block main_class %}app-main{% if active_app %} app-main--app{% endif %}{% endblock %}">
+        {% block main_wrapper %}
         <div class="app-layout{% if not active_app or active_app == 'home' %} app-layout--standalone{% endif %}">
             {% block app_sidebar %}{% endblock %}
             <div id="main-content" class="app-content" tabindex="-1">
                 {% block content %}{% endblock %}
             </div>
         </div>
+        {% endblock %}
     </main>
 
+    {% block global_status %}
     <footer class="global-status" aria-label="Application status">
         <div class="global-status__message" role="status" aria-live="polite" aria-atomic="true">
             <span class="status-ready-dot" aria-hidden="true"></span>
@@ -60,7 +71,8 @@
         </div>
         <a href="{% url 'core:system_status' %}">View system status</a>
     </footer>
-    <script src="{% static 'owl/owl.js' %}" defer></script>
+    {% endblock %}
+    <script src="{% static 'owl/owl.js' %}?v=theme-shell" defer></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

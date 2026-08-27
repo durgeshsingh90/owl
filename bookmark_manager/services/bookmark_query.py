@@ -158,6 +158,7 @@ class BookmarkQuery:
     tags: tuple[str, ...] = ()
     people: tuple[str, ...] = ()
     spaces: tuple[str, ...] = ()
+    category_ids: tuple[int, ...] = ()
     availability: tuple[str, ...] = ()
     recency: tuple[BookmarkRecency, ...] = ()
     changed_since_viewed: bool | None = None
@@ -188,6 +189,17 @@ class BookmarkQuery:
         )
         object.__setattr__(self, "people", _clean_text_values(self.people, "people"))
         object.__setattr__(self, "spaces", _clean_text_values(self.spaces, "spaces"))
+        if isinstance(self.category_ids, (str, bytes)) or not isinstance(
+            self.category_ids, Iterable
+        ):
+            raise InvalidBookmarkQuery("Categories must be a list of identifiers.")
+        category_ids = tuple(dict.fromkeys(self.category_ids))
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in category_ids
+        ):
+            raise InvalidBookmarkQuery("Every category identifier must be a positive number.")
+        object.__setattr__(self, "category_ids", category_ids)
         object.__setattr__(
             self,
             "availability",
@@ -242,6 +254,7 @@ class BookmarkQuery:
             "tags": list(self.tags),
             "people": list(self.people),
             "spaces": list(self.spaces),
+            "category_ids": list(self.category_ids),
             "availability": list(self.availability),
             "recency": [value.value for value in self.recency],
             "changed_since_viewed": self.changed_since_viewed,
@@ -278,6 +291,7 @@ class BookmarkQuery:
             "tags",
             "people",
             "spaces",
+            "category_ids",
             "availability",
             "recency",
             "changed_since_viewed",
@@ -302,7 +316,7 @@ class BookmarkQuery:
             )
             for item in raw_dates
         )
-        for name in ("tags", "people", "spaces", "availability", "recency"):
+        for name in ("tags", "people", "spaces", "category_ids", "availability", "recency"):
             if name in payload:
                 payload[name] = tuple(_saved_sequence(payload[name], name))
         return cls(search=search, sort=sort, **payload)
@@ -443,6 +457,8 @@ def active_filter_descriptors(query: BookmarkQuery) -> tuple[ActiveFilter, ...]:
         descriptors.append(ActiveFilter("person", "Person", value))
     for value in query.spaces:
         descriptors.append(ActiveFilter("space", "Space", value))
+    for value in query.category_ids:
+        descriptors.append(ActiveFilter("category", "Category", str(value)))
     for value in query.availability:
         descriptors.append(
             ActiveFilter("availability", "Availability", BookmarkAvailability(value).label)
@@ -513,6 +529,8 @@ def _apply_database_filters(
         for space in query.spaces:
             space_filter |= Q(space_key__iexact=space) | Q(space_name__iexact=space)
         queryset = queryset.filter(space_filter)
+    if query.category_ids:
+        queryset = queryset.filter(category_id__in=query.category_ids)
     if query.availability:
         queryset = queryset.filter(availability_status__in=query.availability)
     if query.changed_since_viewed is not None:
@@ -549,6 +567,9 @@ def _apply_local_search(queryset: QuerySet[Bookmark], raw_search: str) -> QueryS
         | Q(modified_by_name__icontains=raw_search)
         | Q(tags__name__icontains=raw_search)
         | Q(notes__icontains=raw_search)
+        | Q(page_text__icontains=raw_search)
+        | Q(category__name__icontains=raw_search)
+        | Q(category__domain__icontains=raw_search)
     )
     if raw_search.isdecimal():
         direct |= Q(pk=int(raw_search))

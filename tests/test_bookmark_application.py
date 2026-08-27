@@ -20,6 +20,7 @@ from bookmark_manager.services.bookmark_domain import (
 from bookmark_manager.services.configuration import ActiveConfluenceProfile
 from bookmark_manager.services.confluence_adapter import (
     ConfluenceAncestor,
+    ConfluenceDescendantsResult,
     ConfluencePage,
     ConfluenceResult,
     ConfluenceResultCode,
@@ -108,6 +109,21 @@ class RecordingClient:
         return self.result
 
 
+class DescendantRecordingClient(RecordingClient):
+    def __init__(self, result: ConfluenceResult, descendants: tuple[ConfluencePage, ...]) -> None:
+        super().__init__(result)
+        self.descendants = descendants
+        self.descendant_page_ids: list[str] = []
+
+    def get_descendant_pages(self, page_id: str) -> ConfluenceDescendantsResult:
+        self.descendant_page_ids.append(page_id)
+        return ConfluenceDescendantsResult(
+            ConfluenceResultCode.SUCCESS,
+            "Loaded child pages.",
+            pages=self.descendants,
+        )
+
+
 @pytest.fixture
 def configured_profile(monkeypatch) -> ActiveConfluenceProfile:
     profile = active_profile()
@@ -175,24 +191,84 @@ def test_supported_page_inputs_map_adapter_page_and_build_hierarchy(
     assert bookmark.tree_node == page_node
 
 
-def test_duplicate_short_circuits_before_client_creation_or_request(configured_profile):
+def test_existing_page_refreshes_its_descendant_bookmarks(configured_profile):
     existing = upsert_bookmark(domain_snapshot()).bookmark
-    factory_calls = []
-
-    def forbidden_client_factory(profile):
-        factory_calls.append(profile)
-        raise AssertionError("A duplicate must not create a Confluence client")
-
+    root = adapter_page("300")
+    child = replace(
+        adapter_page("301"),
+        title="Private DNS Child Page",
+        ancestors=(
+            ConfluenceAncestor(
+                page_id="100",
+                title="Engineering",
+                url="https://confluence.example.invalid/wiki/spaces/ENG/pages/100",
+                position=0,
+            ),
+            ConfluenceAncestor(
+                page_id="300",
+                title="Private DNS Architecture",
+                url="https://confluence.example.invalid/wiki/spaces/ENG/pages/300",
+                position=0,
+            ),
+        ),
+    )
+    client = DescendantRecordingClient(
+        ConfluenceResult(ConfluenceResultCode.SUCCESS, "Page loaded.", page=root), (child,)
+    )
     result = save_bookmark_input(
         "https://confluence.example.invalid/wiki/spaces/ENG/pages/000300/renamed",
-        client_factory=forbidden_client_factory,
+        client_factory=lambda _profile: client,
     )
 
     assert result.created is False
-    assert result.source_requested is False
     assert result.bookmark.pk == existing.pk
-    assert factory_calls == []
-    assert Bookmark.objects.count() == 1
+    assert result.descendant_count == 1
+    assert client.page_ids == ["300"]
+    assert client.descendant_page_ids == ["300"]
+    assert Bookmark.objects.count() == 2
+
+
+def test_new_page_saves_all_descendants_as_searchable_local_bookmarks(configured_profile):
+    root = adapter_page("300")
+    child = replace(
+        adapter_page("301"),
+        title="Private DNS Runbook",
+        ancestors=(
+            ConfluenceAncestor(
+                page_id="100",
+                title="Engineering",
+                url="https://confluence.example.invalid/wiki/spaces/ENG/pages/100",
+                position=0,
+            ),
+            ConfluenceAncestor(
+                page_id="200",
+                title="Networking",
+                url="https://confluence.example.invalid/wiki/spaces/ENG/pages/200",
+                position=3,
+            ),
+            ConfluenceAncestor(
+                page_id="300",
+                title="Private DNS Architecture",
+                url="https://confluence.example.invalid/wiki/spaces/ENG/pages/300",
+                position=0,
+            ),
+        ),
+    )
+    client = DescendantRecordingClient(
+        ConfluenceResult(ConfluenceResultCode.SUCCESS, "Page loaded.", page=root), (child,)
+    )
+
+    result = save_bookmark_input("300", client_factory=lambda _profile: client)
+
+    assert result.descendant_count == 1
+    assert result.descendants_created == 1
+    assert client.page_ids == ["300"]
+    assert client.descendant_page_ids == ["300"]
+    assert list(Bookmark.objects.values_list("page_id", flat=True).order_by("page_id")) == [
+        "300",
+        "301",
+    ]
+    assert Bookmark.objects.get(page_id="301").tree_node.parent.page_id == "300"
 
 
 def test_wrong_origin_is_rejected_before_client_creation(configured_profile):

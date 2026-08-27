@@ -37,6 +37,7 @@
             data-tree-select
             data-bookmark-id="{{ item.bookmark.pk }}"
         >{{ item.node.title }}</a>
+        {% if item.matches %}<a class="tree-result-link" href="{% url 'bookmark_manager:link' item.bookmark.pk %}" target="_blank" rel="noopener noreferrer">Open link ↗</a>{% endif %}
         <span class="tree-personal-actions">
             <form method="post" action="{% url 'bookmark_manager:favorite' item.bookmark.pk %}" data-productivity-form data-favorite-form>
                 {% csrf_token %}

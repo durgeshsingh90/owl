@@ -1,0 +1,74 @@
+from dataclasses import replace
+
+import pytest
+
+from bookmark_manager.models import Bookmark, BookmarkCategory, BookmarkSource
+from bookmark_manager.services import bookmark_application
+from bookmark_manager.services.bookmark_application import save_bookmark_input, validated_open_url
+from bookmark_manager.services.bookmark_query import BookmarkQuery, query_bookmarks
+from bookmark_manager.services.configuration import ConfigurationUnavailable
+from bookmark_manager.services.web_bookmarks import rename_bookmark_category, save_web_bookmark
+
+pytestmark = pytest.mark.django_db
+
+
+def test_any_http_url_is_saved_once_and_grouped_by_domain_without_fetching(monkeypatch):
+    monkeypatch.setattr(
+        bookmark_application,
+        "get_active_profile",
+        lambda **_kwargs: (_ for _ in ()).throw(ConfigurationUnavailable("Not configured")),
+    )
+
+    created = save_bookmark_input("https://www.Example.com:443/guides/start#overview")
+    duplicate = save_bookmark_input("https://www.example.com/guides/start#another-section")
+
+    bookmark = created.bookmark
+    assert created.created is True
+    assert duplicate.created is False
+    assert duplicate.bookmark.pk == bookmark.pk
+    assert Bookmark.objects.count() == 1
+    assert bookmark.source_type == BookmarkSource.WEB
+    assert bookmark.canonical_url == "https://www.example.com/guides/start"
+    assert bookmark.page_text == ""
+    assert bookmark.category.domain == "www.example.com"
+    assert bookmark.category.name == "example.com"
+    assert bookmark.tree_node.parent.title == "example.com"
+    assert validated_open_url(bookmark) == bookmark.canonical_url
+
+
+def test_domain_category_can_be_renamed_without_changing_domain_identity():
+    bookmark = save_web_bookmark("https://docs.example.org/reference").bookmark
+    category = bookmark.category
+
+    rename_bookmark_category(category, "Engineering docs")
+
+    category.refresh_from_db()
+    bookmark.tree_node.parent.refresh_from_db()
+    assert category.name == "Engineering docs"
+    assert category.domain == "docs.example.org"
+    assert bookmark.tree_node.parent.title == "Engineering docs"
+
+
+def test_category_filter_and_confluence_page_text_are_local_search_inputs():
+    first = save_web_bookmark("https://one.example.net/alpha").bookmark
+    second = save_web_bookmark("https://two.example.net/beta").bookmark
+    first.source_type = BookmarkSource.CONFLUENCE
+    first.page_text = "Zero trust routing architecture"
+    first.save(update_fields=("source_type", "page_text"))
+
+    category_result = query_bookmarks(BookmarkQuery(category_ids=(second.category_id,)))
+    text_result = query_bookmarks(BookmarkQuery(search="zero trust routing"))
+
+    assert category_result.bookmarks == (second,)
+    assert text_result.bookmarks == (first,)
+    assert BookmarkCategory.objects.count() == 2
+
+
+def test_web_bookmark_canonical_identity_must_match_before_opening():
+    bookmark = save_web_bookmark("https://example.com/original").bookmark
+    bookmark.url = "https://example.com/changed"
+
+    with pytest.raises(bookmark_application.BookmarkActionError) as captured:
+        validated_open_url(bookmark)
+
+    assert captured.value.code == "unsafe_bookmark_url"

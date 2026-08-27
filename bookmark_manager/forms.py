@@ -113,13 +113,13 @@ class ConfluenceSettingsForm(forms.Form):
 
 class BookmarkInputForm(forms.Form):
     page = forms.CharField(
-        label="Confluence Page ID or URL",
+        label="Bookmark URL or Confluence Page ID",
         max_length=4096,
         strip=True,
         widget=forms.TextInput(
             attrs={
                 "autocomplete": "off",
-                "placeholder": "Paste a Confluence URL or numeric Page ID",
+                "placeholder": "Paste any URL or a Confluence Page ID",
             }
         ),
     )
@@ -174,11 +174,12 @@ class BookmarkFilterForm(forms.Form):
         widget=forms.SearchInput(
             attrs={
                 "autocomplete": "off",
-                "placeholder": "Search saved bookmarks, or paste a Confluence URL or Page ID",
+                "placeholder": "Search bookmarks, or paste any URL",
                 "data-bookmark-search": "",
             }
         ),
     )
+    category = forms.IntegerField(required=False, min_value=1, widget=forms.HiddenInput())
     favorite = forms.BooleanField(required=False)
     pinned = forms.BooleanField(required=False)
     tags = forms.MultipleChoiceField(required=False)
@@ -251,6 +252,10 @@ class BookmarkOrganisationForm(forms.Form):
             }
         ),
     )
+
+
+class BookmarkCategoryRenameForm(forms.Form):
+    name = forms.CharField(max_length=253, strip=True)
 
 
 class SavedBookmarkViewForm(forms.Form):

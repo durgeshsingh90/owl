@@ -15,7 +15,7 @@ def loopback_client(client):
 @pytest.mark.parametrize(
     ("path", "expected_heading"),
     [
-        ("/", "Your trusted knowledge owl"),
+        ("/", "Your apps"),
         ("/search/", "Search both knowledge sources in one place"),
         ("/bookmarks/", "Bookmark Manager"),
         ("/bookmarks/settings/", "Confluence Settings"),
@@ -34,7 +34,7 @@ def test_phase_one_pages_render_honest_visible_states(loopback_client, path, exp
 
 
 def test_shared_shell_has_navigation_and_accessible_status_region(loopback_client):
-    response = loopback_client.get("/")
+    response = loopback_client.get("/bookmarks/")
     html = response.content.decode()
 
     application_nav = re.search(
@@ -60,8 +60,28 @@ def test_shared_shell_has_navigation_and_accessible_status_region(loopback_clien
     assert 'href="#main-content"' in html
     assert 'id="main-content"' in html
     assert 'aria-label="OWL Home"' in html
-    assert 'href="/" aria-current="true">Home</a>' in html
+    assert 'href="/bookmarks/" aria-current="true">Bookmark Manager</a>' in html
     assert 'href="/static/vendor/bootstrap/bootstrap.min.css"' in html
+    assert "data-theme-toggle" in html
+
+
+def test_home_lists_every_available_app(loopback_client):
+    response = loopback_client.get("/")
+    html = response.content.decode()
+
+    assert response.status_code == 200
+    assert 'id="all-apps-heading">Your apps</h1>' in html
+    assert "See the whole picture." not in html
+    assert (
+        'class="knowledge-app-card knowledge-app-card--bitbucket" href="/pdfs/" '
+        'aria-describedby="bitbucket-card-summary"' in html
+    )
+    assert (
+        'class="knowledge-app-card knowledge-app-card--bookmarks" href="/bookmarks/" '
+        'aria-describedby="bookmark-card-summary"' in html
+    )
+    assert html.count('class="knowledge-app-card ') == 2
+    assert "data-theme-toggle" in html
 
 
 @pytest.mark.parametrize(
@@ -161,6 +181,8 @@ def test_bookmark_manager_settings_gear_has_the_required_accessible_name(loopbac
 
     assert 'aria-label="Confluence settings"' in html
     assert 'data-settings-fallback="/bookmarks/settings/"' in html
+    assert 'aria-labelledby="bookmark-timeline-heading"' in html
+    assert "Saved timeline" in html
 
 
 def test_bookmark_manager_uses_one_input_for_search_and_saving(loopback_client):
@@ -172,7 +194,7 @@ def test_bookmark_manager_uses_one_input_for_search_and_saving(loopback_client):
 
     assert controls is not None
     assert 'class="bookmark-unified-form"' in html
-    assert 'placeholder="Search saved bookmarks, or paste a Confluence URL or Page ID"' in html
+    assert 'placeholder="Search bookmarks, or paste any URL"' in html
     assert "Search bookmarks" in html
     assert 'formaction="/bookmarks/save/"' in html
     assert "Save page" in html
@@ -186,6 +208,11 @@ def test_pdf_preview_foundation_uses_the_master_plan_phase(loopback_client):
     response = loopback_client.get("/pdfs/")
 
     assert "matched-page preview will appear here in Phase 7" in response.content.decode()
+    assert "People &amp; commits" in response.content.decode()
+    assert (
+        "author, committer, pusher, PR creator, fulfilled-state merger, and non-merge closer roles separate"
+        in response.content.decode()
+    )
 
 
 def test_state_changes_use_dedicated_post_only_routes(loopback_client):

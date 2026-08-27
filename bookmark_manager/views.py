@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import ipaddress
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass, field, replace
 from urllib.parse import urlencode
 
 from django.conf import settings
 from django.core.cache import cache
 from django.db import OperationalError, ProgrammingError
+from django.db.models import Count
 from django.http import (
     HttpRequest,
     HttpResponse,
@@ -28,6 +30,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from bookmark_manager.forms import (
     BookmarkFilterForm,
+    BookmarkCategoryRenameForm,
     BookmarkImportForm,
     BookmarkInputForm,
     BookmarkOrganisationForm,
@@ -36,6 +39,7 @@ from bookmark_manager.forms import (
 )
 from bookmark_manager.models import (
     Bookmark,
+    BookmarkCategory,
     BookmarkImportRun,
     ConfluenceConfiguration,
     ConfluencePageNode,
@@ -80,6 +84,7 @@ from bookmark_manager.services.import_export import (
     export_bookmarks_json,
     import_bookmarks_document,
 )
+from bookmark_manager.services.web_bookmarks import WebBookmarkError, rename_bookmark_category
 
 
 @dataclass(slots=True)
@@ -106,6 +111,97 @@ class BreadcrumbItem:
 class FlatBookmarkItem:
     bookmark: Bookmark
     breadcrumb: tuple[BreadcrumbItem, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BookmarkTimelineGroup:
+    """One saved-date heading and its bookmark links."""
+
+    key: str
+    label: str
+    bookmarks: tuple[Bookmark, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BookmarkTimelinePage:
+    """One bounded page of the chronological bookmark navigation."""
+
+    groups: tuple[BookmarkTimelineGroup, ...]
+    number: int
+    page_count: int
+    total_count: int
+    first_item_number: int
+    last_item_number: int
+
+    @property
+    def has_previous(self) -> bool:
+        return self.number > 1
+
+    @property
+    def has_next(self) -> bool:
+        return self.number < self.page_count
+
+
+def _bookmark_timeline_groups(
+    bookmarks: Iterable[Bookmark],
+    *,
+    at=None,
+) -> tuple[BookmarkTimelineGroup, ...]:
+    """Group this year's bookmarks by month and older bookmarks by year."""
+
+    current_year = timezone.localtime(at or timezone.now()).year
+    grouped: dict[str, tuple[str, list[Bookmark]]] = {}
+    ordered_bookmarks = sorted(
+        bookmarks,
+        key=lambda bookmark: (bookmark.saved_at, bookmark.pk),
+        reverse=True,
+    )
+    for bookmark in ordered_bookmarks:
+        saved_at = timezone.localtime(bookmark.saved_at)
+        if saved_at.year == current_year:
+            key = f"month-{saved_at.year}-{saved_at.month:02d}"
+            label = saved_at.strftime("%B")
+        else:
+            key = f"year-{saved_at.year}"
+            label = str(saved_at.year)
+        if key not in grouped:
+            grouped[key] = (label, [])
+        grouped[key][1].append(bookmark)
+    return tuple(
+        BookmarkTimelineGroup(key=key, label=label, bookmarks=tuple(items))
+        for key, (label, items) in grouped.items()
+    )
+
+
+def _bookmark_timeline_page(
+    bookmarks: Iterable[Bookmark],
+    *,
+    page_number: int,
+    at=None,
+    page_size: int = 100,
+) -> BookmarkTimelinePage:
+    """Return a newest-first bounded timeline page for a large bookmark library."""
+
+    if page_size < 1:
+        raise ValueError("page_size must be positive")
+    ordered = sorted(
+        bookmarks,
+        key=lambda bookmark: (bookmark.saved_at, bookmark.pk),
+        reverse=True,
+    )
+    total_count = len(ordered)
+    page_count = max(1, (total_count + page_size - 1) // page_size)
+    safe_number = min(max(page_number, 1), page_count)
+    start = (safe_number - 1) * page_size
+    end = min(start + page_size, total_count)
+    return BookmarkTimelinePage(
+        groups=_bookmark_timeline_groups(ordered[start:end], at=at),
+        number=safe_number,
+        page_count=page_count,
+        total_count=total_count,
+        first_item_number=start + 1 if total_count else 0,
+        last_item_number=end,
+    )
 
 
 def _is_loopback_request(request: HttpRequest) -> bool:
@@ -243,6 +339,7 @@ def _query_from_filter_form(form: BookmarkFilterForm) -> BookmarkQuery:
         tags=tuple(values.get("tags", ())),
         people=(values["person"],) if values.get("person") else (),
         spaces=(values["space"],) if values.get("space") else (),
+        category_ids=(values["category"],) if values.get("category") else (),
         availability=tuple(values.get("availability", ())),
         recency=tuple(values.get("recency", ())),
         changed_since_viewed=True if values.get("changed") else None,
@@ -262,6 +359,7 @@ def _filter_form_initial(query: BookmarkQuery) -> dict[str, object]:
         "tags": [Tag.normalize_name(value) for value in query.tags],
         "person": query.people[0] if query.people else "",
         "space": query.spaces[0] if query.spaces else "",
+        "category": query.category_ids[0] if query.category_ids else None,
         "availability": list(query.availability),
         "recency": [value.value for value in query.recency],
         "changed": query.changed_since_viewed is True,
@@ -301,6 +399,9 @@ def _resolve_bookmark_query(
         else:
             form = BookmarkFilterForm(request.GET or None)
             query = _query_from_filter_form(form)
+        if request.GET.get("timeline") == "1":
+            query = replace(query, sort=BookmarkSort.ADDED_NEWEST)
+            form = BookmarkFilterForm(initial=_filter_form_initial(query))
         return query, form, saved_view, ""
     except InvalidBookmarkQuery as exc:
         fallback = BookmarkQuery()
@@ -318,6 +419,45 @@ def _clean_current_query_string(request: HttpRequest) -> str:
         "open_error",
         "action",
         "import_run",
+    ):
+        values.pop(key, None)
+    return values.urlencode()
+
+
+def _timeline_query_string(request: HttpRequest) -> str:
+    """Keep active constraints while switching a timeline selection back to the tree."""
+
+    values = request.GET.copy()
+    for key in (
+        "selected",
+        "located",
+        "saved",
+        "similar",
+        "opened",
+        "open_error",
+        "action",
+        "import_run",
+        "sort",
+        "timeline",
+    ):
+        values.pop(key, None)
+    return values.urlencode()
+
+
+def _timeline_paging_query_string(request: HttpRequest) -> str:
+    """Keep the current result state while changing only the timeline page."""
+
+    values = request.GET.copy()
+    for key in (
+        "selected",
+        "located",
+        "saved",
+        "similar",
+        "opened",
+        "open_error",
+        "action",
+        "import_run",
+        "timeline_page",
     ):
         values.pop(key, None)
     return values.urlencode()
@@ -361,6 +501,9 @@ def _active_bookmark_section(request: HttpRequest, *, open_settings: bool) -> st
 
     if open_settings:
         return "settings"
+    category_pk = _positive_query_integer(request, "category")
+    if category_pk:
+        return f"category-{category_pk}"
     if request.GET.get("favorite") == "on":
         return "favorites"
     if request.GET.get("pinned") == "on":
@@ -416,6 +559,10 @@ def _index_context(
         if selected and request.GET.get("similar") == "1"
         else ()
     )
+    timeline_page = _bookmark_timeline_page(
+        query_result.bookmarks,
+        page_number=_positive_query_integer(request, "timeline_page") or 1,
+    )
 
     last_import_run = None
     import_run_pk = _positive_query_integer(request, "import_run")
@@ -453,6 +600,13 @@ def _index_context(
     elif effective_error:
         status_message = effective_error
 
+    try:
+        descendant_count = int(request.GET.get("descendants", "0"))
+    except TypeError, ValueError:
+        descendant_count = 0
+    if descendant_count > 0:
+        status_message += f" · Saved {descendant_count} subpages locally"
+
     selected_breadcrumb = _bookmark_breadcrumb(selected)
     tag_text = ", ".join(tag.name for tag in selected.tags.all()) if selected else ""
 
@@ -477,6 +631,8 @@ def _index_context(
         "query_result": query_result,
         "active_filters": query_result.active_filters,
         "current_query_string": _clean_current_query_string(request),
+        "timeline_query_string": _timeline_query_string(request),
+        "timeline_paging_query_string": _timeline_paging_query_string(request),
         "active_saved_view": active_saved_view,
         "saved_views": SavedBookmarkView.objects.all(),
         "tree_items": tree_items,
@@ -486,10 +642,20 @@ def _index_context(
         ),
         "result_count": query_result.matching_count,
         "total_bookmarks": query_result.counts.all_bookmarks,
+        "bookmark_categories": BookmarkCategory.objects.annotate(
+            bookmark_count=Count("bookmarks")
+        ),
+        "selected_category": BookmarkCategory.objects.filter(
+            pk=query.category_ids[0]
+        ).first()
+        if query.category_ids
+        else None,
         "selected_bookmark": selected,
         "selected_breadcrumb": selected_breadcrumb,
         "selected_parent": selected_breadcrumb[-2] if len(selected_breadcrumb) > 1 else None,
         "similar_bookmarks": similar_bookmarks,
+        "bookmark_timeline_groups": timeline_page.groups,
+        "bookmark_timeline_page": timeline_page,
         "last_import_run": last_import_run,
         "open_settings": open_settings,
         "inline_error": effective_error,
@@ -721,7 +887,7 @@ def remove_settings(request: HttpRequest) -> HttpResponse:
 @sensitive_post_parameters("personal_access_token")
 @never_cache
 def save_bookmark(request: HttpRequest) -> HttpResponse:
-    """Save one supported Confluence Page ID or URL and reveal its stable OWL number."""
+    """Save one unique web URL or Confluence Page ID and reveal its OWL number."""
 
     local_error = _require_local_action(request)
     if local_error:
@@ -768,7 +934,69 @@ def save_bookmark(request: HttpRequest) -> HttpResponse:
     }
     if result.similar_bookmarks:
         query["similar"] = "1"
+    if result.descendant_count:
+        query["descendants"] = result.descendant_count
     return HttpResponseRedirect(f"{reverse('bookmark_manager:index')}?{urlencode(query)}")
+
+
+@require_POST
+@csrf_protect
+@never_cache
+def rename_category(request: HttpRequest, pk: int) -> HttpResponse:
+    """Rename a domain category without changing its stable domain identity."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    category = get_object_or_404(BookmarkCategory, pk=pk)
+    form = BookmarkCategoryRenameForm(request.POST)
+    if not form.is_valid():
+        detail = "Enter a category name up to 253 characters."
+        if _is_async_form(request):
+            return _action_json(
+                state="invalid_category_name",
+                label="Not renamed",
+                detail=detail,
+                status=400,
+            )
+        return redirect(f"{reverse('bookmark_manager:index')}?category={category.pk}")
+    try:
+        rename_bookmark_category(category, form.cleaned_data["name"])
+    except WebBookmarkError as exc:
+        if _is_async_form(request):
+            return _action_json(
+                state="invalid_category_name",
+                label="Not renamed",
+                detail=str(exc),
+                status=400,
+            )
+        return redirect(f"{reverse('bookmark_manager:index')}?category={category.pk}")
+    if _is_async_form(request):
+        return _action_json(
+            state="success",
+            label="Category renamed",
+            detail=f"Renamed {category.domain} to {category.name}",
+            status=200,
+        )
+    return redirect(f"{reverse('bookmark_manager:index')}?category={category.pk}")
+
+
+@require_GET
+@never_cache
+def bookmark_link(request: HttpRequest, pk: int) -> HttpResponse:
+    """Resolve one local search result to its verified Confluence URL."""
+
+    bookmark = get_object_or_404(Bookmark, pk=pk)
+    try:
+        target_url = validated_open_url(bookmark)
+    except BookmarkActionError:
+        return redirect(
+            f"{reverse('bookmark_manager:index')}?{urlencode({'selected': bookmark.pk, 'open_error': 1})}"
+        )
+    response = HttpResponseRedirect(target_url)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @require_POST

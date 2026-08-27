@@ -1,30 +1,43 @@
 {% extends "owl/base.html" %}
 
-{% block content %}
-<div class="home-page">
-    <section class="home-welcome" aria-labelledby="dashboard-heading">
-        <div>
-            <p class="eyebrow">WISE · TRUSTED · KNOWLEDGEABLE</p>
-            <h1 id="dashboard-heading">Your trusted knowledge owl</h1>
-            <p class="lede">A friendly knowledge nerd with a clear view of your Confluence pages and repository PDFs.</p>
-            <ul class="home-values" aria-label="OWL values"><li>Wisdom</li><li>Trust</li><li>Knowledge</li></ul>
+{% block body_class %}home-shell{% endblock %}
+{% block theme_default %}dark{% endblock %}
+{% block app_header %}{% endblock %}
+{% block main_class %}knowledge-main{% endblock %}
+{% block global_status %}{% endblock %}
+
+{% block main_wrapper %}
+<div class="knowledge-layout">
+    <aside class="knowledge-rail" aria-label="OWL navigation">
+        <a class="knowledge-brand" href="{% url 'core:dashboard' %}" aria-label="OWL Home"><span class="knowledge-brand__mark" aria-hidden="true">⌁</span><span><strong>OWL</strong><small>Knowledge, connected.</small></span></a>
+        <nav class="knowledge-nav" aria-label="Workspace navigation">
+            <a class="knowledge-nav__item is-active" href="{% url 'core:dashboard' %}" aria-current="page"><span aria-hidden="true">⌂</span>Home</a>
+            <a class="knowledge-nav__item" href="#your-apps"><span aria-hidden="true">⊞</span>Apps</a>
+            <a class="knowledge-nav__item" href="{% url 'bookmark_manager:index' %}"><span aria-hidden="true">⌑</span>Bookmark Manager</a>
+            <a class="knowledge-nav__item" href="{% url 'bitbucket_search:index' %}"><span aria-hidden="true">⌕</span>Bitbucket Search</a>
+            <a class="knowledge-nav__item" href="{% url 'core:system_status' %}"><span aria-hidden="true">◌</span>System status</a>
+        </nav>
+        <div class="knowledge-rail__bottom">
+            <button class="knowledge-theme-toggle" type="button" data-theme-toggle aria-label="Switch to light mode" aria-pressed="true"><span aria-hidden="true">☼</span><span data-theme-toggle-label>Light mode</span></button>
+            <div class="knowledge-rail__note"><span aria-hidden="true">⌁</span><p>The owl sees what others miss.</p><small>Stay curious. Stay wise.</small></div>
         </div>
-        <div class="home-sun" aria-hidden="true"><span>OWL</span></div>
-    </section>
+    </aside>
 
-    <section class="home-app-grid" aria-label="OWL applications">
-        <a class="home-app-card home-app-card--bookmarks" href="{% url 'bookmark_manager:index' %}">
-            <span class="home-card-icon" aria-hidden="true">⌘</span>
-            <span class="home-card-copy"><strong>Bookmark Manager</strong><small>Browse your real Confluence hierarchy, then organise what matters.</small></span>
-            <span class="home-card-arrow" aria-hidden="true">→</span>
-        </a>
-        <a class="home-app-card home-app-card--bitbucket" href="{% url 'bitbucket_search:index' %}">
-            <span class="home-card-icon" aria-hidden="true">⌕</span>
-            <span class="home-card-copy"><strong>Bitbucket Search</strong><small>Prepare local PDF discovery across approved repositories.</small></span>
-            <span class="home-card-arrow" aria-hidden="true">→</span>
-        </a>
-    </section>
+    <div class="knowledge-stage">
+        <header class="knowledge-topbar"><p><span class="knowledge-topbar__dot" aria-hidden="true"></span>Local workspace</p><div><a href="{% url 'core:system_status' %}">System status</a><button class="knowledge-theme-toggle knowledge-theme-toggle--compact" type="button" data-theme-toggle aria-label="Switch to light mode" aria-pressed="true"><span aria-hidden="true">☼</span><span class="visually-hidden" data-theme-toggle-label>Light mode</span></button></div></header>
+        <div id="main-content" class="knowledge-content" tabindex="-1">
+            <section class="knowledge-apps" id="your-apps" aria-labelledby="all-apps-heading">
+                <div class="knowledge-section-heading"><div><p class="knowledge-kicker">Workspace</p><h1 id="all-apps-heading">Your apps</h1></div><span>2 available</span></div>
+                <div class="knowledge-app-grid">
+                    <a class="knowledge-app-card knowledge-app-card--bookmarks" href="{% url 'bookmark_manager:index' %}" aria-describedby="bookmark-card-summary"><span class="knowledge-app-card__top"><span class="knowledge-app-card__icon" aria-hidden="true">⌑</span><span class="knowledge-app-card__status">Ready</span></span><strong>Bookmark Manager</strong><small id="bookmark-card-summary">Save, organise, and revisit important Confluence pages in their real hierarchy.</small><span class="knowledge-app-card__meta">Confluence library</span><span class="knowledge-app-card__open">Open <span aria-hidden="true">→</span></span></a>
+                    <a class="knowledge-app-card knowledge-app-card--bitbucket" href="{% url 'bitbucket_search:index' %}" aria-describedby="bitbucket-card-summary"><span class="knowledge-app-card__top"><span class="knowledge-app-card__icon" aria-hidden="true">⌕</span><span class="knowledge-app-card__status">Foundation</span></span><strong>Bitbucket Search</strong><small id="bitbucket-card-summary">Prepare fast, local discovery across approved repositories and their PDFs.</small><span class="knowledge-app-card__meta">Repository PDFs</span><span class="knowledge-app-card__open">Open <span aria-hidden="true">→</span></span></a>
+                </div>
+            </section>
 
-    <p class="home-hierarchy-note">Your saved pages appear as a real expandable hierarchy inside Bookmark Manager.</p>
+            <section class="knowledge-recent" aria-labelledby="recent-heading"><div class="knowledge-section-heading"><div><p class="knowledge-kicker">Quick access</p><h2 id="recent-heading">Continue your work</h2></div></div><div class="knowledge-recent-grid"><a href="{% url 'bookmark_manager:index' %}"><span aria-hidden="true">⌑</span><span><strong>Browse your saved pages</strong><small>Open Bookmark Manager and continue from your real Confluence tree.</small></span><b aria-hidden="true">→</b></a><a href="{% url 'bitbucket_search:index' %}"><span aria-hidden="true">⌕</span><span><strong>Prepare repository search</strong><small>Review the PDF discovery foundation and repository status.</small></span><b aria-hidden="true">→</b></a></div></section>
+
+            <section class="knowledge-stats" aria-label="Workspace overview"><div><span aria-hidden="true">◈</span><p>Apps<strong>2</strong><small>available</small></p></div><div><span aria-hidden="true">⌁</span><p>Knowledge sources<strong>2</strong><small>connected tools</small></p></div><div><span aria-hidden="true">⌑</span><p>Bookmark Manager<strong>Ready</strong><small>organise pages</small></p></div><div><span aria-hidden="true">⌕</span><p>Bitbucket Search<strong>Foundation</strong><small>PDF discovery</small></p></div></section>
+        </div>
+    </div>
 </div>
 {% endblock %}

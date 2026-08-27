@@ -13,6 +13,7 @@ This folder is the version-controlled source of truth for planning and implement
 - [007_TWO_APP_NAVIGATION_VALIDATION_REPORT.md](007_TWO_APP_NAVIGATION_VALIDATION_REPORT.md) records the exact two-app navigation contract, app-owned left panels, responsive menu behavior, and automated and visible validation evidence.
 - [008_TROPICAL_HOME_THEME_VALIDATION_REPORT.md](008_TROPICAL_HOME_THEME_VALIDATION_REPORT.md) records the Home navigation update, original tropical visual direction, hierarchy visibility, and validation evidence.
 - [009_OWL_THEME_VALIDATION_REPORT.md](009_OWL_THEME_VALIDATION_REPORT.md) records the final knowledge-owl identity, moonlit palette, hierarchy continuity, and validation evidence.
+- [010_TIMELINE_AND_CONTRIBUTOR_ATTRIBUTION_RECORD.md](010_TIMELINE_AND_CONTRIBUTOR_ATTRIBUTION_RECORD.md) records the implemented bookmark timeline, truthful source-control identity model, planned contributor rail, and phase boundary.
 
 ## Recommended use
 

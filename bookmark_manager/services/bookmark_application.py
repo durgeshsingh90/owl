@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from urllib.parse import parse_qs, urlsplit
 
 from django.conf import settings
+from django.db import transaction
 
 from bookmark_manager.models import Bookmark, ConnectionStatus
 from bookmark_manager.services.bookmark_domain import (
@@ -13,6 +15,7 @@ from bookmark_manager.services.bookmark_domain import (
     ConfluenceNodeSnapshot,
     ConfluencePageSnapshot,
     save_bookmark_by_page_id,
+    upsert_bookmark,
 )
 from bookmark_manager.services.configuration import (
     ActiveConfluenceProfile,
@@ -27,8 +30,25 @@ from bookmark_manager.services.confluence_adapter import (
 )
 from bookmark_manager.services.confluence_validation import PageInputError, parse_page_input
 from bookmark_manager.services.secret_store import SecretStore
+from bookmark_manager.services.web_bookmarks import (
+    WebBookmarkError,
+    canonicalize_web_url,
+    category_for_url,
+    save_web_bookmark,
+)
 
 type ClientFactory = Callable[[ActiveConfluenceProfile], ConfluenceClient]
+
+
+def _looks_like_confluence_page_url(value: str) -> bool:
+    parsed = urlsplit(value)
+    path = parsed.path.casefold()
+    query = {key.casefold() for key in parse_qs(parsed.query)}
+    return (
+        "/pages/" in path
+        or "/content/" in path
+        or (path.endswith("/pages/viewpage.action") and "pageid" in query)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +71,7 @@ def _default_client_factory(profile: ActiveConfluenceProfile) -> ConfluenceClien
     )
 
 
-def _snapshot(page: ConfluencePage) -> ConfluencePageSnapshot:
+def _snapshot(page: ConfluencePage, *, include_text: bool = True) -> ConfluencePageSnapshot:
     ancestors = tuple(
         ConfluenceNodeSnapshot(
             page_id=ancestor.page_id,
@@ -75,7 +95,25 @@ def _snapshot(page: ConfluencePage) -> ConfluencePageSnapshot:
         modified_by_name=page.last_modifier_name,
         author_name=page.author_name,
         ancestors=ancestors,
+        page_text=page.body_text if include_text else "",
     )
+
+
+def _finish_confluence_bookmark(result: BookmarkSaveResult) -> BookmarkSaveResult:
+    canonical_url, hostname = canonicalize_web_url(result.bookmark.url)
+    category = category_for_url(canonical_url, hostname)
+    changed = []
+    for field_name, value in (
+        ("canonical_url", canonical_url),
+        ("category", category),
+        ("source_type", "confluence"),
+    ):
+        if getattr(result.bookmark, field_name) != value:
+            setattr(result.bookmark, field_name, value)
+            changed.append(field_name)
+    if changed:
+        result.bookmark.save(update_fields=changed)
+    return result
 
 
 def _result_error(code: ConfluenceResultCode, message: str) -> BookmarkActionError:
@@ -107,27 +145,73 @@ def save_bookmark_input(
 ) -> BookmarkSaveResult:
     """Validate one supported input and save/reveal its stable Page ID."""
 
+    candidate = str(value or "").strip()
+    profile = None
     try:
         profile = get_active_profile(secret_store=secret_store)
-    except ConfigurationUnavailable as exc:
+    except ConfigurationUnavailable:
+        if candidate.casefold().startswith(("http://", "https://")):
+            try:
+                return save_web_bookmark(candidate)
+            except WebBookmarkError as exc:
+                raise BookmarkActionError("invalid_url", str(exc)) from exc
         raise BookmarkActionError(
             "configuration_required",
-            str(exc),
+            "Connect Confluence before saving a numeric Page ID.",
             ConnectionStatus.NOT_CONFIGURED,
-        ) from exc
+        )
+
+    if (
+        candidate.casefold().startswith(("http://", "https://"))
+        and not profile.origin.contains_application_url(candidate)
+    ):
+        if _looks_like_confluence_page_url(candidate):
+            try:
+                parse_page_input(candidate, profile.origin)
+            except PageInputError as exc:
+                raise BookmarkActionError(exc.code, str(exc)) from exc
+        try:
+            return save_web_bookmark(candidate)
+        except WebBookmarkError as exc:
+            raise BookmarkActionError("invalid_url", str(exc)) from exc
     try:
         parsed = parse_page_input(value, profile.origin)
     except PageInputError as exc:
         raise BookmarkActionError(exc.code, str(exc)) from exc
 
+    client = (client_factory or _default_client_factory)(profile)
+
     def load_metadata(page_id: str) -> ConfluencePageSnapshot:
-        client = (client_factory or _default_client_factory)(profile)
         result = client.get_page(page_id)
         if not result.ok or result.page is None:
             raise _result_error(result.code, result.message)
         return _snapshot(result.page)
 
-    return save_bookmark_by_page_id(parsed.page_id, load_metadata)
+    load_descendants = getattr(client, "get_descendant_pages", None)
+    if not callable(load_descendants):
+        return _finish_confluence_bookmark(save_bookmark_by_page_id(parsed.page_id, load_metadata))
+
+    root_snapshot = load_metadata(parsed.page_id)
+    descendants_result = load_descendants(parsed.page_id)
+    if not descendants_result.ok:
+        raise _result_error(descendants_result.code, descendants_result.message)
+
+    with transaction.atomic():
+        root_result = upsert_bookmark(root_snapshot)
+        descendants_created = 0
+        for descendant in descendants_result.pages:
+            descendant_result = _finish_confluence_bookmark(
+                upsert_bookmark(_snapshot(descendant, include_text=False))
+            )
+            descendants_created += int(descendant_result.created)
+    return _finish_confluence_bookmark(BookmarkSaveResult(
+        bookmark=root_result.bookmark,
+        created=root_result.created,
+        source_requested=True,
+        similar_bookmarks=root_result.similar_bookmarks,
+        descendant_count=len(descendants_result.pages),
+        descendants_created=descendants_created,
+    ))
 
 
 def validated_open_url(
@@ -136,6 +220,18 @@ def validated_open_url(
     secret_store: SecretStore | None = None,
 ) -> str:
     """Return an existing bookmark URL only when it remains inside the active origin."""
+
+    if bookmark.source_type == "web":
+        try:
+            canonical_url, _hostname = canonicalize_web_url(bookmark.url)
+        except WebBookmarkError as exc:
+            raise BookmarkActionError("unsafe_bookmark_url", str(exc)) from exc
+        if canonical_url != bookmark.canonical_url:
+            raise BookmarkActionError(
+                "unsafe_bookmark_url",
+                "The saved URL no longer matches its canonical identity.",
+            )
+        return canonical_url
 
     try:
         profile = get_active_profile(secret_store=secret_store)

@@ -74,6 +74,7 @@ class ConfluencePageSnapshot:
     author_name: str = ""
     ancestors: tuple[ConfluenceNodeSnapshot, ...] = ()
     sibling_position: int | None = None
+    page_text: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +85,8 @@ class BookmarkSaveResult:
     created: bool
     source_requested: bool
     similar_bookmarks: tuple[Bookmark, ...] = ()
+    descendant_count: int = 0
+    descendants_created: int = 0
 
 
 def normalize_page_id(value: PageIdentity) -> str:
@@ -356,6 +359,7 @@ def _normalize_snapshot(snapshot: ConfluencePageSnapshot) -> ConfluencePageSnaps
             "author_name",
             maximum=500,
         ),
+        page_text=_optional_text(snapshot.page_text, "page_text", maximum=8_388_608),
         ancestors=tuple(ancestors),
         sibling_position=sibling_position,
     )
@@ -406,6 +410,7 @@ def _bookmark_source_values(snapshot: ConfluencePageSnapshot) -> dict[str, objec
         "modified_by_name": snapshot.modified_by_name,
         "author_id": snapshot.author_id,
         "author_name": snapshot.author_name,
+        "page_text": snapshot.page_text,
     }
 
 

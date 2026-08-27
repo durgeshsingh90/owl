@@ -629,6 +629,40 @@ Steps and checkpoints:
 5. Confirm OWL binds only to loopback and makes no unapproved external requests.
 6. Confirm no runtime/private file is tracked and cleanup affects only the explicit temporary profile.
 
+### CJ-017 — Browse bookmarks by month and year
+
+- **Persona:** returning Bookmark Manager user
+- **Goal:** find saved pages chronologically without losing their real Confluence location
+- **Priority:** P1
+- **Covers:** 101–102
+
+Steps and checkpoints:
+
+1. Freeze local time near a calendar-year boundary and create bookmarks across multiple current-year months and older years.
+2. Confirm current-year groups use localized month names, older groups use one year heading, empty periods are absent, and both groups are newest first.
+3. Inspect exact Added to OWL dates and accessible group headings with keyboard and screen-reader navigation.
+4. Select entries from each group and confirm the canonical bookmark and details are revealed in the unchanged hierarchy.
+5. Search and filter in the central workspace and confirm the timeline recalculates its groups, removes unrelated entries and empty headings, and still leaves the stored hierarchy unchanged.
+
+### CJ-018 — Follow contributors and inspect their commits
+
+- **Persona:** Bitbucket Search user tracing ownership and change history
+- **Goal:** understand who authored, committed, opened, merged, or verifiably pushed PDF changes
+- **Priority:** P1
+- **Covers:** 103–108
+
+Steps and checkpoints:
+
+1. Build a synthetic repository whose configured branch is `master` and whose commit author, committer, PR author, merger, and verified push actor are deliberately different.
+2. Sync recent history and confirm truthful role labels, distinct identities, hidden emails, and separate commit-history, push-evidence, and PR-history coverage states.
+3. Scroll and keyboard-navigate PDF changes; confirm the right rail highlights the associated contributor using `aria-current` without moving focus.
+4. Select each contributor and verify counts plus the complete available-history commit ledger, affected PDF links, repository, branch, dates, hashes, subjects, and role badges.
+5. Include a direct commit and a commit with unavailable push/PR metadata; confirm OWL does not invent attribution.
+6. Upgrade to Full History and confirm older Git activity appears without duplicates while missing push/PR evidence remains explicitly incomplete.
+7. Close one unmerged PR and fulfill another; confirm only the fulfilled PR contributes to **Merged PRs**.
+8. Confirm loopback OWL exposes no public webhook receiver and Cloud push actors remain unavailable unless the test uses an explicitly approved authenticated relay/import adapter.
+9. Verify the contributor rail as a right-side sticky panel on desktop and a named accessible drawer/strip on a narrow screen.
+
 ## 8. Feature test matrix and traceability
 
 The matrix is the minimum stable coverage map. Implementations may add narrower tests while retaining these IDs. **Automated target** indicates the expected repeatable layer; it does not remove the mapped browser journey.
@@ -674,6 +708,8 @@ The matrix is the minimum stable coverage map. Implementations may add narrower 
 | BMK-016 | Export/re-import without credentials | P0 | Integration + security | 30 |
 | BMK-017 | Confirmed local delete preserves source/shared tree | P0 | Integration + browser | 31 |
 | BMK-018 | Core bookmark workflow is keyboard/screen-reader usable | P0 | Accessibility | 32 |
+| BMK-019 | Added-to-OWL timeline groups current-year months and older years in local time | P1 | Unit + browser | 101 |
+| BMK-020 | Timeline selection reveals the canonical tree item without mutating hierarchy | P1 | Integration + accessibility | 102 |
 
 ### 8.3 Confluence availability and recovery
 
@@ -708,6 +744,12 @@ The matrix is the minimum stable coverage map. Implementations may add narrower 
 | IDX-010 | Interrupted/retried jobs remain idempotent | P0 | Integration + resilience | 52 |
 | IDX-011 | Search uses last published index during work | P0 | Integration + performance | 53 |
 | IDX-012 | Full rebuild stages, validates, and switches atomically | P0 | Integration + resilience | 54 |
+| GIT-001 | Default/master-branch commit author and committer remain truthful separate identities | P0 | Unit + integration | 103 |
+| GIT-002 | Contributor identity normalization and current-result counts are accurate | P1 | Unit + integration | 104 |
+| GIT-003 | Scroll/keyboard highlighting, `aria-current`, focus retention, and narrow layout work | P1 | Browser + accessibility | 105 |
+| GIT-004 | Contributor ledger lists every available-history commit and affected PDF link | P1 | Integration + browser | 106 |
+| GIT-005 | Per-source coverage and duplicate-free Full History commit expansion are explicit | P1 | Integration + browser | 107 |
+| GIT-006 | PR author, fulfilled-state merger, non-merge closer, and authoritative push actor are separate; unavailable is never inferred | P0 | Adapter + security + browser | 108 |
 
 ### 8.5 PDF search and productivity
 
@@ -752,7 +794,7 @@ The matrix is the minimum stable coverage map. Implementations may add narrower 
 | PERF-001 | Representative corpus targets or approved evidence-based exception | P1 | Performance | 87 |
 | OPS-004 | Clean documented setup and first-use smoke | P0 | Clean environment | 88 |
 
-This matrix covers every numbered master acceptance scenario from 1 through 100. A release report must list any test ID that was not run rather than silently omitting it.
+This matrix covers every numbered master acceptance scenario from 1 through 108. A release report must list any test ID that was not run rather than silently omitting it.
 
 ## 9. Automated-test organization
 
@@ -837,9 +879,9 @@ Run the mapped suite before declaring each master-requirements phase complete.
 |---|---|---|
 | 1 — Foundation | CJ-001 partial foundation path, CJ-016 setup/check portion | CFG, SEC-001, SEC-003, SEC-004, OPS-004 foundations |
 | 2 — Bookmark core | CJ-001, CJ-002, CJ-003 | CFG, BMK-001–005, SEC-002 relevant cases |
-| 3 — Tree/productivity | CJ-004, CJ-007 | BMK-006–018, BMK-015–017 |
+| 3 — Tree/productivity | CJ-004, CJ-007, CJ-017 | BMK-006–020, BMK-015–017 |
 | 4 — Refresh/dashboard | CJ-005, CJ-006 | REF, BMK-012–014, GLB-002 relevant dashboard checks |
-| 5 — Repository sync | CJ-008, CJ-012 relevant sync path | REP, OPS-001 relevant job checks |
+| 5 — Repository sync | CJ-008, CJ-012 relevant sync path, CJ-018 attribution foundation | REP, GIT, OPS-001 relevant job checks |
 | 6 — PDF extraction/search | CJ-009, CJ-011 relevant index path | IDX, SEA |
 | 7 — PDF productivity | CJ-010 | PDF |
 | 8 — Global/hardening | CJ-012–CJ-016 | GLB, OPS, SEC, PERF and all prior regression suites |
@@ -882,7 +924,7 @@ A release is ready only when:
 
 - every P0 journey passes;
 - every P1 journey passes or has an explicitly accepted evidence-based exception;
-- all master acceptance scenarios 1–100 have a recorded mapped result;
+- all master acceptance scenarios 1–108 have a recorded mapped result;
 - no open Critical or High security/data-integrity defect remains;
 - the complete automated, migration, accessibility, security, secret-scan, and tracked-file checks pass;
 - backup/restore and credential re-entry pass;

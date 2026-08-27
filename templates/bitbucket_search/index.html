@@ -31,12 +31,21 @@
             </div>
         </div>
 
-        <aside class="pdf-foundation__preview" aria-labelledby="pdf-preview-heading">
-            <h2 id="pdf-preview-heading">Document preview</h2>
-            <div class="planned-pane planned-pane--preview">
-                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 2h8l4 4v16H6V2Z"/><path d="M14 2v5h4M9 12h6M9 16h4"/></svg>
-                <p>A matched-page preview will appear here in Phase 7.</p>
-            </div>
+        <aside class="pdf-foundation__preview" aria-label="Bitbucket result context">
+            <section aria-labelledby="people-commits-heading">
+                <h2 id="people-commits-heading">People &amp; commits</h2>
+                <div class="planned-pane planned-pane--people">
+                    <p>Contributor names, authored commits, verified push activity, opened PRs, and merged PRs will appear here after repository synchronization is implemented. Missing push evidence will be labelled Unavailable.</p>
+                    <p>OWL will keep author, committer, pusher, PR creator, fulfilled-state merger, and non-merge closer roles separate.</p>
+                </div>
+            </section>
+            <section aria-labelledby="pdf-preview-heading">
+                <h2 id="pdf-preview-heading">Document preview</h2>
+                <div class="planned-pane planned-pane--preview">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 2h8l4 4v16H6V2Z"/><path d="M14 2v5h4M9 12h6M9 16h4"/></svg>
+                    <p>A matched-page preview will appear here in Phase 7.</p>
+                </div>
+            </section>
         </aside>
     </section>
 </div>

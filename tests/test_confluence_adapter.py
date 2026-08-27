@@ -250,6 +250,11 @@ def test_normalizes_page_and_ordered_ancestor_metadata(origin):
                 "extensions": {"position": 4},
             },
         ],
+        "body": {
+            "storage": {
+                "value": "<h1>Private DNS</h1><p>Resolver <strong>runbook</strong></p>"
+            }
+        },
         "_links": {"webui": "/wiki/spaces/OWL/pages/4242/Private+DNS+Design"},
     }
     adapter, transport = adapter_with(origin, response(200, payload))
@@ -269,11 +274,46 @@ def test_normalizes_page_and_ordered_ancestor_metadata(origin):
     assert result.page.creator_name == "Creator"
     assert result.page.author_name == "Author"
     assert result.page.last_modifier_name == "Last Modifier"
+    assert result.page.body_text == "Private DNS\nResolver\nrunbook"
     assert [ancestor.page_id for ancestor in result.page.ancestors] == ["100", "200"]
     assert [ancestor.position for ancestor in result.page.ancestors] == [1, 4]
     assert transport.request_count == 1
     assert "/rest/api/content/4242?expand=" in transport.safe_request_facts[0][1]
     assert "%2C" in transport.safe_request_facts[0][1]
+
+
+def test_recursively_loads_normalized_descendant_pages(origin):
+    child = {
+        "id": "301",
+        "type": "page",
+        "title": "Private DNS Runbook",
+        "space": {"key": "OWL", "name": "OWL Architecture"},
+        "version": {"number": 2, "when": "2026-08-24T10:30:00Z", "by": {}},
+        "history": {"createdDate": "2025-01-02T09:00:00+00:00", "createdBy": {}},
+        "author": {},
+        "ancestors": [
+            {
+                "id": "300",
+                "title": "Private DNS Design",
+                "_links": {"webui": "/wiki/spaces/OWL/pages/300/Private-DNS-Design"},
+            }
+        ],
+        "_links": {"webui": "/wiki/spaces/OWL/pages/301/Private-DNS-Runbook"},
+    }
+    adapter, transport = adapter_with(
+        origin,
+        response(200, {"results": [child]}),
+        response(200, {"results": []}),
+    )
+
+    result = adapter.get_descendant_pages("300")
+
+    assert result.ok is True
+    assert [page.page_id for page in result.pages] == ["301"]
+    assert result.pages[0].ancestors[-1].page_id == "300"
+    assert transport.request_count == 2
+    assert "/rest/api/content/300/child/page?" in transport.safe_request_facts[0][1]
+    assert "/rest/api/content/301/child/page?" in transport.safe_request_facts[1][1]
 
 
 def test_page_not_found_is_distinct_but_403_is_not_not_found(origin):

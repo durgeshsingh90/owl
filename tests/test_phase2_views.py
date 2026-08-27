@@ -464,14 +464,16 @@ def test_search_finds_title_url_page_id_and_owl_number(loopback_client, query):
     assert "Visible results</dt>" in html
     assert "Filtered" in html
     assert f'href="?selected={matched.pk}' in html
+    assert f'href="/bookmarks/{matched.pk}/link/"' in html
 
 
-def test_duplicate_page_post_reveals_existing_without_source_request(
+def test_existing_page_post_reveals_the_root_after_descendant_sync(
     loopback_client,
-    secure_store,
+    monkeypatch,
 ):
-    configure_profile(secure_store)
     existing = create_bookmark()
+    result = upsert_bookmark(page_snapshot("300"))
+    monkeypatch.setattr(views, "save_bookmark_input", lambda _value: result)
 
     response = loopback_client.post(
         reverse("bookmark_manager:save"),

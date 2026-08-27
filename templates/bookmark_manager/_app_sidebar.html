@@ -3,18 +3,38 @@
 <aside class="app-sidebar bookmark-app-sidebar" id="bookmark-app-sidebar" aria-labelledby="bookmark-app-sidebar-heading">
     <header class="app-sidebar__header">
         <p class="eyebrow">Bookmark Manager</p>
-        <h2 id="bookmark-app-sidebar-heading">Bookmark tools</h2>
+        <h2 id="bookmark-app-sidebar-heading">Library</h2>
     </header>
 
     <nav class="app-side-nav" aria-label="Bookmark Manager functions">
         <section class="app-side-nav__group" aria-labelledby="bookmark-browse-heading">
             <h3 id="bookmark-browse-heading">Browse</h3>
-            <a href="{% url 'bookmark_manager:index' %}"{% if active_section == 'all' %} aria-current="page" class="is-active"{% endif %}>All bookmarks</a>
-            <a href="{% url 'bookmark_manager:index' %}?favorite=on&amp;sort=added_newest"{% if active_section == 'favorites' %} aria-current="page" class="is-active"{% endif %}>Favorites</a>
-            <a href="{% url 'bookmark_manager:index' %}?pinned=on&amp;sort=added_newest"{% if active_section == 'pinned' %} aria-current="page" class="is-active"{% endif %}>Pinned</a>
+            <a href="{% url 'bookmark_manager:index' %}" data-count="{{ total_bookmarks }}"{% if active_section == 'all' %} aria-current="page" class="is-active"{% endif %}>All bookmarks</a>
+            <a href="{% url 'bookmark_manager:index' %}?favorite=on&amp;sort=added_newest" data-count="{{ query_result.counts.favorites }}"{% if active_section == 'favorites' %} aria-current="page" class="is-active"{% endif %}>Favorites</a>
+            <a href="{% url 'bookmark_manager:index' %}?pinned=on&amp;sort=added_newest" data-count="{{ query_result.counts.pinned }}"{% if active_section == 'pinned' %} aria-current="page" class="is-active"{% endif %}>Pinned</a>
             <a href="{% url 'bookmark_manager:index' %}?sort=recently_opened"{% if active_section == 'recent' %} aria-current="page" class="is-active"{% endif %}>Recently viewed</a>
             <a href="{% url 'bookmark_manager:index' %}?sort=most_opened"{% if active_section == 'frequent' %} aria-current="page" class="is-active"{% endif %}>Frequently viewed</a>
             <a href="{% url 'bookmark_manager:index' %}?max_open=0&amp;sort=added_newest"{% if active_section == 'never' %} aria-current="page" class="is-active"{% endif %}>Never viewed</a>
+            {% if bookmark_categories %}
+            <div class="domain-categories" aria-label="Domain categories">
+                <h4>Domains</h4>
+                {% for category in bookmark_categories %}
+                <div class="domain-category">
+                    <a href="{% url 'bookmark_manager:index' %}?category={{ category.pk }}&amp;sort=added_newest" data-count="{{ category.bookmark_count }}"{% if selected_category.pk == category.pk %} aria-current="page" class="is-active"{% endif %}>{{ category.name }}</a>
+                    <details>
+                        <summary aria-label="Rename {{ category.name }}">Rename</summary>
+                        <form method="post" action="{% url 'bookmark_manager:category_rename' category.pk %}" data-local-redirect-form>
+                            {% csrf_token %}
+                            <label for="category-name-{{ category.pk }}">Category name</label>
+                            <input id="category-name-{{ category.pk }}" name="name" value="{{ category.name }}" maxlength="253" required>
+                            <small>{{ category.domain }}</small>
+                            <button class="button button--small" type="submit">Save name</button>
+                        </form>
+                    </details>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
         </section>
 
         <section class="app-side-nav__group" aria-labelledby="bookmark-data-heading">
@@ -42,7 +62,32 @@
             <div><dt>Pinned</dt><dd>{{ query_result.counts.pinned }}</dd></div>
         </dl>
 
-        <details class="filter-section" open>
+        <section class="bookmark-timeline" aria-labelledby="bookmark-timeline-heading">
+            <h3 id="bookmark-timeline-heading">Saved timeline</h3>
+            <div class="bookmark-timeline__viewport">
+                {% for group in bookmark_timeline_groups %}
+                <div class="bookmark-timeline__group">
+                    <h4>{{ group.label }}</h4>
+                    <ul>
+                        {% for bookmark in group.bookmarks %}
+                        <li><a href="{% url 'bookmark_manager:index' %}?{% if timeline_query_string %}{{ timeline_query_string }}&amp;{% endif %}timeline=1&amp;selected={{ bookmark.pk }}&amp;located={{ bookmark.pk }}"{% if selected_bookmark.pk == bookmark.pk %} aria-current="true"{% endif %}><span>{{ bookmark.title }}</span><time datetime="{{ bookmark.saved_at|date:'c' }}" title="{{ bookmark.saved_at|date:'j F Y, H:i T' }}" aria-label="Saved {{ bookmark.saved_at|date:'j F Y, H:i T' }}">{{ bookmark.saved_at|date:"j M" }}</time></a></li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% empty %}
+                <p class="muted-value">Saved bookmarks will appear here by month and year.</p>
+                {% endfor %}
+            </div>
+            {% if bookmark_timeline_page.page_count > 1 %}
+            <nav class="bookmark-timeline__pagination" aria-label="Saved timeline pages">
+                {% if bookmark_timeline_page.has_previous %}<a href="?{% if timeline_paging_query_string %}{{ timeline_paging_query_string }}&amp;{% endif %}timeline_page={{ bookmark_timeline_page.number|add:'-1' }}#bookmark-timeline-heading">Newer</a>{% else %}<span></span>{% endif %}
+                <span>{{ bookmark_timeline_page.first_item_number }}–{{ bookmark_timeline_page.last_item_number }} of {{ bookmark_timeline_page.total_count }}</span>
+                {% if bookmark_timeline_page.has_next %}<a href="?{% if timeline_paging_query_string %}{{ timeline_paging_query_string }}&amp;{% endif %}timeline_page={{ bookmark_timeline_page.number|add:'1' }}#bookmark-timeline-heading">Older</a>{% endif %}
+            </nav>
+            {% endif %}
+        </section>
+
+        <details class="filter-section">
             <summary>Filters <span>{{ active_filters|length }} active</span></summary>
             <div class="filter-grid">
                 <label class="check-field">{{ filter_form.favorite }} <span>Favorite only</span></label>
@@ -65,7 +110,7 @@
                 <label>Range{{ filter_form.date_preset }}</label>
                 <div class="paired-fields"><label>From{{ filter_form.date_from }}</label><label>To{{ filter_form.date_to }}</label></div>
                 <label>Sort{{ filter_form.sort }}</label>
-                <p class="field-help">Global sorts switch to a flat result list and retain each breadcrumb. The stored hierarchy never changes.</p>
+                <p class="field-help">Sorting changes which matches are prioritised while preserving the stored hierarchy.</p>
             </div>
         </details>
         <div class="filter-actions">

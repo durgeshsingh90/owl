@@ -230,16 +230,6 @@
         });
     });
 
-    const locatedBookmark = document.querySelector("[data-located-bookmark]");
-    if (locatedBookmark) {
-        const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-        locatedBookmark.scrollIntoView({
-            block: "center",
-            behavior: reduceMotion ? "auto" : "smooth",
-        });
-        locatedBookmark.focus({ preventScroll: true });
-    }
-
     const bookmarkSearch = document.querySelector("[data-bookmark-search]");
     document.addEventListener("keydown", (event) => {
         const target = event.target;
@@ -318,6 +308,27 @@
             setTreeExpanded(button, button.getAttribute("aria-expanded") !== "true");
         });
     });
+
+    const locatedBookmark = document.querySelector("[data-located-bookmark]");
+    if (locatedBookmark) {
+        let ancestorGroup = locatedBookmark.closest("[role='group']");
+        while (ancestorGroup) {
+            const owner = document.querySelector(
+                `[data-tree-toggle][aria-controls="${CSS.escape(ancestorGroup.id)}"]`,
+            );
+            if (!owner) {
+                break;
+            }
+            setTreeExpanded(owner, true);
+            ancestorGroup = owner.closest("[role='group']");
+        }
+        const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        locatedBookmark.scrollIntoView({
+            block: "center",
+            behavior: reduceMotion ? "auto" : "smooth",
+        });
+        locatedBookmark.focus({ preventScroll: true });
+    }
 
     document.querySelectorAll("[data-tree-expand-all]").forEach((button) => {
         button.addEventListener("click", () => {

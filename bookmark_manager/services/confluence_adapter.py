@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from enum import StrEnum
+from html.parser import HTMLParser
 from typing import Protocol
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit
 
@@ -33,6 +34,8 @@ DEFAULT_MAX_RESPONSE_BYTES = 1_048_576
 MAX_ALLOWED_RESPONSE_BYTES = 8_388_608
 MAX_TIMEOUT_SECONDS = 60.0
 MAX_REDIRECTS = 3
+CHILD_PAGE_LIMIT = 50
+MAX_DESCENDANT_PAGES = 500
 
 
 class ConfluenceResultCode(StrEnum):
@@ -78,6 +81,7 @@ class ConfluencePage:
     author_name: str
     last_modifier_name: str
     ancestors: tuple[ConfluenceAncestor, ...]
+    body_text: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +96,20 @@ class ConfluenceResult:
     @property
     def ok(self) -> bool:
         return self.code in {ConfluenceResultCode.CONNECTED, ConfluenceResultCode.SUCCESS}
+
+
+@dataclass(frozen=True, slots=True)
+class ConfluenceDescendantsResult:
+    """A bounded, normalized recursive descendant crawl for one saved page."""
+
+    code: ConfluenceResultCode
+    message: str
+    pages: tuple[ConfluencePage, ...] = ()
+    error_kind: ConfluenceErrorKind | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.code is ConfluenceResultCode.SUCCESS
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +300,8 @@ class ConfluenceClient(Protocol):
 
     def get_page(self, page_id: str) -> ConfluenceResult: ...
 
+    def get_descendant_pages(self, page_id: str) -> ConfluenceDescendantsResult: ...
+
 
 class ConfluenceAdapter:
     """Bearer-authenticated, read-only adapter for Confluence REST API v1."""
@@ -363,7 +383,7 @@ class ConfluenceAdapter:
                 message="The requested Confluence Page ID is invalid.",
                 error_kind=ConfluenceErrorKind.MALFORMED_RESPONSE,
             )
-        query = urlencode({"expand": "ancestors,space,version,history"})
+        query = urlencode({"expand": "ancestors,space,version,history,body.storage"})
         url = self.origin.build_url(
             f"/rest/api/content/{quote(normalized_page_id, safe='')}", query=query
         )
@@ -386,6 +406,88 @@ class ConfluenceAdapter:
             message="Confluence page metadata was loaded.",
             page=page,
             http_status=response.status,
+        )
+
+    def get_descendant_pages(self, page_id: str) -> ConfluenceDescendantsResult:
+        """Load child pages recursively, with a fixed 500-page safety limit."""
+
+        try:
+            root_page_id = _normalize_requested_page_id(page_id)
+        except PageInputError:
+            return ConfluenceDescendantsResult(
+                code=ConfluenceResultCode.UNSUPPORTED_RESPONSE,
+                message="The requested Confluence Page ID is invalid.",
+                error_kind=ConfluenceErrorKind.MALFORMED_RESPONSE,
+            )
+
+        pending = [root_page_id]
+        seen_page_ids = {root_page_id}
+        descendants: list[ConfluencePage] = []
+        while pending:
+            parent_page_id = pending.pop(0)
+            start = 0
+            while True:
+                query = urlencode(
+                    {
+                        "expand": "ancestors,space,version,history",
+                        "start": start,
+                        "limit": CHILD_PAGE_LIMIT,
+                    }
+                )
+                url = self.origin.build_url(
+                    f"/rest/api/content/{quote(parent_page_id, safe='')}/child/page",
+                    query=query,
+                )
+                response_or_result = self._perform_get(url)
+                if isinstance(response_or_result, ConfluenceResult):
+                    return ConfluenceDescendantsResult(
+                        code=response_or_result.code,
+                        message=response_or_result.message,
+                        error_kind=response_or_result.error_kind,
+                    )
+                failure = _classify_status(response_or_result, not_found_supported=True)
+                if failure is not None:
+                    return ConfluenceDescendantsResult(
+                        code=failure.code,
+                        message=failure.message,
+                        error_kind=failure.error_kind,
+                    )
+                payload = _decode_object(response_or_result.body)
+                raw_results = payload.get("results") if payload is not None else None
+                if not isinstance(raw_results, list) or len(raw_results) > CHILD_PAGE_LIMIT:
+                    return _malformed_descendants_result()
+                for raw_page in raw_results:
+                    if not isinstance(raw_page, dict):
+                        return _malformed_descendants_result()
+                    try:
+                        child_id = _normalize_requested_page_id(
+                            _required_text(raw_page.get("id"), max_length=32)
+                        )
+                        child = _normalize_page(raw_page, child_id, self.origin)
+                    except KeyError, TypeError, ValueError:
+                        return _malformed_descendants_result()
+                    if child.page_id in seen_page_ids:
+                        return _malformed_descendants_result()
+                    seen_page_ids.add(child.page_id)
+                    descendants.append(child)
+                    pending.append(child.page_id)
+                    if len(descendants) > MAX_DESCENDANT_PAGES:
+                        return ConfluenceDescendantsResult(
+                            code=ConfluenceResultCode.UNSUPPORTED_RESPONSE,
+                            message=(
+                                "This page has more than 500 descendant pages; "
+                                "OWL did not save a partial tree."
+                            ),
+                            error_kind=ConfluenceErrorKind.RESPONSE_TOO_LARGE,
+                        )
+                if len(raw_results) < CHILD_PAGE_LIMIT:
+                    break
+                start += len(raw_results)
+
+        return ConfluenceDescendantsResult(
+            code=ConfluenceResultCode.SUCCESS,
+            message=f"Loaded {len(descendants)} descendant pages.",
+            pages=tuple(descendants),
         )
 
     def _perform_get(self, initial_url: str) -> HttpResponse | ConfluenceResult:
@@ -725,13 +827,52 @@ def _normalize_page(
         author_name=author,
         last_modifier_name=modifier,
         ancestors=tuple(ancestors),
+        body_text=_page_body_text(payload.get("body")),
     )
+
+
+class _ConfluenceTextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        candidate = " ".join(data.split())
+        if candidate:
+            self.parts.append(candidate)
+
+
+def _page_body_text(value: object) -> str:
+    if value in {None, ""}:
+        return ""
+    if not isinstance(value, dict):
+        raise TypeError("Page body metadata is malformed.")
+    storage = value.get("storage")
+    if storage in {None, ""}:
+        return ""
+    if not isinstance(storage, dict):
+        raise TypeError("Page storage metadata is malformed.")
+    html = storage.get("value", "")
+    if not isinstance(html, str) or len(html) > MAX_ALLOWED_RESPONSE_BYTES:
+        raise ValueError("Page storage content is malformed or too large.")
+    parser = _ConfluenceTextExtractor()
+    parser.feed(html)
+    parser.close()
+    return "\n".join(parser.parts)
 
 
 def _malformed_result() -> ConfluenceResult:
     return ConfluenceResult(
         code=ConfluenceResultCode.UNSUPPORTED_RESPONSE,
         message="Confluence returned metadata OWL could not safely understand.",
+        error_kind=ConfluenceErrorKind.MALFORMED_RESPONSE,
+    )
+
+
+def _malformed_descendants_result() -> ConfluenceDescendantsResult:
+    return ConfluenceDescendantsResult(
+        code=ConfluenceResultCode.UNSUPPORTED_RESPONSE,
+        message="Confluence returned child-page data OWL could not safely understand.",
         error_kind=ConfluenceErrorKind.MALFORMED_RESPONSE,
     )
 

@@ -1,11 +1,11 @@
 # OWL master product and implementation requirements
 
 - Work-prompt order: 001
-- Version: 1.1
+- Version: 1.2
 - Status: Approved requirements baseline
 - Repository: git@github.com:durgeshsingh90/owl.git
 - Local project path: /Users/durgesh/Projects/owl
-- Last consolidated: 25 August 2026
+- Last consolidated: 26 August 2026
 
 ## 1. Product outcome
 
@@ -743,6 +743,19 @@ Support:
 
 Default tree browsing uses Added newest while preserving hierarchy. Flat sorts use a results view that retains breadcrumb context.
 
+### 15.4 Saved bookmark timeline
+
+Keep the Confluence hierarchy as the primary workspace, and also provide a compact saved-bookmark
+timeline in the Bookmark Manager left sidebar. Group bookmarks saved during the current calendar
+year under month headings, newest month first. Group older bookmarks under year headings, newest
+year first. Each entry links to and reveals the real bookmark in the hierarchy. This grouping is a
+navigation aid only and never rewrites parent/child relationships. Calculate calendar boundaries
+in OWL's configured local timezone, omit empty periods, expose semantic headings and exact saved
+dates, and retain the normal hierarchy/search/filter workspace beside the timeline. Search and
+filters recalculate the visible timeline groups so unrelated bookmark names do not remain visible.
+Bound the timeline's height and paginate or virtualize its entries so a 10,000-bookmark library
+does not duplicate the complete tree in the DOM or push filters and saved views out of reach.
+
 ## 16. Bookmark refresh
 
 Provide Refresh One, multi-select Refresh Selected, and a visible Refresh All icon with tooltip.
@@ -1138,6 +1151,49 @@ NORMAL
 
 Calculate expiring NEW/UPDATED state from timestamps. When history is shallow, label counts and dates as based on available history.
 
+### 22.7 Commit, push, and pull-request attribution
+
+OWL must keep source-control roles distinct because they can identify different people:
+
+- Git commit author;
+- Git commit committer;
+- authenticated Bitbucket push actor, when Bitbucket supplies it;
+- pull-request creator;
+- pull-request merger for a fulfilled PR;
+- pull-request closer for a declined or otherwise closed-without-merge PR.
+
+Never infer or label the Git author as the person who pushed the change. Store stable Bitbucket
+account identity when available, plus display name and avatar metadata; retain raw Git name/email
+only as a fallback for an unmapped commit identity. Do not merge two people solely because their
+display names match.
+
+The indexed branch is the repository's configured/default branch and may be named `master`,
+`main`, or something else; never hardcode a branch name. Git author and committer data is available
+for commits reachable in the locally available branch history. Label a shallow repository as
+**Available history**. The existing **Full History** operation may complete reachable Git commit
+history, but it does not backfill missing push evidence or pull-request history. Display separate
+coverage states for commit history, push evidence, and PR history. Apply a repository `.mailmap`
+when present; otherwise do not guess that different Git names or emails belong to one person. Hide
+email addresses by default.
+
+For Bitbucket Data Center, ingest default-branch ref-change activity when the configured account
+has the required repository-admin permission, and map each from/to hash range to the reported
+actor. Without that permission, show push attribution as unavailable. For Bitbucket Cloud, ingest
+commit and pull-request identities from REST; exact push actors are available only for captured
+repository push events, so historical push identity must remain unavailable when no event was
+stored. Because OWL remains loopback-only, it must not expose a public inbound webhook endpoint.
+Cloud push events may be used only through a separately approved, authenticated relay or safe event
+import design; until one exists, label Cloud push attribution unavailable. Repository
+synchronization remains read-only.
+
+Required conceptual supporting records:
+
+- contributor identity and provider mapping;
+- commit hash, author, committer, message, timestamps, and source link;
+- observed branch update with actor, from/to hashes, timestamp, trigger, and evidence source;
+- pull-request ID/title/link, creator, fulfilled-state merger, non-merge closer, merge commit, branches, and timestamps;
+- commit-to-document and commit-to-pull-request relationships.
+
 ## 23. PDF extraction and atomic index publication
 
 ### 23.1 Page extraction
@@ -1380,6 +1436,32 @@ Show:
 - actions.
 
 Paginate or virtualize. Initial page size is 50.
+
+### 25.6 People and commits rail
+
+Place a sticky contributor rail on the right of Bitbucket results. Show names with distinct counts
+for **Authored commits**, **Committed changes**, **Pushed changes**, **Opened PRs**, and
+**Merged PRs**. Count a PR under **Merged PRs** only when Bitbucket reports a fulfilled/merged
+state; a person who closes or declines an unmerged PR is not its merger. Missing push attribution
+must be labelled **Unavailable**, not guessed.
+
+As the result list scrolls, highlight the people associated with the most visible result. A person
+may have several simultaneous role badges. Selecting a name filters or opens that person's activity
+view, listing all locally known commits, branch updates, PRs, merges, affected PDF links, and safe
+Bitbucket links. Keyboard focus and scroll-driven highlighting must produce the same state, and the
+interaction must respect reduced-motion settings.
+
+The active person uses `aria-current` and scroll synchronization never moves keyboard focus.
+Selecting a person shows commit hash, subject, date, repository, indexed branch, change role, and
+affected PDF links for every matching commit in available local history. On narrow screens the rail
+becomes a named drawer or compact horizontal strip without hiding contributor filtering.
+
+Rail counts use the complete current filtered result scope, not only the visible viewport. Count
+Authored and Committed as unique `(repository, commit hash)` pairs per role, Pushed as unique
+authoritatively observed branch-update events, and Opened/Merged PRs as unique `(repository, PR
+ID)` pairs. Resynchronization must not double-count the same provider event; one person may still
+receive separate counts when they genuinely performed several roles. The scroll highlight follows
+the most visible result but does not change those scoped counts.
 
 ## 26. Preview, page navigation, open, and copy
 
@@ -2180,6 +2262,17 @@ These scenarios are the final product checklist.
 98. A complete environment-managed profile takes precedence, is labeled **Managed externally**, and cannot be viewed, replaced, or removed through the UI; an incomplete environment profile is rejected clearly.
 99. If Keychain or the configured secure store is unavailable, OWL reports an actionable error and never falls back to plaintext application storage.
 100. Submitted PAT values are absent from URLs, redirects, responses, logs, diagnostics, exports, backups, screenshots, traces, test reports, process arguments, and Git-tracked files.
+
+### 40.6 Bookmark timeline and source attribution
+
+101. The bounded bookmark timeline groups current-calendar-year entries by local month and older entries by year using Added to OWL, newest first, with pagination/virtualization suitable for 10,000 bookmarks.
+102. Timeline links reveal the canonical hierarchy item, boundaries use configured local time, accessible headings/dates are present, and no stored tree relationship changes.
+103. Git author and committer are extracted and displayed separately from the configured/default branch, including a branch named `master`, and neither is presented as the pusher.
+104. The right contributor rail shows distinct identities and accurate counts for the current PDF result/change set.
+105. Scrolling or keyboard navigation highlights the associated contributor with `aria-current` without stealing focus; selecting a contributor applies the matching activity view.
+106. Contributor activity lists every matching available-history commit with hash, subject, date, repository, branch, role, and affected PDF links.
+107. Commit-history, push-evidence, and PR-history coverage are labelled separately; Full History expands reachable Git commits without duplicates but never claims to backfill missing push or PR evidence.
+108. PR author, fulfilled-state merger, non-merge closer, and push actor appear only from authoritative Bitbucket metadata; unavailable attribution is stated and never inferred.
 
 ## 41. Deployment inputs still required from the user
 

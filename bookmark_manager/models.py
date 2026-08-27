@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -112,6 +113,53 @@ class BookmarkRecency(models.TextChoices):
     NEW = "new", "New"
     UPDATED = "updated", "Updated"
     NORMAL = "normal", "Normal"
+
+
+class BookmarkSource(models.TextChoices):
+    CONFLUENCE = "confluence", "Confluence"
+    WEB = "web", "Web"
+
+
+class BookmarkCategory(models.Model):
+    """A user-renamable group whose stable identity is a URL hostname."""
+
+    domain = models.CharField(max_length=253, unique=True)
+    name = models.CharField(max_length=253)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name", "domain", "id"]
+        verbose_name_plural = "bookmark categories"
+
+    def __str__(self) -> str:
+        return self.name
+
+    def clean(self) -> None:
+        super().clean()
+        self.domain = str(self.domain or "").strip().rstrip(".").casefold()
+        self.name = _canonical_personal_name(self.name)
+        errors: dict[str, str] = {}
+        if not self.domain or len(self.domain) > 253:
+            errors["domain"] = "Enter a valid domain name."
+        if not self.name:
+            errors["name"] = "A category name cannot be empty."
+        elif len(self.name) > 253:
+            errors["name"] = "A category name cannot exceed 253 characters."
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            kwargs["update_fields"] = set(update_fields) | {"domain", "name"}
+        return super().save(*args, **kwargs)
+
+    @classmethod
+    def default_name_for_url(cls, url: str) -> str:
+        hostname = (urlsplit(url).hostname or "").casefold()
+        return hostname.removeprefix("www.") or hostname
 
 
 class BookmarkImportStatus(models.TextChoices):
@@ -431,6 +479,23 @@ class Bookmark(models.Model):
     modified_by_name = models.CharField(max_length=500, blank=True)
     author_id = models.CharField(max_length=255, blank=True, db_index=True)
     author_name = models.CharField(max_length=500, blank=True)
+
+    # Cross-source identity and locally searchable content.
+    source_type = models.CharField(
+        max_length=20,
+        choices=BookmarkSource,
+        default=BookmarkSource.CONFLUENCE,
+        db_index=True,
+    )
+    canonical_url = models.URLField(max_length=2048, null=True, blank=True, unique=True)
+    category = models.ForeignKey(
+        BookmarkCategory,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="bookmarks",
+    )
+    page_text = models.TextField(blank=True)
 
     # OWL-owned identity, personal state, and usage.
     saved_at = models.DateTimeField(default=timezone.now, editable=False, db_index=True)

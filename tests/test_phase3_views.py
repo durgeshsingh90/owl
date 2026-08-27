@@ -12,6 +12,7 @@ from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
 
+from bookmark_manager import views
 from bookmark_manager.models import (
     Bookmark,
     BookmarkAvailability,
@@ -110,6 +111,211 @@ def _add_tag(bookmark: Bookmark, name: str) -> None:
 
 def _html(response) -> str:
     return response.content.decode("utf-8")
+
+
+def test_bookmark_timeline_groups_current_year_by_month_then_older_by_year():
+    august = _create_bookmark("810001", "August bookmark", ancestors=())
+    july = _create_bookmark("810002", "July bookmark", ancestors=())
+    previous_year = _create_bookmark("810003", "Previous year bookmark", ancestors=())
+    same_previous_year = _create_bookmark("810005", "Another previous year bookmark", ancestors=())
+    older = _create_bookmark("810004", "Older bookmark", ancestors=())
+    saved_dates = {
+        august.pk: datetime(2026, 8, 20, 10, tzinfo=UTC),
+        july.pk: datetime(2026, 7, 10, 10, tzinfo=UTC),
+        previous_year.pk: datetime(2025, 12, 1, 10, tzinfo=UTC),
+        same_previous_year.pk: datetime(2025, 3, 1, 10, tzinfo=UTC),
+        older.pk: datetime(2024, 4, 1, 10, tzinfo=UTC),
+    }
+    for bookmark in (august, july, previous_year, same_previous_year, older):
+        Bookmark.objects.filter(pk=bookmark.pk).update(saved_at=saved_dates[bookmark.pk])
+    refreshed = {
+        bookmark.pk: Bookmark.objects.get(pk=bookmark.pk)
+        for bookmark in (august, july, previous_year, same_previous_year, older)
+    }
+    bookmarks = [
+        refreshed[older.pk],
+        refreshed[july.pk],
+        refreshed[same_previous_year.pk],
+        refreshed[august.pk],
+        refreshed[previous_year.pk],
+    ]
+
+    groups = views._bookmark_timeline_groups(
+        bookmarks,
+        at=datetime(2026, 8, 26, 12, tzinfo=UTC),
+    )
+
+    assert [group.label for group in groups] == ["August", "July", "2025", "2024"]
+    assert [[item.title for item in group.bookmarks] for group in groups] == [
+        ["August bookmark"],
+        ["July bookmark"],
+        ["Previous year bookmark", "Another previous year bookmark"],
+        ["Older bookmark"],
+    ]
+
+    page = views._bookmark_timeline_page(
+        bookmarks,
+        page_number=2,
+        page_size=2,
+        at=datetime(2026, 8, 26, 12, tzinfo=UTC),
+    )
+    assert (page.number, page.page_count, page.total_count) == (2, 3, 5)
+    assert (page.first_item_number, page.last_item_number) == (3, 4)
+    assert [item.title for item in page.groups[0].bookmarks] == [
+        "Previous year bookmark",
+        "Another previous year bookmark",
+    ]
+
+
+def test_bookmark_timeline_uses_local_timezone_at_the_year_boundary():
+    january_local = _create_bookmark("810021", "January local bookmark", ancestors=())
+    previous_local_year = _create_bookmark("810022", "Previous local year bookmark", ancestors=())
+    Bookmark.objects.filter(pk=january_local.pk).update(
+        saved_at=datetime(2026, 12, 31, 10, tzinfo=UTC)
+    )
+    Bookmark.objects.filter(pk=previous_local_year.pk).update(
+        saved_at=datetime(2026, 12, 31, 9, tzinfo=UTC)
+    )
+
+    with timezone.override("Pacific/Kiritimati"):
+        groups = views._bookmark_timeline_groups(
+            Bookmark.objects.filter(pk__in=(january_local.pk, previous_local_year.pk)),
+            at=datetime(2026, 12, 31, 10, 30, tzinfo=UTC),
+        )
+
+    assert [group.label for group in groups] == ["January", "2026"]
+
+
+def test_bookmark_timeline_renders_accessible_links_without_mutating_hierarchy(
+    loopback_client,
+):
+    current_year = timezone.localdate().year
+    current = _create_bookmark("810011", "Current year page")
+    older = _create_bookmark("810012", "Older page", ancestors=())
+    Bookmark.objects.filter(pk=current.pk).update(
+        saved_at=datetime(current_year, 7, 15, 10, tzinfo=UTC)
+    )
+    Bookmark.objects.filter(pk=older.pk).update(
+        saved_at=datetime(current_year - 1, 12, 1, 10, tzinfo=UTC)
+    )
+    parents_before = dict(ConfluencePageNode.objects.values_list("pk", "parent_id"))
+
+    response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"sort": "title_descending"},
+    )
+    html = _html(response)
+    timeline_match = re.search(
+        r'<section class="bookmark-timeline".*?</section>',
+        html,
+        re.DOTALL,
+    )
+
+    assert response.status_code == 200
+    assert response.context["query_result"].flat_mode is True
+    assert timeline_match is not None
+    timeline_html = timeline_match.group(0)
+    assert 'aria-labelledby="bookmark-timeline-heading"' in timeline_html
+    assert "Saved timeline" in timeline_html
+    assert timeline_html.index("July") < timeline_html.index(str(current_year - 1))
+    assert f'?timeline=1&amp;selected={current.pk}&amp;located={current.pk}"' in timeline_html
+    assert f'?timeline=1&amp;selected={older.pk}&amp;located={older.pk}"' in timeline_html
+    assert 'aria-label="Saved 15 July' in timeline_html
+
+    filtered = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"q": "Current year page", "sort": "title_descending"},
+    )
+    filtered_timeline = re.search(
+        r'<section class="bookmark-timeline".*?</section>',
+        _html(filtered),
+        re.DOTALL,
+    )
+    assert filtered_timeline is not None
+    assert "Current year page" in filtered_timeline.group(0)
+    assert "Older page" not in filtered_timeline.group(0)
+    assert (
+        f"?q=Current+year+page&amp;timeline=1&amp;selected={current.pk}"
+        in filtered_timeline.group(0)
+    )
+
+    revealed = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {
+            "q": "Current year page",
+            "timeline": "1",
+            "selected": current.pk,
+            "located": current.pk,
+        },
+    )
+    revealed_html = _html(revealed)
+    revealed_timeline = re.search(
+        r'<section class="bookmark-timeline".*?</section>',
+        revealed_html,
+        re.DOTALL,
+    )
+    assert revealed.context["query_result"].flat_mode is False
+    assert revealed.context["selected_bookmark"].pk == current.pk
+    assert revealed_timeline is not None
+    assert 'aria-current="true"' in revealed_timeline.group(0)
+    assert "data-located-bookmark" in revealed_html
+    assert dict(ConfluencePageNode.objects.values_list("pk", "parent_id")) == parents_before
+
+
+def test_bookmark_timeline_paginates_and_preserves_active_result_state(loopback_client):
+    observation_time = timezone.now()
+    for offset in range(101):
+        bookmark = _create_bookmark(
+            str(820000 + offset),
+            f"Paged timeline bookmark {offset:03d}",
+            ancestors=(),
+        )
+        Bookmark.objects.filter(pk=bookmark.pk).update(
+            saved_at=observation_time - timedelta(days=offset)
+        )
+
+    first_response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"q": "Paged timeline", "sort": "title_descending"},
+    )
+    first_page = first_response.context["bookmark_timeline_page"]
+    first_timeline = re.search(
+        r'<section class="bookmark-timeline".*?</section>',
+        _html(first_response),
+        re.DOTALL,
+    )
+
+    assert (first_page.number, first_page.page_count, first_page.total_count) == (1, 2, 101)
+    assert (first_page.first_item_number, first_page.last_item_number) == (1, 100)
+    assert first_page.has_next is True
+    assert first_timeline is not None
+    assert "1–100 of 101" in first_timeline.group(0)
+    assert (
+        "?q=Paged+timeline&amp;sort=title_descending&amp;timeline_page=2" in first_timeline.group(0)
+    )
+
+    second_response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"q": "Paged timeline", "sort": "title_descending", "timeline_page": "2"},
+    )
+    second_page = second_response.context["bookmark_timeline_page"]
+    second_timeline = re.search(
+        r'<section class="bookmark-timeline".*?</section>',
+        _html(second_response),
+        re.DOTALL,
+    )
+
+    assert (second_page.number, second_page.first_item_number, second_page.last_item_number) == (
+        2,
+        101,
+        101,
+    )
+    assert second_page.has_previous is True
+    assert second_page.has_next is False
+    assert second_timeline is not None
+    assert "101–101 of 101" in second_timeline.group(0)
+    assert "Newer" in second_timeline.group(0)
+    assert "Older" not in second_timeline.group(0)
 
 
 def _async_post(client, path: str, data=None):
@@ -318,9 +524,13 @@ def test_combined_http_filters_and_flat_sort_preserve_the_tree(loopback_client):
     assert result.bookmarks == (target,)
     assert result.flat_mode is True
     assert result.active_filter_count == 11
-    assert "Sorted results" in html
-    assert "Flat view with paths" in html
-    assert "Knowledge › Cloud Architecture › PrivateLink route map" in html
+    assert "Bookmark tree" in html
+    assert "Sorted matches in hierarchy" in html
+    assert 'role="tree" aria-label="Confluence page hierarchy"' in html
+    assert "Knowledge" in html
+    assert "Cloud Architecture" in html
+    assert "PrivateLink route map" in html
+    assert "flat-bookmark-list" not in html
     assert "Selected tags use ALL" in html
     assert dict(ConfluencePageNode.objects.values_list("pk", "parent_id")) == parents_before
 
