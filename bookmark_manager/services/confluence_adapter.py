@@ -843,12 +843,12 @@ class _ConfluenceTextExtractor(HTMLParser):
 
 
 def _page_body_text(value: object) -> str:
-    if value in {None, ""}:
+    if value is None or value == "":
         return ""
     if not isinstance(value, dict):
         raise TypeError("Page body metadata is malformed.")
     storage = value.get("storage")
-    if storage in {None, ""}:
+    if storage is None or storage == "":
         return ""
     if not isinstance(storage, dict):
         raise TypeError("Page storage metadata is malformed.")

@@ -146,7 +146,8 @@ def test_first_use_page_has_accessible_settings_gear_dialog_and_blank_pat(loopba
     assert "<dialog" in html
     assert 'aria-labelledby="confluence-settings-heading"' in html
     assert 'data-open-on-load="false"' in html
-    assert "Connect Confluence first" in html
+    assert "Confluence text search is optional" not in html
+    assert 'aria-describedby="bookmark-connection-help"' not in html
     assert "No bookmarks saved yet" in html
     assert 'autocomplete="new-password"' in password_input_tag(html)
     assert "value=" not in password_input_tag(html)
@@ -461,10 +462,11 @@ def test_search_finds_title_url_page_id_and_owl_number(loopback_client, query):
     assert response.status_code == 200
     assert "Private DNS Architecture" in html
     assert "Storage Operations Handbook" not in html
-    assert "Visible results</dt>" in html
+    assert response.context["result_count"] == 1
     assert "Filtered" in html
     assert f'href="?selected={matched.pk}' in html
-    assert f'href="/bookmarks/{matched.pk}/link/"' in html
+    assert f'action="/bookmarks/{matched.pk}/open/"' in html
+    assert "Open link ↗" not in html
 
 
 def test_existing_page_post_reveals_the_root_after_descendant_sync(

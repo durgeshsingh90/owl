@@ -291,6 +291,38 @@ def test_wrong_origin_is_rejected_before_client_creation(configured_profile):
     assert Bookmark.objects.count() == 0
 
 
+def test_confluence_save_indexes_only_the_requested_page_text(configured_profile):
+    root = replace(adapter_page("300"), body_text="Root page searchable architecture text")
+    child = replace(adapter_page("301"), body_text="Child text must never be indexed")
+    client = DescendantRecordingClient(
+        ConfluenceResult(
+            ConfluenceResultCode.SUCCESS,
+            "Loaded page.",
+            page=root,
+        ),
+        (child,),
+    )
+
+    result = save_bookmark_input("300", client_factory=lambda _profile: client)
+
+    assert result.bookmark.page_text == "Root page searchable architecture text"
+    assert Bookmark.objects.get(page_id="301").page_text == ""
+
+
+def test_readding_an_old_confluence_bookmark_backfills_missing_page_text(configured_profile):
+    existing = upsert_bookmark(domain_snapshot()).bookmark
+    page = replace(adapter_page("300"), body_text="Backfilled searchable page text")
+    client = RecordingClient(
+        ConfluenceResult(ConfluenceResultCode.SUCCESS, "Loaded page.", page=page)
+    )
+
+    result = save_bookmark_input("300", client_factory=lambda _profile: client)
+
+    assert result.bookmark.pk == existing.pk
+    assert result.bookmark.page_text == "Backfilled searchable page text"
+    assert client.page_ids == ["300"]
+
+
 @pytest.mark.parametrize(
     ("result_code", "expected_code", "expected_configuration_state"),
     [

@@ -45,6 +45,7 @@ def test_private_paths_are_rejected(candidate: str):
         "docs/schema.json",
         "docs/bookmark_schema.json",
         "static/owl/icon.svg",
+        "static/owl/owl.png",
     ],
 )
 def test_normal_public_paths_are_allowed(candidate: str):

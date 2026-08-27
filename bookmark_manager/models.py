@@ -135,6 +135,13 @@ class BookmarkCategory(models.Model):
     def __str__(self) -> str:
         return self.name
 
+    def save(self, *args, **kwargs):
+        self.clean()
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            kwargs["update_fields"] = set(update_fields) | {"domain", "name"}
+        return super().save(*args, **kwargs)
+
     def clean(self) -> None:
         super().clean()
         self.domain = str(self.domain or "").strip().rstrip(".").casefold()
@@ -148,13 +155,6 @@ class BookmarkCategory(models.Model):
             errors["name"] = "A category name cannot exceed 253 characters."
         if errors:
             raise ValidationError(errors)
-
-    def save(self, *args, **kwargs):
-        self.clean()
-        update_fields = kwargs.get("update_fields")
-        if update_fields is not None:
-            kwargs["update_fields"] = set(update_fields) | {"domain", "name"}
-        return super().save(*args, **kwargs)
 
     @classmethod
     def default_name_for_url(cls, url: str) -> str:

@@ -16,7 +16,9 @@ from bookmark_manager import views
 from bookmark_manager.models import (
     Bookmark,
     BookmarkAvailability,
+    BookmarkCategory,
     BookmarkImportRun,
+    BookmarkSource,
     ConfluenceConfiguration,
     ConfluencePageNode,
     SavedBookmarkView,
@@ -113,6 +115,16 @@ def _html(response) -> str:
     return response.content.decode("utf-8")
 
 
+def _sidebar_html(response) -> str:
+    match = re.search(
+        r'<aside class="app-sidebar bookmark-app-sidebar".*?</aside>',
+        _html(response),
+        re.DOTALL,
+    )
+    assert match is not None
+    return match.group(0)
+
+
 def test_bookmark_timeline_groups_current_year_by_month_then_older_by_year():
     august = _create_bookmark("810001", "August bookmark", ancestors=())
     july = _create_bookmark("810002", "July bookmark", ancestors=())
@@ -186,9 +198,7 @@ def test_bookmark_timeline_uses_local_timezone_at_the_year_boundary():
     assert [group.label for group in groups] == ["January", "2026"]
 
 
-def test_bookmark_timeline_renders_accessible_links_without_mutating_hierarchy(
-    loopback_client,
-):
+def test_slim_sidebar_keeps_browse_links_and_domain_categories_only(loopback_client):
     current_year = timezone.localdate().year
     current = _create_bookmark("810011", "Current year page")
     older = _create_bookmark("810012", "Older page", ancestors=())
@@ -198,46 +208,61 @@ def test_bookmark_timeline_renders_accessible_links_without_mutating_hierarchy(
     Bookmark.objects.filter(pk=older.pk).update(
         saved_at=datetime(current_year - 1, 12, 1, 10, tzinfo=UTC)
     )
+    category = BookmarkCategory.objects.create(
+        domain="confluence.example.invalid",
+        name="confluence.example.invalid",
+    )
+    Bookmark.objects.filter(pk__in=(current.pk, older.pk)).update(category=category)
     parents_before = dict(ConfluencePageNode.objects.values_list("pk", "parent_id"))
 
     response = loopback_client.get(
         reverse("bookmark_manager:index"),
         {"sort": "title_descending"},
     )
-    html = _html(response)
-    timeline_match = re.search(
-        r'<section class="bookmark-timeline".*?</section>',
-        html,
-        re.DOTALL,
-    )
+    sidebar = _sidebar_html(response)
 
     assert response.status_code == 200
     assert response.context["query_result"].flat_mode is True
-    assert timeline_match is not None
-    timeline_html = timeline_match.group(0)
-    assert 'aria-labelledby="bookmark-timeline-heading"' in timeline_html
-    assert "Saved timeline" in timeline_html
-    assert timeline_html.index("July") < timeline_html.index(str(current_year - 1))
-    assert f'?timeline=1&amp;selected={current.pk}&amp;located={current.pk}"' in timeline_html
-    assert f'?timeline=1&amp;selected={older.pk}&amp;located={older.pk}"' in timeline_html
-    assert 'aria-label="Saved 15 July' in timeline_html
+    assert response.context["bookmark_timeline_page"].total_count == 2
+    browse_labels = (
+        "All bookmarks",
+        "Favorites",
+        "Pinned",
+        "Recently viewed",
+        "Frequently viewed",
+        "Never viewed",
+    )
+    assert all(label in sidebar for label in browse_labels)
+    assert [category.name for category in response.context["bookmark_categories"]] == [
+        "confluence.example.invalid"
+    ]
+    assert "confluence.example.invalid" in sidebar
+    for removed in (
+        "Saved timeline",
+        "Filters",
+        "Date and sort",
+        "Saved views",
+        "Import JSON",
+        "Export JSON",
+        "Confluence settings",
+        "System status",
+        "Shortcuts:",
+    ):
+        assert removed not in sidebar
+    for removed_hook in (
+        'class="bookmark-timeline"',
+        'class="app-sidebar__workspace"',
+        'id="bookmark-import"',
+    ):
+        assert removed_hook not in sidebar
 
     filtered = loopback_client.get(
         reverse("bookmark_manager:index"),
         {"q": "Current year page", "sort": "title_descending"},
     )
-    filtered_timeline = re.search(
-        r'<section class="bookmark-timeline".*?</section>',
-        _html(filtered),
-        re.DOTALL,
-    )
-    assert filtered_timeline is not None
-    assert "Current year page" in filtered_timeline.group(0)
-    assert "Older page" not in filtered_timeline.group(0)
-    assert (
-        f"?q=Current+year+page&amp;timeline=1&amp;selected={current.pk}"
-        in filtered_timeline.group(0)
-    )
+    assert filtered.context["bookmark_timeline_page"].total_count == 1
+    assert filtered.context["query_result"].bookmarks == (current,)
+    assert 'class="bookmark-timeline"' not in _sidebar_html(filtered)
 
     revealed = loopback_client.get(
         reverse("bookmark_manager:index"),
@@ -249,20 +274,15 @@ def test_bookmark_timeline_renders_accessible_links_without_mutating_hierarchy(
         },
     )
     revealed_html = _html(revealed)
-    revealed_timeline = re.search(
-        r'<section class="bookmark-timeline".*?</section>',
-        revealed_html,
-        re.DOTALL,
-    )
     assert revealed.context["query_result"].flat_mode is False
     assert revealed.context["selected_bookmark"].pk == current.pk
-    assert revealed_timeline is not None
-    assert 'aria-current="true"' in revealed_timeline.group(0)
     assert "data-located-bookmark" in revealed_html
     assert dict(ConfluencePageNode.objects.values_list("pk", "parent_id")) == parents_before
 
 
-def test_bookmark_timeline_paginates_and_preserves_active_result_state(loopback_client):
+def test_bookmark_timeline_context_paginates_without_rendering_sidebar_timeline(
+    loopback_client,
+):
     observation_time = timezone.now()
     for offset in range(101):
         bookmark = _create_bookmark(
@@ -279,31 +299,17 @@ def test_bookmark_timeline_paginates_and_preserves_active_result_state(loopback_
         {"q": "Paged timeline", "sort": "title_descending"},
     )
     first_page = first_response.context["bookmark_timeline_page"]
-    first_timeline = re.search(
-        r'<section class="bookmark-timeline".*?</section>',
-        _html(first_response),
-        re.DOTALL,
-    )
 
     assert (first_page.number, first_page.page_count, first_page.total_count) == (1, 2, 101)
     assert (first_page.first_item_number, first_page.last_item_number) == (1, 100)
     assert first_page.has_next is True
-    assert first_timeline is not None
-    assert "1–100 of 101" in first_timeline.group(0)
-    assert (
-        "?q=Paged+timeline&amp;sort=title_descending&amp;timeline_page=2" in first_timeline.group(0)
-    )
+    assert 'class="bookmark-timeline"' not in _sidebar_html(first_response)
 
     second_response = loopback_client.get(
         reverse("bookmark_manager:index"),
         {"q": "Paged timeline", "sort": "title_descending", "timeline_page": "2"},
     )
     second_page = second_response.context["bookmark_timeline_page"]
-    second_timeline = re.search(
-        r'<section class="bookmark-timeline".*?</section>',
-        _html(second_response),
-        re.DOTALL,
-    )
 
     assert (second_page.number, second_page.first_item_number, second_page.last_item_number) == (
         2,
@@ -312,10 +318,7 @@ def test_bookmark_timeline_paginates_and_preserves_active_result_state(loopback_
     )
     assert second_page.has_previous is True
     assert second_page.has_next is False
-    assert second_timeline is not None
-    assert "101–101 of 101" in second_timeline.group(0)
-    assert "Newer" in second_timeline.group(0)
-    assert "Older" not in second_timeline.group(0)
+    assert 'class="bookmark-timeline"' not in _sidebar_html(second_response)
 
 
 def _async_post(client, path: str, data=None):
@@ -463,6 +466,72 @@ def test_http_search_covers_every_local_bookmark_scope(loopback_client, search):
     assert "Filtered tree" in _html(response)
 
 
+def test_tree_opens_titles_shows_usage_and_keeps_quick_note_in_details(loopback_client):
+    bookmark = _create_bookmark()
+    _set_bookmark_values(bookmark, open_count=2, notes="Review the routing notes")
+
+    response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"selected": bookmark.pk},
+    )
+    html = _html(response)
+
+    assert response.status_code == 200
+    assert f'class="tree-open-form" method="post" action="/bookmarks/{bookmark.pk}/open/"' in html
+    assert f'aria-label="Open {bookmark.title}"' in html
+    assert "Open link ↗" not in html
+    assert 'class="tree-quick-note"' not in html
+    assert "<strong>2</strong> opens" in html
+    assert "Added " in html
+    assert "Written " in html
+    assert "Updated " in html
+    assert ">Quick note <small>Stored locally and never sent to Confluence</small>" in html
+    assert "Review the routing notes" in html
+
+
+def test_confluence_people_column_counts_unique_pages_and_filters_by_name(loopback_client):
+    first = _create_bookmark()
+    second = _create_bookmark("730004", "Second architecture page", ancestors=())
+    _set_bookmark_values(
+        second,
+        author_name="Alice Author",
+        created_by_name="Alice Author",
+        modified_by_name="Morgan Modifier",
+    )
+    web = _create_bookmark("730005", "Ordinary web bookmark", ancestors=())
+    _set_bookmark_values(
+        web,
+        source_type=BookmarkSource.WEB,
+        author_name="Web Writer",
+        created_by_name="Web Writer",
+        modified_by_name="Web Editor",
+    )
+
+    response = loopback_client.get(reverse("bookmark_manager:index"))
+    contacts = {contact.name: contact for contact in response.context["confluence_contacts"]}
+    html = _html(response)
+
+    assert contacts["Alice Author"].page_count == 2
+    assert contacts["Alice Author"].written_count == 2
+    assert contacts["Alice Author"].updated_count == 0
+    assert contacts["Morgan Modifier"].page_count == 2
+    assert contacts["Morgan Modifier"].updated_count == 2
+    assert contacts["Carla Creator"].page_count == 1
+    assert "Web Writer" not in contacts
+    assert "Web Editor" not in contacts
+    assert 'class="bookmark-pane bookmark-pane--people"' in html
+    assert "?person=Alice%20Author&amp;sort=updated_newest" in html
+
+    filtered = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"person": "Alice Author", "sort": "updated_newest"},
+    )
+
+    assert set(filtered.context["query_result"].bookmarks) == {first, second}
+    assert web not in filtered.context["query_result"].bookmarks
+    assert filtered.context["active_contact"] == "Alice Author"
+
+
 def test_combined_http_filters_and_flat_sort_preserve_the_tree(loopback_client):
     now = timezone.now()
     target = _create_bookmark()
@@ -526,12 +595,12 @@ def test_combined_http_filters_and_flat_sort_preserve_the_tree(loopback_client):
     assert result.active_filter_count == 11
     assert "Bookmark tree" in html
     assert "Sorted matches in hierarchy" in html
-    assert 'role="tree" aria-label="Confluence page hierarchy"' in html
+    assert 'role="tree" aria-label="Bookmark hierarchy"' in html
     assert "Knowledge" in html
     assert "Cloud Architecture" in html
     assert "PrivateLink route map" in html
     assert "flat-bookmark-list" not in html
-    assert "Selected tags use ALL" in html
+    assert "Selected tags use ALL" not in _sidebar_html(response)
     assert dict(ConfluencePageNode.objects.values_list("pk", "parent_id")) == parents_before
 
 
@@ -566,12 +635,12 @@ def test_saved_view_ajax_round_trip_restores_validated_query_not_tree_state(loop
     assert "located" not in saved.filters
 
     restored = loopback_client.get(payload["redirect"])
-    html = _html(restored)
     assert restored.status_code == 200
     assert restored.context["active_saved_view"] == saved
     assert restored.context["query_result"].bookmarks == (target,)
     assert restored.context["query_result"].flat_mode is True
-    assert f'?saved_view={saved.pk}" aria-current="true"' in html
+    assert saved in restored.context["saved_views"]
+    assert saved.name not in _sidebar_html(restored)
 
 
 def test_export_response_is_sensitive_attachment_and_excludes_credentials(
@@ -608,7 +677,9 @@ def test_export_response_is_sensitive_attachment_and_excludes_credentials(
     assert "authorization" not in rendered.casefold()
 
 
-def test_import_http_journey_continues_and_renders_partial_result(loopback_client):
+def test_import_http_journey_returns_to_settings_and_renders_partial_result(
+    loopback_client,
+):
     records = [
         _legacy_record("810001", "First imported page", "2025-08-20T09:30:00Z"),
         "malformed sibling that must not abort valid records",
@@ -622,12 +693,12 @@ def test_import_http_journey_continues_and_renders_partial_result(loopback_clien
 
     response = loopback_client.post(
         reverse("bookmark_manager:import"),
-        {"import_file": upload},
+        {"import_file": upload, "return_to": "settings"},
     )
 
     assert response.status_code == 302
     run = BookmarkImportRun.objects.get()
-    assert f"import_run={run.pk}" in response["Location"]
+    assert response["Location"] == (f"{reverse('bookmark_manager:settings')}?import_run={run.pk}")
     assert run.imported_records == 2
     assert run.failed_records == 1
     assert Bookmark.objects.filter(page_id__in=("810001", "810002")).count() == 2
@@ -641,6 +712,25 @@ def test_import_http_journey_continues_and_renders_partial_result(loopback_clien
     assert "<dt>Rejected</dt><dd>1</dd>" in html
     assert "Record 2" in html
     assert "The record must be a JSON object." in html
+
+
+def test_invalid_import_returning_to_settings_renders_field_and_error_feedback(
+    loopback_client,
+):
+    response = loopback_client.post(
+        reverse("bookmark_manager:import"),
+        {"return_to": "settings"},
+    )
+    html = _html(response)
+
+    assert response.status_code == 400
+    assert response.context["import_form"].errors["import_file"]
+    assert "Bookmark data" in html
+    assert "Import JSON" in html
+    assert "Choose a valid UTF-8 .json bookmark file" in html
+    assert "This field is required." in html
+    assert 'name="return_to" value="settings"' in html
+    assert "Advanced settings" not in html
 
 
 def test_confirmed_ajax_delete_preserves_shared_hierarchy_and_sibling(loopback_client):
@@ -793,7 +883,7 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     html = _html(response)
 
     assert response.status_code == 200
-    assert 'role="tree" aria-label="Confluence page hierarchy" data-bookmark-tree' in html
+    assert 'role="tree" aria-label="Bookmark hierarchy" data-bookmark-tree' in html
     assert 'role="treeitem"' in html
     assert 'aria-level="1"' in html
     assert 'aria-level="2"' in html
@@ -812,11 +902,10 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert 'data-confirm-message="Delete this bookmark from OWL?' in html
     assert 'role="status" aria-live="polite" aria-atomic="true"' in html
     assert "<time datetime=" in html and 'tabindex="0"' in html
-    assert "Shortcuts:" in html
-    for key in ("/", "E", "F", "P"):
-        assert f"<kbd>{key}</kbd>" in html
-    assert "Enter opens details" in html
-    assert html.count('name="csrfmiddlewaretoken"') >= 8
+    sidebar = _sidebar_html(response)
+    assert "Shortcuts:" not in sidebar
+    assert "Enter opens details" not in sidebar
+    assert html.count('name="csrfmiddlewaretoken"') >= 6
     element_ids = re.findall(r'\sid="([^"]+)"', html)
     assert len(element_ids) == len(set(element_ids))
 

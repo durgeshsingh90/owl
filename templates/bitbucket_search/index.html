@@ -1,52 +1,286 @@
 {% extends "owl/base.html" %}
+{% load static %}
 
-{% block app_sidebar %}
-    {% include "bitbucket_search/_app_sidebar.html" %}
+{% block body_class %}bitbucket-shell{% endblock %}
+{% block theme_default %}dark{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=owl-brand">
 {% endblock %}
 
-{% block content %}
-<div class="page-stack product-page">
-    <header class="product-toolbar">
-        <div>
-            <p class="eyebrow">Local document discovery</p>
-            <div class="title-row">
-                <h1>Bitbucket Search</h1>
-                <span class="phase-pill">Planned for Phases 5–7</span>
-            </div>
-            <p>PDF Search will find technical documents by repository, path, filename, page text, and notes once indexing is enabled.</p>
-        </div>
-        <a class="button button--secondary" href="{% url 'bitbucket_search:repositories' %}">Repository foundation</a>
-    </header>
+{% block app_header %}{% endblock %}
 
-    <section class="pdf-foundation" aria-labelledby="pdf-foundation-heading">
-        <div class="pdf-foundation__main">
-            <div class="foundation-message">
-                <span class="state-label state-label--planned">Planned for Phases 5–7</span>
-                <h2 id="pdf-foundation-heading">PDF indexing and search are not active yet</h2>
-                <p>No repository has been accessed, no PDF has been parsed, and no index has been created by this page. The visible layout establishes where the later local search workflow will live.</p>
-                <div class="inline-links">
-                    <a class="text-link" href="{% url 'bitbucket_search:repositories' %}">Repository foundation <span aria-hidden="true">→</span></a>
-                    <a class="text-link" href="{% url 'bitbucket_search:index_status' %}">Index status foundation <span aria-hidden="true">→</span></a>
-                </div>
-            </div>
-        </div>
+{% block main_class %}bitbucket-main{% endblock %}
 
-        <aside class="pdf-foundation__preview" aria-label="Bitbucket result context">
-            <section aria-labelledby="people-commits-heading">
-                <h2 id="people-commits-heading">People &amp; commits</h2>
-                <div class="planned-pane planned-pane--people">
-                    <p>Contributor names, authored commits, verified push activity, opened PRs, and merged PRs will appear here after repository synchronization is implemented. Missing push evidence will be labelled Unavailable.</p>
-                    <p>OWL will keep author, committer, pusher, PR creator, fulfilled-state merger, and non-merge closer roles separate.</p>
-                </div>
+{% block main_wrapper %}
+<div class="bitbucket-workspace">
+    <aside class="bb-repository-rail" aria-labelledby="bb-repositories-heading">
+        <a class="bb-brand" href="{% url 'core:dashboard' %}" aria-label="OWL Home">
+            <span class="bb-brand__mark" aria-hidden="true">
+                <img src="{% static 'owl/owl.png' %}" alt="" width="512" height="512" decoding="async">
+            </span>
+            <span class="bb-brand__copy">
+                <strong>OWL</strong>
+                <small>Bitbucket Search</small>
+            </span>
+        </a>
+
+        <section class="bb-repositories" aria-labelledby="bb-repositories-heading">
+            <div class="bb-section-heading">
+                <h2 id="bb-repositories-heading">Repositories</h2>
+                <a class="bb-add-repository" href="{% url 'bitbucket_search:repositories' %}">
+                    <span aria-hidden="true">→</span>
+                    Repository setup
+                </a>
+            </div>
+
+            <label class="bb-repository-search">
+                <span class="visually-hidden">Search repositories</span>
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <circle cx="11" cy="11" r="6.5"/>
+                    <path d="m16 16 4 4"/>
+                </svg>
+                <input type="search" placeholder="Search repositories…" disabled aria-describedby="bb-repository-search-note">
+            </label>
+            <p class="bb-control-note" id="bb-repository-search-note">Available after repository sync is implemented.</p>
+
+            <div class="bb-repository-empty">
+                <span class="bb-repository-empty__icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                        <path d="M3.5 7.5h6l1.7 2h9.3v9.5h-17V7.5Z"/>
+                        <path d="M5 7.5V5h5l1.5 2.5"/>
+                    </svg>
+                </span>
+                <strong>No repositories connected</strong>
+                <p>Repository registration and synchronization are planned for Phase 5.</p>
+                <a href="{% url 'bitbucket_search:repositories' %}">View repository foundation</a>
+            </div>
+        </section>
+
+        <div class="bb-rail-footer">
+            <nav class="bb-rail-links" aria-label="Bitbucket Search functions">
+                <a class="is-active" href="{% url 'bitbucket_search:index' %}" aria-current="page">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 4.5 4.5"/></svg>
+                    Search PDFs
+                </a>
+                <a href="{% url 'bitbucket_search:repositories' %}">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 7.5h6l1.7 2h9.3v9.5h-17V7.5Z"/></svg>
+                    Repositories
+                </a>
+                <a href="{% url 'bitbucket_search:index_status' %}">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 17V9M10 17V5M16 17v-4M22 17V7"/></svg>
+                    Index &amp; refresh status
+                </a>
+            </nav>
+
+            <dl class="bb-statistics" aria-label="Bitbucket Search totals">
+                <div><dt>Total repositories</dt><dd>0</dd></div>
+                <div><dt>Total PDFs</dt><dd>0</dd></div>
+                <div><dt>Indexed size</dt><dd>0 B</dd></div>
+                <div><dt>Total opens</dt><dd>0</dd></div>
+            </dl>
+        </div>
+    </aside>
+
+    <section class="bb-stage" aria-label="Bitbucket Search workspace">
+        <header class="bb-topbar">
+            <a class="bb-app-title" href="{% url 'bitbucket_search:index' %}" aria-label="Bitbucket Search">
+                <span class="bb-app-title__icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                        <path d="M5 4.5h5.5v6H5zM13.5 4.5H19v6h-5.5zM5 13.5h5.5v6H5zM13.5 13.5H19v6h-5.5z"/>
+                    </svg>
+                </span>
+                <span>
+                    <h1>Bitbucket Search</h1>
+                    <p>Search and explore PDFs across approved repositories</p>
+                </span>
+            </a>
+
+            <div class="bb-topbar__actions">
+                <a class="bb-sync-status" href="{% url 'bitbucket_search:index_status' %}" aria-label="Sync status: not configured">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="M8.5 12h7M12 8.5V12"/></svg>
+                    <span role="status" aria-live="polite" aria-atomic="true">
+                        <strong>Sync status</strong>
+                        <b>Not configured</b>
+                        <small>No repositories connected</small>
+                    </span>
+                </a>
+                <details class="bb-app-switcher">
+                    <summary class="bb-icon-button" aria-label="Applications">
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><rect x="14" y="14" width="6" height="6"/></svg>
+                    </summary>
+                    <nav class="primary-nav" aria-label="Applications">
+                        <a class="nav-link" href="{% url 'core:dashboard' %}">Home</a>
+                        <a class="nav-link" href="{% url 'bookmark_manager:index' %}">Bookmark Manager</a>
+                        <a class="nav-link is-active" href="{% url 'bitbucket_search:index' %}" aria-current="true">Bitbucket Search</a>
+                    </nav>
+                </details>
+                <a class="bb-icon-button bb-icon-button--repositories" href="{% url 'bitbucket_search:repositories' %}" aria-label="Repository foundation">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/><path d="m19 13.5 1.2 1.6-2 3.4-2-.3-1.4.8-.8 1.9h-4l-.8-1.9-1.4-.8-2 .3-2-3.4L5 13.5v-1.6L3.8 10.3l2-3.4 2 .3 1.4-.8.8-1.9h4l.8 1.9 1.4.8 2-.3 2 3.4-1.2 1.6v1.6Z"/></svg>
+                </a>
+                <a class="bb-icon-button" href="{% url 'core:system_status' %}" aria-label="System status">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M9.7 9a2.5 2.5 0 1 1 3.2 2.4c-.8.3-.9.8-.9 1.6M12 17.3v.2"/></svg>
+                </a>
+                <button class="bb-icon-button" type="button" data-theme-toggle aria-label="Switch to light mode" aria-pressed="true">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M19 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
+                    <span class="visually-hidden" data-theme-toggle-label>Light mode</span>
+                </button>
+                <span class="bb-local-avatar" aria-label="Local workspace">L</span>
+            </div>
+        </header>
+
+        <details class="bb-mobile-repositories">
+            <summary>
+                <span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 7.5h6l1.7 2h9.3v9.5h-17V7.5Z"/></svg>
+                    Repositories
+                </span>
+                <span class="bb-mobile-repositories__meta">
+                    <small>0 connected</small>
+                    <span class="bb-mobile-repositories__indicator" aria-hidden="true"></span>
+                </span>
+            </summary>
+            <div class="bb-mobile-repositories__body">
+                <p>No repositories are connected. Registration and synchronization are planned for Phase 5.</p>
+                <nav aria-label="Bitbucket Search mobile functions">
+                    <a href="{% url 'bitbucket_search:index' %}" aria-current="page">Search PDFs</a>
+                    <a href="{% url 'bitbucket_search:repositories' %}">Repository foundation</a>
+                    <a href="{% url 'bitbucket_search:index_status' %}">Index status</a>
+                </nav>
+            </div>
+        </details>
+
+        <div id="main-content" class="bb-content" tabindex="-1">
+            <section class="bb-search-controls" aria-label="PDF search controls">
+                <label class="bb-main-search">
+                    <span class="visually-hidden">Search PDFs</span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4.5 4.5"/></svg>
+                    <input type="search" placeholder="Search repositories, file names, content, paths…" disabled aria-describedby="bb-search-note">
+                </label>
+                <button class="bb-control-button" type="button" disabled>
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16l-6 7v5l-4 2v-7L4 6Z"/><path d="M15.5 5v4M13.5 7h4"/></svg>
+                    Filters
+                </button>
             </section>
-            <section aria-labelledby="pdf-preview-heading">
-                <h2 id="pdf-preview-heading">Document preview</h2>
-                <div class="planned-pane planned-pane--preview">
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 2h8l4 4v16H6V2Z"/><path d="M14 2v5h4M9 12h6M9 16h4"/></svg>
-                    <p>A matched-page preview will appear here in Phase 7.</p>
+            <p class="bb-search-note" id="bb-search-note">Search and filters become available after local PDF indexing is implemented.</p>
+
+            <section class="bb-results" aria-labelledby="bb-results-heading">
+                <div class="bb-results-toolbar">
+                    <p id="bb-results-heading">Showing <strong>0 PDFs</strong> <span>Phase 3 foundation</span></p>
+                    <div class="bb-result-actions" aria-label="Result actions">
+                        <button type="button" disabled>
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="7" y="7" width="11" height="12" rx="1.5"/><path d="M15 7V5H5v11h2"/></svg>
+                            Copy all (0)
+                        </button>
+                        <button type="button" disabled>
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 7.5h6l1.7 2h9.3v9.5h-17V7.5Z"/></svg>
+                            Open all (0)
+                        </button>
+                        <button type="button" disabled>
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v12M8 11l4 4 4-4M5 18.5h14"/></svg>
+                            Export list
+                        </button>
+                        <span class="bb-view-switch" aria-label="Result view">
+                            <button type="button" disabled aria-label="List view">
+                                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6h11M9 12h11M9 18h11M4 6h1M4 12h1M4 18h1"/></svg>
+                            </button>
+                            <button type="button" disabled aria-label="Grid view">
+                                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><rect x="14" y="14" width="6" height="6"/></svg>
+                            </button>
+                        </span>
+                    </div>
                 </div>
+
+                <div class="bb-results-table-wrap">
+                    <table class="bb-results-table">
+                        <caption class="visually-hidden">Bitbucket PDF search results</caption>
+                        <colgroup>
+                            <col class="bb-column-name">
+                            <col class="bb-column-path">
+                            <col class="bb-column-repository">
+                            <col class="bb-column-size">
+                            <col class="bb-column-opens">
+                            <col class="bb-column-favorite">
+                        </colgroup>
+                        <thead>
+                            <tr>
+                                <th scope="col">PDF name</th>
+                                <th scope="col">Path</th>
+                                <th scope="col">Repository</th>
+                                <th scope="col">Size</th>
+                                <th scope="col">Open count</th>
+                                <th scope="col">Favorite</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="bb-period-row">
+                                <th colspan="6" scope="rowgroup">
+                                    <span class="bb-period-heading__dot" aria-hidden="true"></span>
+                                    <span class="bb-period-heading">
+                                        <strong id="bb-empty-period-heading">Not indexed</strong>
+                                        <span>Local foundation state</span>
+                                    </span>
+                                </th>
+                            </tr>
+                            <tr class="bb-empty-row">
+                                <td colspan="6">
+                                    <div class="bb-empty-state" aria-labelledby="bb-empty-period-heading">
+                                        <div class="bb-empty-state__lead">
+                                            <span class="bb-empty-state__icon" aria-hidden="true">
+                                                <svg viewBox="0 0 24 24" focusable="false"><path d="M6 2.5h8l4 4v15H6v-19Z"/><path d="M14 2.5v5h4M9 12h6M9 16h4"/></svg>
+                                            </span>
+                                            <div>
+                                                <span class="bb-planned-label">Planned for Phases 5–7</span>
+                                                <h2>PDF indexing and search are not active yet</h2>
+                                                <p>No repository has been accessed, no PDF has been parsed, and no local index has been created by this page.</p>
+                                            </div>
+                                        </div>
+
+                                        <div class="bb-empty-state__actions">
+                                            <a class="bb-primary-link" href="{% url 'bitbucket_search:repositories' %}">Repository foundation</a>
+                                            <a href="{% url 'bitbucket_search:index_status' %}">Index status foundation <span aria-hidden="true">→</span></a>
+                                        </div>
+
+                                        <div class="bb-planned-context">
+                                            <article aria-labelledby="people-commits-heading">
+                                                <span class="bb-context-icon" aria-hidden="true">
+                                                    <svg viewBox="0 0 24 24" focusable="false"><circle cx="9" cy="8" r="3"/><path d="M3.5 18c.6-3.2 2.4-5 5.5-5s4.9 1.8 5.5 5M16 8h4M18 6v4M16 14h4M16 18h4"/></svg>
+                                                </span>
+                                                <div>
+                                                    <h3 id="people-commits-heading">People &amp; commits</h3>
+                                                    <p>Contributor names and verified activity will appear after synchronization. Missing push evidence will be labelled <strong>Unavailable</strong>.</p>
+                                                    <p>OWL will keep author, committer, pusher, PR creator, fulfilled-state merger, and non-merge closer roles separate.</p>
+                                                </div>
+                                            </article>
+                                            <article aria-labelledby="pdf-preview-heading">
+                                                <span class="bb-context-icon" aria-hidden="true">
+                                                    <svg viewBox="0 0 24 24" focusable="false"><path d="M6 2.5h8l4 4v15H6v-19Z"/><path d="M14 2.5v5h4M9 12h6M9 16h4"/></svg>
+                                                </span>
+                                                <div>
+                                                    <h3 id="pdf-preview-heading">Document preview</h3>
+                                                    <p>A matched-page preview will appear here in Phase 7.</p>
+                                                    <p>Future results will explain filename, path, repository, page-text, and note matches.</p>
+                                                </div>
+                                            </article>
+                                        </div>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <footer class="bb-pagination" aria-label="Results pagination">
+                    <label>Rows per page: <select disabled><option>50</option></select></label>
+                    <nav aria-label="PDF result pages">
+                        <button type="button" disabled aria-current="page">1</button>
+                    </nav>
+                    <label>Go to page: <input type="number" value="1" min="1" disabled></label>
+                </footer>
             </section>
-        </aside>
+        </div>
     </section>
 </div>
 {% endblock %}
+
+{% block global_status %}{% endblock %}

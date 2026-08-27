@@ -1978,6 +1978,13 @@ svg {
     font-size: 1.85rem;
 }
 
+.knowledge-brand__mark img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
 .knowledge-brand strong,
 .knowledge-brand small {
     display: block;

@@ -1,0 +1,64 @@
+# OWL first-time installation dependencies.
+# Requires Python 3.14.x.
+# Install with: python -m pip install -r requirements.txt
+#
+# Exported from uv.lock with all development extras so a new machine can run
+# the application, tests, linting, and the project validation script.
+asgiref==3.12.1
+    # via django
+cffi==2.1.1 ; platform_python_implementation != 'PyPy' and sys_platform == 'linux'
+    # via cryptography
+colorama==0.4.6 ; sys_platform == 'win32'
+    # via pytest
+coverage==7.15.4
+    # via owl-workspace-locator
+cryptography==50.0.0 ; sys_platform == 'linux'
+    # via secretstorage
+django==6.1
+    # via owl-workspace-locator
+iniconfig==2.3.0
+    # via pytest
+jaraco-classes==3.4.0
+    # via keyring
+jaraco-context==6.1.2
+    # via keyring
+jaraco-functools==4.6.0
+    # via keyring
+jeepney==0.9.0 ; sys_platform == 'linux'
+    # via
+    #   keyring
+    #   secretstorage
+keyring==25.7.0
+    # via owl-workspace-locator
+more-itertools==11.1.0
+    # via
+    #   jaraco-classes
+    #   jaraco-functools
+packaging==26.3
+    # via pytest
+pluggy==1.6.0
+    # via pytest
+pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy' and sys_platform == 'linux'
+    # via cffi
+pygments==2.21.0
+    # via pytest
+pytest==9.1.1
+    # via
+    #   owl-workspace-locator
+    #   pytest-django
+pytest-django==4.14.0
+    # via owl-workspace-locator
+python-dotenv==1.2.3
+    # via owl-workspace-locator
+pywin32-ctypes==0.2.3 ; sys_platform == 'win32'
+    # via keyring
+ruff==0.16.4
+    # via owl-workspace-locator
+secretstorage==3.5.0 ; sys_platform == 'linux'
+    # via keyring
+sqlparse==0.6.0
+    # via django
+tzdata==2026.3 ; sys_platform == 'win32'
+    # via django
+uv==0.12.5
+    # via owl-workspace-locator

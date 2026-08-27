@@ -50,9 +50,7 @@ def canonicalize_web_url(value: str) -> tuple[str, str]:
     port_suffix = "" if port is None or default_port else f":{port}"
     netloc = f"[{hostname}]{port_suffix}" if ":" in hostname else f"{hostname}{port_suffix}"
     path = parsed.path or "/"
-    canonical = urlunsplit(
-        SplitResult(parsed.scheme.casefold(), netloc, path, parsed.query, "")
-    )
+    canonical = urlunsplit(SplitResult(parsed.scheme.casefold(), netloc, path, parsed.query, ""))
     return canonical, hostname
 
 

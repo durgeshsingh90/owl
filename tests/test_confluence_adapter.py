@@ -251,9 +251,7 @@ def test_normalizes_page_and_ordered_ancestor_metadata(origin):
             },
         ],
         "body": {
-            "storage": {
-                "value": "<h1>Private DNS</h1><p>Resolver <strong>runbook</strong></p>"
-            }
+            "storage": {"value": "<h1>Private DNS</h1><p>Resolver <strong>runbook</strong></p>"}
         },
         "_links": {"webui": "/wiki/spaces/OWL/pages/4242/Private+DNS+Design"},
     }

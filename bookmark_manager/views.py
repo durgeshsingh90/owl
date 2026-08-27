@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from django.conf import settings
 from django.core.cache import cache
 from django.db import OperationalError, ProgrammingError
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.http import (
     HttpRequest,
     HttpResponse,
@@ -29,8 +29,8 @@ from django.views.decorators.debug import sensitive_post_parameters
 from django.views.decorators.http import require_GET, require_POST
 
 from bookmark_manager.forms import (
-    BookmarkFilterForm,
     BookmarkCategoryRenameForm,
+    BookmarkFilterForm,
     BookmarkImportForm,
     BookmarkInputForm,
     BookmarkOrganisationForm,
@@ -41,6 +41,7 @@ from bookmark_manager.models import (
     Bookmark,
     BookmarkCategory,
     BookmarkImportRun,
+    BookmarkSource,
     ConfluenceConfiguration,
     ConfluencePageNode,
     SavedBookmarkView,
@@ -111,6 +112,27 @@ class BreadcrumbItem:
 class FlatBookmarkItem:
     bookmark: Bookmark
     breadcrumb: tuple[BreadcrumbItem, ...]
+
+
+@dataclass(slots=True)
+class ConfluenceContactSummary:
+    """One real Confluence contributor with page-level role counts."""
+
+    name: str
+    written_page_ids: set[int] = field(default_factory=set)
+    updated_page_ids: set[int] = field(default_factory=set)
+
+    @property
+    def page_count(self) -> int:
+        return len(self.written_page_ids | self.updated_page_ids)
+
+    @property
+    def written_count(self) -> int:
+        return len(self.written_page_ids)
+
+    @property
+    def updated_count(self) -> int:
+        return len(self.updated_page_ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +330,46 @@ def _tree_items(
             item.depth = parent_item.depth + 1
             parent_item.children.append(item)
     return roots
+
+
+def _confluence_contacts() -> tuple[ConfluenceContactSummary, ...]:
+    """Summarize saved Confluence creators/authors/modifiers without double-counting pages."""
+
+    contacts: dict[str, ConfluenceContactSummary] = {}
+
+    def record(name: str, bookmark_id: int, *, role: str) -> None:
+        display_name = name.strip()
+        if not display_name:
+            return
+        key = display_name.casefold()
+        contact = contacts.setdefault(key, ConfluenceContactSummary(name=display_name))
+        if role == "written":
+            contact.written_page_ids.add(bookmark_id)
+        else:
+            contact.updated_page_ids.add(bookmark_id)
+
+    bookmarks = Bookmark.objects.filter(source_type=BookmarkSource.CONFLUENCE).only(
+        "id",
+        "author_name",
+        "created_by_name",
+        "modified_by_name",
+    )
+    for bookmark in bookmarks:
+        seen_writers: set[str] = set()
+        for writer_name in (bookmark.author_name, bookmark.created_by_name):
+            writer_key = writer_name.strip().casefold()
+            if not writer_key or writer_key in seen_writers:
+                continue
+            seen_writers.add(writer_key)
+            record(writer_name, bookmark.pk, role="written")
+        record(bookmark.modified_by_name, bookmark.pk, role="updated")
+
+    return tuple(
+        sorted(
+            contacts.values(),
+            key=lambda contact: (-contact.page_count, contact.name.casefold()),
+        )
+    )
 
 
 def _positive_query_integer(request: HttpRequest, name: str) -> int | None:
@@ -629,6 +691,7 @@ def _index_context(
         "search_term": search_term,
         "bookmark_query": query,
         "query_result": query_result,
+        "bookmark_counts": query_result.counts,
         "active_filters": query_result.active_filters,
         "current_query_string": _clean_current_query_string(request),
         "timeline_query_string": _timeline_query_string(request),
@@ -642,12 +705,10 @@ def _index_context(
         ),
         "result_count": query_result.matching_count,
         "total_bookmarks": query_result.counts.all_bookmarks,
-        "bookmark_categories": BookmarkCategory.objects.annotate(
-            bookmark_count=Count("bookmarks")
-        ),
-        "selected_category": BookmarkCategory.objects.filter(
-            pk=query.category_ids[0]
-        ).first()
+        "bookmark_categories": BookmarkCategory.objects.annotate(bookmark_count=Count("bookmarks")),
+        "confluence_contacts": _confluence_contacts(),
+        "active_contact": query.people[0] if query.people else "",
+        "selected_category": BookmarkCategory.objects.filter(pk=query.category_ids[0]).first()
         if query.category_ids
         else None,
         "selected_bookmark": selected,
@@ -676,20 +737,49 @@ def index(request: HttpRequest) -> HttpResponse:
 def settings_page(request: HttpRequest) -> HttpResponse:
     """Render a non-JavaScript fallback for the secure settings panel."""
 
+    return render(request, "bookmark_manager/settings.html", _settings_page_context(request))
+
+
+def _settings_page_context(
+    request: HttpRequest,
+    *,
+    settings_form: ConfluenceSettingsForm | None = None,
+    import_form: BookmarkImportForm | None = None,
+    inline_error: str = "",
+    status_message: str = "",
+) -> dict[str, object]:
+    """Build the full settings page, including the shared bookmark navigation."""
+
     summary = get_configuration_summary()
-    return render(
-        request,
-        "bookmark_manager/settings.html",
-        {
-            "active_nav": "bookmarks",
-            "active_app": "bookmarks",
-            "active_section": "settings",
-            "page_title": "Confluence Settings",
-            "configuration": summary,
-            "settings_form": _new_settings_form(summary),
-            "status_message": f"Confluence settings · {summary.label}",
-        },
+    bookmark_counts = Bookmark.objects.aggregate(
+        all_bookmarks=Count("pk"),
+        favorites=Count("pk", filter=Q(favorite=True)),
+        pinned=Count("pk", filter=Q(pinned=True)),
     )
+    import_run = None
+    import_run_pk = _positive_query_integer(request, "import_run")
+    if import_run_pk:
+        import_run = (
+            BookmarkImportRun.objects.prefetch_related("failures").filter(pk=import_run_pk).first()
+        )
+    return {
+        "active_nav": "bookmarks",
+        "active_app": "bookmarks",
+        "active_section": "settings",
+        "page_title": "Confluence Settings",
+        "configuration": summary,
+        "settings_form": (
+            settings_form if settings_form is not None else _new_settings_form(summary)
+        ),
+        "import_form": import_form if import_form is not None else BookmarkImportForm(),
+        "last_import_run": import_run,
+        "inline_error": inline_error,
+        "bookmark_counts": bookmark_counts,
+        "total_bookmarks": bookmark_counts["all_bookmarks"],
+        "bookmark_categories": BookmarkCategory.objects.annotate(bookmark_count=Count("bookmarks")),
+        "selected_category": None,
+        "status_message": status_message or f"Confluence settings · {summary.label}",
+    }
 
 
 def _first_form_error(form: ConfluenceSettingsForm) -> str:
@@ -773,19 +863,14 @@ def _render_settings_failure(
         )
     form.add_error(None, detail)
     if request.POST.get("return_to") == "settings":
-        summary = get_configuration_summary()
         return render(
             request,
             "bookmark_manager/settings.html",
-            {
-                "active_nav": "bookmarks",
-                "active_app": "bookmarks",
-                "active_section": "settings",
-                "page_title": "Confluence Settings",
-                "configuration": summary,
-                "settings_form": form,
-                "status_message": detail,
-            },
+            _settings_page_context(
+                request,
+                settings_form=form,
+                status_message=detail,
+            ),
             status=400,
         )
     return render(
@@ -1258,25 +1343,52 @@ def import_bookmarks(request: HttpRequest) -> HttpResponse:
     form = BookmarkImportForm(request.POST, request.FILES)
     if not form.is_valid():
         detail = "Choose a valid UTF-8 .json bookmark file within the configured size limit."
+        if request.POST.get("return_to") == "settings":
+            return render(
+                request,
+                "bookmark_manager/settings.html",
+                _settings_page_context(request, import_form=form, inline_error=detail),
+                status=400,
+            )
         return render(
             request,
             "bookmark_manager/index.html",
-            _index_context(request, import_form=form, inline_error=detail),
+            _index_context(
+                request,
+                import_form=form,
+                open_settings=True,
+                inline_error=detail,
+            ),
             status=400,
         )
     uploaded = form.cleaned_data["import_file"]
     try:
         result = import_bookmarks_document(uploaded.read(), filename=uploaded.name)
     except BookmarkImportError as exc:
+        if request.POST.get("return_to") == "settings":
+            return render(
+                request,
+                "bookmark_manager/settings.html",
+                _settings_page_context(request, import_form=form, inline_error=str(exc)),
+                status=400,
+            )
         return render(
             request,
             "bookmark_manager/index.html",
-            _index_context(request, import_form=form, inline_error=str(exc)),
+            _index_context(
+                request,
+                import_form=form,
+                open_settings=True,
+                inline_error=str(exc),
+            ),
             status=400,
         )
-    return redirect(
-        f"{reverse('bookmark_manager:index')}?{urlencode({'import_run': result.run.pk})}"
+    destination = (
+        reverse("bookmark_manager:settings")
+        if request.POST.get("return_to") == "settings"
+        else reverse("bookmark_manager:index")
     )
+    return redirect(f"{destination}?{urlencode({'import_run': result.run.pk})}")
 
 
 @require_POST

@@ -45,7 +45,7 @@ def _looks_like_confluence_page_url(value: str) -> bool:
     path = parsed.path.casefold()
     query = {key.casefold() for key in parse_qs(parsed.query)}
     return (
-        "/pages/" in path
+        ("/spaces/" in path and "/pages/" in path)
         or "/content/" in path
         or (path.endswith("/pages/viewpage.action") and "pageid" in query)
     )
@@ -149,7 +149,7 @@ def save_bookmark_input(
     profile = None
     try:
         profile = get_active_profile(secret_store=secret_store)
-    except ConfigurationUnavailable:
+    except ConfigurationUnavailable as exc:
         if candidate.casefold().startswith(("http://", "https://")):
             try:
                 return save_web_bookmark(candidate)
@@ -159,12 +159,11 @@ def save_bookmark_input(
             "configuration_required",
             "Connect Confluence before saving a numeric Page ID.",
             ConnectionStatus.NOT_CONFIGURED,
-        )
+        ) from exc
 
-    if (
-        candidate.casefold().startswith(("http://", "https://"))
-        and not profile.origin.contains_application_url(candidate)
-    ):
+    if candidate.casefold().startswith(
+        ("http://", "https://")
+    ) and not profile.origin.contains_application_url(candidate):
         if _looks_like_confluence_page_url(candidate):
             try:
                 parse_page_input(candidate, profile.origin)
@@ -174,6 +173,20 @@ def save_bookmark_input(
             return save_web_bookmark(candidate)
         except WebBookmarkError as exc:
             raise BookmarkActionError("invalid_url", str(exc)) from exc
+    if candidate.casefold().startswith(("http://", "https://")):
+        try:
+            canonical_candidate, _hostname = canonicalize_web_url(candidate)
+        except WebBookmarkError as exc:
+            raise BookmarkActionError("invalid_url", str(exc)) from exc
+        existing_by_url = Bookmark.objects.filter(canonical_url=canonical_candidate).first()
+        if existing_by_url is not None and (
+            existing_by_url.source_type == "web" or existing_by_url.page_text
+        ):
+            return BookmarkSaveResult(
+                existing_by_url,
+                created=False,
+                source_requested=False,
+            )
     try:
         parsed = parse_page_input(value, profile.origin)
     except PageInputError as exc:
@@ -189,6 +202,9 @@ def save_bookmark_input(
 
     load_descendants = getattr(client, "get_descendant_pages", None)
     if not callable(load_descendants):
+        existing = Bookmark.objects.filter(page_id=parsed.page_id).first()
+        if existing is not None and not existing.page_text:
+            return _finish_confluence_bookmark(upsert_bookmark(load_metadata(parsed.page_id)))
         return _finish_confluence_bookmark(save_bookmark_by_page_id(parsed.page_id, load_metadata))
 
     root_snapshot = load_metadata(parsed.page_id)
@@ -204,14 +220,16 @@ def save_bookmark_input(
                 upsert_bookmark(_snapshot(descendant, include_text=False))
             )
             descendants_created += int(descendant_result.created)
-    return _finish_confluence_bookmark(BookmarkSaveResult(
-        bookmark=root_result.bookmark,
-        created=root_result.created,
-        source_requested=True,
-        similar_bookmarks=root_result.similar_bookmarks,
-        descendant_count=len(descendants_result.pages),
-        descendants_created=descendants_created,
-    ))
+    return _finish_confluence_bookmark(
+        BookmarkSaveResult(
+            bookmark=root_result.bookmark,
+            created=root_result.created,
+            source_requested=True,
+            similar_bookmarks=root_result.similar_bookmarks,
+            descendant_count=len(descendants_result.pages),
+            descendants_created=descendants_created,
+        )
+    )
 
 
 def validated_open_url(

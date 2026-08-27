@@ -22,6 +22,7 @@ from django.utils import timezone
 from bookmark_manager.models import (
     Bookmark,
     BookmarkAvailability,
+    BookmarkCategory,
     BookmarkRecency,
     ConfluencePageNode,
     SavedBookmarkView,
@@ -457,8 +458,13 @@ def active_filter_descriptors(query: BookmarkQuery) -> tuple[ActiveFilter, ...]:
         descriptors.append(ActiveFilter("person", "Person", value))
     for value in query.spaces:
         descriptors.append(ActiveFilter("space", "Space", value))
+    category_names = dict(
+        BookmarkCategory.objects.filter(pk__in=query.category_ids).values_list("pk", "name")
+    )
     for value in query.category_ids:
-        descriptors.append(ActiveFilter("category", "Category", str(value)))
+        descriptors.append(
+            ActiveFilter("category", "Category", category_names.get(value, str(value)))
+        )
     for value in query.availability:
         descriptors.append(
             ActiveFilter("availability", "Availability", BookmarkAvailability(value).label)

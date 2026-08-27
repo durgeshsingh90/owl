@@ -7,7 +7,7 @@
     <meta name="referrer" content="no-referrer">
     <title>{% block title %}{{ page_title|default:"Dashboard" }} · OWL{% endblock %}</title>
     <link rel="stylesheet" href="{% static 'vendor/bootstrap/bootstrap.min.css' %}">
-    <link rel="stylesheet" href="{% static 'owl/owl.css' %}">
+    <link rel="stylesheet" href="{% static 'owl/owl.css' %}?v=owl-brand">
     {% block extra_head %}{% endblock %}
 </head>
 <body class="{% block body_class %}{% endblock %}" data-theme="{% block theme_default %}light{% endblock %}">

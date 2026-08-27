@@ -1,4 +1,5 @@
 {% extends "owl/base.html" %}
+{% load static %}
 
 {% block body_class %}home-shell{% endblock %}
 {% block theme_default %}dark{% endblock %}
@@ -9,7 +10,7 @@
 {% block main_wrapper %}
 <div class="knowledge-layout">
     <aside class="knowledge-rail" aria-label="OWL navigation">
-        <a class="knowledge-brand" href="{% url 'core:dashboard' %}" aria-label="OWL Home"><span class="knowledge-brand__mark" aria-hidden="true">⌁</span><span><strong>OWL</strong><small>Knowledge, connected.</small></span></a>
+        <a class="knowledge-brand" href="{% url 'core:dashboard' %}" aria-label="OWL Home"><span class="knowledge-brand__mark" aria-hidden="true"><img src="{% static 'owl/owl.png' %}" alt="" width="512" height="512" decoding="async"></span><span><strong>OWL</strong><small>Knowledge, connected.</small></span></a>
         <nav class="knowledge-nav" aria-label="Workspace navigation">
             <a class="knowledge-nav__item is-active" href="{% url 'core:dashboard' %}" aria-current="page"><span aria-hidden="true">⌂</span>Home</a>
             <a class="knowledge-nav__item" href="#your-apps"><span aria-hidden="true">⊞</span>Apps</a>

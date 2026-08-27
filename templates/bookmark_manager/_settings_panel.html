@@ -34,6 +34,7 @@
             {% csrf_token %}
             <input type="hidden" name="return_to" value="{{ return_to }}">
             {{ settings_form.verification_receipt }}
+            {{ settings_form.auth_mode.as_hidden }}
 
             <div class="form-field">
                 {{ settings_form.base_url.label_tag }}
@@ -52,15 +53,6 @@
                 {% for error in settings_form.personal_access_token.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
             </div>
 
-            <details class="advanced-settings">
-                <summary>Advanced</summary>
-                <div class="form-field">
-                    {{ settings_form.auth_mode.label_tag }}
-                    {{ settings_form.auth_mode }}
-                    <p class="field-help">OWL uses the standard read-only Bearer PAT flow.</p>
-                </div>
-            </details>
-
             <p class="test-result" role="status" aria-live="polite" data-connection-test-result data-state="idle">No connection test has run for the current values.</p>
 
             <div class="form-actions">
@@ -73,6 +65,52 @@
                 {% endif %}
             </div>
         </form>
+
+        <section class="settings-data" aria-labelledby="bookmark-data-settings-heading">
+            <div>
+                <h3 id="bookmark-data-settings-heading">Bookmark data</h3>
+                <p>Download a local JSON backup or merge bookmarks from an OWL JSON export. Credentials are never included.</p>
+            </div>
+
+            {% if inline_error %}<div class="form-errors" role="alert">{{ inline_error }}</div>{% endif %}
+
+            {% if last_import_run %}
+            <div class="import-result{% if last_import_run.failed_records %} import-result--partial{% endif %}" aria-labelledby="settings-import-result-heading">
+                <div>
+                    <h4 id="settings-import-result-heading">Import {{ last_import_run.get_status_display|lower }}</h4>
+                    <p>{{ last_import_run.outcome }}</p>
+                </div>
+                <dl>
+                    <div><dt>Imported</dt><dd>{{ last_import_run.imported_records }}</dd></div>
+                    <div><dt>Already present</dt><dd>{{ last_import_run.skipped_records }}</dd></div>
+                    <div><dt>Rejected</dt><dd>{{ last_import_run.failed_records }}</dd></div>
+                </dl>
+                {% if last_import_run.failures.all %}
+                <details>
+                    <summary>Review sanitized record failures</summary>
+                    <ul>
+                        {% for failure in last_import_run.failures.all %}
+                        <li>Record {{ failure.record_number }}{% if failure.page_id %} · Page ID {{ failure.page_id }}{% endif %}: {{ failure.reason }}</li>
+                        {% endfor %}
+                    </ul>
+                </details>
+                {% endif %}
+            </div>
+            {% endif %}
+
+            <div class="settings-data__actions">
+                <a class="button button--secondary" href="{% url 'bookmark_manager:export' %}">Export JSON</a>
+                <form class="import-form" method="post" action="{% url 'bookmark_manager:import' %}" enctype="multipart/form-data">
+                    {% csrf_token %}
+                    <input type="hidden" name="return_to" value="{{ return_to }}">
+                    <label for="{{ import_form.import_file.id_for_label }}">{{ import_form.import_file.label }}</label>
+                    {{ import_form.import_file }}
+                    {% if import_form.import_file.errors %}<div class="field-error" role="alert">{{ import_form.import_file.errors|striptags }}</div>{% endif %}
+                    <p class="field-help" id="id_import_file_helptext">{{ import_form.import_file.help_text }} Existing personal values win.</p>
+                    <button class="button button--secondary" type="submit">Import JSON</button>
+                </form>
+            </div>
+        </section>
 
         {% if configuration.source == "keyring" and not configuration.managed_externally %}
         <div class="danger-zone">
