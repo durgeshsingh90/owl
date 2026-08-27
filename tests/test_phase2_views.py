@@ -473,7 +473,7 @@ def test_search_finds_title_url_page_id_and_owl_number(loopback_client, query):
     assert "Open link ↗" not in html
 
 
-def test_existing_page_post_reveals_the_root_after_descendant_sync(
+def test_existing_page_post_reveals_the_saved_tree_node(
     loopback_client,
     monkeypatch,
 ):

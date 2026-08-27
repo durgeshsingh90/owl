@@ -110,9 +110,15 @@ when durable refresh, repository synchronization, and indexing are implemented.
 3. Enter the exact HTTPS base URL for your Confluence Data Center application, including its
    context path when it has one.
 4. Enter a PAT, select **Test connection**, and review the sanitized result.
-5. Select **Save settings**. On macOS, the PAT is stored in Keychain; SQLite contains only the
-   non-secret origin, mode, and verification state.
+5. Select **Save settings**. OWL encrypts the PAT locally, using the operating-system credential
+   store when available and its encrypted SQLite field as the fallback.
 6. Paste a modern or legacy Confluence page URL, or its numeric Page ID, into **Save bookmark**.
+7. OWL saves exactly that page as one bookmark. Its root-to-page ancestors become hierarchy-only
+   tree nodes, and searchable body text is stored only for the selected page.
+
+The terminal running `python manage.py runserver` reports the safe save stages: extracted Page ID,
+selected-page fetch, ancestor count, page-text character count, and final bookmark ID. It never
+logs the PAT, pasted credential-bearing URL, or page body.
 
 Reopening settings never returns the stored PAT. Changing to a different canonical origin requires
 a new PAT. Removing the connection deletes the secure credential while keeping local bookmarks.

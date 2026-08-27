@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import parse_qs, urlsplit
 
 from django.conf import settings
-from django.db import transaction
 
 from bookmark_manager.models import Bookmark, ConnectionStatus
 from bookmark_manager.services.bookmark_domain import (
@@ -38,6 +38,8 @@ from bookmark_manager.services.web_bookmarks import (
 )
 
 type ClientFactory = Callable[[ActiveConfluenceProfile], ConfluenceClient]
+
+logger = logging.getLogger("owl.bookmarks")
 
 
 def _looks_like_confluence_page_url(value: str) -> bool:
@@ -71,7 +73,7 @@ def _default_client_factory(profile: ActiveConfluenceProfile) -> ConfluenceClien
     )
 
 
-def _snapshot(page: ConfluencePage, *, include_text: bool = True) -> ConfluencePageSnapshot:
+def _snapshot(page: ConfluencePage) -> ConfluencePageSnapshot:
     ancestors = tuple(
         ConfluenceNodeSnapshot(
             page_id=ancestor.page_id,
@@ -95,7 +97,7 @@ def _snapshot(page: ConfluencePage, *, include_text: bool = True) -> ConfluenceP
         modified_by_name=page.last_modifier_name,
         author_name=page.author_name,
         ancestors=ancestors,
-        page_text=page.body_text if include_text else "",
+        page_text=page.body_text,
     )
 
 
@@ -146,6 +148,10 @@ def save_bookmark_input(
     """Validate one supported input and save/reveal its stable Page ID."""
 
     candidate = str(value or "").strip()
+    logger.info(
+        "Bookmark save started input_type=%s",
+        "url" if candidate.casefold().startswith(("http://", "https://")) else "page_id",
+    )
     profile = None
     try:
         profile = get_active_profile(secret_store=secret_store)
@@ -182,6 +188,11 @@ def save_bookmark_input(
         if existing_by_url is not None and (
             existing_by_url.source_type == "web" or existing_by_url.page_text
         ):
+            logger.info(
+                "Bookmark already exists bookmark_id=%s page_id=%s source_requested=false",
+                existing_by_url.pk,
+                existing_by_url.page_id,
+            )
             return BookmarkSaveResult(
                 existing_by_url,
                 created=False,
@@ -190,46 +201,53 @@ def save_bookmark_input(
     try:
         parsed = parse_page_input(value, profile.origin)
     except PageInputError as exc:
+        logger.warning("Bookmark input rejected reason=%s", exc.code)
         raise BookmarkActionError(exc.code, str(exc)) from exc
+
+    logger.info(
+        "Confluence page identified page_id=%s input_kind=%s",
+        parsed.page_id,
+        parsed.kind.value,
+    )
 
     client = (client_factory or _default_client_factory)(profile)
 
     def load_metadata(page_id: str) -> ConfluencePageSnapshot:
+        logger.info("Fetching selected Confluence page page_id=%s descendants=false", page_id)
         result = client.get_page(page_id)
         if not result.ok or result.page is None:
-            raise _result_error(result.code, result.message)
-        return _snapshot(result.page)
-
-    load_descendants = getattr(client, "get_descendant_pages", None)
-    if not callable(load_descendants):
-        existing = Bookmark.objects.filter(page_id=parsed.page_id).first()
-        if existing is not None and not existing.page_text:
-            return _finish_confluence_bookmark(upsert_bookmark(load_metadata(parsed.page_id)))
-        return _finish_confluence_bookmark(save_bookmark_by_page_id(parsed.page_id, load_metadata))
-
-    root_snapshot = load_metadata(parsed.page_id)
-    descendants_result = load_descendants(parsed.page_id)
-    if not descendants_result.ok:
-        raise _result_error(descendants_result.code, descendants_result.message)
-
-    with transaction.atomic():
-        root_result = upsert_bookmark(root_snapshot)
-        descendants_created = 0
-        for descendant in descendants_result.pages:
-            descendant_result = _finish_confluence_bookmark(
-                upsert_bookmark(_snapshot(descendant, include_text=False))
+            logger.warning(
+                "Confluence page fetch failed page_id=%s result=%s",
+                page_id,
+                result.code.value,
             )
-            descendants_created += int(descendant_result.created)
-    return _finish_confluence_bookmark(
-        BookmarkSaveResult(
-            bookmark=root_result.bookmark,
-            created=root_result.created,
-            source_requested=True,
-            similar_bookmarks=root_result.similar_bookmarks,
-            descendant_count=len(descendants_result.pages),
-            descendants_created=descendants_created,
+            raise _result_error(result.code, result.message)
+        snapshot = _snapshot(result.page)
+        logger.info(
+            "Confluence page loaded page_id=%s ancestors=%d page_text_characters=%d",
+            page_id,
+            len(snapshot.ancestors),
+            len(snapshot.page_text),
         )
+        return snapshot
+
+    existing = Bookmark.objects.filter(page_id=parsed.page_id).first()
+    if existing is not None and not existing.page_text:
+        result = replace(
+            upsert_bookmark(load_metadata(parsed.page_id)),
+            source_requested=True,
+        )
+    else:
+        result = save_bookmark_by_page_id(parsed.page_id, load_metadata)
+    result = _finish_confluence_bookmark(result)
+    logger.info(
+        "Bookmark save completed page_id=%s bookmark_id=%s created=%s source_requested=%s",
+        parsed.page_id,
+        result.bookmark.pk,
+        result.created,
+        result.source_requested,
     )
+    return result
 
 
 def validated_open_url(

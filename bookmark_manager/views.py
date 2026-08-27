@@ -681,13 +681,6 @@ def _index_context(
     elif effective_error:
         status_message = effective_error
 
-    try:
-        descendant_count = int(request.GET.get("descendants", "0"))
-    except (TypeError, ValueError):
-        descendant_count = 0
-    if descendant_count > 0:
-        status_message += f" · Saved {descendant_count} subpages locally"
-
     selected_breadcrumb = _bookmark_breadcrumb(selected)
     tag_text = ", ".join(tag.name for tag in selected.tags.all()) if selected else ""
 
@@ -1039,8 +1032,6 @@ def save_bookmark(request: HttpRequest) -> HttpResponse:
     }
     if result.similar_bookmarks:
         query["similar"] = "1"
-    if result.descendant_count:
-        query["descendants"] = result.descendant_count
     return HttpResponseRedirect(f"{reverse('bookmark_manager:index')}?{urlencode(query)}")
 
 
