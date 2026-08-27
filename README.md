@@ -177,11 +177,13 @@ review the staged diff before every public commit as well.
 `.env.example` contains documented defaults only. Your copied `.env` is private and ignored by
 Git.
 
-For normal interactive use, the Bookmark Manager configuration gear saves a Confluence PAT in the
-operating-system credential store (macOS Keychain by default), never in SQLite. A complete
-`CONFLUENCE_BASE_URL` plus `CONFLUENCE_PAT` environment profile remains available for deliberate
-development or headless use. An environment-managed profile takes precedence, remains blank in
-the browser, and cannot be replaced or removed through the UI.
+For normal interactive use, the Bookmark Manager configuration gear encrypts the Confluence PAT
+with OWL's machine-local secret key. OWL prefers the operating-system credential store (macOS
+Keychain or Windows Credential Manager) and automatically stores the encrypted payload in its
+local SQLite database when that store is unavailable. A complete `CONFLUENCE_BASE_URL` plus
+`CONFLUENCE_PAT` environment profile remains available for deliberate development or headless use.
+An environment-managed profile takes precedence, remains blank in the browser, and cannot be
+replaced or removed through the UI.
 
 Public CI uses only blank or clearly synthetic connection values, a temporary database, an
 isolated in-memory credential store, and tests marked to exclude every live external integration.
@@ -191,6 +193,7 @@ isolated in-memory credential store, and tests marked to exclude every live exte
 The versions are pinned in `pyproject.toml`:
 
 - Django 6.1;
+- cryptography 50.0.0;
 - python-dotenv 1.2.3;
 - keyring 25.7.0;
 - pytest 9.1.1;

@@ -65,8 +65,8 @@ class ConfluenceSettingsForm(forms.Form):
             ].help_text = "Stored securely. Leave this empty to keep the current PAT."
         else:
             self.fields["personal_access_token"].help_text = (
-                "The PAT is sent only in this CSRF-protected request and stored in the "
-                "operating-system credential store."
+                "The PAT is sent only in this CSRF-protected request and encrypted before "
+                "OWL stores it locally."
             )
         if managed_externally:
             for field_name in ("base_url", "personal_access_token", "auth_mode"):

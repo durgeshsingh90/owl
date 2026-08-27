@@ -211,12 +211,12 @@ OWL_ALLOW_NON_LOOPBACK = _env_bool("OWL_ALLOW_NON_LOOPBACK", False)
 
 
 # A complete environment-managed Confluence profile takes precedence over the
-# UI-managed Keychain profile. These settings must never enter template context.
+# UI-managed encrypted profile. These settings must never enter template context.
 CONFLUENCE_BASE_URL = os.getenv("CONFLUENCE_BASE_URL", "").strip()
 CONFLUENCE_PAT = os.getenv("CONFLUENCE_PAT", "").strip()
 CONFLUENCE_AUTH_MODE = os.getenv("CONFLUENCE_AUTH_MODE", "bearer").strip().casefold() or "bearer"
 CONFLUENCE_SECRET_BACKEND = (
-    os.getenv("CONFLUENCE_SECRET_BACKEND", "keyring").strip().casefold() or "keyring"
+    os.getenv("CONFLUENCE_SECRET_BACKEND", "auto").strip().casefold() or "auto"
 )
 CONFLUENCE_REQUEST_TIMEOUT_SECONDS = _env_int("CONFLUENCE_REQUEST_TIMEOUT_SECONDS", 30, minimum=1)
 CONFLUENCE_MAX_RESPONSE_BYTES = _env_int("CONFLUENCE_MAX_RESPONSE_BYTES", 1_048_576, minimum=1_024)

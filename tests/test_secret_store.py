@@ -2,7 +2,9 @@ import pytest
 from django.test import override_settings
 
 from bookmark_manager.services.secret_store import (
+    DatabaseSecretStore,
     InMemorySecretStore,
+    KeyringSecretStore,
     SecretStoreOperationError,
     SecretStoreUnavailable,
     get_secret_store,
@@ -41,7 +43,10 @@ def test_memory_secret_store_failure_modes_preserve_existing_value():
 )
 def test_memory_backend_requires_explicit_test_permission():
     reset_secret_store_cache()
-    assert isinstance(get_secret_store(), InMemorySecretStore)
+    try:
+        assert isinstance(get_secret_store(), InMemorySecretStore)
+    finally:
+        reset_secret_store_cache()
 
 
 @override_settings(
@@ -50,5 +55,76 @@ def test_memory_backend_requires_explicit_test_permission():
 )
 def test_memory_backend_is_rejected_without_explicit_permission():
     reset_secret_store_cache()
-    with pytest.raises(SecretStoreUnavailable):
-        get_secret_store()
+    try:
+        with pytest.raises(SecretStoreUnavailable):
+            get_secret_store()
+    finally:
+        reset_secret_store_cache()
+
+
+@pytest.mark.django_db
+@override_settings(
+    SECRET_KEY="synthetic-database-encryption-key",
+    CONFLUENCE_SECRET_BACKEND="database",
+)
+def test_database_store_encrypts_credential_at_rest():
+    from bookmark_manager.models import ConfluenceConfiguration
+
+    marker = "synthetic-database-pat-never-valid"
+    reset_secret_store_cache()
+    try:
+        store = get_secret_store()
+        assert isinstance(store, DatabaseSecretStore)
+        assert store.is_available()
+        assert store.get() is None
+
+        store.set(marker)
+
+        ciphertext = ConfluenceConfiguration.objects.get(pk=1).credential_ciphertext
+        assert ciphertext
+        assert marker not in ciphertext
+        assert store.get() == marker
+
+        store.delete()
+        assert store.get() is None
+    finally:
+        reset_secret_store_cache()
+
+
+@pytest.mark.django_db
+@override_settings(
+    SECRET_KEY="synthetic-database-encryption-key",
+    CONFLUENCE_SECRET_BACKEND="database",
+)
+def test_database_store_rejects_ciphertext_from_another_installation():
+    marker = "synthetic-database-pat-never-valid"
+    store = DatabaseSecretStore()
+    store.set(marker)
+
+    with (
+        override_settings(SECRET_KEY="different-synthetic-installation-key"),
+        pytest.raises(SecretStoreOperationError),
+    ):
+        DatabaseSecretStore().get()
+
+
+@pytest.mark.django_db
+@override_settings(CONFLUENCE_SECRET_BACKEND="auto")
+def test_auto_backend_falls_back_to_database(monkeypatch):
+    monkeypatch.setattr(KeyringSecretStore, "is_available", lambda self: False)
+    reset_secret_store_cache()
+    try:
+        assert isinstance(get_secret_store(), DatabaseSecretStore)
+    finally:
+        reset_secret_store_cache()
+
+
+@pytest.mark.django_db
+@override_settings(CONFLUENCE_SECRET_BACKEND="auto")
+def test_auto_backend_prefers_available_operating_system_store(monkeypatch):
+    monkeypatch.setattr(KeyringSecretStore, "is_available", lambda self: True)
+    reset_secret_store_cache()
+    try:
+        assert isinstance(get_secret_store(), KeyringSecretStore)
+    finally:
+        reset_secret_store_cache()

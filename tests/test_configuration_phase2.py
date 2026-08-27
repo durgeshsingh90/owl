@@ -34,6 +34,7 @@ from bookmark_manager.services.confluence_adapter import (
     ConfluenceResultCode,
 )
 from bookmark_manager.services.secret_store import (
+    DatabaseSecretStore,
     InMemorySecretStore,
     SecretStoreOperationError,
 )
@@ -158,6 +159,31 @@ def test_in_memory_store_round_trip_never_places_credential_in_database(
     assert configuration.credential_source == CredentialSource.KEYRING
     assert unique_credential not in repr(result)
     assert unique_credential not in repr(configuration.__dict__)
+
+
+@override_settings(
+    CONFLUENCE_BASE_URL="",
+    CONFLUENCE_PAT="",
+    SECRET_KEY="synthetic-database-encryption-key",
+)
+def test_database_store_round_trip_persists_only_encrypted_credential(unique_credential):
+    store = DatabaseSecretStore()
+
+    result = save_ui_configuration(
+        base_url=SYNTHETIC_ORIGIN,
+        personal_access_token=unique_credential,
+        secret_store=store,
+    )
+
+    assert result.success is True
+    configuration = ConfluenceConfiguration.objects.get(pk=1)
+    assert configuration.credential_source == CredentialSource.DATABASE
+    assert configuration.credential_ciphertext
+    assert unique_credential not in configuration.credential_ciphertext
+
+    profile = get_active_profile(secret_store=store)
+    assert profile.token == unique_credential
+    assert profile.source == CredentialSource.DATABASE
 
 
 @override_settings(CONFLUENCE_BASE_URL="", CONFLUENCE_PAT="")

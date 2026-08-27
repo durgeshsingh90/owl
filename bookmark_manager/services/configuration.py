@@ -33,6 +33,7 @@ from bookmark_manager.services.confluence_validation import (
 from bookmark_manager.services.secret_store import (
     SecretStore,
     SecretStoreError,
+    credential_source_for_store,
     get_secret_store,
 )
 
@@ -243,7 +244,7 @@ def get_configuration_summary(*, secret_store: SecretStore | None = None) -> Con
         )
     except (ConfigurationUnavailable, SecretStoreError):
         return ConfigurationSummary(
-            source=CredentialSource.KEYRING,
+            source=configuration.credential_source,
             complete=False,
             state=ConnectionStatus.CREDENTIAL_STORE_UNAVAILABLE,
             label="Credential store unavailable",
@@ -256,7 +257,7 @@ def get_configuration_summary(*, secret_store: SecretStore | None = None) -> Con
         complete=True,
         state=configuration.connection_status,
         label=configuration.get_connection_status_display(),
-        detail="The Confluence profile is stored securely on this computer.",
+        detail="The Confluence profile is stored encrypted on this computer.",
         last_verified_at=configuration.last_verified_at,
         has_stored_credential=True,
     )
@@ -312,7 +313,7 @@ def get_active_profile(*, secret_store: SecretStore | None = None) -> ActiveConf
         origin=origin,
         token=bound.token,
         auth_mode=configuration.auth_mode,
-        source=CredentialSource.KEYRING,
+        source=configuration.credential_source,
     )
 
 
@@ -583,6 +584,7 @@ def save_ui_configuration(
         verified_at = current.last_verified_at
 
     credential_written = False
+    credential_source = credential_source_for_store(store)
     try:
         if credential_write_required:
             store.set(_credential_envelope(origin, normalized_auth_mode, submitted_secret))
@@ -599,7 +601,7 @@ def save_ui_configuration(
                 defaults={
                     "base_url": origin.base_url,
                     "auth_mode": normalized_auth_mode,
-                    "credential_source": CredentialSource.KEYRING,
+                    "credential_source": credential_source,
                     "connection_status": connection_status,
                     "configured_at": configured_at,
                     "last_test_attempt_at": verified_at,
@@ -625,7 +627,7 @@ def save_ui_configuration(
         True,
         connection_status,
         ConnectionStatus(connection_status).label,
-        "The Confluence profile was stored securely.",
+        "The Confluence profile was stored encrypted.",
         verified_at=verified_at,
     )
 

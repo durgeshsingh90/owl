@@ -9,6 +9,7 @@ description = "A local Confluence bookmark manager and indexed PDF search tool."
 readme = "README.md"
 requires-python = ">=3.13,<3.15"
 dependencies = [
+    "cryptography==50.0.0",
     "Django==6.1",
     "keyring==25.7.0",
     "python-dotenv==1.2.3",

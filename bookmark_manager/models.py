@@ -34,6 +34,7 @@ def _sanitized_single_line(value: object, *, fallback: str = "") -> str:
 class CredentialSource(models.TextChoices):
     NONE = "none", "Not configured"
     KEYRING = "keyring", "Operating-system credential store"
+    DATABASE = "database", "Encrypted local database"
     ENVIRONMENT = "environment", "Managed externally"
 
 
@@ -55,11 +56,7 @@ class ConnectionStatus(models.TextChoices):
 
 
 class ConfluenceConfiguration(models.Model):
-    """Non-secret Confluence settings.
-
-    The PAT and any credential-store identifier deliberately do not belong in this model.
-    A fixed primary key enforces the single-user, single-profile product boundary.
-    """
+    """The single local Confluence profile and optional encrypted credential payload."""
 
     id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
     base_url = models.URLField(max_length=2048, blank=True)
@@ -69,6 +66,7 @@ class ConfluenceConfiguration(models.Model):
         choices=CredentialSource,
         default=CredentialSource.NONE,
     )
+    credential_ciphertext = models.TextField(blank=True, editable=False)
     connection_status = models.CharField(
         max_length=32,
         choices=ConnectionStatus,

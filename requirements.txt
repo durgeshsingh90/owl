@@ -6,14 +6,16 @@
 # the application, tests, linting, and the project validation script.
 asgiref==3.12.1
     # via django
-cffi==2.1.1 ; platform_python_implementation != 'PyPy' and sys_platform == 'linux'
+cffi==2.1.1 ; platform_python_implementation != 'PyPy'
     # via cryptography
 colorama==0.4.6 ; sys_platform == 'win32'
     # via pytest
 coverage==7.15.4
     # via owl-workspace-locator
-cryptography==50.0.0 ; sys_platform == 'linux'
-    # via secretstorage
+cryptography==50.0.0
+    # via
+    #   owl-workspace-locator
+    #   secretstorage
 django==6.1
     # via owl-workspace-locator
 iniconfig==2.3.0
@@ -38,7 +40,7 @@ packaging==26.3
     # via pytest
 pluggy==1.6.0
     # via pytest
-pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy' and sys_platform == 'linux'
+pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
     # via cffi
 pygments==2.21.0
     # via pytest

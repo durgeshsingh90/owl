@@ -112,7 +112,7 @@
             </div>
         </section>
 
-        {% if configuration.source == "keyring" and not configuration.managed_externally %}
+        {% if configuration.source == "keyring" or configuration.source == "database" %}
         <div class="danger-zone">
             <h3>Remove connection</h3>
             <p>This removes the securely stored PAT and local connection profile. Saved bookmarks stay in OWL.</p>

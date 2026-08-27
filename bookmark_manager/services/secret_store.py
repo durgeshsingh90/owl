@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 from abc import ABC, abstractmethod
 from functools import lru_cache
 from typing import Final
 
+from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
+from django.db import DatabaseError
 
 KEYRING_SERVICE: Final = "owl.confluence"
 KEYRING_ACCOUNT: Final = "active"
@@ -92,6 +96,77 @@ class KeyringSecretStore(SecretStore):
             raise SecretStoreOperationError("The credential could not be removed.") from exc
 
 
+class DatabaseSecretStore(SecretStore):
+    """Encrypted credential storage in OWL's single local configuration row."""
+
+    @staticmethod
+    def _configuration_model():
+        from bookmark_manager.models import ConfluenceConfiguration
+
+        return ConfluenceConfiguration
+
+    @staticmethod
+    def _fernet() -> Fernet:
+        digest = hashlib.sha256(
+            f"owl.database-credential.v1:{settings.SECRET_KEY}".encode()
+        ).digest()
+        return Fernet(base64.urlsafe_b64encode(digest))
+
+    def is_available(self) -> bool:
+        try:
+            (
+                self._configuration_model()
+                .objects.values_list("credential_ciphertext", flat=True)
+                .first()
+            )
+        except DatabaseError:
+            return False
+        return True
+
+    def get(self) -> str | None:
+        try:
+            ciphertext = (
+                self._configuration_model()
+                .objects.filter(pk=1)
+                .values_list("credential_ciphertext", flat=True)
+                .first()
+            )
+        except DatabaseError as exc:
+            raise SecretStoreOperationError(
+                "The encrypted database credential could not be read."
+            ) from exc
+        if not ciphertext:
+            return None
+        try:
+            return self._fernet().decrypt(ciphertext.encode("ascii")).decode("utf-8")
+        except (InvalidToken, UnicodeDecodeError, ValueError) as exc:
+            raise SecretStoreOperationError(
+                "The encrypted database credential could not be read."
+            ) from exc
+
+    def set(self, value: str) -> None:
+        if not value:
+            raise ValueError("A non-empty credential is required.")
+        ciphertext = self._fernet().encrypt(value.encode("utf-8")).decode("ascii")
+        try:
+            self._configuration_model().objects.update_or_create(
+                pk=1,
+                defaults={"credential_ciphertext": ciphertext},
+            )
+        except DatabaseError as exc:
+            raise SecretStoreOperationError(
+                "The encrypted database credential could not be stored."
+            ) from exc
+
+    def delete(self) -> None:
+        try:
+            self._configuration_model().objects.filter(pk=1).update(credential_ciphertext="")
+        except DatabaseError as exc:
+            raise SecretStoreOperationError(
+                "The encrypted database credential could not be removed."
+            ) from exc
+
+
 class InMemorySecretStore(SecretStore):
     """Explicitly injectable fake used by automated tests only."""
 
@@ -126,11 +201,22 @@ class InMemorySecretStore(SecretStore):
 @lru_cache(maxsize=1)
 def get_secret_store() -> SecretStore:
     backend = settings.CONFLUENCE_SECRET_BACKEND.casefold()
+    if backend == "auto":
+        keyring_store = KeyringSecretStore()
+        return keyring_store if keyring_store.is_available() else DatabaseSecretStore()
     if backend == "keyring":
         return KeyringSecretStore()
+    if backend == "database":
+        return DatabaseSecretStore()
     if backend == "memory" and settings.OWL_ALLOW_IN_MEMORY_SECRET_STORE:
         return InMemorySecretStore()
     raise SecretStoreUnavailable("The configured credential backend is not permitted.")
+
+
+def credential_source_for_store(store: SecretStore) -> str:
+    """Return the persisted source label without exposing any stored value."""
+
+    return "database" if isinstance(store, DatabaseSecretStore) else "keyring"
 
 
 def reset_secret_store_cache() -> None:
