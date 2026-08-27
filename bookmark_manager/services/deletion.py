@@ -7,6 +7,7 @@ bookmark plus hierarchy-only leaf nodes that are no longer shared.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from django.db import transaction
@@ -29,6 +30,14 @@ class BookmarkDeleteResult:
     owl_number: int
     page_id: str
     title: str
+    pruned_node_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class BulkBookmarkDeleteResult:
+    """Non-sensitive summary of one atomic multi-bookmark deletion."""
+
+    deleted_count: int
     pruned_node_count: int
 
 
@@ -70,6 +79,49 @@ def delete_local_bookmark(
         page_id=result.page_id,
         title=result.title,
         pruned_node_count=pruned_count,
+    )
+
+
+@transaction.atomic
+def delete_local_bookmarks(
+    bookmark_pks: Iterable[int],
+    *,
+    confirmed: bool = False,
+) -> BulkBookmarkDeleteResult:
+    """Atomically delete selected OWL bookmarks without contacting Confluence."""
+
+    if confirmed is not True:
+        raise DeleteConfirmationRequired(
+            "Confirm that the selected local OWL bookmarks and personal data may be removed."
+        )
+
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for value in bookmark_pks:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise Bookmark.DoesNotExist("A selected OWL bookmark does not exist.")
+        if value not in seen:
+            seen.add(value)
+            normalized.append(value)
+    if not normalized:
+        raise Bookmark.DoesNotExist("Select at least one OWL bookmark to delete.")
+
+    bookmarks = {
+        bookmark.pk: bookmark
+        for bookmark in Bookmark.objects.select_for_update()
+        .select_related("tree_node")
+        .filter(pk__in=normalized)
+    }
+    if len(bookmarks) != len(normalized):
+        raise Bookmark.DoesNotExist("A selected OWL bookmark does not exist.")
+
+    pruned_node_count = 0
+    for bookmark_pk in normalized:
+        result = delete_local_bookmark(bookmarks[bookmark_pk], confirmed=True)
+        pruned_node_count += result.pruned_node_count
+    return BulkBookmarkDeleteResult(
+        deleted_count=len(normalized),
+        pruned_node_count=pruned_node_count,
     )
 
 

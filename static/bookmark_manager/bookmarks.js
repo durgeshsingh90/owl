@@ -380,17 +380,110 @@
         }
     }
 
+    const treeChecks = Array.from(document.querySelectorAll("[data-tree-check]"));
     const checkedBookmarks = readJsonObject(checkedStorageKey);
-    document.querySelectorAll("[data-bookmark-check]").forEach((checkbox) => {
-        checkbox.checked = Boolean(checkedBookmarks[checkbox.value]);
+    const selectionCount = document.querySelector("[data-tree-selection-count]");
+    const deleteSelectedButton = document.querySelector("[data-delete-selected]");
+
+    const directTreeCheck = (item) =>
+        item?.querySelector(":scope > [data-tree-row] [data-tree-check]") || null;
+    const descendantTreeChecks = (item) =>
+        Array.from(item?.querySelectorAll(":scope > ul [data-tree-check]") || []);
+    const directDetailsLink = (item) =>
+        item?.querySelector(":scope > [data-tree-row] [data-tree-select]") || null;
+
+    const refreshItemAggregate = (item) => {
+        const checkbox = directTreeCheck(item);
+        const descendants = descendantTreeChecks(item);
+        if (!checkbox || !descendants.length) {
+            if (checkbox) {
+                checkbox.indeterminate = false;
+            }
+            return;
+        }
+        const allDescendants = descendants.every(
+            (candidate) => candidate.checked && !candidate.indeterminate,
+        );
+        const anyDescendants = descendants.some(
+            (candidate) => candidate.checked || candidate.indeterminate,
+        );
+        if (checkbox.dataset.bookmarkId) {
+            const ownBookmarkSelected = checkbox.checked;
+            checkbox.indeterminate =
+                (ownBookmarkSelected || anyDescendants) &&
+                !(ownBookmarkSelected && allDescendants);
+        } else {
+            checkbox.checked = allDescendants;
+            checkbox.indeterminate = anyDescendants && !allDescendants;
+        }
+    };
+
+    const refreshAncestorAggregates = (item) => {
+        let parentItem = item?.parentElement?.closest("[data-tree-item]");
+        while (parentItem) {
+            refreshItemAggregate(parentItem);
+            parentItem = parentItem.parentElement?.closest("[data-tree-item]");
+        }
+    };
+
+    const selectedBookmarkChecks = () =>
+        treeChecks.filter((checkbox) => checkbox.dataset.bookmarkId && checkbox.checked);
+
+    const persistCheckedBookmarks = () => {
+        const nextChecked = {};
+        selectedBookmarkChecks().forEach((checkbox) => {
+            nextChecked[checkbox.dataset.bookmarkId] = true;
+        });
+        safeStorage.set(checkedStorageKey, JSON.stringify(nextChecked));
+    };
+
+    const refreshSelectionControls = () => {
+        const count = selectedBookmarkChecks().length;
+        if (selectionCount) {
+            selectionCount.textContent = `${count} selected`;
+        }
+        if (deleteSelectedButton) {
+            deleteSelectedButton.disabled = count === 0;
+            deleteSelectedButton.textContent = count ? `Delete selected (${count})` : "Delete selected";
+        }
+    };
+
+    treeChecks.forEach((checkbox) => {
+        checkbox.checked = Boolean(
+            checkbox.dataset.bookmarkId && checkedBookmarks[checkbox.dataset.bookmarkId],
+        );
+        checkbox.indeterminate = false;
+    });
+    Array.from(document.querySelectorAll("[data-tree-item]"))
+        .reverse()
+        .forEach(refreshItemAggregate);
+    persistCheckedBookmarks();
+    refreshSelectionControls();
+
+    treeChecks.forEach((checkbox) => {
         checkbox.addEventListener("change", () => {
-            checkedBookmarks[checkbox.value] = checkbox.checked;
-            safeStorage.set(checkedStorageKey, JSON.stringify(checkedBookmarks));
-            announce(
-                checkbox.checked
-                    ? `Bookmark #${checkbox.value} selected`
-                    : `Bookmark #${checkbox.value} unselected`,
-            );
+            const item = checkbox.closest("[data-tree-item]");
+            checkbox.indeterminate = false;
+            descendantTreeChecks(item).forEach((descendant) => {
+                descendant.checked = checkbox.checked;
+                descendant.indeterminate = false;
+            });
+            refreshAncestorAggregates(item);
+            persistCheckedBookmarks();
+            refreshSelectionControls();
+            const count = selectedBookmarkChecks().length;
+            announce(`${count} bookmark${count === 1 ? "" : "s"} selected`);
+
+            // A checked bookmark is also the page the user is working with.
+            // Reload through its details link after persisting the bulk selection so
+            // the right-hand panel is populated without losing checked descendants.
+            if (checkbox.checked && checkbox.dataset.bookmarkId) {
+                const detailsLink = directDetailsLink(item);
+                if (detailsLink && !detailsLink.matches('[aria-current="true"]')) {
+                    safeStorage.set(selectionStorageKey, checkbox.dataset.bookmarkId);
+                    window.location.assign(detailsLink.href);
+                }
+            }
         });
     });
 

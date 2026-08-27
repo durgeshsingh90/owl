@@ -2094,6 +2094,28 @@
     background: var(--bookmark-accent-soft);
 }
 
+.bookmark-manager-shell .tree-bulk-actions {
+    align-items: center;
+    justify-content: flex-end;
+}
+
+.bookmark-manager-shell .tree-bulk-actions form {
+    margin: 0;
+}
+
+.bookmark-manager-shell .tree-selection-count {
+    color: var(--muted);
+    font-size: 0.64rem;
+    white-space: nowrap;
+}
+
+.bookmark-manager-shell .button--compact {
+    min-height: 30px;
+    padding: 0.32rem 0.55rem;
+    border-radius: 5px;
+    font-size: 0.68rem;
+}
+
 .bookmark-manager-shell .bookmark-tree {
     min-width: 0;
     padding: 0.65rem 0.8rem 1rem !important;

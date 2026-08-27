@@ -80,7 +80,7 @@ from bookmark_manager.services.configuration import (
     save_ui_configuration,
     test_candidate_connection,
 )
-from bookmark_manager.services.deletion import delete_local_bookmark
+from bookmark_manager.services.deletion import delete_local_bookmark, delete_local_bookmarks
 from bookmark_manager.services.import_export import (
     BookmarkImportError,
     export_bookmarks_json,
@@ -665,7 +665,14 @@ def _index_context(
     elif last_import_run:
         status_message = last_import_run.outcome
     elif request.GET.get("action") == "deleted":
-        status_message = "Bookmark deleted from OWL · Confluence was not changed"
+        try:
+            deleted_count = max(1, int(request.GET.get("count", "1")))
+        except (TypeError, ValueError):
+            deleted_count = 1
+        status_message = (
+            f"{deleted_count} bookmark{'s' if deleted_count != 1 else ''} deleted from OWL"
+            " · Confluence was not changed"
+        )
     elif request.GET.get("action") == "view_saved":
         status_message = "Saved bookmark view updated"
     elif request.GET.get("action") == "view_deleted":
@@ -1421,6 +1428,49 @@ def delete_bookmark(request: HttpRequest, pk: int) -> HttpResponse:
                 "state": "success",
                 "label": "Bookmark deleted",
                 "detail": "Removed from OWL. Confluence was not changed.",
+                "redirect": target,
+            }
+        )
+    return redirect(target)
+
+
+@require_POST
+@csrf_protect
+@never_cache
+def delete_selected_bookmarks(request: HttpRequest) -> HttpResponse:
+    """Delete selected local bookmarks atomically after explicit confirmation."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    if request.POST.get("confirm") != "delete-selected":
+        return HttpResponseBadRequest("Confirmation is required before deleting bookmarks.")
+
+    raw_ids = request.POST.getlist("bookmark_ids")
+    if not raw_ids or any(not value.isascii() or not value.isdigit() for value in raw_ids):
+        return HttpResponseBadRequest("Select at least one valid bookmark to delete.")
+    bookmark_ids = [int(value) for value in raw_ids]
+    try:
+        result = delete_local_bookmarks(bookmark_ids, confirmed=True)
+    except Bookmark.DoesNotExist:
+        return HttpResponseBadRequest("One or more selected bookmarks no longer exist.")
+
+    target = (
+        f"{reverse('bookmark_manager:index')}?"
+        f"{urlencode({'action': 'deleted', 'count': result.deleted_count})}"
+    )
+    detail = (
+        f"Deleted {result.deleted_count} bookmark"
+        f"{'s' if result.deleted_count != 1 else ''} from OWL. "
+        "Confluence was not changed."
+    )
+    if _is_async_form(request):
+        return JsonResponse(
+            {
+                "state": "success",
+                "label": "Bookmarks deleted",
+                "detail": detail,
+                "deleted_count": result.deleted_count,
                 "redirect": target,
             }
         )

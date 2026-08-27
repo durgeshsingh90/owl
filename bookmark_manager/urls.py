@@ -9,6 +9,7 @@ app_name = "bookmark_manager"
 urlpatterns = [
     path("", views.index, name="index"),
     path("save/", views.save_bookmark, name="save"),
+    path("delete-selected/", views.delete_selected_bookmarks, name="delete_selected"),
     path("import/", views.import_bookmarks, name="import"),
     path("export/", views.export_bookmarks, name="export"),
     path("views/save/", views.save_view, name="view_save"),

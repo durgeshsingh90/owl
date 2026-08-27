@@ -765,6 +765,41 @@ def test_confirmed_ajax_delete_preserves_shared_hierarchy_and_sibling(loopback_c
     assert ConfluencePageNode.objects.filter(pk__in=(root_id, parent_id)).count() == 2
 
 
+def test_bulk_delete_removes_selected_parent_and_child_bookmarks(loopback_client):
+    parent = _create_bookmark("830001", "Selected parent", ancestors=())
+    child = _create_bookmark(
+        "830002",
+        "Selected child",
+        ancestors=(_node_snapshot("830001", "Selected parent", space_key="ARC"),),
+    )
+    untouched = _create_bookmark("830003", "Untouched bookmark", ancestors=())
+    parent_node_id = parent.tree_node_id
+    child_node_id = child.tree_node_id
+
+    rejected = loopback_client.post(
+        reverse("bookmark_manager:delete_selected"),
+        {"confirm": "not-confirmed", "bookmark_ids": [parent.pk, child.pk]},
+    )
+    assert rejected.status_code == 400
+    assert Bookmark.objects.filter(pk__in=(parent.pk, child.pk)).count() == 2
+
+    deleted = _async_post(
+        loopback_client,
+        reverse("bookmark_manager:delete_selected"),
+        {
+            "confirm": "delete-selected",
+            "bookmark_ids": [str(parent.pk), str(child.pk)],
+        },
+    )
+
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted_count"] == 2
+    assert deleted.json()["detail"] == ("Deleted 2 bookmarks from OWL. Confluence was not changed.")
+    assert not Bookmark.objects.filter(pk__in=(parent.pk, child.pk)).exists()
+    assert not ConfluencePageNode.objects.filter(pk__in=(parent_node_id, child_node_id)).exists()
+    assert Bookmark.objects.filter(pk=untouched.pk).exists()
+
+
 def test_phase_three_routes_enforce_declared_http_methods(loopback_client):
     bookmark = _create_bookmark()
     saved_view = SavedBookmarkView.objects.create(name="Protected view")
@@ -776,6 +811,7 @@ def test_phase_three_routes_enforce_declared_http_methods(loopback_client):
         reverse("bookmark_manager:view_delete", args=(saved_view.pk,)),
         reverse("bookmark_manager:import"),
         reverse("bookmark_manager:delete", args=(bookmark.pk,)),
+        reverse("bookmark_manager:delete_selected"),
         reverse("bookmark_manager:open_parent", args=(bookmark.pk,)),
     )
 
@@ -803,6 +839,10 @@ def test_every_phase_three_state_change_requires_csrf():
         ),
         (reverse("bookmark_manager:import"), {}),
         (reverse("bookmark_manager:delete", args=(bookmark.pk,)), {"confirm": "delete"}),
+        (
+            reverse("bookmark_manager:delete_selected"),
+            {"confirm": "delete-selected", "bookmark_ids": [bookmark.pk]},
+        ),
         (reverse("bookmark_manager:open_parent", args=(bookmark.pk,)), {}),
     )
 
@@ -825,6 +865,10 @@ def test_phase_three_actions_and_export_are_loopback_only():
         ),
         (reverse("bookmark_manager:import"), {}),
         (reverse("bookmark_manager:delete", args=(bookmark.pk,)), {"confirm": "delete"}),
+        (
+            reverse("bookmark_manager:delete_selected"),
+            {"confirm": "delete-selected", "bookmark_ids": [bookmark.pk]},
+        ),
         (reverse("bookmark_manager:open_parent", args=(bookmark.pk,)), {}),
     )
 
@@ -892,8 +936,13 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert 'aria-expanded="true"' in html
     assert "data-located-bookmark" in html
     assert "data-tree-toggle" in html
+    assert "data-tree-check" in html
     assert "data-tree-expand-all" in html
     assert "data-tree-collapse-all" in html
+    assert 'id="bulk-delete-bookmarks"' in html
+    assert "data-delete-selected" in html
+    assert f'name="bookmark_ids" value="{bookmark.pk}"' in html
+    assert 'form="bulk-delete-bookmarks"' in html
     assert "data-productivity-form" in html
     assert "data-favorite-form" in html
     assert "data-pin-form" in html
@@ -923,6 +972,7 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
         "owl.bookmark-manager.tree-expansion.v1",
         "owl.bookmark-manager.selection.v1",
         "owl.bookmark-manager.tree-scroll.v1",
+        "window.location.assign(detailsLink.href)",
         "element.textContent = payload.notes",
         "data-external-open-form",
     ):

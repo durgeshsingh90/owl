@@ -21,6 +21,7 @@ from bookmark_manager.services.bookmark_domain import (
 from bookmark_manager.services.deletion import (
     DeleteConfirmationRequired,
     delete_local_bookmark,
+    delete_local_bookmarks,
 )
 from bookmark_manager.services.import_export import (
     DOCUMENT_TYPE,
@@ -404,5 +405,27 @@ def test_bmk_017_local_delete_requires_confirmation_and_preserves_shared_tree():
 
     final = delete_local_bookmark(second.pk, confirmed=True)
     assert final.pruned_node_count == 3
+    assert Bookmark.objects.count() == 0
+    assert ConfluencePageNode.objects.count() == 0
+
+
+def test_bulk_delete_is_atomic_when_any_selected_bookmark_is_missing():
+    first = upsert_bookmark(_snapshot("310", "First selected leaf")).bookmark
+    second = upsert_bookmark(_snapshot("311", "Second selected leaf")).bookmark
+
+    with pytest.raises(Bookmark.DoesNotExist):
+        delete_local_bookmarks((first.pk, 999_999, second.pk), confirmed=True)
+
+    assert Bookmark.objects.filter(pk__in=(first.pk, second.pk)).count() == 2
+
+
+def test_bulk_delete_removes_selected_bookmarks_and_prunes_their_branch():
+    first = upsert_bookmark(_snapshot("320", "First selected leaf")).bookmark
+    second = upsert_bookmark(_snapshot("321", "Second selected leaf")).bookmark
+
+    result = delete_local_bookmarks((first.pk, second.pk, first.pk), confirmed=True)
+
+    assert result.deleted_count == 2
+    assert result.pruned_node_count == 4
     assert Bookmark.objects.count() == 0
     assert ConfluencePageNode.objects.count() == 0

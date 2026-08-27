@@ -138,7 +138,22 @@
                     <h2 id="bookmark-tree-heading">Bookmark tree</h2>
                     <span>{% if query_result.flat_mode %}Sorted matches in hierarchy{% elif active_filters %}Filtered tree{% else %}Bookmark hierarchy{% endif %}</span>
                 </div>
-                <div class="compact-actions"><button type="button" class="text-button" data-tree-expand-all>Expand all</button><button type="button" class="text-button" data-tree-collapse-all>Collapse all</button></div>
+                <div class="compact-actions tree-bulk-actions">
+                    <span class="tree-selection-count" role="status" aria-live="polite" data-tree-selection-count>0 selected</span>
+                    <form
+                        id="bulk-delete-bookmarks"
+                        method="post"
+                        action="{% url 'bookmark_manager:delete_selected' %}"
+                        data-confirm-message="Delete the selected bookmarks from OWL? Their local notes, tags, favorites, pins, and usage will be removed. Confluence pages will not be changed."
+                        data-local-redirect-form
+                    >
+                        {% csrf_token %}
+                        <input type="hidden" name="confirm" value="delete-selected">
+                        <button class="button button--danger button--compact" type="submit" disabled data-delete-selected>Delete selected</button>
+                    </form>
+                    <button type="button" class="text-button" data-tree-expand-all>Expand all</button>
+                    <button type="button" class="text-button" data-tree-collapse-all>Collapse all</button>
+                </div>
             </div>
 
             {% if tree_items %}
