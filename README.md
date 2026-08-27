@@ -26,8 +26,8 @@ The complete product contract is in [work_prompts](work_prompts/README.md).
 
 ## What you need
 
-- macOS or Linux;
-- Python 3.14;
+- macOS, Linux, or Windows 10/11;
+- Python 3.13 or 3.14;
 - Git;
 - an internet connection while cloning OWL and downloading the pinned Python packages.
 
@@ -42,7 +42,7 @@ commands exactly:
 
 ```bash
 cd /Users/durgesh/Projects/owl
-python3.14 -m venv .venv
+python3.13 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install uv==0.12.5
@@ -65,6 +65,25 @@ On another computer where OWL has not been downloaded, first run:
 git clone git@github.com:durgeshsingh90/owl.git
 cd owl
 ```
+
+### Windows Command Prompt
+
+On Windows with Python 3.13 installed, open Command Prompt and run:
+
+```bat
+cd C:\Users\YOUR_USERNAME\code\owl
+py -3.13 -m venv .venv
+.venv\Scripts\activate.bat
+python --version
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+if not exist .env copy .env.example .env
+python manage.py migrate
+python manage.py runserver
+```
+
+`python --version` must report Python 3.13.x or 3.14.x. The activated interpreter shown by
+`where python` should be the `.venv\Scripts\python.exe` inside this checkout.
 
 The first start creates a strong machine-local Django key under `var/secrets/` when
 `DJANGO_SECRET_KEY` is blank. The key and the entire `var/` directory are ignored by Git.

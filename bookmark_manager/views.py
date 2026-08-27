@@ -271,7 +271,7 @@ def _action_json(
 def _configuration_record() -> ConfluenceConfiguration | None:
     try:
         return ConfluenceConfiguration.objects.filter(pk=1).first()
-    except OperationalError, ProgrammingError:
+    except (OperationalError, ProgrammingError):
         return None
 
 
@@ -683,7 +683,7 @@ def _index_context(
 
     try:
         descendant_count = int(request.GET.get("descendants", "0"))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         descendant_count = 0
     if descendant_count > 0:
         status_message += f" · Saved {descendant_count} subpages locally"

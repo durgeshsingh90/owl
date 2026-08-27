@@ -1,5 +1,5 @@
 # OWL first-time installation dependencies.
-# Requires Python 3.14.x.
+# Requires Python 3.13 or 3.14.
 # Install with: python -m pip install -r requirements.txt
 #
 # Exported from uv.lock with all development extras so a new machine can run

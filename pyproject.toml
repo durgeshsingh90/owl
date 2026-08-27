@@ -7,7 +7,7 @@ name = "owl-workspace-locator"
 version = "0.1.0"
 description = "A local Confluence bookmark manager and indexed PDF search tool."
 readme = "README.md"
-requires-python = ">=3.14,<3.15"
+requires-python = ">=3.13,<3.15"
 dependencies = [
     "Django==6.1",
     "keyring==25.7.0",
@@ -50,7 +50,7 @@ markers = [
 ]
 
 [tool.ruff]
-target-version = "py314"
+target-version = "py313"
 line-length = 100
 extend-exclude = [
     "**/migrations",

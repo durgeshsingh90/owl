@@ -204,7 +204,7 @@ def get_configuration_summary(*, secret_store: SecretStore | None = None) -> Con
 
     try:
         configuration = ConfluenceConfiguration.objects.filter(pk=1).first()
-    except OperationalError, ProgrammingError:
+    except (OperationalError, ProgrammingError):
         return ConfigurationSummary(
             source=CredentialSource.NONE,
             complete=False,
@@ -241,7 +241,7 @@ def get_configuration_summary(*, secret_store: SecretStore | None = None) -> Con
             expected_origin=configuration.base_url,
             expected_auth_mode=configuration.auth_mode,
         )
-    except ConfigurationUnavailable, SecretStoreError:
+    except (ConfigurationUnavailable, SecretStoreError):
         return ConfigurationSummary(
             source=CredentialSource.KEYRING,
             complete=False,
@@ -373,7 +373,7 @@ def _consume_verification_receipt(
         return None
     try:
         verified_at = datetime.fromisoformat(str(record["verified_at"]))
-    except KeyError, TypeError, ValueError:
+    except (KeyError, TypeError, ValueError):
         return None
     return verified_at if timezone.is_aware(verified_at) else timezone.make_aware(verified_at)
 
@@ -433,7 +433,7 @@ def test_candidate_connection(
                 expected_origin=origin.base_url,
                 expected_auth_mode=normalized_auth_mode,
             ).token
-        except ConfigurationUnavailable, SecretStoreError:
+        except (ConfigurationUnavailable, SecretStoreError):
             token = ""
     if not token:
         return ConfigurationActionResult(
@@ -508,7 +508,7 @@ def save_ui_configuration(
     try:
         store = _store_or_unavailable(secret_store)
         previous_stored_value = store.get()
-    except ConfigurationUnavailable, SecretStoreError:
+    except (ConfigurationUnavailable, SecretStoreError):
         return _action_failure(
             ConnectionStatus.CREDENTIAL_STORE_UNAVAILABLE,
             "Credential store unavailable",
@@ -608,7 +608,7 @@ def save_ui_configuration(
                     "last_error_message": "",
                 },
             )
-    except CredentialEnvelopeError, DatabaseError, SecretStoreError:
+    except (CredentialEnvelopeError, DatabaseError, SecretStoreError):
         if credential_written:
             with suppress(SecretStoreError):
                 if previous_stored_value:
@@ -653,7 +653,7 @@ def remove_ui_configuration(
         store = _store_or_unavailable(secret_store)
         previous_stored_value = store.get()
         store.delete()
-    except ConfigurationUnavailable, SecretStoreError:
+    except (ConfigurationUnavailable, SecretStoreError):
         return _action_failure(
             ConnectionStatus.CREDENTIAL_STORE_UNAVAILABLE,
             "Credential not removed",

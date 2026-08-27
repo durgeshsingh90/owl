@@ -111,7 +111,7 @@ class CanonicalOrigin:
             parsed = urlsplit(value)
             port = parsed.port
             host = _canonical_host(parsed.hostname or "")
-        except OriginValidationError, ValueError:
+        except (OriginValidationError, ValueError):
             return False
         return (
             parsed.scheme.casefold() == self.scheme

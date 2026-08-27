@@ -216,7 +216,7 @@ class BookmarkFilterForm(forms.Form):
             self.fields["tags"].choices = tuple(
                 Tag.objects.order_by("normalized_name").values_list("normalized_name", "name")
             )
-        except OperationalError, ProgrammingError:
+        except (OperationalError, ProgrammingError):
             self.fields["tags"].choices = ()
 
     def clean(self):

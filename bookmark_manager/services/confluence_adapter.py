@@ -399,7 +399,7 @@ class ConfluenceAdapter:
             return _malformed_result()
         try:
             page = _normalize_page(payload, normalized_page_id, self.origin)
-        except KeyError, TypeError, ValueError:
+        except (KeyError, TypeError, ValueError):
             return _malformed_result()
         return ConfluenceResult(
             code=ConfluenceResultCode.SUCCESS,
@@ -464,7 +464,7 @@ class ConfluenceAdapter:
                             _required_text(raw_page.get("id"), max_length=32)
                         )
                         child = _normalize_page(raw_page, child_id, self.origin)
-                    except KeyError, TypeError, ValueError:
+                    except (KeyError, TypeError, ValueError):
                         return _malformed_descendants_result()
                     if child.page_id in seen_page_ids:
                         return _malformed_descendants_result()
@@ -517,7 +517,12 @@ class ConfluenceAdapter:
                 return _unreachable_result(ConfluenceErrorKind.TLS)
             except TimeoutError:
                 return _unreachable_result(ConfluenceErrorKind.TIMEOUT)
-            except OriginResolutionError, UnsafeRequestError, OSError, http.client.HTTPException:
+            except (
+                OriginResolutionError,
+                UnsafeRequestError,
+                OSError,
+                http.client.HTTPException,
+            ):
                 return _unreachable_result(ConfluenceErrorKind.CONNECTIVITY)
 
             if (
@@ -652,7 +657,7 @@ def _retry_after_seconds(value: str | None) -> int | None:
         return min(int(stripped), 86_400)
     try:
         retry_at = parsedate_to_datetime(stripped)
-    except TypeError, ValueError, OverflowError:
+    except (TypeError, ValueError, OverflowError):
         return None
     if retry_at.tzinfo is None:
         retry_at = retry_at.replace(tzinfo=UTC)
@@ -662,7 +667,7 @@ def _retry_after_seconds(value: str | None) -> int | None:
 def _decode_object(body: bytes) -> dict[str, object] | None:
     try:
         decoded = json.loads(body.decode("utf-8"))
-    except UnicodeDecodeError, json.JSONDecodeError:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(decoded, dict):
         return None

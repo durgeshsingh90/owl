@@ -335,7 +335,7 @@ def _literal_value(raw_value: str, *, quoted_key: bool = False) -> str | None:
     if value[0:1] in {"'", '"'}:
         try:
             parsed = ast.literal_eval(value)
-        except SyntaxError, ValueError:
+        except (SyntaxError, ValueError):
             return ""
         if not isinstance(parsed, str):
             return None
@@ -581,7 +581,7 @@ class _PythonLiteralVisitor(ast.NodeVisitor):
 def _python_literal_problems(text: str) -> list[tuple[int, str]] | None:
     try:
         tree = ast.parse(text)
-    except SyntaxError, ValueError:
+    except (SyntaxError, ValueError):
         return None
     visitor = _PythonLiteralVisitor()
     visitor.visit(tree)
