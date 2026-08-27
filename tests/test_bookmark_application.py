@@ -140,7 +140,8 @@ def configured_profile(monkeypatch) -> ActiveConfluenceProfile:
     [
         " 00300 ",
         "https://confluence.example.invalid/wiki/spaces/ENG/pages/00300/private-dns",
-        "https://confluence.example.invalid/wiki/pages/viewpage.action?pageId=00300",
+        "https://confluence.example.invalid/wiki/pages/viewpage.action"
+        "?pageId=00300&spaceKey=ENG&title=Untrusted%20URL%20Title",
     ],
     ids=("raw-page-id", "modern-url", "legacy-url"),
 )
@@ -152,7 +153,10 @@ def test_supported_page_inputs_map_adapter_page_and_build_hierarchy(
         ConfluenceResult(
             ConfluenceResultCode.SUCCESS,
             "Page loaded.",
-            page=adapter_page(),
+            page=replace(
+                adapter_page(),
+                body_text="Private DNS searchable architecture text",
+            ),
         )
     )
     factory_profiles = []
@@ -171,6 +175,7 @@ def test_supported_page_inputs_map_adapter_page_and_build_hierarchy(
     bookmark = result.bookmark
     assert bookmark.page_id == "300"
     assert bookmark.title == "Private DNS Architecture"
+    assert bookmark.page_text == "Private DNS searchable architecture text"
     assert bookmark.space_name == "Engineering"
     assert bookmark.space_key == "ENG"
     assert bookmark.version == 7
@@ -184,10 +189,13 @@ def test_supported_page_inputs_map_adapter_page_and_build_hierarchy(
     section = ConfluencePageNode.objects.get(page_id="200")
     page_node = ConfluencePageNode.objects.get(page_id="300")
     assert root.parent is None
+    assert root.title == "Engineering"
     assert root.sibling_position == 0
     assert section.parent == root
+    assert section.title == "Networking"
     assert section.sibling_position == 3
     assert page_node.parent == section
+    assert page_node.title == "Private DNS Architecture"
     assert bookmark.tree_node == page_node
 
 

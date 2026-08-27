@@ -64,7 +64,7 @@ def test_memory_backend_is_rejected_without_explicit_permission():
 
 @pytest.mark.django_db
 @override_settings(
-    SECRET_KEY="synthetic-database-encryption-key",
+    SECRET_KEY="synthetic-test-secret-key-only-not-for-real-use-database-encryption",
     CONFLUENCE_SECRET_BACKEND="database",
 )
 def test_database_store_encrypts_credential_at_rest():
@@ -93,7 +93,7 @@ def test_database_store_encrypts_credential_at_rest():
 
 @pytest.mark.django_db
 @override_settings(
-    SECRET_KEY="synthetic-database-encryption-key",
+    SECRET_KEY="synthetic-test-secret-key-only-not-for-real-use-database-encryption",
     CONFLUENCE_SECRET_BACKEND="database",
 )
 def test_database_store_rejects_ciphertext_from_another_installation():
@@ -102,7 +102,9 @@ def test_database_store_rejects_ciphertext_from_another_installation():
     store.set(marker)
 
     with (
-        override_settings(SECRET_KEY="different-synthetic-installation-key"),
+        override_settings(
+            SECRET_KEY="synthetic-test-secret-key-only-not-for-real-use-other-installation"
+        ),
         pytest.raises(SecretStoreOperationError),
     ):
         DatabaseSecretStore().get()

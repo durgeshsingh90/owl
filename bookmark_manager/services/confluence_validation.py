@@ -424,7 +424,12 @@ def parse_page_input(value: str, configured_origin: CanonicalOrigin) -> ParsedPa
             raise PageInputError(
                 "unsupported_page_url", "The legacy Confluence page URL is malformed."
             ) from exc
-        if set(query) != {"pageId"} or len(query["pageId"]) != 1:
+        allowed_query_fields = {"pageId", "spaceKey", "title"}
+        if (
+            "pageId" not in query
+            or not set(query).issubset(allowed_query_fields)
+            or any(len(values) != 1 for values in query.values())
+        ):
             raise PageInputError(
                 "unsupported_page_url", "The legacy Confluence URL must contain one Page ID."
             )

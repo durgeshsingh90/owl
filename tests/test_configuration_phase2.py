@@ -164,7 +164,7 @@ def test_in_memory_store_round_trip_never_places_credential_in_database(
 @override_settings(
     CONFLUENCE_BASE_URL="",
     CONFLUENCE_PAT="",
-    SECRET_KEY="synthetic-database-encryption-key",
+    SECRET_KEY="synthetic-test-secret-key-only-not-for-real-use-database-encryption",
 )
 def test_database_store_round_trip_persists_only_encrypted_credential(unique_credential):
     store = DatabaseSecretStore()

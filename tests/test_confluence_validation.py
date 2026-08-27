@@ -177,11 +177,38 @@ def test_page_input_parses_raw_modern_and_legacy_identity():
         "https://confluence.example.invalid/wiki/pages/viewpage.action?pageId=1234",
         origin,
     )
+    legacy_with_display_metadata = parse_page_input(
+        "https://confluence.example.invalid/wiki/pages/viewpage.action"
+        "?pageId=1234&spaceKey=OWL&title=Private%20DNS",
+        origin,
+    )
 
-    assert raw.page_id == modern.page_id == legacy.page_id == "1234"
+    assert (
+        raw.page_id
+        == modern.page_id
+        == legacy.page_id
+        == legacy_with_display_metadata.page_id
+        == "1234"
+    )
     assert raw.kind == PageInputKind.PAGE_ID
     assert modern.kind == PageInputKind.MODERN_URL
     assert legacy.kind == PageInputKind.LEGACY_URL
+    assert legacy_with_display_metadata.kind == PageInputKind.LEGACY_URL
+
+
+def test_legacy_page_url_with_display_metadata_works_at_root_context():
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid", allow_test_targets=True
+    )
+
+    parsed = parse_page_input(
+        "https://confluence.example.invalid/pages/viewpage.action"
+        "?pageId=2354945019&spaceKey=SERVICES&title=Project%2BPages",
+        origin,
+    )
+
+    assert parsed.page_id == "2354945019"
+    assert parsed.kind == PageInputKind.LEGACY_URL
 
 
 @pytest.mark.parametrize(
@@ -201,6 +228,11 @@ def test_page_input_parses_raw_modern_and_legacy_identity():
         ),
         (
             "https://confluence.example.invalid/wiki/pages/viewpage.action?pageId=123&src=nav",
+            "unsupported_page_url",
+        ),
+        (
+            "https://confluence.example.invalid/wiki/pages/viewpage.action"
+            "?pageId=123&spaceKey=OWL&spaceKey=OTHER",
             "unsupported_page_url",
         ),
     ],
