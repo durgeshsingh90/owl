@@ -13,10 +13,10 @@ import html
 import json
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import PurePosixPath
-from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
 
 from django.db import IntegrityError, transaction
 from django.db.models import F
@@ -41,7 +41,12 @@ from bookmark_manager.services.bookmark_outline import (
     next_outline_position,
 )
 from bookmark_manager.services.configuration import ConfigurationUnavailable, get_active_profile
-from bookmark_manager.services.confluence_validation import PageInputError, parse_page_input
+from bookmark_manager.services.confluence_validation import (
+    PageInputError,
+    extract_page_id_from_url,
+    parse_page_input,
+    parse_page_lookup_input,
+)
 from core.logging import redact_log_text
 
 DOCUMENT_TYPE = "owl.bookmark-export"
@@ -60,10 +65,6 @@ _SENSITIVE_QUERY_KEY = re.compile(
     r"auth|authorization|cookie|credential|key|pass|password|pat|secret|session|token|"
     r"api[_-]?key|access[_-]?token|refresh[_-]?token|private[_-]?key"
     r")$"
-)
-_PAGE_PATH_PATTERNS = (
-    re.compile(r"/(?:pages|content)/0*([1-9][0-9]*)(?:/|$)", re.IGNORECASE),
-    re.compile(r"/viewpage\.action(?:/|$)", re.IGNORECASE),
 )
 _TEXT_URL_PATTERN = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
@@ -327,6 +328,7 @@ def import_bookmarks_document(
     custom_saver = bookmark_saver is not None
     for processed, item in enumerate(prepared, start=1):
         page_id = item.normalized.page_id if item.normalized is not None else ""
+        save_input = page_id
         try:
             if current_owl_export:
                 if item.normalized is None:
@@ -344,6 +346,7 @@ def import_bookmarks_document(
                         item.raw,
                         explicit_page_id,
                     )
+                    save_input = page_id
                 elif item.normalized is None and not isinstance(item.raw, Mapping):
                     raise ImportRecordError(item.normalization_error)
                 existing = Bookmark.objects.filter(page_id=page_id).first() if page_id else None
@@ -354,12 +357,13 @@ def import_bookmarks_document(
                         active_profile() if explicit_page_id is None or not custom_saver else None
                     )
                     if explicit_page_id is None and loaded_profile is not None:
-                        page_id = _validated_url_only_legacy_json_page_id(
+                        page_id, save_input = _validated_url_only_legacy_json_save_input(
                             item.raw,
                             loaded_profile.origin,
                         )
                     elif item.normalized is not None:
                         page_id = item.normalized.page_id
+                        save_input = page_id
 
                     can_fetch = explicit_page_id is not None and (
                         custom_saver or loaded_profile is not None
@@ -368,27 +372,70 @@ def import_bookmarks_document(
                         explicit_page_id is None and loaded_profile is not None
                     )
                     if can_fetch:
-                        save_result = saver(page_id)
-                        if item.normalized is None:
-                            created = _apply_authoritative_import_state_from_raw(
-                                save_result,
-                                item.raw,
+                        try:
+                            save_result = saver(save_input)
+                        except BookmarkActionError as exc:
+                            if exc.code != "not_found":
+                                raise
+                            if not page_id:
+                                raise ImportRecordError(exc.message) from exc
+                            not_found_profile = loaded_profile or active_profile()
+                            if not_found_profile is None:
+                                raise ImportRecordError(
+                                    profile_error
+                                    or "Connect Confluence to retain this deleted-page reference."
+                                ) from exc
+                            deleted_record = (
+                                _safe_not_found_record(
+                                    item.normalized,
+                                    origin=not_found_profile.origin,
+                                )
+                                if item.normalized is not None
+                                else _minimal_not_found_record(
+                                    page_id=page_id,
+                                    source_url=item.source_url,
+                                    origin=not_found_profile.origin,
+                                    record_number=item.record_number,
+                                    imported_at=import_time,
+                                )
+                            )
+                            created = _merge_not_found_reference(
+                                deleted_record,
                                 run=run,
-                                record_number=item.record_number,
                                 imported_at=import_time,
-                                requested_page_id=page_id,
+                                error_message=exc.message,
                             )
                         else:
-                            created = _apply_authoritative_import_state(
-                                save_result,
-                                item.normalized,
-                                run=run,
-                                imported_at=import_time,
-                                requested_page_id=page_id,
-                            )
-                    elif item.normalized is not None:
+                            if not page_id:
+                                authoritative_bookmark = getattr(save_result, "bookmark", None)
+                                if not isinstance(authoritative_bookmark, Bookmark):
+                                    raise ImportRecordError(
+                                        "Confluence did not return a bookmark that could be imported."
+                                    )
+                                page_id = authoritative_bookmark.page_id
+                            if item.normalized is None:
+                                created = _apply_authoritative_import_state_from_raw(
+                                    save_result,
+                                    item.raw,
+                                    run=run,
+                                    record_number=item.record_number,
+                                    imported_at=import_time,
+                                    requested_page_id=page_id,
+                                )
+                            else:
+                                created = _apply_authoritative_import_state(
+                                    save_result,
+                                    item.normalized,
+                                    run=run,
+                                    imported_at=import_time,
+                                    requested_page_id=page_id,
+                                )
+                    elif item.normalized is not None and explicit_page_id is not None:
                         # Backward-compatible offline import when no Confluence
-                        # profile is available and the legacy record is self-contained.
+                        # profile is available and the legacy record carries an
+                        # explicit identity. URL-only records always cross the
+                        # configured-origin boundary before they can become
+                        # Confluence bookmarks.
                         with transaction.atomic():
                             created = _merge_record(
                                 item.normalized,
@@ -458,12 +505,12 @@ def import_bookmarks_text(
 ) -> BookmarkImportResult:
     """Extract HTTP(S) URLs from text and save each independently.
 
-    Probable Confluence URLs must expose one valid Page ID before any save is
-    attempted. A visually truncated Confluence link is recoverable when its Page
-    ID remains intact: OWL sends that ID through the normal Confluence save path,
-    which retrieves the current canonical URL, metadata, and page text. One
-    incomplete or unreachable page is recorded without stopping the remaining
-    URLs.
+    Probable Confluence URLs must expose one valid Page ID or one exact legacy
+    title lookup before any save is attempted. A visually truncated Confluence
+    link is recoverable when its Page ID remains intact: OWL sends that ID through
+    the normal Confluence save path, which retrieves the current canonical URL,
+    metadata, and page text. One incomplete or unreachable page is recorded
+    without stopping the remaining URLs.
     """
 
     normalized_max_bytes = _bounded_document_integer(
@@ -500,6 +547,7 @@ def import_bookmarks_text(
 
     for record_number, url in enumerate(urls, start=1):
         page_id = ""
+        deleted_reference_created: bool | None = None
         try:
             save_input = url
             truncated = _has_truncation_marker(url)
@@ -519,13 +567,45 @@ def import_bookmarks_text(
                 # ellipsis only for identity validation, then save by Page ID so the
                 # configured Confluence adapter supplies the authoritative full URL.
                 confluence_input = _without_trailing_truncation_marker(url)
-                parsed = parse_page_input(confluence_input, profile.origin)
-                page_id = parsed.page_id
-                if truncated:
-                    save_input = page_id
+                try:
+                    parsed = parse_page_input(confluence_input, profile.origin)
+                except PageInputError as page_input_error:
+                    try:
+                        parse_page_lookup_input(confluence_input, profile.origin)
+                    except PageInputError:
+                        if not _looks_like_title_lookup_url(confluence_input):
+                            raise page_input_error from None
+                        raise
+                    if truncated:
+                        raise ImportRecordError(
+                            "Incomplete or truncated Confluence title URL."
+                        ) from None
+                    save_input = confluence_input
+                else:
+                    page_id = parsed.page_id
+                    if truncated:
+                        save_input = page_id
             elif truncated:
                 raise ImportRecordError("Incomplete or truncated URL.")
-            result = saver(save_input)
+            try:
+                result = saver(save_input)
+            except BookmarkActionError as exc:
+                if exc.code != "not_found" or not page_id or profile is None:
+                    raise
+                deleted_record = _minimal_not_found_record(
+                    page_id=page_id,
+                    source_url=url,
+                    origin=profile.origin,
+                    record_number=record_number,
+                    imported_at=import_time,
+                )
+                deleted_reference_created = _merge_not_found_reference(
+                    deleted_record,
+                    run=run,
+                    imported_at=import_time,
+                    error_message=exc.message,
+                )
+                result = None
         except PageInputError as exc:
             _record_failure(
                 run,
@@ -551,7 +631,12 @@ def import_bookmarks_text(
                 source_url=url,
             )
         else:
-            if result.created:
+            created = (
+                deleted_reference_created
+                if deleted_reference_created is not None
+                else result.created
+            )
+            if created:
                 imported += 1
             else:
                 skipped += 1
@@ -640,6 +725,21 @@ def _probably_confluence_url(value: str) -> bool:
         or ("/spaces/" in path and "/pages/" in path)
         or "/content/" in path
         or path.endswith("/viewpage.action")
+    )
+
+
+def _looks_like_title_lookup_url(value: str) -> bool:
+    try:
+        parts = urlsplit(value)
+        query_names = {
+            re.sub(r"[^a-z0-9]", "", key.casefold())
+            for key in parse_qs(parts.query, keep_blank_values=True)
+        }
+    except ValueError:
+        return False
+    return (
+        parts.path.casefold().endswith(("/pages/viewpage.action", "/viewpage.action"))
+        and "title" in query_names
     )
 
 
@@ -1034,6 +1134,165 @@ def _merge_record(
     return True
 
 
+def _merge_not_found_reference(
+    record: _NormalizedRecord,
+    *,
+    run: BookmarkImportRun,
+    imported_at: datetime,
+    error_message: str,
+) -> bool:
+    """Keep a historical local reference when Confluence verifies a missing page.
+
+    The upstream lookup, rather than imported source data, is authoritative for the
+    deleted state. Imported usage is deliberately reset and no imported page body is
+    persisted. A pre-existing bookmark keeps its tree node (and therefore its visible
+    Word-style number); a new reference uses the normal lowest-free outline allocator.
+    """
+
+    checked_at = timezone.now()
+    safe_message = _sanitize_error_message(error_message) or "Confluence could not find this page."
+    with transaction.atomic():
+        existing = Bookmark.objects.select_for_update().filter(page_id=record.page_id).first()
+        if existing is not None:
+            existing.availability_status = BookmarkAvailability.NOT_FOUND
+            existing.last_refresh_attempt_at = checked_at
+            existing.last_error_code = "not_found"
+            existing.last_error_message = safe_message
+            existing.last_error_at = checked_at
+            existing.save(
+                update_fields=[
+                    "availability_status",
+                    "last_refresh_attempt_at",
+                    "last_error_code",
+                    "last_error_message",
+                    "last_error_at",
+                ]
+            )
+            _fill_existing_imported_local_blanks(existing, record, run)
+            return False
+
+        deleted_record = replace(
+            record,
+            open_count=0,
+            first_opened_at=None,
+            last_viewed_at=None,
+            last_viewed_version=None,
+            last_refresh_attempt_at=checked_at,
+            last_refreshed_at=None,
+            last_change_detected_at=None,
+            availability_status=BookmarkAvailability.NOT_FOUND,
+            last_error_code="not_found",
+            last_error_message=safe_message,
+            last_error_at=checked_at,
+        )
+        return _merge_record(
+            deleted_record,
+            run=run,
+            imported_at=imported_at,
+        )
+
+
+def _safe_not_found_record(record: _NormalizedRecord, *, origin) -> _NormalizedRecord:
+    """Keep a same-origin reference URL without trusting imported source URLs."""
+
+    safe_url = origin.build_url(
+        "/pages/viewpage.action",
+        query=urlencode({"pageId": record.page_id}),
+    )
+    try:
+        candidate = urlsplit(record.url)._replace(fragment="").geturl()
+        parsed = parse_page_input(candidate, origin)
+        if parsed.page_id == record.page_id:
+            safe_url = _safe_url(candidate, required=True)
+    except (ImportRecordError, PageInputError, ValueError):
+        pass
+
+    return replace(
+        record,
+        url=safe_url,
+        hierarchy=tuple(replace(node, url="") for node in record.hierarchy),
+    )
+
+
+def _minimal_not_found_record(
+    *,
+    page_id: str,
+    source_url: str,
+    origin,
+    record_number: int,
+    imported_at: datetime,
+) -> _NormalizedRecord:
+    """Build a source-text-free reference after Confluence confirms a 404."""
+
+    candidate = _without_trailing_truncation_marker(source_url)
+    try:
+        parts = urlsplit(candidate)
+        safe_candidate = parts._replace(fragment="").geturl()
+        parsed = parse_page_input(safe_candidate, origin)
+        if parsed.page_id != page_id:
+            raise PageInputError(
+                "conflicting_page_id",
+                "The Confluence URL contains a conflicting Page ID.",
+            )
+        safe_url = _safe_url(safe_candidate, required=True)
+    except (ImportRecordError, PageInputError, ValueError):
+        safe_url = origin.build_url(
+            "/pages/viewpage.action",
+            query=urlencode({"pageId": page_id}),
+        )
+
+    path_segments = [segment for segment in urlsplit(safe_url).path.split("/") if segment]
+    raw_title = unquote_plus(path_segments[-1]) if path_segments else ""
+    title = " ".join(raw_title.split())
+    if not title or title.casefold() == "viewpage.action" or title.isdecimal():
+        title = f"Deleted Confluence page {page_id}"
+    title = title[:500]
+
+    space_key = ""
+    for index, segment in enumerate(path_segments[:-1]):
+        if segment.casefold() == "spaces":
+            space_key = unquote_plus(path_segments[index + 1])[:255]
+            break
+
+    return _NormalizedRecord(
+        record_number=record_number,
+        page_id=page_id,
+        title=title,
+        url=safe_url,
+        space_name="",
+        space_key=space_key,
+        version=1,
+        created_at=None,
+        updated_at=None,
+        created_by_id="",
+        created_by_name="",
+        modified_by_id="",
+        modified_by_name="",
+        author_id="",
+        author_name="",
+        hierarchy=(),
+        saved_at=imported_at,
+        favorite=False,
+        pinned=False,
+        notes="",
+        notes_updated_at=None,
+        tags=(),
+        open_count=0,
+        first_opened_at=None,
+        last_viewed_at=None,
+        last_viewed_version=None,
+        last_refresh_attempt_at=None,
+        last_refreshed_at=None,
+        last_change_detected_at=None,
+        availability_status=BookmarkAvailability.NOT_FOUND,
+        last_error_code="not_found",
+        last_error_message="",
+        last_error_at=None,
+        legacy_number="",
+        canonical_owl_number=None,
+    )
+
+
 def _explicit_legacy_json_page_id(raw: object) -> str | None:
     if not isinstance(raw, Mapping):
         return None
@@ -1080,8 +1339,13 @@ def _validated_explicit_legacy_json_page_id(raw: object, explicit_page_id: str) 
     return explicit_page_id
 
 
-def _validated_url_only_legacy_json_page_id(raw: object, origin) -> str:
-    """Use a URL identity only after structural and configured-origin validation."""
+def _validated_url_only_legacy_json_save_input(raw: object, origin) -> tuple[str, str]:
+    """Validate a URL-only record and return its known ID plus normal save input.
+
+    A title-only legacy URL has no local identity yet, so it is preserved only as
+    an input to the normal application service after the configured-origin check.
+    That service resolves the exact page through authenticated Confluence.
+    """
 
     if not isinstance(raw, Mapping):
         raise ImportRecordError("The record must be a JSON object.")
@@ -1099,8 +1363,22 @@ def _validated_url_only_legacy_json_page_id(raw: object, origin) -> str:
     try:
         parsed_input = parse_page_input(safe_url, origin)
     except PageInputError as exc:
-        raise ImportRecordError(str(exc)) from exc
-    return parsed_input.page_id
+        try:
+            parse_page_lookup_input(safe_url, origin)
+        except PageInputError as lookup_exc:
+            selected_error = lookup_exc if _looks_like_title_lookup_url(safe_url) else exc
+            raise ImportRecordError(str(selected_error)) from selected_error
+        return "", safe_url
+    return parsed_input.page_id, parsed_input.page_id
+
+
+def _validated_url_only_legacy_json_page_id(raw: object, origin) -> str:
+    """Backward-compatible helper for callers that specifically require an ID."""
+
+    page_id, _save_input = _validated_url_only_legacy_json_save_input(raw, origin)
+    if not page_id:
+        raise ImportRecordError("The record URL requires an exact Confluence title lookup.")
+    return page_id
 
 
 def _authoritative_save_result(
@@ -1906,19 +2184,7 @@ def _looks_like_record(document: Mapping[str, object]) -> bool:
 def _page_id_from_url(value: object) -> object:
     if not isinstance(value, str) or not value.strip():
         return _MISSING
-    try:
-        parts = urlsplit(value.strip())
-    except ValueError:
-        return _MISSING
-    for pattern in _PAGE_PATH_PATTERNS:
-        match = pattern.search(parts.path)
-        if match and match.lastindex:
-            return match.group(1)
-        if match:
-            query_value = parse_qs(parts.query).get("pageId", [None])[0]
-            if query_value:
-                return query_value
-    return _MISSING
+    return extract_page_id_from_url(value.strip()) or _MISSING
 
 
 def _person_value(

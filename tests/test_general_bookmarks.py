@@ -60,11 +60,16 @@ def test_domain_category_can_be_renamed_without_changing_domain_identity():
     bookmark = save_web_bookmark("https://docs.example.org/reference").bookmark
     category = bookmark.category
 
-    rename_bookmark_category(category, "Engineering docs")
+    rename_bookmark_category(
+        category,
+        "Engineering docs",
+        description="Architecture standards and runbooks",
+    )
 
     category.refresh_from_db()
     bookmark.tree_node.parent.refresh_from_db()
     assert category.name == "Engineering docs"
+    assert category.description == "Architecture standards and runbooks"
     assert category.domain == "docs.example.org"
     assert bookmark.tree_node.parent.title == "Engineering docs"
 
@@ -116,16 +121,54 @@ def test_http_save_lists_domain_category_and_supports_rename(client, monkeypatch
 
     renamed = client.post(
         reverse("bookmark_manager:category_rename", args=(category.pk,)),
-        {"name": "Developer portal"},
+        {
+            "name": "Developer portal",
+            "description": "SDK documentation and platform runbooks",
+        },
     )
 
     category.refresh_from_db()
     assert renamed.status_code == 302
     assert category.name == "Developer portal"
+    assert category.description == "SDK documentation and platform runbooks"
+    assert category.domain == "developer.example.com"
+
+    updated_page = client.get(reverse("bookmark_manager:index"))
+    updated_html = updated_page.content.decode()
+    assert "Developer portal" in updated_html
+    assert "SDK documentation and platform runbooks" in updated_html
+    assert 'name="description"' in updated_html
+    assert "Save domain" in updated_html
 
     settings_page = client.get(reverse("bookmark_manager:settings"))
     settings_html = settings_page.content.decode()
     assert settings_page.status_code == 200
     assert "Developer portal" in settings_html
+    assert "SDK documentation and platform runbooks" in settings_html
     assert f"?category={category.pk}&amp;sort=added_newest" in settings_html
     assert 'aria-label="Domain categories"' in settings_html
+
+
+def test_domain_description_is_escaped_and_can_be_cleared(client):
+    bookmark = save_web_bookmark("https://docs.example.org/reference").bookmark
+    category = bookmark.category
+    rename_bookmark_category(
+        category,
+        "Engineering docs",
+        description='<script>alert("domain")</script> Internal references',
+    )
+
+    page = client.get(reverse("bookmark_manager:index"))
+    html = page.content.decode()
+
+    assert "&lt;script&gt;alert(&quot;domain&quot;)&lt;/script&gt; Internal references" in html
+    assert '<script>alert("domain")</script>' not in html
+
+    cleared = client.post(
+        reverse("bookmark_manager:category_rename", args=(category.pk,)),
+        {"name": "Engineering docs", "description": ""},
+    )
+    category.refresh_from_db()
+
+    assert cleared.status_code == 302
+    assert category.description == ""

@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from django.conf import settings
 
-from bookmark_manager.models import Bookmark, ConnectionStatus
+from bookmark_manager.models import Bookmark, BookmarkAvailability, ConnectionStatus
 from bookmark_manager.services.bookmark_domain import (
     BookmarkSaveResult,
     ConfluenceNodeSnapshot,
@@ -28,7 +28,11 @@ from bookmark_manager.services.confluence_adapter import (
     ConfluencePage,
     ConfluenceResultCode,
 )
-from bookmark_manager.services.confluence_validation import PageInputError, parse_page_input
+from bookmark_manager.services.confluence_validation import (
+    PageInputError,
+    parse_page_input,
+    parse_page_lookup_input,
+)
 from bookmark_manager.services.secret_store import SecretStore
 from bookmark_manager.services.web_bookmarks import (
     WebBookmarkError,
@@ -49,7 +53,22 @@ def _looks_like_confluence_page_url(value: str) -> bool:
     return (
         ("/spaces/" in path and "/pages/" in path)
         or "/content/" in path
-        or (path.endswith("/pages/viewpage.action") and "pageid" in query)
+        or (
+            path.endswith(("/pages/viewpage.action", "/viewpage.action"))
+            and bool({"pageid", "title"} & query)
+        )
+    )
+
+
+def _looks_like_title_lookup_url(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    query = {key.casefold() for key in parse_qs(parsed.query, keep_blank_values=True)}
+    return (
+        parsed.path.casefold().endswith(("/pages/viewpage.action", "/viewpage.action"))
+        and "title" in query
     )
 
 
@@ -201,31 +220,59 @@ def save_bookmark_input(
                 created=False,
                 source_requested=False,
             )
+    client = (client_factory or build_confluence_client)(profile)
+    resolved_page: ConfluencePage | None = None
     try:
-        parsed = parse_page_input(value, profile.origin)
-    except PageInputError as exc:
-        logger.warning("Bookmark input rejected reason=%s", exc.code)
-        raise BookmarkActionError(exc.code, str(exc)) from exc
+        parsed = parse_page_input(candidate, profile.origin)
+    except PageInputError as page_input_error:
+        try:
+            lookup = parse_page_lookup_input(candidate, profile.origin)
+        except PageInputError as exc:
+            selected_error = exc if _looks_like_title_lookup_url(candidate) else page_input_error
+            logger.warning("Bookmark input rejected reason=%s", selected_error.code)
+            raise BookmarkActionError(selected_error.code, str(selected_error)) from selected_error
+        logger.info(
+            "Resolving Confluence page title space_supplied=%s",
+            bool(lookup.space_key),
+        )
+        lookup_result = client.find_page(lookup.space_key, lookup.title)
+        if not lookup_result.ok or lookup_result.page is None:
+            logger.warning(
+                "Confluence page title lookup failed result=%s",
+                lookup_result.code.value,
+            )
+            raise _result_error(lookup_result.code, lookup_result.message) from None
+        resolved_page = lookup_result.page
+        page_id = resolved_page.page_id
+        input_kind = "title_lookup"
+    else:
+        page_id = parsed.page_id
+        input_kind = parsed.kind.value
 
     logger.info(
         "Confluence page identified page_id=%s input_kind=%s",
-        parsed.page_id,
-        parsed.kind.value,
+        page_id,
+        input_kind,
     )
-
-    client = (client_factory or build_confluence_client)(profile)
 
     def load_metadata(page_id: str) -> ConfluencePageSnapshot:
         logger.info("Fetching selected Confluence page page_id=%s descendants=false", page_id)
-        result = client.get_page(page_id)
-        if not result.ok or result.page is None:
-            logger.warning(
-                "Confluence page fetch failed page_id=%s result=%s",
-                page_id,
-                result.code.value,
-            )
-            raise _result_error(result.code, result.message)
-        snapshot = snapshot_from_confluence_page(result.page)
+        page = (
+            resolved_page
+            if resolved_page is not None and resolved_page.page_id == page_id
+            else None
+        )
+        if page is None:
+            result = client.get_page(page_id)
+            if not result.ok or result.page is None:
+                logger.warning(
+                    "Confluence page fetch failed page_id=%s result=%s",
+                    page_id,
+                    result.code.value,
+                )
+                raise _result_error(result.code, result.message)
+            page = result.page
+        snapshot = snapshot_from_confluence_page(page)
         logger.info(
             "Confluence page loaded page_id=%s ancestors=%d page_text_characters=%d",
             page_id,
@@ -234,18 +281,18 @@ def save_bookmark_input(
         )
         return snapshot
 
-    existing = Bookmark.objects.filter(page_id=parsed.page_id).first()
+    existing = Bookmark.objects.filter(page_id=page_id).first()
     if existing is not None and not existing.page_text:
         result = replace(
-            upsert_bookmark(load_metadata(parsed.page_id)),
+            upsert_bookmark(load_metadata(page_id)),
             source_requested=True,
         )
     else:
-        result = save_bookmark_by_page_id(parsed.page_id, load_metadata)
+        result = save_bookmark_by_page_id(page_id, load_metadata)
     result = finish_confluence_bookmark(result)
     logger.info(
         "Bookmark save completed page_id=%s bookmark_id=%s created=%s source_requested=%s",
-        parsed.page_id,
+        page_id,
         result.bookmark.pk,
         result.created,
         result.source_requested,
@@ -271,6 +318,12 @@ def validated_open_url(
                 "The saved URL no longer matches its canonical identity.",
             )
         return canonical_url
+
+    if bookmark.availability_status == BookmarkAvailability.NOT_FOUND:
+        raise BookmarkActionError(
+            "not_found",
+            "This Confluence page is marked as deleted and cannot be opened.",
+        )
 
     try:
         profile = get_active_profile(secret_store=secret_store)

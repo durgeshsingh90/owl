@@ -32,6 +32,7 @@ from bookmark_manager.services.bookmark_domain import (
     ConfluencePageSnapshot,
     upsert_bookmark,
 )
+from bookmark_manager.services.bookmark_outline import outline_number_map
 from bookmark_manager.services.configuration import save_ui_configuration
 from bookmark_manager.services.secret_store import InMemorySecretStore, get_secret_store
 
@@ -234,6 +235,7 @@ def test_slim_sidebar_keeps_browse_links_and_domain_categories_only(loopback_cli
         "Recently viewed",
         "Frequently viewed",
         "Never viewed",
+        "Deleted pages",
     )
     assert all(label in sidebar for label in browse_labels)
     assert [category.name for category in response.context["bookmark_categories"]] == [
@@ -281,6 +283,49 @@ def test_slim_sidebar_keeps_browse_links_and_domain_categories_only(loopback_cli
     assert revealed.context["selected_bookmark"].pk == current.pk
     assert "data-located-bookmark" in revealed_html
     assert dict(ConfluencePageNode.objects.values_list("pk", "parent_id")) == parents_before
+
+
+def test_domain_sidebar_shows_global_bookmark_totals_during_filtered_search(loopback_client):
+    first = _create_bookmark("810031", "Matching architecture guide", ancestors=())
+    second = _create_bookmark("810032", "Other architecture guide", ancestors=())
+    third = _create_bookmark("810033", "Support handbook", ancestors=())
+    docs = BookmarkCategory.objects.create(
+        domain="docs.example.invalid",
+        name="Engineering docs",
+        description="Architecture and engineering references",
+    )
+    support = BookmarkCategory.objects.create(
+        domain="support.example.invalid",
+        name="Support portal",
+    )
+    Bookmark.objects.filter(pk__in=(first.pk, second.pk)).update(category=docs)
+    Bookmark.objects.filter(pk=third.pk).update(category=support)
+
+    response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"q": "Matching architecture guide"},
+    )
+    sidebar = _sidebar_html(response)
+    totals = {
+        category.domain: category.total_bookmarks
+        for category in response.context["bookmark_categories"]
+    }
+
+    assert response.context["result_count"] == 1
+    assert totals == {
+        "docs.example.invalid": 2,
+        "support.example.invalid": 1,
+    }
+    assert 'aria-label="2 total bookmarks">2</span>' in sidebar
+    assert 'aria-label="1 total bookmark">1</span>' in sidebar
+    assert "Architecture and engineering references" in sidebar
+
+    settings_response = loopback_client.get(reverse("bookmark_manager:settings"))
+    settings_totals = {
+        category.domain: category.total_bookmarks
+        for category in settings_response.context["bookmark_categories"]
+    }
+    assert settings_totals == totals
 
 
 def test_sidebar_shortcuts_filter_and_order_the_expected_bookmarks(loopback_client):
@@ -342,11 +387,50 @@ def test_sidebar_shortcuts_filter_and_order_the_expected_bookmarks(loopback_clie
         "pinned": 1,
         "viewed": 3,
         "never_viewed": 1,
+        "deleted_pages": 0,
     }
     sidebar = _sidebar_html(recent_response)
     assert "?min_open=1&amp;sort=recently_opened" in sidebar
     assert "?min_open=1&amp;sort=most_opened" in sidebar
     assert 'data-count="3" aria-current="page" class="is-active">Recently viewed' in sidebar
+
+
+def test_deleted_pages_sidebar_filters_not_found_references_and_hides_live_open_actions(
+    loopback_client,
+):
+    active = _create_bookmark("811101", "Active Confluence page", ancestors=())
+    deleted = _create_bookmark("811102", "Deleted Confluence page", ancestors=())
+    _set_bookmark_values(
+        deleted,
+        availability_status=BookmarkAvailability.NOT_FOUND,
+        last_error_code="not_found",
+        last_error_message="Confluence could not find this page.",
+        page_text="",
+    )
+
+    response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {
+            "availability": BookmarkAvailability.NOT_FOUND,
+            "sort": "added_newest",
+            "selected": deleted.pk,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.context["active_section"] == "deleted"
+    assert response.context["query_result"].bookmarks == (deleted,)
+    assert response.context["selected_bookmark"] == deleted
+    assert response.context["bookmark_counts"]["deleted_pages"] == 1
+    sidebar = _sidebar_html(response)
+    assert "?availability=not_found&amp;sort=added_newest" in sidebar
+    assert 'data-count="1" aria-current="page" class="is-active">Deleted pages' in sidebar
+    html = _html(response)
+    assert "Deleted Confluence page" in html
+    assert "Not found" in html
+    assert f'action="/bookmarks/{deleted.pk}/open/"' not in html
+    assert f'action="/bookmarks/{active.pk}/open/"' not in html
+    assert "Open in Confluence" not in html
 
 
 def test_filtered_tree_renders_unmatched_bookmarked_ancestor_as_folder_context(loopback_client):
@@ -446,6 +530,178 @@ def _legacy_record(page_id: str, title: str, saved_at: str) -> dict[str, object]
         "savedAt": saved_at,
         "breadcrumb": f"Engineering > Network > {title}",
     }
+
+
+def test_async_save_success_identifies_domain_and_tree_outline_number(loopback_client):
+    response = _async_post(
+        loopback_client,
+        reverse("bookmark_manager:save"),
+        {"q": "https://docs.example.com/runbooks/private-dns"},
+    )
+
+    bookmark = Bookmark.objects.select_related("category", "tree_node").get()
+    numbers = outline_number_map(ConfluencePageNode.objects.all())
+    expected_outline = numbers[bookmark.tree_node_id]
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["state"] == "success"
+    assert payload["domain"] == "docs.example.com"
+    assert payload["category"] == "docs.example.com"
+    assert payload["title"] == bookmark.title
+    assert payload["outline_number"] == expected_outline
+    assert f"Added “{bookmark.title}”." in payload["detail"]
+    assert f"Saved under docs.example.com as bookmark {expected_outline}." in payload["detail"]
+    assert "Category: docs.example.com." in payload["detail"]
+
+
+def test_existing_bookmark_redirect_status_identifies_title_and_location(loopback_client):
+    bookmark = _create_bookmark(title="Existing private DNS runbook")
+    category = BookmarkCategory.objects.create(
+        domain="confluence.example.invalid",
+        name="Architecture knowledge",
+    )
+    bookmark.category = category
+    bookmark.save(update_fields=("category",))
+
+    response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"selected": bookmark.pk, "saved": "existing"},
+    )
+    selected = response.context["selected_bookmark"]
+    status_message = response.context["status_message"]
+
+    assert response.status_code == 200
+    assert response.context["bookmark_save_status"] == status_message
+    assert status_message in _html(response)
+    assert "Existing private DNS runbook" in status_message
+    assert "already saved" in status_message
+    assert "confluence.example.invalid" in status_message
+    assert f"bookmark {selected.outline_number}" in status_message
+    assert "Category: Architecture knowledge." in status_message
+
+
+def test_enter_on_a_complete_unmatched_url_uses_the_add_bookmark_submitter(
+    loopback_client,
+    settings,
+):
+    url = "https://docs.example.com/runbooks/new-private-dns"
+    response = loopback_client.get(reverse("bookmark_manager:index"), {"q": url})
+    html = _html(response)
+    script = Path(settings.BASE_DIR, "static", "bookmark_manager", "bookmarks.js").read_text()
+    enter_handler = script.split(
+        'bookmarkSearch?.addEventListener("keydown", (event) => {',
+        1,
+    )[1].split(
+        'bookmarkSearch?.addEventListener("input", (event) => {',
+        1,
+    )[0]
+
+    assert response.status_code == 200
+    assert response.context["url_search_active"] is True
+    assert response.context["url_identity_match_count"] == 0
+    assert f'data-completed-search="{url}"' in html
+    assert 'data-url-search-complete="true"' in html
+    assert 'data-url-match-count="0"' in html
+    assert 'formaction="/bookmarks/save/"' in html
+    assert "No saved bookmark matches this Page ID or URL. Press Enter to add it." in html
+    assert 'event.key !== "Enter"' in enter_handler
+    assert "event.preventDefault();" in enter_handler
+    assert 'bookmarkUnifiedForm.dataset.urlSearchComplete === "true"' in enter_handler
+    assert "if (matchCount > 0)" in enter_handler
+    assert "bookmarkUnifiedForm.requestSubmit(bookmarkSaveButton);" in enter_handler
+    assert enter_handler.index("if (matchCount > 0)") < enter_handler.index(
+        "bookmarkUnifiedForm.requestSubmit(bookmarkSaveButton);"
+    )
+
+
+def test_complete_unmatched_url_search_restores_focus_and_caret(
+    loopback_client,
+    settings,
+):
+    url = "https://docs.example.com/runbooks/new-private-dns"
+    response = loopback_client.get(reverse("bookmark_manager:index"), {"q": url})
+    script = Path(settings.BASE_DIR, "static", "bookmark_manager", "bookmarks.js").read_text()
+    focus_handler = script.split(
+        "const refocusUnmatchedUrlSearch = () => {",
+        1,
+    )[1].split(
+        "refocusUnmatchedUrlSearch();",
+        1,
+    )[0]
+
+    assert response.status_code == 200
+    assert response.context["url_search_active"] is True
+    assert response.context["url_identity_match_count"] == 0
+    assert 'bookmarkUnifiedForm.dataset.urlSearchComplete !== "true"' in focus_handler
+    assert "matchCount !== 0" in focus_handler
+    assert "!isCompleteHttpUrl(bookmarkSearch.value)" in focus_handler
+    assert "bookmarkSearch.focus({ preventScroll: true });" in focus_handler
+    assert "bookmarkSearch.setSelectionRange(caretPosition, caretPosition);" in focus_handler
+
+
+def test_add_bookmark_button_shows_busy_success_and_restored_states(
+    loopback_client,
+    settings,
+):
+    response = loopback_client.get(reverse("bookmark_manager:index"))
+    html = _html(response)
+    script = Path(settings.BASE_DIR, "static", "bookmark_manager", "bookmarks.js").read_text()
+    stylesheet = Path(
+        settings.BASE_DIR,
+        "static",
+        "bookmark_manager",
+        "bookmarks.css",
+    ).read_text()
+    save_handler = script.split(
+        'bookmarkUnifiedForm?.addEventListener("submit", async (event) => {',
+        1,
+    )[1].split(
+        'document.querySelectorAll("[data-bookmark-import-form]")',
+        1,
+    )[0]
+    submit_helper = script.split("const submitLocalForm = async (", 1)[1].split(
+        'settingsForm?.addEventListener("submit"',
+        1,
+    )[0]
+    added_rule = stylesheet.split(
+        ".bookmark-manager-shell .bookmark-unified-form .button--primary.is-added {",
+        1,
+    )[1].split("}", 1)[0]
+
+    assert response.status_code == 200
+    assert "data-bookmark-save" in html
+    assert ">Add bookmark</button>" in html
+    assert re.search(
+        r'<p[^>]*role="status"[^>]*hidden[^>]*data-bookmark-save-result[^>]*></p>',
+        html,
+    )
+    assert re.search(r'submitter\.textContent = "Adding(?: bookmark)?…";', save_handler)
+    assert 'busyButton?.setAttribute("aria-busy", "true")' in submit_helper
+    assert "busyButton.disabled = true" in submit_helper
+    assert "busyButton.disabled = false" in submit_helper
+    assert 'busyButton?.removeAttribute("aria-busy")' in submit_helper
+    assert "submitter," in save_handler
+    assert save_handler.index("const defaultSaveLabel") < save_handler.index(
+        'submitter.textContent = "Adding'
+    )
+    assert save_handler.index('submitter.textContent = "Adding') < save_handler.index(
+        "await submitLocalForm("
+    )
+    assert 'submitter.classList.add("is-added")' in save_handler
+    assert 'submitter.textContent = "✓ Added"' in save_handler
+    assert 'submitter.setAttribute("aria-label", "Bookmark added")' in save_handler
+    assert "submitter.textContent = defaultSaveLabel" in save_handler
+    assert 'submitter.removeAttribute("aria-label")' in save_handler
+    assert "let redirectPending = false;" in save_handler
+    assert "new URL(payload.redirect, window.location.href).origin" in save_handler
+    assert "submitter.disabled = redirectPending;" in save_handler
+    assert "if (!redirectPending)" in save_handler
+    assert "bookmarkSaveInFlight = false;" in save_handler
+    assert "let redirectAccepted = false;" in submit_helper
+    assert "if (!redirectAccepted)" in submit_helper
+    assert "window.setTimeout(() =>" in save_handler
+    assert "background: var(--teal);" in added_rule
 
 
 def test_notes_and_tags_ajax_are_local_searchable_and_html_escaped(loopback_client):
@@ -793,6 +1049,30 @@ def test_terminal_refresh_status_on_initial_load_is_inactive(
     assert 'data-active="false"' in html
     assert f'data-status="{status}"' in html
     assert expected_label in html
+
+
+def test_completed_refresh_timestamp_shows_both_local_date_and_time(loopback_client):
+    completed_at = datetime(2026, 8, 28, 18, 37, tzinfo=UTC)
+    BookmarkRefreshRun.objects.create(
+        status=BookmarkRefreshStatus.SUCCEEDED,
+        total_bookmarks=1,
+        processed_bookmarks=1,
+        succeeded_bookmarks=1,
+        failed_bookmarks=0,
+        completed_at=completed_at,
+    )
+
+    response = loopback_client.get(reverse("bookmark_manager:index"))
+    html = _html(response)
+    expected_display = timezone.localtime(completed_at).strftime("%d %b %Y, %H:%M")
+
+    assert response.status_code == 200
+    assert f'<time datetime="{completed_at.isoformat()}">{expected_display}</time>' in html
+    assert response.context["refresh_status"]["last_completed_display"]
+    assert re.search(
+        r"Last completed <time datetime=\"[^\"]+\">\d{2} \w{3} \d{4}, \d{2}:\d{2}</time>",
+        html,
+    )
 
 
 def test_global_refresh_javascript_schedules_one_reload_for_every_terminal_outcome(settings):
@@ -1417,7 +1697,58 @@ def test_async_open_returns_only_a_validated_target_and_tracks_usage(loopback_cl
     assert bookmark.last_viewed_version == bookmark.version
 
 
-def test_page_details_copy_url_uses_compact_icon_and_one_second_feedback(loopback_client, settings):
+def test_selected_live_bookmarks_expose_only_safe_local_open_endpoints(loopback_client):
+    store = get_secret_store()
+    assert isinstance(store, InMemorySecretStore)
+    configured = save_ui_configuration(
+        base_url=SYNTHETIC_ORIGIN,
+        personal_access_token=SYNTHETIC_PAT,
+        secret_store=store,
+    )
+    assert configured.success is True
+    first = _create_bookmark("840001", "First live page", ancestors=())
+    second = _create_bookmark("840002", "Second live page", ancestors=())
+    deleted = _create_bookmark("840003", "Deleted page", ancestors=())
+    _set_bookmark_values(deleted, availability_status=BookmarkAvailability.NOT_FOUND)
+
+    response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"selected": first.pk},
+    )
+    html = _html(response)
+
+    def checkbox(bookmark: Bookmark) -> str:
+        match = re.search(
+            rf'<input\b(?=[^>]*\bvalue="{bookmark.pk}")[^>]*>',
+            html,
+            re.DOTALL,
+        )
+        assert match is not None
+        return match.group(0)
+
+    for bookmark in (first, second):
+        element = checkbox(bookmark)
+        endpoint = reverse("bookmark_manager:open", args=(bookmark.pk,))
+        assert f'data-open-url="{endpoint}"' in element
+        assert bookmark.url not in element
+
+        opened = _async_post(loopback_client, endpoint)
+        assert opened.status_code == 200
+        assert opened.json()["url"] == bookmark.url
+
+    assert "data-open-url" not in checkbox(deleted)
+    assert "data-open-selected" in html
+    assert "data-details-open-form" in html
+    assert "data-details-open-button" in html
+    assert Bookmark.objects.get(pk=first.pk).open_count == 1
+    assert Bookmark.objects.get(pk=second.pk).open_count == 1
+    assert Bookmark.objects.get(pk=deleted.pk).open_count == 0
+
+
+def test_page_details_copy_controls_use_compact_icons_and_one_second_tick_feedback(
+    loopback_client,
+    settings,
+):
     bookmark = _create_bookmark()
 
     response = loopback_client.get(reverse("bookmark_manager:index"), {"selected": bookmark.pk})
@@ -1429,13 +1760,33 @@ def test_page_details_copy_url_uses_compact_icon_and_one_second_feedback(loopbac
     assert 'class="copy-url-control"' in html
     assert 'aria-label="Copy URL"' in html
     assert 'title="Copy URL"' in html
-    assert 'data-copy-success="Copied"' in html
+    assert 'data-copy-success="URL copied"' in html
     assert 'data-copy-default-label="Copy URL"' in html
-    assert "data-copy-feedback" in html
+    assert 'data-copy-default-label="Copy Page ID"' in html
+    assert 'data-copy-default-label="Copy breadcrumb"' in html
+    assert html.count('class="copy-url-control"') == 3
+    assert html.count("copy-url-control__icon--success") == 3
+    assert "data-copy-feedback" not in html
     assert html.count('data-copy-default-label="Copy URL"') == 1
     assert "const copyFeedbackTimers = new WeakMap()" in script
     assert "if (!button.dataset.copyDefaultLabel)" in script
     assert "window.setTimeout(() => resetCopyFeedback(button), 1000)" in script
+
+
+def test_every_page_detail_copy_icon_keeps_an_accessible_label(loopback_client):
+    bookmark = _create_bookmark()
+
+    response = loopback_client.get(reverse("bookmark_manager:index"), {"selected": bookmark.pk})
+    html = _html(response)
+
+    for label in ("Copy URL", "Copy Page ID", "Copy breadcrumb"):
+        match = re.search(
+            rf'<button\b(?=[^>]*\bdata-copy-value=)(?=[^>]*\baria-label="{label}")[^>]*>',
+            html,
+            re.DOTALL,
+        )
+        assert match is not None, f"Missing accessible label for {label}"
+        assert f'title="{label}"' in match.group(0)
 
 
 def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_client, settings):
@@ -1473,6 +1824,7 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert "data-tree-toggle" in html
     assert "data-tree-check" in html
     assert f'data-details-url="?selected={bookmark.pk}' in html
+    assert f'data-open-url="/bookmarks/{bookmark.pk}/open/"' in html
     assert "tree-details-link" not in html
     assert ">Page details</a>" not in html
     assert "data-tree-expand-all" in html
@@ -1483,7 +1835,7 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert "data-delete-selected" in html
     assert 'data-delete-locked="true"' in html
     assert "🔒" in html
-    assert "bookmarks.js?v=workspace-ui-v15" in html
+    assert "bookmarks.js?v=workspace-ui-v17" in html
     assert f'name="bookmark_ids" value="{bookmark.pk}"' in html
     assert 'form="bulk-delete-bookmarks"' in html
     assert "data-productivity-form" in html
@@ -1500,9 +1852,13 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert f'data-copy-value="{bookmark.url}"' in html
     assert 'class="copy-url-control"' in html
     assert 'aria-label="Copy URL"' in html
-    assert 'data-copy-success="Copied"' in html
+    assert 'data-copy-success="URL copied"' in html
     assert 'data-copy-default-label="Copy URL"' in html
-    assert "data-copy-feedback" in html
+    assert 'data-copy-default-label="Copy Page ID"' in html
+    assert 'data-copy-default-label="Copy breadcrumb"' in html
+    assert "data-copy-feedback" not in html
+    assert "data-details-open-form" in html
+    assert "data-details-open-button" in html
     assert bookmark.url in html
     assert "<time datetime=" in html and 'tabindex="0"' in html
     sidebar = _sidebar_html(response)
@@ -1547,7 +1903,13 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
         "window.clearTimeout(searchTimer)",
         "element.textContent = payload.notes",
         "data-external-open-form",
+        'form.matches("[data-details-open-form]")',
+        "selectedBookmarkChecks()",
+        'window.open("about:blank", "_blank")',
+        "openedWindows[index].location.replace(payload.url)",
         "if (!button.dataset.copyDefaultLabel)",
         "window.setTimeout(() => resetCopyFeedback(button), 1000)",
+        'submitter.textContent = "✓ Added"',
+        'submitter.classList.add("is-added")',
     ):
         assert hook in script

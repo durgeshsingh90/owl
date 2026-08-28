@@ -9,6 +9,7 @@ from django.test import override_settings
 
 from bookmark_manager.models import (
     Bookmark,
+    BookmarkAvailability,
     BookmarkImportFailure,
     BookmarkImportStatus,
     ConfluenceConfiguration,
@@ -112,6 +113,28 @@ def test_text_import_recovers_truncated_confluence_url_by_page_id(url):
     assert result.run.imported_records == 1
     assert result.run.failed_records == 0
     assert saved_inputs == ["910003"]
+
+
+def test_text_import_sends_trusted_exact_title_url_through_normal_save_flow():
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    title_url = (
+        "https://confluence.example.invalid/wiki/pages/viewpage.action"
+        "?spaceKey=ENG&title=Firewall+Authentication+Page"
+    )
+    saved_inputs = []
+
+    result = import_bookmarks_text(
+        f"Meeting page {title_url}",
+        bookmark_saver=lambda value: saved_inputs.append(value) or SimpleNamespace(created=True),
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert result.run.imported_records == 1
+    assert result.run.failed_records == 0
+    assert saved_inputs == [title_url]
 
 
 def test_text_import_recovery_fetches_and_saves_authoritative_confluence_url(monkeypatch):
@@ -222,7 +245,7 @@ def test_text_import_does_not_recover_truncated_confluence_url_outside_profile(
     assert reason_fragment in failure.reason
 
 
-def test_text_import_reports_unknown_confluence_page_and_continues_remaining_urls():
+def test_text_import_keeps_unknown_confluence_reference_and_continues_remaining_urls():
     origin = validate_confluence_origin(
         "https://confluence.example.invalid/wiki", allow_test_targets=True
     )
@@ -242,15 +265,15 @@ def test_text_import_reports_unknown_confluence_page_and_continues_remaining_url
         profile_loader=lambda: SimpleNamespace(origin=origin),
     )
 
-    assert result.run.status == BookmarkImportStatus.COMPLETED_WITH_FAILURES
-    assert result.run.imported_records == 1
-    assert result.run.failed_records == 1
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert result.run.imported_records == 2
+    assert result.run.failed_records == 0
     assert saved_inputs == ["999999", web_url]
-    failure = result.run.failures.get()
-    assert failure.record_number == 1
-    assert failure.page_id == "999999"
-    assert failure.source_url == unknown_url
-    assert failure.reason == "The Confluence page was not found."
+    deleted_reference = Bookmark.objects.get(page_id="999999")
+    assert deleted_reference.availability_status == BookmarkAvailability.NOT_FOUND
+    assert deleted_reference.last_error_code == "not_found"
+    assert deleted_reference.last_error_message == "The Confluence page was not found."
+    assert deleted_reference.page_text == ""
 
 
 def test_text_import_does_not_recover_truncated_non_confluence_url():
@@ -301,7 +324,7 @@ def _legacy_record(page_id: str, title: str, saved_at: str, **overrides):
     return record
 
 
-def _snapshot(page_id: str, title: str) -> ConfluencePageSnapshot:
+def _snapshot(page_id: str, title: str, *, page_text: str = "") -> ConfluencePageSnapshot:
     return ConfluencePageSnapshot(
         page_id=page_id,
         title=title,
@@ -311,6 +334,7 @@ def _snapshot(page_id: str, title: str) -> ConfluencePageSnapshot:
         version=7,
         created_at=datetime(2025, 1, 2, tzinfo=UTC),
         updated_at=datetime(2026, 8, 20, tzinfo=UTC),
+        page_text=page_text,
         ancestors=(
             ConfluenceNodeSnapshot(
                 page_id="100",
@@ -529,6 +553,153 @@ def test_json_import_uses_safe_url_identity_when_explicit_page_id_is_unusable(
     assert result.failed_records == 0
     assert requested_page_ids == [expected_page_id]
     assert Bookmark.objects.filter(page_id=expected_page_id).exists()
+
+
+def test_json_import_uses_one_generic_numeric_candidate_from_trusted_confluence_url():
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    requested_page_ids = []
+
+    def saver(page_id):
+        requested_page_ids.append(page_id)
+        return upsert_bookmark(_snapshot(page_id, "Fetched from generic URL identity"))
+
+    result = import_bookmarks_document(
+        [
+            {
+                "pageTitle": "Legacy link without a recognised Confluence route",
+                "pageUrl": (
+                    "https://confluence.example.invalid/wiki/display/ADR/archive/"
+                    "2492786022/How+to+SoAR"
+                ),
+            }
+        ],
+        bookmark_saver=saver,
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert result.imported_records == 1
+    assert result.failed_records == 0
+    assert requested_page_ids == ["2492786022"]
+    assert Bookmark.objects.filter(page_id="2492786022").exists()
+
+
+def test_json_url_only_exact_title_lookup_uses_normal_authoritative_save_flow():
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    title_url = (
+        "https://confluence.example.invalid/wiki/pages/viewpage.action"
+        "?spaceKey=ENG&title=Firewall+Authentication+Page"
+    )
+    saved_inputs = []
+
+    def saver(value):
+        saved_inputs.append(value)
+        return upsert_bookmark(
+            _snapshot(
+                "910005",
+                "Firewall Authentication Page",
+                page_text="Searchable text for Firewall Authentication Page",
+            )
+        )
+
+    result = import_bookmarks_document(
+        [{"pageTitle": "Imported stale title", "pageUrl": title_url}],
+        bookmark_saver=saver,
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert result.imported_records == 1
+    assert result.failed_records == 0
+    assert saved_inputs == [title_url]
+    bookmark = Bookmark.objects.get(page_id="910005")
+    assert bookmark.title == "Firewall Authentication Page"
+    assert bookmark.page_text == "Searchable text for Firewall Authentication Page"
+
+
+def test_json_import_reports_not_found_for_generic_numeric_confluence_candidate():
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    requested_page_ids = []
+
+    def saver(page_id):
+        requested_page_ids.append(page_id)
+        raise BookmarkActionError("not_found", "Confluence could not find this page.")
+
+    source_url = (
+        "https://confluence.example.invalid/wiki/display/ADR/archive/2492786022/How+to+SoAR"
+    )
+    result = import_bookmarks_document(
+        [{"pageTitle": "Missing legacy page", "pageUrl": source_url}],
+        bookmark_saver=saver,
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert result.imported_records == 1
+    assert result.failed_records == 0
+    assert requested_page_ids == ["2492786022"]
+    missing_reference = Bookmark.objects.get(page_id="2492786022")
+    assert missing_reference.url == source_url
+    assert missing_reference.availability_status == BookmarkAvailability.NOT_FOUND
+    assert missing_reference.last_error_code == "not_found"
+    assert missing_reference.last_error_message == "Confluence could not find this page."
+
+
+def test_json_import_rejects_multiple_generic_numeric_candidates_without_fetching():
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    requested_page_ids = []
+
+    result = import_bookmarks_document(
+        [
+            {
+                "pageTitle": "Ambiguous legacy Confluence link",
+                "pageUrl": (
+                    "https://confluence.example.invalid/wiki/display/ADR/archive/"
+                    "2492786022/revision/31"
+                ),
+            }
+        ],
+        bookmark_saver=lambda page_id: requested_page_ids.append(page_id),
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED_WITH_FAILURES
+    assert result.imported_records == 0
+    assert result.failed_records == 1
+    assert requested_page_ids == []
+    assert "multiple numeric" in result.run.failures.get().reason.lower()
+
+
+def test_json_import_does_not_infer_generic_numeric_candidate_from_external_url():
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    requested_page_ids = []
+
+    result = import_bookmarks_document(
+        [
+            {
+                "pageTitle": "Untrusted external page",
+                "pageUrl": "https://external.example.invalid/archive/2492786022/page",
+            }
+        ],
+        bookmark_saver=lambda page_id: requested_page_ids.append(page_id),
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED_WITH_FAILURES
+    assert result.imported_records == 0
+    assert result.failed_records == 1
+    assert requested_page_ids == []
+    assert not Bookmark.objects.exists()
 
 
 @pytest.mark.parametrize(
@@ -759,7 +930,7 @@ def test_json_import_fetches_existing_page_when_searchable_text_is_missing():
     assert existing.notes == "Keep this personal note while backfilling"
 
 
-def test_json_import_records_adapter_failure_and_continues_with_remaining_pages():
+def test_json_import_keeps_not_found_reference_when_other_fields_cannot_be_normalized():
     origin = validate_confluence_origin(
         "https://confluence.example.invalid/wiki", allow_test_targets=True
     )
@@ -791,16 +962,125 @@ def test_json_import_records_adapter_failure_and_continues_with_remaining_pages(
         profile_loader=lambda: SimpleNamespace(origin=origin),
     )
 
-    assert result.run.status == BookmarkImportStatus.COMPLETED_WITH_FAILURES
-    assert result.imported_records == 1
-    assert result.failed_records == 1
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert result.imported_records == 2
+    assert result.failed_records == 0
     assert requested_page_ids == ["817229951", "810938483"]
     assert Bookmark.objects.filter(page_id="810938483").exists()
-    failure = result.run.failures.get()
-    assert failure.record_number == 1
-    assert failure.page_id == "817229951"
-    assert failure.reason == "The Confluence page was not found."
+    missing_reference = Bookmark.objects.get(page_id="817229951")
+    assert missing_reference.availability_status == BookmarkAvailability.NOT_FOUND
+    assert missing_reference.last_error_code == "not_found"
+    assert missing_reference.url == (
+        "https://confluence.example.invalid/wiki/pages/817229951/Missing"
+    )
     assert "must-not-appear" not in json.dumps(result.sanitized_failure_report())
+
+
+def test_json_import_not_found_marks_existing_reference_without_changing_outline_number():
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    existing = upsert_bookmark(_snapshot("817229951", "Existing local reference")).bookmark
+    existing_node_pk = existing.tree_node_id
+    existing_outline_position = existing.tree_node.outline_position
+    existing.notes = "Keep this local reference note."
+    existing.open_count = 7
+    existing.save(update_fields=("notes", "open_count"))
+
+    def saver(_page_id):
+        raise BookmarkActionError("not_found", "Confluence could not find this page.")
+
+    result = import_bookmarks_document(
+        [
+            _legacy_record(
+                "817229951",
+                "Existing imported title",
+                "2026-08-20T10:00:00Z",
+                legacyNumber="4.2",
+            )
+        ],
+        bookmark_saver=saver,
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert result.imported_records == 0
+    assert result.skipped_records == 1
+    assert result.failed_records == 0
+    existing.refresh_from_db()
+    existing.tree_node.refresh_from_db()
+    assert existing.tree_node_id == existing_node_pk
+    assert existing.tree_node.outline_position == existing_outline_position
+    assert existing.availability_status == BookmarkAvailability.NOT_FOUND
+    assert existing.last_error_code == "not_found"
+    assert existing.last_error_message == "Confluence could not find this page."
+    assert existing.last_error_at is not None
+    assert existing.page_text == ""
+    assert existing.notes == "Keep this local reference note."
+    assert existing.open_count == 7
+    assert existing.legacy_number == "4.2"
+
+
+def test_json_import_not_found_creates_reference_with_safe_lowest_free_outline_number():
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    first = upsert_bookmark(_snapshot("810000001", "First local child")).bookmark
+    second = upsert_bookmark(_snapshot("810000002", "Second local child")).bookmark
+    deleted_outline_position = first.tree_node.outline_position
+    occupied_outline_position = second.tree_node.outline_position
+    delete_local_bookmark(first, confirmed=True)
+
+    def saver(_page_id):
+        raise BookmarkActionError("not_found", "Confluence could not find this page.")
+
+    result = import_bookmarks_document(
+        [
+            {
+                "pageId": "2492786022",
+                "pageTitle": "Deleted Confluence page reference",
+                "pageUrl": (
+                    "https://confluence.example.invalid/wiki/spaces/ADR/pages/"
+                    "2492786022/How+to+SoAR"
+                ),
+                "spaceKey": "ENG",
+                "savedAt": "2026-08-20T10:00:00Z",
+                "owl_number": second.pk,
+                "pageText": "Imported source text that must not be retained",
+                "hierarchy": [
+                    {
+                        "pageId": "100",
+                        "title": "Engineering",
+                        "url": "https://confluence.example.invalid/wiki/pages/100",
+                    },
+                    {
+                        "pageId": "200",
+                        "title": "Network",
+                        "url": "https://confluence.example.invalid/wiki/pages/200",
+                    },
+                ],
+            }
+        ],
+        bookmark_saver=saver,
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert result.imported_records == 1
+    assert result.skipped_records == 0
+    assert result.failed_records == 0
+    deleted_reference = Bookmark.objects.get(page_id="2492786022")
+    second.refresh_from_db()
+    second.tree_node.refresh_from_db()
+    assert deleted_reference.pk != second.pk
+    assert deleted_reference.tree_node.parent_id == second.tree_node.parent_id
+    assert deleted_reference.tree_node.outline_position == deleted_outline_position
+    assert second.tree_node.outline_position == occupied_outline_position
+    assert deleted_reference.availability_status == BookmarkAvailability.NOT_FOUND
+    assert deleted_reference.last_error_code == "not_found"
+    assert deleted_reference.page_text == ""
+    assert deleted_reference.page_text_size_bytes == 0
+    assert deleted_reference.legacy_number == str(second.pk)
 
 
 def test_bmk_015_heterogeneous_import_continues_and_assigns_deterministic_numbers():

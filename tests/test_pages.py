@@ -127,7 +127,7 @@ def test_bookmark_manager_topbar_matches_the_app_workspace_contract(loopback_cli
     assert 'class="bookmark-app-title"' in html
     assert 'class="bookmark-topbar__actions"' in html
     assert "bookmark-connection-summary" not in html
-    assert "bookmarks.css?v=workspace-ui-v15" in html
+    assert "bookmarks.css?v=workspace-ui-v17" in html
     assert 'aria-label="Applications"' in html
     assert 'aria-label="Confluence settings"' in html
     assert "data-theme-toggle" in html
@@ -317,6 +317,7 @@ def test_bookmark_manager_settings_gear_has_the_required_accessible_name(loopbac
         "Recently viewed",
         "Frequently viewed",
         "Never viewed",
+        "Deleted pages",
     ]
     for removed in (
         "Data",

@@ -1987,6 +1987,46 @@
     display: grid;
 }
 
+.bookmark-manager-shell .domain-category__link {
+    justify-content: space-between;
+    gap: 0.55rem;
+    padding-right: 0.7rem;
+}
+
+.bookmark-manager-shell .domain-category__name {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.bookmark-manager-shell .domain-category__count {
+    display: inline-grid;
+    min-width: 1.65rem;
+    min-height: 1.4rem;
+    flex: 0 0 auto;
+    place-items: center;
+    padding: 0.1rem 0.35rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--muted);
+    background: var(--surface-subtle);
+    font-size: 0.68rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.bookmark-manager-shell .domain-category__link.is-active .domain-category__count {
+    border-color: color-mix(in srgb, var(--bookmark-accent) 45%, var(--line));
+    color: var(--bookmark-accent);
+    background: var(--surface);
+}
+
+.bookmark-manager-shell .domain-category__description {
+    margin: -0.08rem 0.7rem 0.22rem;
+    color: var(--muted);
+    font-size: 0.65rem;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
 .bookmark-manager-shell .domain-category details {
     margin: -0.2rem 0 0.2rem 0.7rem;
 }
@@ -2014,7 +2054,8 @@
     font-size: 0.65rem;
 }
 
-.bookmark-manager-shell .domain-category form input {
+.bookmark-manager-shell .domain-category form input,
+.bookmark-manager-shell .domain-category form textarea {
     width: 100%;
     min-height: 32px;
     padding: 0.3rem 0.4rem;
@@ -2022,6 +2063,11 @@
     border-radius: 5px;
     color: var(--ink);
     background: var(--surface);
+}
+
+.bookmark-manager-shell .domain-category form textarea {
+    min-height: 64px;
+    resize: vertical;
 }
 
 .bookmark-manager-shell .app-sidebar__workspace {
@@ -2122,6 +2168,13 @@
     border-color: var(--bookmark-accent);
     color: #15120c;
     background: var(--bookmark-accent);
+}
+
+.bookmark-manager-shell .bookmark-unified-form .button--primary.is-added {
+    border-color: var(--teal);
+    color: #fff;
+    background: var(--teal);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--teal) 18%, transparent);
 }
 
 .bookmark-manager-shell .bookmark-unified-form .field-help,
@@ -2642,6 +2695,18 @@
     font-weight: 720;
 }
 
+.bookmark-manager-shell .tree-node-link--unavailable {
+    grid-column: 5;
+    align-self: center;
+    color: var(--muted-strong);
+    cursor: default;
+}
+
+.bookmark-manager-shell .tree-node-link--unavailable:hover {
+    color: var(--muted-strong);
+    text-decoration: none;
+}
+
 .bookmark-manager-shell .tree-node-link--path:hover {
     color: var(--muted-strong);
     text-decoration: none;
@@ -2781,14 +2846,13 @@
     height: 30px;
     align-items: center;
     justify-content: center;
-    gap: 0.3rem;
     padding: 0;
     border: 1px solid var(--line);
     border-radius: 6px;
     color: var(--muted-strong);
     background: var(--bookmark-panel);
     cursor: pointer;
-    transition: width 140ms ease, color 140ms ease, background-color 140ms ease;
+    transition: color 140ms ease, background-color 140ms ease;
 }
 
 .bookmark-manager-shell .copy-url-control:hover,
@@ -2809,19 +2873,11 @@
     stroke-width: 1.8;
 }
 
-.bookmark-manager-shell .copy-url-control__icon--success,
-.bookmark-manager-shell .copy-url-control__feedback {
+.bookmark-manager-shell .copy-url-control__icon--success {
     display: none;
 }
 
-.bookmark-manager-shell .copy-url-control__feedback {
-    font-size: 0.7rem;
-    font-weight: 750;
-}
-
 .bookmark-manager-shell .copy-url-control.is-copied {
-    width: 74px;
-    padding-inline: 0.45rem;
     color: var(--teal);
     background: color-mix(in srgb, var(--teal) 12%, var(--bookmark-panel));
 }
@@ -2830,8 +2886,7 @@
     display: none;
 }
 
-.bookmark-manager-shell .copy-url-control.is-copied .copy-url-control__icon--success,
-.bookmark-manager-shell .copy-url-control.is-copied .copy-url-control__feedback {
+.bookmark-manager-shell .copy-url-control.is-copied .copy-url-control__icon--success {
     display: block;
 }
 
@@ -2941,6 +2996,13 @@
     border-color: #ffd38d;
     color: #0d0b08;
     background: #f2bd68;
+}
+
+.bookmark-manager-shell[data-theme="dark"] .bookmark-unified-form .button--primary.is-added {
+    border-color: #61d4b3;
+    color: #061b15;
+    background: #61d4b3;
+    box-shadow: 0 0 0 3px rgb(97 212 179 / 20%);
 }
 
 .bookmark-manager-shell[data-theme="dark"] .button--secondary {

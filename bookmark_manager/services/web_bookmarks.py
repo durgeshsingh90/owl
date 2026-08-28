@@ -133,12 +133,22 @@ def save_web_bookmark(value: str) -> BookmarkSaveResult:
 
 
 @transaction.atomic
-def rename_bookmark_category(category: BookmarkCategory, name: str) -> BookmarkCategory:
+def rename_bookmark_category(
+    category: BookmarkCategory,
+    name: str,
+    *,
+    description: str | None = None,
+) -> BookmarkCategory:
     category.name = name
+    if description is not None:
+        category.description = description
     try:
-        category.save(update_fields=("name", "updated_at"))
+        category.save(update_fields=("name", "description", "updated_at"))
     except ValidationError as exc:
-        message = exc.message_dict.get("name", ["Enter a valid category name."])[0]
+        message = next(
+            iter(exc.message_dict.get("name", ()) or exc.message_dict.get("description", ())),
+            "Enter valid domain details.",
+        )
         raise WebBookmarkError(message) from exc
     ConfluencePageNode.objects.filter(
         provisional_key=f"domain:{hashlib.sha256(category.domain.encode('utf-8')).hexdigest()}"

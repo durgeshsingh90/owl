@@ -571,6 +571,10 @@ def test_unified_bookmark_input_can_save_a_page_from_its_search_field(
 
     assert response.status_code == 302
     assert "selected=" in response.headers["Location"]
+    redirected = loopback_client.get(response.headers["Location"])
+    assert "Unified input page" in redirected.context["status_message"]
+    assert redirected.context["bookmark_save_status"] == redirected.context["status_message"]
+    assert redirected.context["bookmark_save_status"] in response_html(redirected)
 
 
 def test_async_bookmark_save_reports_retrieval_success_before_redirect(
@@ -587,10 +591,21 @@ def test_async_bookmark_save_reports_retrieval_success_before_redirect(
     )
 
     assert response.status_code == 200
-    assert response.json()["state"] == "success"
-    assert response.json()["label"] == "Page added"
-    assert "searchable text retrieved" in response.json()["detail"]
-    assert response.json()["redirect"].startswith("/bookmarks/?selected=")
+    payload = response.json()
+    assert payload["state"] == "success"
+    assert payload["label"] == "Page added"
+    assert payload["created"] is True
+    assert payload["bookmark_id"] == new_result.bookmark.pk
+    assert payload["title"] == "Async page"
+    assert payload["outline_number"]
+    assert payload["category"]
+    assert payload["domain"]
+    assert f"as bookmark {payload['outline_number']}" in payload["detail"]
+    assert payload["category"] in payload["detail"]
+    assert payload["domain"] in payload["detail"]
+    assert "Async page" in payload["detail"]
+    assert "searchable text retrieved" in payload["detail"]
+    assert payload["redirect"].startswith("/bookmarks/?selected=")
 
 
 def test_open_is_post_only_tracks_success_and_uses_safe_redirect_headers(

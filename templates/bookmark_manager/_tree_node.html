@@ -33,17 +33,21 @@
                 data-tree-check
                 data-node-id="{{ item.node.pk }}"
                 aria-label="{% if item.bookmark %}Select bookmark {{ item.outline_number }} and its child bookmarks{% else %}Select all bookmarks under {{ item.node.title }}{% endif %}"
-                {% if item.bookmark %}name="bookmark_ids" value="{{ item.bookmark.pk }}" form="bulk-delete-bookmarks" data-bookmark-id="{{ item.bookmark.pk }}" data-details-url="?selected={{ item.bookmark.pk }}{% if current_query_string %}&amp;{{ current_query_string }}{% endif %}"{% endif %}
+                {% if item.bookmark %}name="bookmark_ids" value="{{ item.bookmark.pk }}" form="bulk-delete-bookmarks" data-bookmark-id="{{ item.bookmark.pk }}" data-details-url="?selected={{ item.bookmark.pk }}{% if current_query_string %}&amp;{{ current_query_string }}{% endif %}" data-bookmark-title="{{ item.node.title }}"{% if item.bookmark.availability_status != "not_found" %} data-open-url="{% url 'bookmark_manager:open' item.bookmark.pk %}"{% endif %}{% endif %}
             >
         </label>
         {% if item.bookmark %}
         <span class="tree-node-icon tree-node-icon--page" aria-hidden="true">
             <svg viewBox="0 0 24 24" focusable="false"><path d="M6.5 3.5h7l4 4V20.5h-11z"/><path d="M13.5 3.5v4h4M9 12h6M9 15.5h6"/></svg>
         </span>
-        <form class="tree-open-form" method="post" action="{% url 'bookmark_manager:open' item.bookmark.pk %}" target="_blank" rel="noopener noreferrer" data-external-open-form>
-            {% csrf_token %}
-            <button class="tree-node-link" type="submit" aria-label="Open bookmark {{ item.outline_number }}, {{ item.node.title }}">{{ item.node.title }}</button>
-        </form>
+        {% if item.bookmark.availability_status == "not_found" %}
+        <span class="tree-node-link tree-node-link--unavailable" title="This Confluence page is marked as deleted">{{ item.node.title }}</span>
+        {% else %}
+            <form class="tree-open-form" method="post" action="{% url 'bookmark_manager:open' item.bookmark.pk %}" target="_blank" rel="noopener noreferrer" data-external-open-form>
+                {% csrf_token %}
+                <button class="tree-node-link" type="submit" aria-label="Open bookmark {{ item.outline_number }}, {{ item.node.title }}">{{ item.node.title }}</button>
+            </form>
+        {% endif %}
         <span class="tree-personal-actions">
             <form method="post" action="{% url 'bookmark_manager:favorite' item.bookmark.pk %}" data-productivity-form data-favorite-form>
                 {% csrf_token %}

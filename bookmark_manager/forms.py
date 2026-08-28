@@ -263,6 +263,12 @@ class BookmarkOrganisationForm(forms.Form):
 
 class BookmarkCategoryRenameForm(forms.Form):
     name = forms.CharField(max_length=253, strip=True)
+    description = forms.CharField(
+        required=False,
+        max_length=500,
+        strip=True,
+        widget=forms.Textarea(attrs={"rows": 3}),
+    )
 
 
 class SavedBookmarkViewForm(forms.Form):

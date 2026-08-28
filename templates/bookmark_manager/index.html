@@ -2,7 +2,7 @@
 {% load static bookmark_display %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bookmark_manager/bookmarks.css' %}?v=workspace-ui-v15">
+<link rel="stylesheet" href="{% static 'bookmark_manager/bookmarks.css' %}?v=workspace-ui-v17">
 {% endblock %}
 
 {% block body_class %}bookmark-manager-shell{% endblock %}
@@ -57,7 +57,7 @@
                         {% if refresh_status.active %}Refreshing {{ refresh_status.processed }} / {{ refresh_status.total }}{% elif refresh_status.status == 'succeeded' or refresh_status.status == 'succeeded_with_errors' %}Confluence refreshed{% elif refresh_status.status == 'failed' or refresh_status.status == 'interrupted' %}Refresh needs attention{% else %}Refresh Confluence{% endif %}
                     </strong>
                     <small data-global-refresh-time>
-                        {% if refresh_timestamp %}Last completed <time datetime="{{ refresh_timestamp }}">{{ refresh_timestamp }}</time>{% else %}Never refreshed globally{% endif %}
+                        {% if refresh_timestamp %}Last completed <time datetime="{{ refresh_timestamp }}">{% firstof refresh_status.last_completed_display refresh_status.completed_display %}</time>{% else %}Never refreshed globally{% endif %}
                     </small>
                     <span class="global-refresh-control__track" aria-hidden="true"><span data-global-refresh-progress style="width: {{ refresh_status.progress }}%"></span></span>
                 </span>
@@ -185,7 +185,7 @@
             </p>
             {% endif %}
             {% if active_filters %}<a class="text-link" href="{% url 'bookmark_manager:index' %}">Clear all</a>{% endif %}
-            <p class="inline-message" role="status" hidden data-bookmark-save-result></p>
+            <p class="inline-message" role="status" data-state="success"{% if not bookmark_save_status %} hidden{% endif %} data-bookmark-save-result>{{ bookmark_save_status }}</p>
         </form>
         <noscript><p class="field-help">Enable JavaScript to save a page from this shared input.</p></noscript>
     </section>
@@ -252,6 +252,7 @@
                     <div><h3 class="bookmark-detail-title"><span class="bookmark-detail-outline">{{ selected_outline_number }}</span> {{ selected_bookmark.title }}</h3><p class="bookmark-detail-id">Bookmark {{ selected_outline_number }} · OWL ID #{{ selected_bookmark.pk }}{% if selected_bookmark.source_type == 'confluence' %} · Confluence Page ID {{ selected_bookmark.page_id }}{% else %} · Web bookmark{% endif %}</p></div>
                     <span class="detail-status" data-availability="{{ selected_bookmark.availability_status }}">{% if selected_bookmark.availability_status != "active" %}{{ selected_bookmark.get_availability_status_display }}{% else %}{{ selected_bookmark.recency_status.label }}{% endif %}</span>
                 </div>
+                {% if selected_bookmark.availability_status == 'not_found' %}<div class="similar-warning" role="status"><strong>Deleted page reference.</strong> Confluence could not find this Page ID. OWL keeps the reference and local organisation details, but it cannot be opened unless a later refresh finds the page again.</div>{% endif %}
                 {% if selected_bookmark.changed_since_viewed %}<div class="changed-notice" role="status"><strong>Changed since you last opened it</strong><span>Last viewed version {{ selected_bookmark.last_viewed_version }} · Current version {{ selected_bookmark.version }}</span></div>{% endif %}
                 <form id="bookmark-organisation-form" class="organisation-form organisation-form--primary" method="post" action="{% url 'bookmark_manager:organise' selected_bookmark.pk %}" data-productivity-form>
                     {% csrf_token %}
@@ -268,23 +269,22 @@
                         aria-label="Copy URL"
                         title="Copy URL"
                         data-copy-value="{{ selected_bookmark.url }}"
-                        data-copy-success="Copied"
+                        data-copy-success="URL copied"
                         data-copy-default-label="Copy URL"
                     >
                         <svg class="copy-url-control__icon copy-url-control__icon--copy" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
                         <svg class="copy-url-control__icon copy-url-control__icon--success" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m5 12 4 4 10-10"/></svg>
-                        <span class="copy-url-control__feedback" data-copy-feedback aria-hidden="true">Copied</span>
                     </button>
                 </div>
                 <div class="inline-actions detail-actions">
-                    <form method="post" action="{% url 'bookmark_manager:open' selected_bookmark.pk %}" target="_blank" rel="noopener noreferrer" data-external-open-form>{% csrf_token %}<button class="button button--primary" type="submit">{% if selected_bookmark.source_type == 'confluence' %}Open in Confluence{% else %}Open website{% endif %}</button></form>
+                    {% if selected_bookmark.availability_status != 'not_found' %}<form method="post" action="{% url 'bookmark_manager:open' selected_bookmark.pk %}" target="_blank" rel="noopener noreferrer" data-external-open-form data-details-open-form data-open-selected>{% csrf_token %}<button class="button button--primary" type="submit" data-details-open-button data-default-aria-label="{% if selected_bookmark.source_type == 'confluence' %}Open in Confluence{% else %}Open website{% endif %}" aria-label="{% if selected_bookmark.source_type == 'confluence' %}Open in Confluence{% else %}Open website{% endif %}">{% if selected_bookmark.source_type == 'confluence' %}Open in Confluence{% else %}Open website{% endif %}</button></form>{% endif %}
                     {% if selected_parent and selected_bookmark.source_type == 'confluence' %}<form method="post" action="{% url 'bookmark_manager:open_parent' selected_bookmark.pk %}" target="_blank" rel="noopener noreferrer" data-external-open-form>{% csrf_token %}<button class="button button--secondary" type="submit">Open parent</button></form>{% endif %}
                     <form method="post" action="{% url 'bookmark_manager:favorite' selected_bookmark.pk %}" data-productivity-form>{% csrf_token %}<button class="button button--secondary" type="submit" aria-pressed="{{ selected_bookmark.favorite|yesno:'true,false' }}" data-favorite-state="{{ selected_bookmark.favorite|yesno:'true,false' }}" data-bookmark-id="{{ selected_bookmark.pk }}">{% if selected_bookmark.favorite %}★ Favorite{% else %}☆ Favorite{% endif %}</button></form>
                     <form method="post" action="{% url 'bookmark_manager:pin' selected_bookmark.pk %}" data-productivity-form>{% csrf_token %}<button class="button button--secondary" type="submit" aria-pressed="{{ selected_bookmark.pinned|yesno:'true,false' }}" data-pin-state="{{ selected_bookmark.pinned|yesno:'true,false' }}" data-bookmark-id="{{ selected_bookmark.pk }}">{% if selected_bookmark.pinned %}Pinned{% else %}Pin{% endif %}</button></form>
                 </div>
                 <div class="copy-actions">
-                    {% if selected_bookmark.source_type == 'confluence' %}<button class="text-button" type="button" data-copy-value="{{ selected_bookmark.page_id }}" data-copy-success="Page ID copied">Copy Page ID</button>{% endif %}
-                    <button class="text-button" type="button" data-copy-value="{% for item in selected_breadcrumb %}{% if not forloop.first %} › {% endif %}{{ item.title }}{% endfor %}" data-copy-success="Breadcrumb copied">Copy breadcrumb</button>
+                    {% if selected_bookmark.source_type == 'confluence' %}<button class="copy-url-control" type="button" aria-label="Copy Page ID" title="Copy Page ID" data-copy-value="{{ selected_bookmark.page_id }}" data-copy-success="Page ID copied" data-copy-default-label="Copy Page ID"><svg class="copy-url-control__icon copy-url-control__icon--copy" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg><svg class="copy-url-control__icon copy-url-control__icon--success" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m5 12 4 4 10-10"/></svg></button>{% endif %}
+                    <button class="copy-url-control" type="button" aria-label="Copy breadcrumb" title="Copy breadcrumb" data-copy-value="{% for item in selected_breadcrumb %}{% if not forloop.first %} › {% endif %}{{ item.title }}{% endfor %}" data-copy-success="Breadcrumb copied" data-copy-default-label="Copy breadcrumb"><svg class="copy-url-control__icon copy-url-control__icon--copy" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg><svg class="copy-url-control__icon copy-url-control__icon--success" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m5 12 4 4 10-10"/></svg></button>
                 </div>
                 <div class="detail-tag-editor">
                     <label for="{{ organisation_form.tags.id_for_label }}">Tags <small>Separate with commas</small></label>
@@ -388,4 +388,4 @@
 {% endblock %}
 
 {% block global_status %}{% endblock %}
-{% block scripts %}<script src="{% static 'bookmark_manager/bookmarks.js' %}?v=workspace-ui-v15" defer></script>{% endblock %}
+{% block scripts %}<script src="{% static 'bookmark_manager/bookmarks.js' %}?v=workspace-ui-v17" defer></script>{% endblock %}

@@ -39,6 +39,7 @@ from bookmark_manager.forms import (
 )
 from bookmark_manager.models import (
     Bookmark,
+    BookmarkAvailability,
     BookmarkCategory,
     BookmarkImportRun,
     BookmarkRefreshRun,
@@ -664,6 +665,8 @@ def _active_bookmark_section(request: HttpRequest, *, open_settings: bool) -> st
         return "favorites"
     if request.GET.get("pinned") == "on":
         return "pinned"
+    if request.GET.getlist("availability") == [BookmarkAvailability.NOT_FOUND]:
+        return "deleted"
     if request.GET.get("max_open") == "0":
         return "never"
     if request.GET.get("sort") == BookmarkSort.RECENTLY_OPENED:
@@ -682,7 +685,17 @@ def _global_bookmark_counts() -> dict[str, int]:
         pinned=Count("pk", filter=Q(pinned=True)),
         viewed=Count("pk", filter=Q(open_count__gte=1)),
         never_viewed=Count("pk", filter=Q(open_count=0)),
+        deleted_pages=Count(
+            "pk",
+            filter=Q(availability_status=BookmarkAvailability.NOT_FOUND),
+        ),
     )
+
+
+def _bookmark_categories_with_totals():
+    """Return every domain with its total saved bookmarks, independent of filters."""
+
+    return BookmarkCategory.objects.annotate(total_bookmarks=Count("bookmarks"))
 
 
 def _refresh_run_payload(
@@ -723,10 +736,20 @@ def _refresh_run_payload(
         "started_at": run.started_at.isoformat() if run and run.started_at else None,
         "heartbeat_at": run.heartbeat_at.isoformat() if run and run.heartbeat_at else None,
         "completed_at": run.completed_at.isoformat() if run and run.completed_at else None,
+        "completed_display": (
+            timezone.localtime(run.completed_at).strftime("%d %b %Y, %H:%M")
+            if run is not None and run.completed_at is not None
+            else ""
+        ),
         "last_completed_at": (
             completed.completed_at.isoformat()
             if completed is not None and completed.completed_at is not None
             else None
+        ),
+        "last_completed_display": (
+            timezone.localtime(completed.completed_at).strftime("%d %b %Y, %H:%M")
+            if completed is not None and completed.completed_at is not None
+            else ""
         ),
         "last_completed_status": completed.status if completed else "",
         "detail": run.last_error_message if run else "",
@@ -765,7 +788,7 @@ def _index_context(
     selected_pk = _positive_query_integer(request, "selected")
     located_pk = _positive_query_integer(request, "located")
     selected = (
-        Bookmark.objects.select_related("tree_node")
+        Bookmark.objects.select_related("tree_node", "category")
         .prefetch_related("tags")
         .filter(pk=selected_pk)
         .first()
@@ -813,9 +836,21 @@ def _index_context(
         f"Ready · {query_result.matching_count} of {query_result.counts.all_bookmarks} bookmarks"
     )
     if request.GET.get("saved") == "new" and selected:
-        status_message = f"Saved bookmark {selected.outline_number} · {selected.title}"
+        category_name = selected.category.name if selected.category else "Uncategorised"
+        category_domain = selected.category.domain if selected.category else "No domain"
+        status_message = (
+            f"Added “{selected.title}”. "
+            f"Saved under {category_domain} as bookmark {selected.outline_number}. "
+            f"Category: {category_name}."
+        )
     elif request.GET.get("saved") == "existing" and selected:
-        status_message = f"Already saved as bookmark {selected.outline_number}"
+        category_name = selected.category.name if selected.category else "Uncategorised"
+        category_domain = selected.category.domain if selected.category else "No domain"
+        status_message = (
+            f"“{selected.title}” is already saved. "
+            f"Saved under {category_domain} as bookmark {selected.outline_number}. "
+            f"Category: {category_name}."
+        )
     elif request.GET.get("opened") == "1" and selected:
         status_message = f"Opened bookmark {selected.outline_number}"
     elif last_import_run:
@@ -891,7 +926,7 @@ def _index_context(
         ),
         "result_count": query_result.matching_count,
         "total_bookmarks": query_result.counts.all_bookmarks,
-        "bookmark_categories": BookmarkCategory.objects.annotate(bookmark_count=Count("bookmarks")),
+        "bookmark_categories": _bookmark_categories_with_totals(),
         "confluence_contacts": _confluence_contacts(),
         "active_contact": query.people[0] if query.people else "",
         "selected_category": BookmarkCategory.objects.filter(pk=query.category_ids[0]).first()
@@ -908,6 +943,9 @@ def _index_context(
         "open_settings": open_settings,
         "inline_error": effective_error,
         "status_message": status_message,
+        "bookmark_save_status": (
+            status_message if request.GET.get("saved") in {"new", "existing"} else ""
+        ),
     }
 
 
@@ -1027,7 +1065,7 @@ def _settings_page_context(
         "bookmark_counts": bookmark_counts,
         "refresh_status": _refresh_run_payload(refresh_run, completed_refresh),
         "total_bookmarks": bookmark_counts["all_bookmarks"],
-        "bookmark_categories": BookmarkCategory.objects.annotate(bookmark_count=Count("bookmarks")),
+        "bookmark_categories": _bookmark_categories_with_totals(),
         "selected_category": None,
         "status_message": status_message or f"Confluence settings · {summary.label}",
     }
@@ -1273,17 +1311,43 @@ def save_bookmark(request: HttpRequest) -> HttpResponse:
     target = f"{reverse('bookmark_manager:index')}?{urlencode(query)}"
     if _is_async_form(request):
         is_confluence = result.bookmark.source_type == BookmarkSource.CONFLUENCE
+        outline_number = outline_number_map(ConfluencePageNode.objects.all()).get(
+            result.bookmark.tree_node_id,
+            str(result.bookmark.pk),
+        )
+        category_name = (
+            result.bookmark.category.name if result.bookmark.category else "Uncategorised"
+        )
+        category_domain = (
+            result.bookmark.category.domain if result.bookmark.category else "No domain"
+        )
+        bookmark_state_detail = (
+            f"Added “{result.bookmark.title}”."
+            if result.created
+            else f"“{result.bookmark.title}” is already saved."
+        )
+        location_detail = (
+            f"{bookmark_state_detail} "
+            f"Saved under {category_domain} as bookmark {outline_number}. "
+            f"Category: {category_name}."
+        )
         return JsonResponse(
             {
                 "state": "success",
                 "label": "Page added" if result.created else "Bookmark already saved",
                 "detail": (
-                    "Confluence page, hierarchy, and searchable text retrieved."
+                    f"{location_detail} Confluence page, hierarchy, and searchable text retrieved."
                     if is_confluence and result.created
-                    else "The existing bookmark is ready."
+                    else f"{location_detail} The existing bookmark is ready."
                     if not result.created
-                    else "Web bookmark added."
+                    else f"{location_detail} Web bookmark added."
                 ),
+                "created": result.created,
+                "bookmark_id": result.bookmark.pk,
+                "title": result.bookmark.title,
+                "outline_number": outline_number,
+                "category": category_name,
+                "domain": category_domain,
                 "redirect": target,
             }
         )
@@ -1312,7 +1376,11 @@ def rename_category(request: HttpRequest, pk: int) -> HttpResponse:
             )
         return redirect(f"{reverse('bookmark_manager:index')}?category={category.pk}")
     try:
-        rename_bookmark_category(category, form.cleaned_data["name"])
+        rename_bookmark_category(
+            category,
+            form.cleaned_data["name"],
+            description=form.cleaned_data["description"],
+        )
     except WebBookmarkError as exc:
         if _is_async_form(request):
             return _action_json(
@@ -1325,8 +1393,8 @@ def rename_category(request: HttpRequest, pk: int) -> HttpResponse:
     if _is_async_form(request):
         return _action_json(
             state="success",
-            label="Category renamed",
-            detail=f"Renamed {category.domain} to {category.name}",
+            label="Domain updated",
+            detail=f"Updated {category.domain}: {category.name}",
             status=200,
         )
     return redirect(f"{reverse('bookmark_manager:index')}?category={category.pk}")

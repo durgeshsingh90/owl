@@ -137,6 +137,14 @@ class ParsedPageInput:
     kind: PageInputKind
 
 
+@dataclass(frozen=True, slots=True)
+class ParsedPageLookup:
+    """A same-origin legacy URL whose page identity must be resolved upstream."""
+
+    space_key: str
+    title: str
+
+
 def _canonical_host(host: str) -> str:
     candidate = host.strip().rstrip(".").casefold()
     if not candidate or len(candidate) > 253:
@@ -426,6 +434,11 @@ def _page_id_from_url_parts(relative_path: str, query: str) -> tuple[str, bool]:
         ]
         if len(numeric_segments) == 1:
             candidates.append((numeric_segments[0], True))
+        elif len(set(numeric_segments)) > 1:
+            raise PageInputError(
+                "unsupported_page_url",
+                "The Confluence URL contains multiple numeric Page ID candidates.",
+            )
 
     identities = {page_id for page_id, _from_path in candidates}
     if not identities:
@@ -506,3 +519,102 @@ def parse_page_input(value: str, configured_origin: CanonicalOrigin) -> ParsedPa
     legacy_path = relative_path.casefold() in {"/pages/viewpage.action", "/viewpage.action"}
     kind = PageInputKind.LEGACY_URL if legacy_path and not from_path else PageInputKind.MODERN_URL
     return ParsedPageInput(page_id, kind)
+
+
+def parse_page_lookup_input(value: str, configured_origin: CanonicalOrigin) -> ParsedPageLookup:
+    """Parse an exact title lookup from a trusted legacy Confluence page URL.
+
+    The lookup form is deliberately narrow.  It accepts only Confluence's legacy
+    ``viewpage.action`` route, requires one non-empty title, and never treats an
+    arbitrary same-origin URL as a page search.  The configured origin remains
+    the trust boundary before any authenticated request is made.
+    """
+
+    raw = str(value or "").strip()
+    if not raw or len(raw) > 8192 or any(ord(character) < 32 for character in raw) or "\\" in raw:
+        raise PageInputError("invalid_page_url", "Enter a valid Confluence page URL.")
+
+    try:
+        parsed = urlsplit(raw)
+        _ = parsed.port
+    except ValueError as exc:
+        raise PageInputError("invalid_page_url", "Enter a valid Confluence page URL.") from exc
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise PageInputError("invalid_page_url", "Enter a valid Confluence page URL.")
+
+    origin_check_url = parsed._replace(fragment="").geturl()
+    if not configured_origin.is_same_origin_url(origin_check_url):
+        raise PageInputError(
+            "disallowed_origin", "The page URL must use the configured Confluence origin."
+        )
+    if not configured_origin.contains_application_url(origin_check_url):
+        raise PageInputError(
+            "disallowed_context", "The page URL must use the configured Confluence path."
+        )
+
+    relative_path = parsed.path[len(configured_origin.context_path) :]
+    if relative_path.casefold() not in {"/pages/viewpage.action", "/viewpage.action"}:
+        raise PageInputError(
+            "unsupported_page_url",
+            "The Confluence URL must contain a Page ID or an exact page title.",
+        )
+
+    try:
+        query_fields = parse_qs(parsed.query, keep_blank_values=True)
+    except ValueError as exc:
+        raise PageInputError(
+            "unsupported_page_url", "The Confluence page URL is malformed."
+        ) from exc
+
+    title_values: list[str] = []
+    space_values: list[str] = []
+    for key, values in query_fields.items():
+        normalized_key = _normalized_query_key(key)
+        if normalized_key == "title":
+            title_values.extend(values)
+        elif normalized_key == "spacekey":
+            space_values.extend(values)
+
+    if len(title_values) != 1:
+        raise PageInputError(
+            "unsupported_page_url",
+            "The Confluence URL must contain one exact page title.",
+        )
+    if len(space_values) > 1:
+        raise PageInputError(
+            "unsupported_page_url",
+            "The Confluence URL must contain at most one space key.",
+        )
+
+    raw_title = title_values[0]
+    raw_space_key = space_values[0] if space_values else ""
+    if any(ord(character) < 32 for character in raw_title + raw_space_key):
+        raise PageInputError(
+            "unsupported_page_url",
+            "The Confluence URL contains unsupported title or space-key characters.",
+        )
+    title = " ".join(raw_title.split())
+    space_key = " ".join(raw_space_key.split())
+    if (
+        not title
+        or len(title) > 500
+        or any(ord(character) < 32 for character in title)
+        or "\\" in title
+    ):
+        raise PageInputError(
+            "unsupported_page_url", "The Confluence URL must contain one exact page title."
+        )
+    if (
+        len(space_key) > 255
+        or any(ord(character) < 32 for character in space_key)
+        or "\\" in space_key
+    ):
+        raise PageInputError(
+            "unsupported_page_url", "The Confluence URL contains an invalid space key."
+        )
+    return ParsedPageLookup(space_key=space_key, title=title)

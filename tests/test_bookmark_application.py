@@ -6,7 +6,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from bookmark_manager.models import Bookmark, ConfluencePageNode, ConnectionStatus
+from bookmark_manager.models import (
+    Bookmark,
+    BookmarkAvailability,
+    ConfluencePageNode,
+    ConnectionStatus,
+)
 from bookmark_manager.services import bookmark_application
 from bookmark_manager.services.bookmark_application import (
     BookmarkActionError,
@@ -119,6 +124,21 @@ class DescendantForbiddenClient(RecordingClient):
         raise AssertionError("A single bookmark save must not request descendant pages.")
 
 
+class LookupRecordingClient(RecordingClient):
+    def __init__(
+        self,
+        lookup_result: ConfluenceResult,
+        page_result: ConfluenceResult | None = None,
+    ) -> None:
+        super().__init__(page_result or lookup_result)
+        self.lookup_result = lookup_result
+        self.lookup_calls: list[tuple[str, str]] = []
+
+    def find_page(self, space_key: str, title: str) -> ConfluenceResult:
+        self.lookup_calls.append((space_key, title))
+        return self.lookup_result
+
+
 @pytest.fixture
 def configured_profile(monkeypatch) -> ActiveConfluenceProfile:
     profile = active_profile()
@@ -194,6 +214,56 @@ def test_supported_page_inputs_map_adapter_page_and_build_hierarchy(
     assert page_node.parent == section
     assert page_node.title == "Private DNS Architecture"
     assert bookmark.tree_node == page_node
+
+
+def test_page_idless_trusted_url_resolves_one_exact_space_and_title_match(
+    configured_profile,
+):
+    page = replace(adapter_page(), body_text="Resolved searchable page text")
+    client = LookupRecordingClient(
+        ConfluenceResult(
+            ConfluenceResultCode.SUCCESS,
+            "One exact page matched.",
+            page=page,
+        )
+    )
+
+    result = save_bookmark_input(
+        "https://confluence.example.invalid/wiki/pages/viewpage.action"
+        "?spaceKey=ENG&title=Private+DNS+Architecture",
+        client_factory=lambda _profile: client,
+    )
+
+    assert client.lookup_calls == [("ENG", "Private DNS Architecture")]
+    assert result.created is True
+    assert result.bookmark.page_id == "300"
+    assert result.bookmark.title == "Private DNS Architecture"
+    assert result.bookmark.page_text == "Resolved searchable page text"
+    assert Bookmark.objects.count() == 1
+
+
+def test_page_idless_trusted_url_rejects_an_ambiguous_space_title_lookup(
+    configured_profile,
+):
+    client = LookupRecordingClient(
+        ConfluenceResult(
+            ConfluenceResultCode.UNSUPPORTED_RESPONSE,
+            "More than one Confluence page matched this space and title.",
+        )
+    )
+
+    with pytest.raises(BookmarkActionError) as captured:
+        save_bookmark_input(
+            "https://confluence.example.invalid/wiki/pages/viewpage.action"
+            "?spaceKey=ENG&title=Shared+Runbook",
+            client_factory=lambda _profile: client,
+        )
+
+    assert client.lookup_calls == [("ENG", "Shared Runbook")]
+    assert client.page_ids == []
+    assert captured.value.code == "unsupported_response"
+    assert "more than one" in captured.value.message.casefold()
+    assert Bookmark.objects.count() == 0
 
 
 def test_existing_page_with_missing_text_refreshes_only_that_page(configured_profile):
@@ -386,6 +456,20 @@ def test_validated_open_url_returns_only_a_url_inside_active_application_origin(
     assert captured.value.code == "unsafe_bookmark_url"
     assert SYNTHETIC_PAT not in str(captured.value)
     assert SYNTHETIC_PAT not in repr(captured.value)
+
+
+def test_validated_open_url_rejects_deleted_confluence_reference(configured_profile):
+    bookmark = upsert_bookmark(domain_snapshot()).bookmark
+    bookmark.availability_status = BookmarkAvailability.NOT_FOUND
+    bookmark.last_error_code = "not_found"
+    bookmark.last_error_message = "Confluence could not find this page."
+    bookmark.save(update_fields=("availability_status", "last_error_code", "last_error_message"))
+
+    with pytest.raises(BookmarkActionError) as captured:
+        validated_open_url(bookmark)
+
+    assert captured.value.code == "not_found"
+    assert str(captured.value) == "This Confluence page is marked as deleted and cannot be opened."
 
 
 def test_profile_and_invalid_input_errors_do_not_reveal_credentials(configured_profile):

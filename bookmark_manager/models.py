@@ -123,6 +123,7 @@ class BookmarkCategory(models.Model):
 
     domain = models.CharField(max_length=253, unique=True)
     name = models.CharField(max_length=253)
+    description = models.CharField(max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -137,13 +138,14 @@ class BookmarkCategory(models.Model):
         self.clean()
         update_fields = kwargs.get("update_fields")
         if update_fields is not None:
-            kwargs["update_fields"] = set(update_fields) | {"domain", "name"}
+            kwargs["update_fields"] = set(update_fields) | {"domain", "name", "description"}
         return super().save(*args, **kwargs)
 
     def clean(self) -> None:
         super().clean()
         self.domain = str(self.domain or "").strip().rstrip(".").casefold()
         self.name = _canonical_personal_name(self.name)
+        self.description = _canonical_personal_name(self.description)
         errors: dict[str, str] = {}
         if not self.domain or len(self.domain) > 253:
             errors["domain"] = "Enter a valid domain name."
@@ -151,6 +153,8 @@ class BookmarkCategory(models.Model):
             errors["name"] = "A category name cannot be empty."
         elif len(self.name) > 253:
             errors["name"] = "A category name cannot exceed 253 characters."
+        if len(self.description) > 500:
+            errors["description"] = "A domain description cannot exceed 500 characters."
         if errors:
             raise ValidationError(errors)
 

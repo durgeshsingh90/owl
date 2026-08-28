@@ -300,6 +300,8 @@ class ConfluenceClient(Protocol):
 
     def get_page(self, page_id: str) -> ConfluenceResult: ...
 
+    def find_page(self, space_key: str, title: str) -> ConfluenceResult: ...
+
     def get_descendant_pages(self, page_id: str) -> ConfluenceDescendantsResult: ...
 
 
@@ -369,6 +371,96 @@ class ConfluenceAdapter:
         return ConfluenceResult(
             code=ConfluenceResultCode.CONNECTED,
             message="Connected. Confluence accepted the read-only request.",
+            http_status=response.status,
+        )
+
+    def find_page(self, space_key: str, title: str) -> ConfluenceResult:
+        """Resolve one exact page title within the optional exact space key.
+
+        Confluence performs the lookup, but OWL still verifies the returned title,
+        space, identity, URL, and full metadata before accepting it.  Two exact
+        matches are deliberately ambiguous rather than relying on result order.
+        """
+
+        try:
+            normalized_title = _required_text(title, max_length=500)
+            normalized_space_key = _optional_text(space_key, max_length=255)
+        except (TypeError, ValueError):
+            return ConfluenceResult(
+                code=ConfluenceResultCode.UNSUPPORTED_RESPONSE,
+                message="The requested Confluence page title or space key is invalid.",
+                error_kind=ConfluenceErrorKind.MALFORMED_RESPONSE,
+            )
+
+        query_fields = {
+            "type": "page",
+            "title": normalized_title,
+            "limit": 2,
+            "expand": "ancestors,space,version,history,body.storage",
+        }
+        if normalized_space_key:
+            query_fields["spaceKey"] = normalized_space_key
+        url = self.origin.build_url("/rest/api/content", query=urlencode(query_fields))
+        response_or_result = self._perform_get(url)
+        if isinstance(response_or_result, ConfluenceResult):
+            return response_or_result
+        response = response_or_result
+        failure = _classify_status(response, not_found_supported=True)
+        if failure is not None:
+            return failure
+        payload = _decode_object(response.body)
+        raw_results = payload.get("results") if payload is not None else None
+        if not isinstance(raw_results, list) or len(raw_results) > 2:
+            return _malformed_result()
+        if len(raw_results) > 1:
+            return ConfluenceResult(
+                code=ConfluenceResultCode.UNSUPPORTED_RESPONSE,
+                message=(
+                    "More than one Confluence page matches this title lookup. "
+                    "Use a URL with a space key or Page ID."
+                ),
+                http_status=response.status,
+            )
+
+        exact_payloads: dict[str, dict[str, object]] = {}
+        try:
+            for raw_page in raw_results:
+                if not isinstance(raw_page, dict):
+                    raise TypeError("Page lookup metadata is malformed.")
+                if _required_text(raw_page.get("title"), max_length=500) != normalized_title:
+                    continue
+                raw_space = raw_page.get("space")
+                if not isinstance(raw_space, dict):
+                    raise TypeError("Page lookup space metadata is malformed.")
+                returned_space_key = _required_text(raw_space.get("key"), max_length=255)
+                if normalized_space_key and returned_space_key != normalized_space_key:
+                    continue
+                page_id = _normalize_requested_page_id(
+                    _required_text(raw_page.get("id"), max_length=32)
+                )
+                exact_payloads[page_id] = raw_page
+        except (KeyError, TypeError, ValueError):
+            return _malformed_result()
+
+        if not exact_payloads:
+            return ConfluenceResult(
+                code=ConfluenceResultCode.NOT_FOUND,
+                message="Confluence could not find an exact page title match.",
+                http_status=response.status,
+            )
+        page_id, raw_page = next(iter(exact_payloads.items()))
+        try:
+            page = _normalize_page(raw_page, page_id, self.origin)
+            if page.title != normalized_title:
+                raise ValueError("Page lookup title metadata is inconsistent.")
+            if normalized_space_key and page.space_key != normalized_space_key:
+                raise ValueError("Page lookup space metadata is inconsistent.")
+        except (KeyError, TypeError, ValueError):
+            return _malformed_result()
+        return ConfluenceResult(
+            code=ConfluenceResultCode.SUCCESS,
+            message="Confluence page metadata was loaded.",
+            page=page,
             http_status=response.status,
         )
 

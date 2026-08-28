@@ -136,6 +136,7 @@
         if (busyButton) {
             busyButton.disabled = true;
         }
+        let redirectAccepted = false;
         try {
             const response = await fetch(actionUrl, {
                 method: "POST",
@@ -149,8 +150,9 @@
             if (response.redirected) {
                 const target = new URL(response.url, window.location.href);
                 if (target.origin === window.location.origin) {
+                    redirectAccepted = true;
                     window.location.assign(target.href);
-                    return;
+                    return null;
                 }
             }
             let payload = null;
@@ -160,6 +162,7 @@
             if (payload?.redirect) {
                 const target = new URL(payload.redirect, window.location.href);
                 if (target.origin === window.location.origin) {
+                    redirectAccepted = true;
                     if (statusTarget) {
                         statusTarget.hidden = false;
                         statusTarget.textContent = `${payload.label} — ${payload.detail}`;
@@ -170,7 +173,7 @@
                     } else {
                         window.location.assign(target.href);
                     }
-                    return;
+                    return payload;
                 }
             }
             if (statusTarget) {
@@ -180,16 +183,20 @@
                     : "The action could not be completed. Review the form and try again.";
                 statusTarget.dataset.state = payload?.state || "error";
             }
+            return payload;
         } catch (_error) {
             if (statusTarget) {
                 statusTarget.hidden = false;
                 statusTarget.textContent = "The local action could not be completed.";
                 statusTarget.dataset.state = "unreachable";
             }
+            return null;
         } finally {
-            busyButton?.removeAttribute("aria-busy");
-            if (busyButton) {
-                busyButton.disabled = false;
+            if (!redirectAccepted) {
+                busyButton?.removeAttribute("aria-busy");
+                if (busyButton) {
+                    busyButton.disabled = false;
+                }
             }
         }
     };
@@ -205,12 +212,16 @@
     const bookmarkUnifiedForm = document.querySelector("[data-bookmark-unified-form]");
     const bookmarkSaveButton = bookmarkUnifiedForm?.querySelector("[data-bookmark-save]");
     const bookmarkSaveResult = document.querySelector("[data-bookmark-save-result]");
+    let bookmarkSaveInFlight = false;
     bookmarkUnifiedForm?.addEventListener("submit", async (event) => {
         const submitter = event.submitter;
         if (!(submitter instanceof HTMLElement) || !submitter.matches("[data-bookmark-save]")) {
             return;
         }
         event.preventDefault();
+        if (bookmarkSaveInFlight) {
+            return;
+        }
         window.clearTimeout(searchTimer);
         if (!bookmarkUnifiedForm.reportValidity()) {
             return;
@@ -229,14 +240,54 @@
                 ? "Retrieving the Confluence page, hierarchy, and searchable text…"
                 : "Adding bookmark…";
         }
-        await submitLocalForm(
+        const defaultSaveLabel = submitter.textContent.trim() || "Add bookmark";
+        bookmarkSaveInFlight = true;
+        submitter.disabled = true;
+        submitter.setAttribute("aria-busy", "true");
+        submitter.setAttribute("aria-label", "Adding bookmark");
+        submitter.textContent = "Adding…";
+        const payload = await submitLocalForm(
             bookmarkUnifiedForm,
             bookmarkSaveResult,
             submitter,
             saveAction,
             formData,
-            500,
+            1250,
         );
+        let redirectPending = false;
+        if (payload?.redirect) {
+            try {
+                redirectPending =
+                    new URL(payload.redirect, window.location.href).origin ===
+                    window.location.origin;
+            } catch (_error) {
+                redirectPending = false;
+            }
+        }
+        submitter.removeAttribute("aria-busy");
+        if (payload?.created) {
+            submitter.classList.add("is-added");
+            submitter.textContent = "✓ Added";
+            submitter.setAttribute("aria-label", "Bookmark added");
+            submitter.disabled = true;
+            announce(payload.detail || "Bookmark added");
+            window.setTimeout(() => {
+                submitter.classList.remove("is-added");
+                submitter.textContent = defaultSaveLabel;
+                submitter.removeAttribute("aria-label");
+                submitter.disabled = redirectPending;
+                if (!redirectPending) {
+                    bookmarkSaveInFlight = false;
+                }
+            }, 1000);
+        } else {
+            submitter.textContent = defaultSaveLabel;
+            submitter.removeAttribute("aria-label");
+            submitter.disabled = redirectPending;
+            if (!redirectPending) {
+                bookmarkSaveInFlight = false;
+            }
+        }
     });
 
     document.querySelectorAll("[data-bookmark-import-form]").forEach((form) => {
@@ -759,6 +810,7 @@
     const selectAllCheckbox = document.querySelector("[data-tree-select-all]");
     const selectionCount = document.querySelector("[data-tree-selection-count]");
     const deleteSelectedButton = document.querySelector("[data-delete-selected]");
+    const detailsOpenButton = document.querySelector("[data-details-open-button]");
     let deleteRelockTimer = null;
 
     const showTreeRowDetails = (row) => {
@@ -880,6 +932,25 @@
         if (deleteSelectedButton) {
             deleteSelectedButton.disabled = count === 0;
             lockDeleteSelected();
+        }
+        if (detailsOpenButton) {
+            const openableCount = selectedBookmarkChecks().filter(
+                (checkbox) => checkbox.dataset.openUrl,
+            ).length;
+            const defaultLabel =
+                detailsOpenButton.dataset.defaultAriaLabel || "Open saved bookmark";
+            if (count > 1) {
+                const selectedLabel = `Open ${openableCount} selected live bookmark${
+                    openableCount === 1 ? "" : "s"
+                } in separate tabs`;
+                detailsOpenButton.setAttribute("aria-label", selectedLabel);
+                detailsOpenButton.title = selectedLabel;
+                detailsOpenButton.disabled = openableCount === 0;
+            } else {
+                detailsOpenButton.setAttribute("aria-label", defaultLabel);
+                detailsOpenButton.title = defaultLabel;
+                detailsOpenButton.disabled = false;
+            }
         }
     };
 
@@ -1253,39 +1324,93 @@
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
             const button = form.querySelector("button[type='submit']");
-            const externalWindow = window.open("about:blank", "_blank");
-            if (externalWindow) {
-                externalWindow.opener = null;
+            const checkedBookmarks = selectedBookmarkChecks();
+            const openSelected =
+                form.matches("[data-details-open-form]") && checkedBookmarks.length > 1;
+            const requests = openSelected
+                ? checkedBookmarks
+                      .filter((checkbox) => checkbox.dataset.openUrl)
+                      .map((checkbox) => ({
+                          action: checkbox.dataset.openUrl,
+                          title: checkbox.dataset.bookmarkTitle || "Saved bookmark",
+                      }))
+                : [{ action: form.action, title: "Saved bookmark" }];
+            if (!requests.length) {
+                announce("None of the selected bookmarks can be opened.");
+                return;
             }
+            const openedWindows = requests.map(() => {
+                const externalWindow = window.open("about:blank", "_blank");
+                if (externalWindow) {
+                    externalWindow.opener = null;
+                }
+                return externalWindow;
+            });
             button?.setAttribute("aria-busy", "true");
             if (button) {
                 button.disabled = true;
             }
             try {
-                const response = await fetch(form.action, {
-                    method: "POST",
-                    body: new FormData(form),
-                    credentials: "same-origin",
-                    headers: {
-                        Accept: "application/json",
-                        "X-Requested-With": "XMLHttpRequest",
-                    },
-                });
-                const payload = await response.json();
-                if (!response.ok || !payload.url) {
-                    throw new Error(payload.detail || "The page could not be opened safely.");
-                }
-                announce(payload.detail || "Opened in Confluence");
-                if (externalWindow) {
-                    externalWindow.location.replace(payload.url);
-                } else {
-                    window.open(payload.url, "_blank", "noopener,noreferrer");
-                }
-            } catch (error) {
-                externalWindow?.close();
-                announce(
-                    error instanceof Error ? error.message : "The page could not be opened safely.",
+                const results = await Promise.all(
+                    requests.map(async (request, index) => {
+                        const requestData = new FormData();
+                        requestData.set("csrfmiddlewaretoken", csrfToken());
+                        try {
+                            const response = await fetch(request.action, {
+                                method: "POST",
+                                body: requestData,
+                                credentials: "same-origin",
+                                headers: {
+                                    Accept: "application/json",
+                                    "X-Requested-With": "XMLHttpRequest",
+                                },
+                            });
+                            const payload = await response.json();
+                            if (!response.ok || !payload.url) {
+                                throw new Error(
+                                    payload.detail || "The page could not be opened safely.",
+                                );
+                            }
+                            if (openedWindows[index]) {
+                                openedWindows[index].location.replace(payload.url);
+                            } else {
+                                window.open(payload.url, "_blank", "noopener,noreferrer");
+                            }
+                            return { opened: true, title: request.title, detail: payload.detail };
+                        } catch (error) {
+                            openedWindows[index]?.close();
+                            return {
+                                opened: false,
+                                title: request.title,
+                                detail:
+                                    error instanceof Error
+                                        ? error.message
+                                        : "The page could not be opened safely.",
+                            };
+                        }
+                    }),
                 );
+                const openedCount = results.filter((result) => result.opened).length;
+                const failedResults = results.filter((result) => !result.opened);
+                const unavailableCount = openSelected
+                    ? checkedBookmarks.length - requests.length
+                    : 0;
+                if (failedResults.length || unavailableCount) {
+                    const failedCount = failedResults.length + unavailableCount;
+                    announce(
+                        `${openedCount} bookmark${
+                            openedCount === 1 ? "" : "s"
+                        } opened; ${failedCount} could not be opened.`,
+                    );
+                } else {
+                    announce(
+                        openSelected
+                            ? `${openedCount} selected bookmark${
+                                  openedCount === 1 ? "" : "s"
+                              } opened in separate tabs.`
+                            : results[0]?.detail || "Opened saved bookmark",
+                    );
+                }
             } finally {
                 button?.removeAttribute("aria-busy");
                 if (button) {
@@ -1365,6 +1490,28 @@
         }
     };
 
+    const refocusUnmatchedUrlSearch = () => {
+        if (
+            !bookmarkSearch ||
+            !bookmarkUnifiedForm ||
+            bookmarkUnifiedForm.dataset.urlSearchComplete !== "true"
+        ) {
+            return;
+        }
+        const matchCount = Number.parseInt(
+            bookmarkUnifiedForm.dataset.urlMatchCount || "0",
+            10,
+        );
+        if (matchCount !== 0 || !isCompleteHttpUrl(bookmarkSearch.value)) {
+            return;
+        }
+        bookmarkSearch.focus({ preventScroll: true });
+        const caretPosition = bookmarkSearch.value.length;
+        bookmarkSearch.setSelectionRange(caretPosition, caretPosition);
+    };
+
+    refocusUnmatchedUrlSearch();
+
     bookmarkSearch?.addEventListener("keydown", (event) => {
         if (
             event.key !== "Enter" ||
@@ -1404,6 +1551,9 @@
             return;
         }
         if (bookmarkSaveButton instanceof HTMLElement) {
+            if (bookmarkSaveInFlight || bookmarkSaveButton.disabled) {
+                return;
+            }
             bookmarkUnifiedForm.requestSubmit(bookmarkSaveButton);
         }
     });

@@ -26,20 +26,27 @@
             <a href="{% url 'bookmark_manager:index' %}?min_open=1&amp;sort=recently_opened" data-count="{{ bookmark_counts.viewed }}"{% if active_section == 'recent' %} aria-current="page" class="is-active"{% endif %}>Recently viewed</a>
             <a href="{% url 'bookmark_manager:index' %}?min_open=1&amp;sort=most_opened" data-count="{{ bookmark_counts.viewed }}"{% if active_section == 'frequent' %} aria-current="page" class="is-active"{% endif %}>Frequently viewed</a>
             <a href="{% url 'bookmark_manager:index' %}?max_open=0&amp;sort=added_newest" data-count="{{ bookmark_counts.never_viewed }}"{% if active_section == 'never' %} aria-current="page" class="is-active"{% endif %}>Never viewed</a>
+            <a href="{% url 'bookmark_manager:index' %}?availability=not_found&amp;sort=added_newest" data-count="{{ bookmark_counts.deleted_pages }}"{% if active_section == 'deleted' %} aria-current="page" class="is-active"{% endif %}>Deleted pages</a>
             {% if bookmark_categories %}
             <div class="domain-categories" aria-label="Domain categories">
                 <h4>Domains</h4>
                 {% for category in bookmark_categories %}
                 <div class="domain-category">
-                    <a href="{% url 'bookmark_manager:index' %}?category={{ category.pk }}&amp;sort=added_newest" data-count="{{ category.bookmark_count }}"{% if selected_category.pk == category.pk %} aria-current="page" class="is-active"{% endif %}>{{ category.name }}</a>
+                    <a class="domain-category__link{% if selected_category.pk == category.pk %} is-active{% endif %}" href="{% url 'bookmark_manager:index' %}?category={{ category.pk }}&amp;sort=added_newest"{% if selected_category.pk == category.pk %} aria-current="page"{% endif %}>
+                        <span class="domain-category__name">{{ category.name }}</span>
+                        <span class="domain-category__count" aria-label="{{ category.total_bookmarks }} total bookmark{{ category.total_bookmarks|pluralize }}">{{ category.total_bookmarks }}</span>
+                    </a>
+                    {% if category.description %}<p class="domain-category__description">{{ category.description }}</p>{% endif %}
                     <details>
-                        <summary aria-label="Rename {{ category.name }}">Rename</summary>
+                        <summary aria-label="Edit {{ category.name }}">Edit domain</summary>
                         <form method="post" action="{% url 'bookmark_manager:category_rename' category.pk %}" data-local-redirect-form>
                             {% csrf_token %}
                             <label for="category-name-{{ category.pk }}">Category name</label>
                             <input id="category-name-{{ category.pk }}" name="name" value="{{ category.name }}" maxlength="253" required>
-                            <small>{{ category.domain }}</small>
-                            <button class="button button--small" type="submit">Save name</button>
+                            <label for="category-description-{{ category.pk }}">Description</label>
+                            <textarea id="category-description-{{ category.pk }}" name="description" maxlength="500" rows="3" placeholder="What do you use this domain for?">{{ category.description }}</textarea>
+                            <small>Domain: {{ category.domain }}</small>
+                            <button class="button button--small" type="submit">Save domain</button>
                         </form>
                     </details>
                 </div>

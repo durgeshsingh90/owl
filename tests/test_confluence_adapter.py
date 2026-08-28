@@ -280,6 +280,66 @@ def test_normalizes_page_and_ordered_ancestor_metadata(origin):
     assert "%2C" in transport.safe_request_facts[0][1]
 
 
+def test_find_page_normalizes_one_exact_space_and_title_match(origin):
+    payload = {
+        "id": "4242",
+        "type": "page",
+        "title": "Private DNS Design",
+        "space": {"key": "OWL", "name": "OWL Architecture"},
+        "version": {"number": 7, "when": "2026-08-24T10:30:00Z"},
+        "history": {"createdDate": "2025-01-02T09:00:00Z"},
+        "ancestors": [],
+        "body": {"storage": {"value": "<p>Exact searchable match</p>"}},
+        "_links": {"webui": "/wiki/spaces/OWL/pages/4242/Private+DNS+Design"},
+    }
+    adapter, transport = adapter_with(origin, response(200, {"results": [payload]}))
+
+    result = adapter.find_page("OWL", "Private DNS Design")
+
+    assert result.code == ConfluenceResultCode.SUCCESS
+    assert result.page is not None
+    assert result.page.page_id == "4242"
+    assert result.page.title == "Private DNS Design"
+    assert result.page.body_text == "Exact searchable match"
+    assert transport.request_count == 1
+    request_url = transport.safe_request_facts[0][1]
+    assert "/rest/api/content?" in request_url
+    assert "spaceKey=OWL" in request_url
+    assert "title=Private+DNS+Design" in request_url
+
+
+def test_find_page_rejects_multiple_distinct_space_title_matches(origin):
+    adapter, transport = adapter_with(
+        origin,
+        response(
+            200,
+            {
+                "results": [
+                    {
+                        "id": "4242",
+                        "type": "page",
+                        "title": "Shared Runbook",
+                        "space": {"key": "OWL"},
+                    },
+                    {
+                        "id": "4243",
+                        "type": "page",
+                        "title": "Shared Runbook",
+                        "space": {"key": "OWL"},
+                    },
+                ]
+            },
+        ),
+    )
+
+    result = adapter.find_page("OWL", "Shared Runbook")
+
+    assert result.code == ConfluenceResultCode.UNSUPPORTED_RESPONSE
+    assert result.page is None
+    assert "more than one" in result.message.casefold()
+    assert transport.request_count == 1
+
+
 def test_recursively_loads_normalized_descendant_pages(origin):
     child = {
         "id": "301",
