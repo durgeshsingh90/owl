@@ -2,7 +2,7 @@
 {% load static bookmark_display %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bookmark_manager/bookmarks.css' %}?v=workspace-ui-v11">
+<link rel="stylesheet" href="{% static 'bookmark_manager/bookmarks.css' %}?v=workspace-ui-v15">
 {% endblock %}
 
 {% block body_class %}bookmark-manager-shell{% endblock %}
@@ -121,7 +121,7 @@
                 {% for failure in last_import_run.failures.all %}
                 <li>
                     <strong>Record {{ failure.record_number }}{% if failure.page_id %} · Page ID {{ failure.page_id }}{% endif %}</strong>
-                    {% if failure.url %}<code>{{ failure.url }}</code>{% elif failure.source_url %}<code>{{ failure.source_url }}</code>{% endif %}
+                    {% if failure.source_url %}<span><strong>Failed URL:</strong> <code>{{ failure.source_url }}</code></span>{% else %}<span><strong>Failed URL:</strong> Unavailable for this record.</span>{% endif %}
                     <span>{{ failure.reason }}</span>
                 </li>
                 {% endfor %}
@@ -206,6 +206,10 @@
                     <span>{% if query_result.flat_mode %}Sorted matches in hierarchy{% elif active_filters %}Filtered tree{% else %}Bookmark hierarchy{% endif %}</span>
                 </div>
                 <div class="compact-actions tree-bulk-actions">
+                    <label class="tree-select-all">
+                        <input type="checkbox" data-tree-select-all aria-label="Select all bookmarks shown in the tree">
+                        <span>Select all</span>
+                    </label>
                     <span class="tree-selection-count" role="status" aria-live="polite" data-tree-selection-count>0 selected</span>
                     <form
                         id="bulk-delete-bookmarks"
@@ -258,7 +262,19 @@
                 <div class="detail-full-url">
                     <strong>Full URL</strong>
                     <code>{{ selected_bookmark.url }}</code>
-                    <button class="text-button" type="button" data-copy-value="{{ selected_bookmark.url }}" data-copy-success="URL copied">Copy URL</button>
+                    <button
+                        class="copy-url-control"
+                        type="button"
+                        aria-label="Copy URL"
+                        title="Copy URL"
+                        data-copy-value="{{ selected_bookmark.url }}"
+                        data-copy-success="Copied"
+                        data-copy-default-label="Copy URL"
+                    >
+                        <svg class="copy-url-control__icon copy-url-control__icon--copy" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+                        <svg class="copy-url-control__icon copy-url-control__icon--success" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m5 12 4 4 10-10"/></svg>
+                        <span class="copy-url-control__feedback" data-copy-feedback aria-hidden="true">Copied</span>
+                    </button>
                 </div>
                 <div class="inline-actions detail-actions">
                     <form method="post" action="{% url 'bookmark_manager:open' selected_bookmark.pk %}" target="_blank" rel="noopener noreferrer" data-external-open-form>{% csrf_token %}<button class="button button--primary" type="submit">{% if selected_bookmark.source_type == 'confluence' %}Open in Confluence{% else %}Open website{% endif %}</button></form>
@@ -272,7 +288,11 @@
                 </div>
                 <div class="detail-tag-editor">
                     <label for="{{ organisation_form.tags.id_for_label }}">Tags <small>Separate with commas</small></label>
-                    {{ organisation_form.tags }}
+                    <div class="tag-autocomplete" data-tag-autocomplete>
+                        {{ organisation_form.tags }}
+                        <div id="bookmark-tag-suggestion-list" class="tag-suggestion-list" role="listbox" aria-label="Existing tag suggestions" data-tag-suggestion-list hidden></div>
+                        {{ tag_suggestions|json_script:"bookmark-tag-suggestions-data" }}
+                    </div>
                     <button class="button button--secondary" type="submit" form="bookmark-organisation-form">Save tags</button>
                 </div>
                 <p class="note-preview" data-notes-display data-bookmark-id="{{ selected_bookmark.pk }}">{{ selected_bookmark.notes|default:"No quick note yet." }}</p>
@@ -368,4 +388,4 @@
 {% endblock %}
 
 {% block global_status %}{% endblock %}
-{% block scripts %}<script src="{% static 'bookmark_manager/bookmarks.js' %}?v=workspace-ui-v11" defer></script>{% endblock %}
+{% block scripts %}<script src="{% static 'bookmark_manager/bookmarks.js' %}?v=workspace-ui-v15" defer></script>{% endblock %}

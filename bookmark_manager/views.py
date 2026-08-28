@@ -114,6 +114,7 @@ class BookmarkTreeItem:
     matches: bool = True
     depth: int = 1
     outline_number: str = ""
+    subtree_open_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +321,7 @@ def _tree_items(
         )
     )
     outline_numbers = outline_number_map(all_nodes)
+    subtree_open_counts = _subtree_open_counts(all_nodes)
     visible_nodes = [node for node in all_nodes if node.pk in query_result.visible_node_ids]
 
     items_by_id: dict[int, BookmarkTreeItem] = {}
@@ -338,6 +340,7 @@ def _tree_items(
             located=bool(bookmark and bookmark.pk == located_pk),
             matches=node.pk in query_result.matched_node_ids,
             outline_number=outline_numbers.get(node.pk, ""),
+            subtree_open_count=subtree_open_counts.get(node.pk, 0),
         )
 
     roots: list[BookmarkTreeItem] = []
@@ -370,6 +373,47 @@ def _tree_items(
         root_ranks.sort(key=lambda ranked: (ranked[0], ranked[1].node.pk))
         roots[:] = [item for _rank, item in root_ranks]
     return roots, outline_numbers
+
+
+def _subtree_open_counts(nodes: Iterable[ConfluencePageNode]) -> dict[int, int]:
+    """Roll every saved page's open count into its complete ancestor path.
+
+    ``_tree_items`` supplies nodes loaded with ``select_related("bookmark")``.
+    This bottom-up pass therefore adds no database queries, and it deliberately
+    uses the complete local tree so a collapsed or filtered folder still reports
+    the total clicks from every bookmarked page beneath it.
+    """
+
+    node_list = list(nodes)
+    node_ids = {node.pk for node in node_list}
+    parent_ids: dict[int, int | None] = {}
+    remaining_children = {node.pk: 0 for node in node_list}
+    totals: dict[int, int] = {}
+
+    for node in node_list:
+        parent_id = node.parent_id if node.parent_id in node_ids else None
+        parent_ids[node.pk] = parent_id
+        if parent_id is not None:
+            remaining_children[parent_id] += 1
+        try:
+            bookmark = node.bookmark
+        except Bookmark.DoesNotExist:
+            totals[node.pk] = 0
+        else:
+            totals[node.pk] = bookmark.open_count
+
+    pending = [node_id for node_id, child_count in remaining_children.items() if child_count == 0]
+    while pending:
+        node_id = pending.pop()
+        parent_id = parent_ids[node_id]
+        if parent_id is None:
+            continue
+        totals[parent_id] += totals[node_id]
+        remaining_children[parent_id] -= 1
+        if remaining_children[parent_id] == 0:
+            pending.append(parent_id)
+
+    return totals
 
 
 def _attach_outline_numbers(
@@ -820,6 +864,11 @@ def _index_context(
         )
         if selected
         else None,
+        "tag_suggestions": tuple(
+            Tag.objects.order_by("normalized_name").values_list("name", flat=True)
+        )
+        if selected
+        else (),
         "search_term": search_term,
         "url_search_active": url_search_active,
         "url_identity_matches": url_identity_matches,

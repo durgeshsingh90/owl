@@ -247,9 +247,15 @@ class BookmarkOrganisationForm(forms.Form):
         strip=True,
         widget=forms.TextInput(
             attrs={
+                "aria-autocomplete": "list",
+                "aria-controls": "bookmark-tag-suggestion-list",
+                "aria-expanded": "false",
+                "aria-haspopup": "listbox",
+                "autocomplete": "off",
                 "form": "bookmark-organisation-form",
                 "id": "bookmark-organisation-tags",
                 "placeholder": "network, architecture, review",
+                "role": "combobox",
             }
         ),
     )

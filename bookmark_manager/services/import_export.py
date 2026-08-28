@@ -102,6 +102,7 @@ class BookmarkImportResult:
             {
                 "record_number": failure.record_number,
                 "page_id": failure.page_id,
+                "source_url": failure.source_url,
                 "reason": failure.reason,
             }
             for failure in self.run.failures.order_by("record_number", "pk")
@@ -238,16 +239,24 @@ def import_bookmarks_document(
 
     normalized: list[_NormalizedRecord] = []
     for record_number, raw_record in enumerate(records, start=1):
+        source_url = _source_url_from_record(raw_record)
         try:
             normalized.append(_normalize_record(raw_record, record_number=record_number))
         except ImportRecordError as exc:
-            _record_failure(run, record_number, "", str(exc))
+            _record_failure(
+                run,
+                record_number,
+                "",
+                str(exc),
+                source_url=source_url,
+            )
         except Exception:
             _record_failure(
                 run,
                 record_number,
                 "",
                 "The record could not be normalized safely.",
+                source_url=source_url,
             )
 
     if schema_version == str(EXPORT_SCHEMA_VERSION):
@@ -278,6 +287,7 @@ def import_bookmarks_document(
                 normalized_record.record_number,
                 normalized_record.page_id,
                 str(exc),
+                source_url=normalized_record.url,
             )
         except IntegrityError:
             _record_failure(
@@ -285,6 +295,7 @@ def import_bookmarks_document(
                 normalized_record.record_number,
                 normalized_record.page_id,
                 "The record conflicts with existing bookmark data.",
+                source_url=normalized_record.url,
             )
         except Exception:
             _record_failure(
@@ -292,6 +303,7 @@ def import_bookmarks_document(
                 normalized_record.record_number,
                 normalized_record.page_id,
                 "The record could not be imported safely.",
+                source_url=normalized_record.url,
             )
         else:
             if created:
@@ -329,8 +341,11 @@ def import_bookmarks_text(
     """Extract HTTP(S) URLs from text and save each independently.
 
     Probable Confluence URLs must expose one valid Page ID before any save is
-    attempted. One incomplete or unreachable page is recorded without stopping
-    the remaining URLs.
+    attempted. A visually truncated Confluence link is recoverable when its Page
+    ID remains intact: OWL sends that ID through the normal Confluence save path,
+    which retrieves the current canonical URL, metadata, and page text. One
+    incomplete or unreachable page is recorded without stopping the remaining
+    URLs.
     """
 
     normalized_max_bytes = _bounded_document_integer(
@@ -368,8 +383,8 @@ def import_bookmarks_text(
     for record_number, url in enumerate(urls, start=1):
         page_id = ""
         try:
-            if "..." in url or "…" in url:
-                raise ImportRecordError("Incomplete or truncated URL.")
+            save_input = url
+            truncated = _has_truncation_marker(url)
             if _probably_confluence_url(url):
                 if not profile_loaded:
                     profile_loaded = True
@@ -381,29 +396,41 @@ def import_bookmarks_text(
                         )
                 if profile is None:
                     raise ImportRecordError(profile_error)
-                parsed = parse_page_input(url, profile.origin)
+                # Chat/transcript exports often shorten only the visible page title,
+                # leaving a trustworthy Page ID in the path. Strip a trailing visual
+                # ellipsis only for identity validation, then save by Page ID so the
+                # configured Confluence adapter supplies the authoritative full URL.
+                confluence_input = _without_trailing_truncation_marker(url)
+                parsed = parse_page_input(confluence_input, profile.origin)
                 page_id = parsed.page_id
-            result = saver(url)
+                if truncated:
+                    save_input = page_id
+            elif truncated:
+                raise ImportRecordError("Incomplete or truncated URL.")
+            result = saver(save_input)
         except PageInputError as exc:
             _record_failure(
                 run,
                 record_number,
                 page_id,
-                f"{_safe_text_url_reference(url)} — incomplete Confluence URL: {exc}",
+                f"Incomplete Confluence URL: {exc}",
+                source_url=url,
             )
         except (BookmarkActionError, ImportRecordError) as exc:
             _record_failure(
                 run,
                 record_number,
                 page_id,
-                f"{_safe_text_url_reference(url)} — {exc}",
+                str(exc),
+                source_url=url,
             )
         except Exception:
             _record_failure(
                 run,
                 record_number,
                 page_id,
-                f"{_safe_text_url_reference(url)} — the bookmark could not be saved.",
+                "The bookmark could not be saved.",
+                source_url=url,
             )
         else:
             if result.created:
@@ -463,6 +490,26 @@ def _extract_text_urls(text: str) -> list[str]:
     return urls
 
 
+def _has_truncation_marker(value: str) -> bool:
+    return "..." in value or "…" in value
+
+
+def _without_trailing_truncation_marker(value: str) -> str:
+    """Remove only a transcript-style trailing ellipsis from a URL.
+
+    Embedded ellipses remain untouched so a malformed or ambiguous link cannot be
+    silently reinterpreted. The configured-origin and Page-ID validation still run
+    after this small recovery step.
+    """
+
+    candidate = value
+    while candidate.endswith("…"):
+        candidate = candidate[:-1]
+    while candidate.endswith("..."):
+        candidate = candidate[:-3]
+    return candidate
+
+
 def _probably_confluence_url(value: str) -> bool:
     try:
         parts = urlsplit(value)
@@ -478,13 +525,51 @@ def _probably_confluence_url(value: str) -> bool:
     )
 
 
-def _safe_text_url_reference(value: str) -> str:
+def _safe_failure_source_url(value: object) -> str:
+    """Keep an identifying URL without credentials, fragments, or arbitrary query data."""
+
+    if not isinstance(value, str):
+        return ""
+    candidate = redact_log_text(value).strip()
+    if not candidate:
+        return ""
     try:
-        parts = urlsplit(value)
-        reference = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+        parts = urlsplit(candidate)
+        _validated_port = parts.port
     except ValueError:
-        reference = "URL"
-    return redact_log_text(reference)[:140] or "URL"
+        return ""
+    if parts.scheme.casefold() not in {"http", "https"} or not parts.hostname:
+        return ""
+
+    host = parts.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+
+    # A numeric Page ID identifies legacy viewpage.action links without
+    # retaining arbitrary query values that might hold credentials.
+    page_ids = parse_qs(parts.query).get("pageId", ())
+    safe_query = ""
+    if len(page_ids) == 1 and str(page_ids[0]).isdecimal():
+        safe_query = urlencode({"pageId": str(page_ids[0])})
+    reference = urlunsplit((parts.scheme.casefold(), host, parts.path, safe_query, ""))
+    return reference[:2048]
+
+
+def _source_url_from_record(raw_record: object) -> str:
+    if not isinstance(raw_record, Mapping):
+        return ""
+    source = _mapping(raw_record.get("source", raw_record.get("confluence")))
+    raw_url = _pick_many(
+        (source, raw_record),
+        "url",
+        "page_url",
+        "pageUrl",
+        "link",
+        default="",
+    )
+    return _safe_failure_source_url(raw_url)
 
 
 def _decode_document(
@@ -1263,12 +1348,15 @@ def _record_failure(
     record_number: int,
     page_id: str,
     reason: str,
+    *,
+    source_url: object = "",
 ) -> None:
     BookmarkImportFailure.objects.update_or_create(
         import_run=run,
         record_number=record_number,
         defaults={
             "page_id": page_id if page_id.isdecimal() and len(page_id) <= 64 else "",
+            "source_url": _safe_failure_source_url(source_url),
             "reason": _sanitize_failure_reason(reason),
         },
     )

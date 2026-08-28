@@ -373,6 +373,20 @@ def test_filtered_tree_renders_unmatched_bookmarked_ancestor_as_folder_context(l
     assert f'data-bookmark-id="{child.pk}"' in html
 
 
+def test_folder_rows_render_total_descendant_clicks_for_collapsed_tree(loopback_client):
+    first = _create_bookmark("812101", "First child")
+    second = _create_bookmark("812102", "Second child")
+    _set_bookmark_values(first, open_count=2)
+    _set_bookmark_values(second, open_count=9)
+
+    response = loopback_client.get(reverse("bookmark_manager:index"))
+    html = _html(response)
+
+    assert 'aria-label="11 total clicks across bookmarked pages in Knowledge"' in html
+    assert 'aria-label="11 total clicks across bookmarked pages in Cloud Architecture"' in html
+    assert "<strong>11</strong> clicks" in html
+
+
 def test_bookmark_timeline_context_paginates_without_rendering_sidebar_timeline(
     loopback_client,
 ):
@@ -481,6 +495,62 @@ def test_notes_and_tags_ajax_are_local_searchable_and_html_escaped(loopback_clie
     assert tag_search.context["query_result"].bookmarks == (bookmark,)
 
 
+def test_page_details_exposes_every_existing_tag_as_escaped_autocomplete_data(loopback_client):
+    selected = _create_bookmark()
+    another = _create_bookmark(page_id="730004", title="Another saved page")
+    _add_tag(selected, "Network Edge")
+    _add_tag(another, "Architecture")
+    Tag.objects.get_or_create_normalized("<Existing & reusable>")
+
+    response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"selected": selected.pk},
+    )
+    html = _html(response)
+
+    assert response.status_code == 200
+    assert set(response.context["tag_suggestions"]) == {
+        "Network Edge",
+        "Architecture",
+        "<Existing & reusable>",
+    }
+    assert 'role="combobox"' in html
+    assert 'aria-autocomplete="list"' in html
+    assert 'aria-haspopup="listbox"' in html
+    assert 'aria-controls="bookmark-tag-suggestion-list"' in html
+    assert 'id="bookmark-tag-suggestion-list"' in html
+    assert 'role="listbox"' in html
+    encoded = re.search(
+        r'<script id="bookmark-tag-suggestions-data" type="application/json">(.*?)</script>',
+        html,
+    )
+    assert encoded is not None
+    assert set(json.loads(encoded.group(1))) == {
+        "Network Edge",
+        "Architecture",
+        "<Existing & reusable>",
+    }
+    assert "\\u003CExisting \\u0026 reusable\\u003E" in encoded.group(1)
+
+
+def test_tag_autocomplete_is_comma_aware_and_keeps_free_form_tags(settings):
+    script = Path(settings.BASE_DIR, "static", "bookmark_manager", "bookmarks.js").read_text()
+
+    for hook in (
+        'document.querySelector("[data-tag-autocomplete]")',
+        'value.lastIndexOf(",", cursor - 1)',
+        'value.indexOf(",", cursor)',
+        "candidate.includes(query)",
+        ".slice(0, 8)",
+        'event.key === "ArrowDown"',
+        'event.key === "ArrowUp"',
+        'event.key === "Enter"',
+        'event.key === "Escape"',
+        "chooseTagSuggestion",
+    ):
+        assert hook in script
+
+
 def test_favorite_and_pin_ajax_actions_are_independent(loopback_client):
     bookmark = _create_bookmark()
 
@@ -571,6 +641,7 @@ def test_tree_opens_titles_shows_usage_and_keeps_quick_note_in_details(loopback_
 
     assert response.status_code == 200
     assert f'class="tree-open-form" method="post" action="/bookmarks/{bookmark.pk}/open/"' in html
+    assert '<button class="tree-node-link" type="submit"' in html
     assert f'aria-label="Open bookmark 1.1.1, {bookmark.title}"' in html
     assert "Open link ↗" not in html
     assert 'class="tree-quick-note"' not in html
@@ -582,6 +653,79 @@ def test_tree_opens_titles_shows_usage_and_keeps_quick_note_in_details(loopback_
     assert 'id="bookmark-organisation-form"' in html
     assert 'form="bookmark-organisation-form"' in html
     assert "Review the routing notes" in html
+
+
+def test_tree_folder_open_counts_roll_up_all_descendant_bookmarks_without_extra_queries(
+    django_assert_num_queries,
+):
+    root = _node_snapshot("741001", "Shared knowledge", space_key="ENG")
+    section = _node_snapshot("741002", "Architecture", space_key="ENG")
+    first = _create_bookmark(
+        page_id="741003",
+        title="Routing guide",
+        ancestors=(root, section),
+        space_key="ENG",
+    )
+    second = _create_bookmark(
+        page_id="741004",
+        title="Security guide",
+        ancestors=(root, section),
+        space_key="ENG",
+    )
+    _set_bookmark_values(first, open_count=2)
+    _set_bookmark_values(second, open_count=7)
+
+    # Only one leaf is visible, but a folder's count describes its complete local
+    # subtree rather than changing when a search hides another saved descendant.
+    query_result = views.query_bookmarks(views.BookmarkQuery(search="Routing guide"))
+    with django_assert_num_queries(1):
+        roots, _outline_numbers = views._tree_items(
+            query_result,
+            selected_pk=None,
+            located_pk=None,
+        )
+
+    root_item = next(item for item in roots if item.node.page_id == root.page_id)
+    section_item = next(item for item in root_item.children if item.node.page_id == section.page_id)
+    leaf_item = next(item for item in section_item.children if item.bookmark == first)
+
+    assert root_item.subtree_open_count == 9
+    assert section_item.subtree_open_count == 9
+    assert leaf_item.subtree_open_count == 2
+
+
+def test_tree_title_is_the_only_external_open_hit_target(loopback_client, settings):
+    bookmark = _create_bookmark()
+
+    response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"selected": bookmark.pk},
+    )
+    html = _html(response)
+    stylesheet = Path(
+        settings.BASE_DIR,
+        "static",
+        "bookmark_manager",
+        "bookmarks.css",
+    ).read_text()
+    open_form_rule = stylesheet.split(
+        ".bookmark-manager-shell .tree-open-form {",
+        1,
+    )[1].split("}", 1)[0]
+    title_button_rule = stylesheet.split(
+        ".bookmark-manager-shell .tree-node-link {",
+        1,
+    )[1].split("}", 1)[0]
+
+    assert f'data-tree-row\n        data-details-url="?selected={bookmark.pk}' in html
+    assert f'action="/bookmarks/{bookmark.pk}/open/" target="_blank"' in html
+    assert '<button class="tree-node-link" type="submit"' in html
+    assert "width: fit-content;" in open_form_rule
+    assert "max-width: 100%;" in open_form_rule
+    assert "justify-self: start;" in open_form_rule
+    assert "display: inline-block;" in title_button_rule
+    assert "width: auto;" in title_button_rule
+    assert "max-width: 100%;" in title_button_rule
 
 
 def test_refresh_failure_status_renders_wrapped_url_reason_and_dismiss_control(
@@ -615,6 +759,88 @@ def test_refresh_failure_status_renders_wrapped_url_reason_and_dismiss_control(
     assert 'aria-label="Dismiss refresh issues"' in html
     assert bookmark.url in html
     assert "Confluence did not return this page after 3 attempts." in html
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_label"),
+    (
+        (BookmarkRefreshStatus.SUCCEEDED, "Confluence refreshed"),
+        (BookmarkRefreshStatus.SUCCEEDED_WITH_ERRORS, "Confluence refreshed"),
+        (BookmarkRefreshStatus.FAILED, "Refresh needs attention"),
+        (BookmarkRefreshStatus.INTERRUPTED, "Refresh needs attention"),
+    ),
+)
+def test_terminal_refresh_status_on_initial_load_is_inactive(
+    loopback_client,
+    status,
+    expected_label,
+):
+    succeeded = int(status == BookmarkRefreshStatus.SUCCEEDED)
+    BookmarkRefreshRun.objects.create(
+        status=status,
+        total_bookmarks=1,
+        processed_bookmarks=1,
+        succeeded_bookmarks=succeeded,
+        failed_bookmarks=1 - succeeded,
+        completed_at=timezone.now(),
+    )
+
+    response = loopback_client.get(reverse("bookmark_manager:index"))
+    html = _html(response)
+
+    assert response.status_code == 200
+    assert "data-global-refresh\n                data-status-url=" in html
+    assert 'data-active="false"' in html
+    assert f'data-status="{status}"' in html
+    assert expected_label in html
+
+
+def test_global_refresh_javascript_schedules_one_reload_for_every_terminal_outcome(settings):
+    script = Path(settings.BASE_DIR, "static", "bookmark_manager", "bookmarks.js").read_text()
+    refresh_script = script.split(
+        'const globalRefresh = document.querySelector("[data-global-refresh]");',
+        1,
+    )[1].split("    const safeStorage = {", 1)[0]
+    submit_script = refresh_script.split(
+        'globalRefresh?.addEventListener("submit", async (event) => {',
+        1,
+    )[1]
+
+    # An active run rendered by the server and a run started on this page both
+    # become reload candidates. A terminal result rendered on the initial page
+    # does not, because data-active is false and renderGlobalRefresh is not called.
+    assert (
+        'let globalRefreshReloadPending = globalRefresh?.dataset.active === "true";'
+        in refresh_script
+    )
+    assert submit_script.index("globalRefreshReloadPending = true;") < submit_script.index(
+        "renderGlobalRefresh(payload.refresh);"
+    )
+
+    # Success, partial success, and final failures all finish the background run
+    # and therefore must refresh the bookmark names, text, dates, and status UI.
+    for terminal_status in (
+        '"succeeded"',
+        '"succeeded_with_errors"',
+        '"failed"',
+        '"interrupted"',
+    ):
+        assert (
+            terminal_status
+            in refresh_script.split(
+                "const globalRefreshTerminalStatuses = new Set([",
+                1,
+            )[1].split("]);", 1)[0]
+        )
+    assert "globalRefreshTerminalStatuses.has(status)" in refresh_script
+
+    # Polling can return the same terminal snapshot more than once, so the reload
+    # helper and the pending flag both guard the navigation as a one-shot action.
+    assert "if (globalRefreshReloadScheduled)" in refresh_script
+    assert "globalRefreshReloadScheduled = true;" in refresh_script
+    assert "globalRefreshReloadPending = false;" in refresh_script
+    assert refresh_script.count("reloadAfterGlobalRefresh();") == 1
+    assert refresh_script.count("window.location.reload()") == 1
 
 
 def test_confluence_people_column_counts_unique_pages_and_filters_by_name(loopback_client):
@@ -845,10 +1071,50 @@ def test_import_http_journey_returns_to_settings_and_renders_partial_result(
     assert "<dt>Rejected</dt><dd>1</dd>" in html
     assert "Record 2" in html
     assert "The record must be a JSON object." in html
+    assert "Failed URL:</strong> Unavailable for this record." in html
     assert "data-import-result" in html
     assert 'aria-label="Dismiss import result"' in html
     assert "data-dismiss-import-result" in html
     assert 'class="operation-failure-list"' in html
+
+
+def test_json_import_result_identifies_failed_record_with_sanitized_source_url(
+    loopback_client,
+):
+    upload = SimpleUploadedFile(
+        "failed-bookmark.json",
+        json.dumps(
+            [
+                {
+                    "page_id": "810099",
+                    "title": "Unsafe source URL",
+                    "url": (
+                        "https://username:password@confluence.example.invalid/"
+                        "wiki/pages/810099?token=private-token#private-fragment"
+                    ),
+                }
+            ]
+        ).encode("utf-8"),
+        content_type="application/json",
+    )
+
+    response = loopback_client.post(
+        reverse("bookmark_manager:import"),
+        {"import_file": upload, "return_to": "settings"},
+    )
+
+    assert response.status_code == 302
+    run = BookmarkImportRun.objects.get()
+    failure = run.failures.get()
+    assert failure.source_url == ("https://confluence.example.invalid/wiki/pages/810099")
+
+    html = _html(loopback_client.get(response["Location"]))
+    assert "Failed URL:" in html
+    assert "<code>https://confluence.example.invalid/wiki/pages/810099</code>" in html
+    assert "username" not in html
+    assert "username:password@" not in html
+    assert "private-token" not in html
+    assert "private-fragment" not in html
 
 
 def test_browser_style_async_json_import_passes_csrf_and_redirects_to_result():
@@ -957,7 +1223,7 @@ def test_text_import_http_journey_adds_valid_urls_and_reports_incomplete_ones(
     assert "Completed 1 of 2 extracted URLs" in html
     assert "incomplete or failed 1" in html
     assert "Review incomplete or failed URLs" in html
-    assert "example.com/guides/incomplete..." in html
+    assert "<code>https://example.com/guides/incomplete...</code>" in html
     assert "Incomplete or truncated URL" in html
 
 
@@ -1150,6 +1416,27 @@ def test_async_open_returns_only_a_validated_target_and_tracks_usage(loopback_cl
     assert bookmark.last_viewed_version == bookmark.version
 
 
+def test_page_details_copy_url_uses_compact_icon_and_one_second_feedback(loopback_client, settings):
+    bookmark = _create_bookmark()
+
+    response = loopback_client.get(reverse("bookmark_manager:index"), {"selected": bookmark.pk})
+    html = _html(response)
+    script = Path(settings.BASE_DIR, "static", "bookmark_manager", "bookmarks.js").read_text()
+
+    assert response.status_code == 200
+    assert f'data-copy-value="{bookmark.url}"' in html
+    assert 'class="copy-url-control"' in html
+    assert 'aria-label="Copy URL"' in html
+    assert 'title="Copy URL"' in html
+    assert 'data-copy-success="Copied"' in html
+    assert 'data-copy-default-label="Copy URL"' in html
+    assert "data-copy-feedback" in html
+    assert html.count('data-copy-default-label="Copy URL"') == 1
+    assert "const copyFeedbackTimers = new WeakMap()" in script
+    assert "if (!button.dataset.copyDefaultLabel)" in script
+    assert "window.setTimeout(() => resetCopyFeedback(button), 1000)" in script
+
+
 def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_client, settings):
     store = get_secret_store()
     assert isinstance(store, InMemorySecretStore)
@@ -1189,11 +1476,13 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert ">Page details</a>" not in html
     assert "data-tree-expand-all" in html
     assert "data-tree-collapse-all" in html
+    assert "data-tree-select-all" in html
+    assert 'aria-label="Select all bookmarks shown in the tree"' in html
     assert 'id="bulk-delete-bookmarks"' in html
     assert "data-delete-selected" in html
     assert 'data-delete-locked="true"' in html
     assert "🔒" in html
-    assert "bookmarks.js?v=workspace-ui-v11" in html
+    assert "bookmarks.js?v=workspace-ui-v15" in html
     assert f'name="bookmark_ids" value="{bookmark.pk}"' in html
     assert 'form="bulk-delete-bookmarks"' in html
     assert "data-productivity-form" in html
@@ -1208,6 +1497,11 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert html.index("detail-full-url") < html.index("detail-actions")
     assert f"<code>{bookmark.url}</code>" in html
     assert f'data-copy-value="{bookmark.url}"' in html
+    assert 'class="copy-url-control"' in html
+    assert 'aria-label="Copy URL"' in html
+    assert 'data-copy-success="Copied"' in html
+    assert 'data-copy-default-label="Copy URL"' in html
+    assert "data-copy-feedback" in html
     assert bookmark.url in html
     assert "<time datetime=" in html and 'tabindex="0"' in html
     sidebar = _sidebar_html(response)
@@ -1241,6 +1535,9 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
         'deleteSelectedButton.dataset.deleteLocked = "false"',
         'label.textContent = "Click again to delete"',
         "window.setTimeout(lockDeleteSelected, 10000)",
+        'selectAllCheckbox?.addEventListener("change"',
+        "selectAllCheckbox.indeterminate = count > 0",
+        "treeChecks.forEach((checkbox) => {",
         "[data-bookmark-import-form]",
         "Extracting URLs, checking Confluence Page IDs, and retrieving pages",
         "Retrieving the Confluence page, hierarchy, and searchable text",
@@ -1249,5 +1546,7 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
         "window.clearTimeout(searchTimer)",
         "element.textContent = payload.notes",
         "data-external-open-form",
+        "if (!button.dataset.copyDefaultLabel)",
+        "window.setTimeout(() => resetCopyFeedback(button), 1000)",
     ):
         assert hook in script

@@ -828,6 +828,7 @@ class BookmarkImportFailure(models.Model):
     )
     record_number = models.PositiveIntegerField()
     page_id = models.CharField(max_length=64, blank=True)
+    source_url = models.CharField(max_length=2048, blank=True)
     reason = models.CharField(max_length=500)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -851,18 +852,25 @@ class BookmarkImportFailure(models.Model):
         self.clean()
         update_fields = kwargs.get("update_fields")
         if update_fields is not None:
-            kwargs["update_fields"] = set(update_fields) | {"page_id", "reason"}
+            kwargs["update_fields"] = set(update_fields) | {
+                "page_id",
+                "source_url",
+                "reason",
+            }
         return super().save(*args, **kwargs)
 
     def clean(self) -> None:
         super().clean()
         self.page_id = _sanitized_single_line(self.page_id)
+        self.source_url = _sanitized_single_line(self.source_url)
         self.reason = _sanitized_single_line(self.reason, fallback="Invalid import record.")
         errors: dict[str, str] = {}
         if self.record_number < 1:
             errors["record_number"] = "Import record numbers start at one."
         if len(self.page_id) > self._meta.get_field("page_id").max_length:
             errors["page_id"] = "The Page ID in a failure cannot exceed 64 characters."
+        if len(self.source_url) > self._meta.get_field("source_url").max_length:
+            errors["source_url"] = "The source URL in a failure cannot exceed 2048 characters."
         if len(self.reason) > self._meta.get_field("reason").max_length:
             errors["reason"] = "The failure reason cannot exceed 500 characters."
         if errors:

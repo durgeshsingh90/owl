@@ -195,6 +195,7 @@ def test_import_failure_is_sanitized_ordered_and_unique_per_record():
         import_run=run,
         record_number=3,
         page_id="  300\n",
+        source_url="  https://confluence.example.invalid/pages/300\n",
         reason="Malformed\nrecord\tcontent",
     )
     first = BookmarkImportFailure.objects.create(
@@ -204,6 +205,7 @@ def test_import_failure_is_sanitized_ordered_and_unique_per_record():
     )
 
     assert third.page_id == "300"
+    assert third.source_url == "https://confluence.example.invalid/pages/300"
     assert third.reason == "Malformed record content"
     assert list(run.failures.all()) == [first, third]
 

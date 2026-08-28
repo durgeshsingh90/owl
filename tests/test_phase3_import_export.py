@@ -14,10 +14,18 @@ from bookmark_manager.models import (
     ConfluenceConfiguration,
     ConfluencePageNode,
 )
+from bookmark_manager.services import bookmark_application
+from bookmark_manager.services.bookmark_application import BookmarkActionError, save_bookmark_input
 from bookmark_manager.services.bookmark_domain import (
     ConfluenceNodeSnapshot,
     ConfluencePageSnapshot,
     upsert_bookmark,
+)
+from bookmark_manager.services.configuration import ActiveConfluenceProfile
+from bookmark_manager.services.confluence_adapter import (
+    ConfluencePage,
+    ConfluenceResult,
+    ConfluenceResultCode,
 )
 from bookmark_manager.services.confluence_validation import validate_confluence_origin
 from bookmark_manager.services.deletion import (
@@ -51,6 +59,7 @@ def test_text_import_extracts_unique_urls_and_continues_after_incomplete_conflue
     result = import_bookmarks_text(
         """
         Complete https://confluence.example.invalid/wiki/spaces/ENG/pages/910001/Complete
+        Recoverable https://confluence.example.invalid/wiki/spaces/ENG/pages/910002/Long-page-title...
         Truncated https://confluence.example.invalid/wiki/spac...
         Missing ID https://confluence.example.invalid/wiki/spaces/ENG/pages/
         Web https://example.com/guides/complete?view=all
@@ -62,20 +71,209 @@ def test_text_import_extracts_unique_urls_and_continues_after_incomplete_conflue
     )
 
     assert result.run.schema_version == "text-urls-v1"
-    assert result.run.total_records == 4
-    assert result.run.imported_records == 2
+    assert result.run.total_records == 5
+    assert result.run.imported_records == 3
     assert result.run.failed_records == 2
     assert result.run.status == BookmarkImportStatus.COMPLETED_WITH_FAILURES
     assert saved_urls == [
         "https://confluence.example.invalid/wiki/spaces/ENG/pages/910001/Complete",
+        "910002",
         "https://example.com/guides/complete?view=all",
     ]
     failures = list(result.run.failures.all())
-    assert [failure.record_number for failure in failures] == [2, 3]
-    assert "confluence.example.invalid/wiki/spac..." in failures[0].reason
-    assert "Incomplete or truncated URL" in failures[0].reason
-    assert "confluence.example.invalid/wiki/spaces/ENG/pages/" in failures[1].reason
-    assert "incomplete Confluence URL" in failures[1].reason
+    assert [failure.record_number for failure in failures] == [3, 4]
+    assert failures[0].source_url == "https://confluence.example.invalid/wiki/spac..."
+    assert "Incomplete Confluence URL" in failures[0].reason
+    assert failures[1].source_url == ("https://confluence.example.invalid/wiki/spaces/ENG/pages/")
+    assert "Incomplete Confluence URL" in failures[1].reason
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://confluence.example.invalid/wiki/spaces/ENG/pages/910003/Page-title…",
+        "https://confluence.example.invalid/wiki/pages/viewpage.action?pageId=910003...",
+    ],
+    ids=("modern-unicode-ellipsis", "legacy-query-ellipsis"),
+)
+def test_text_import_recovers_truncated_confluence_url_by_page_id(url):
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    saved_inputs = []
+
+    result = import_bookmarks_text(
+        f"Meeting link {url}",
+        bookmark_saver=lambda value: saved_inputs.append(value) or SimpleNamespace(created=True),
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert result.run.imported_records == 1
+    assert result.run.failed_records == 0
+    assert saved_inputs == ["910003"]
+
+
+def test_text_import_recovery_fetches_and_saves_authoritative_confluence_url(monkeypatch):
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    profile = ActiveConfluenceProfile(
+        origin=origin,
+        token="synthetic-text-import-token-never-valid",
+        auth_mode="bearer",
+        source="environment",
+    )
+    page = ConfluencePage(
+        page_id="910004",
+        title="Authoritative page title",
+        url=(
+            "https://confluence.example.invalid/wiki/spaces/ENG/pages/910004/"
+            "authoritative-page-title"
+        ),
+        space_key="ENG",
+        space_name="Engineering",
+        version=12,
+        created_at=datetime(2025, 1, 2, tzinfo=UTC),
+        updated_at=datetime(2026, 8, 28, tzinfo=UTC),
+        creator_name="Creator",
+        author_name="Author",
+        last_modifier_name="Modifier",
+        ancestors=(),
+        body_text="Fresh searchable Confluence page text",
+    )
+    requested_page_ids = []
+
+    def get_page(page_id):
+        requested_page_ids.append(page_id)
+        return ConfluenceResult(
+            ConfluenceResultCode.SUCCESS,
+            "Page loaded.",
+            page=page,
+        )
+
+    monkeypatch.setattr(
+        bookmark_application,
+        "get_active_profile",
+        lambda **_kwargs: profile,
+    )
+
+    result = import_bookmarks_text(
+        (
+            "https://confluence.example.invalid/wiki/spaces/ENG/pages/910004/"
+            "visible-title-was-cut-off..."
+        ),
+        profile_loader=lambda: profile,
+        bookmark_saver=lambda value: save_bookmark_input(
+            value,
+            client_factory=lambda _profile: SimpleNamespace(get_page=get_page),
+        ),
+    )
+
+    bookmark = Bookmark.objects.get(page_id="910004")
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert requested_page_ids == ["910004"]
+    assert bookmark.url == page.url
+    assert bookmark.canonical_url == page.url
+    assert bookmark.title == "Authoritative page title"
+    assert bookmark.page_text == "Fresh searchable Confluence page text"
+
+
+@pytest.mark.parametrize(
+    ("truncated_url", "reason_fragment"),
+    [
+        (
+            "https://other-confluence.example.invalid/wiki/spaces/ENG/pages/910003/"
+            "Outside+Origin...",
+            "configured Confluence origin",
+        ),
+        (
+            "https://confluence.example.invalid/spaces/ENG/pages/910004/Outside+Context...",
+            "configured Confluence path",
+        ),
+    ],
+)
+def test_text_import_does_not_recover_truncated_confluence_url_outside_profile(
+    truncated_url,
+    reason_fragment,
+):
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    complete_url = "https://example.com/guides/remaining"
+    saved_inputs = []
+
+    def saver(value):
+        saved_inputs.append(value)
+        return SimpleNamespace(created=True)
+
+    result = import_bookmarks_text(
+        f"Rejected {truncated_url}\nRemaining {complete_url}",
+        bookmark_saver=saver,
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED_WITH_FAILURES
+    assert result.run.imported_records == 1
+    assert result.run.failed_records == 1
+    assert saved_inputs == [complete_url]
+    failure = result.run.failures.get()
+    assert failure.source_url == truncated_url
+    assert reason_fragment in failure.reason
+
+
+def test_text_import_reports_unknown_confluence_page_and_continues_remaining_urls():
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    unknown_url = "https://confluence.example.invalid/wiki/spaces/ENG/pages/999999/Unknown+Page..."
+    web_url = "https://example.com/guides/remaining"
+    saved_inputs = []
+
+    def saver(value):
+        saved_inputs.append(value)
+        if value == "999999":
+            raise BookmarkActionError("not_found", "The Confluence page was not found.")
+        return SimpleNamespace(created=True)
+
+    result = import_bookmarks_text(
+        f"Unknown {unknown_url}\nRemaining {web_url}",
+        bookmark_saver=saver,
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED_WITH_FAILURES
+    assert result.run.imported_records == 1
+    assert result.run.failed_records == 1
+    assert saved_inputs == ["999999", web_url]
+    failure = result.run.failures.get()
+    assert failure.record_number == 1
+    assert failure.page_id == "999999"
+    assert failure.source_url == unknown_url
+    assert failure.reason == "The Confluence page was not found."
+
+
+def test_text_import_does_not_recover_truncated_non_confluence_url():
+    truncated_url = "https://example.com/guides/important-archi..."
+    complete_url = "https://example.com/guides/remaining"
+    saved_inputs = []
+
+    def saver(value):
+        saved_inputs.append(value)
+        return SimpleNamespace(created=True)
+
+    result = import_bookmarks_text(
+        f"Truncated {truncated_url}\nComplete {complete_url}",
+        bookmark_saver=saver,
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED_WITH_FAILURES
+    assert result.run.imported_records == 1
+    assert result.run.failed_records == 1
+    assert saved_inputs == [complete_url]
+    failure = result.run.failures.get()
+    assert failure.source_url == truncated_url
+    assert failure.reason == "Incomplete or truncated URL."
 
 
 @pytest.mark.parametrize(
@@ -185,6 +383,7 @@ def test_bmk_015_heterogeneous_import_continues_and_assigns_deterministic_number
         {
             "record_number": 4,
             "page_id": "",
+            "source_url": "",
             "reason": "The record must be a JSON object.",
         },
     )
@@ -413,7 +612,7 @@ def test_import_validates_utf8_size_and_sanitizes_failure_surfaces():
 
     assert result.failed_records == 1
     failure = BookmarkImportFailure.objects.get(import_run=result.run)
-    combined = f"{result.run.filename} {failure.page_id} {failure.reason}"
+    combined = f"{result.run.filename} {failure.page_id} {failure.source_url} {failure.reason}"
     assert "synthetic-failure-pat-never-valid-value" not in combined
     assert "[REDACTED]" in result.run.filename
 
@@ -430,6 +629,8 @@ def test_import_validates_utf8_size_and_sanitizes_failure_surfaces():
         ]
     )
     assert unsafe_url.failed_records == 1
+    unsafe_failure = BookmarkImportFailure.objects.get(import_run=unsafe_url.run)
+    assert unsafe_failure.source_url == ("https://confluence.example.invalid/wiki/pages/300")
     assert "synthetic-failure-pat-never-valid-value" not in json.dumps(
         unsafe_url.sanitized_failure_report()
     )

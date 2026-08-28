@@ -95,7 +95,7 @@
                         {% for failure in last_import_run.failures.all %}
                         <li>
                             <strong>Record {{ failure.record_number }}{% if failure.page_id %} · Page ID {{ failure.page_id }}{% endif %}</strong>
-                            {% if failure.url %}<code>{{ failure.url }}</code>{% elif failure.source_url %}<code>{{ failure.source_url }}</code>{% endif %}
+                            {% if failure.source_url %}<span><strong>Failed URL:</strong> <code>{{ failure.source_url }}</code></span>{% else %}<span><strong>Failed URL:</strong> Unavailable for this record.</span>{% endif %}
                             <span>{{ failure.reason }}</span>
                         </li>
                         {% endfor %}

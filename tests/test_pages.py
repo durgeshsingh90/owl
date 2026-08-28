@@ -127,13 +127,28 @@ def test_bookmark_manager_topbar_matches_the_app_workspace_contract(loopback_cli
     assert 'class="bookmark-app-title"' in html
     assert 'class="bookmark-topbar__actions"' in html
     assert "bookmark-connection-summary" not in html
-    assert "bookmarks.css?v=workspace-ui-v11" in html
+    assert "bookmarks.css?v=workspace-ui-v15" in html
     assert 'aria-label="Applications"' in html
     assert 'aria-label="Confluence settings"' in html
     assert "data-theme-toggle" in html
     assert html.count('id="main-content"') == 1
     assert '<header class="app-header">' not in html
     assert 'class="product-toolbar"' not in html
+
+
+def test_bookmark_manager_workspace_uses_minimal_edges_and_fills_page_height():
+    asset_path = finders.find("bookmark_manager/bookmarks.css")
+
+    assert asset_path is not None
+    with open(asset_path, encoding="utf-8") as stylesheet:
+        css = stylesheet.read()
+
+    assert "--bookmark-page-inline-edge: clamp(0.2rem, 0.35vw, 0.35rem);" in css
+    assert "padding-bottom: 0;" in css
+    assert "padding: 1.15rem var(--bookmark-page-inline-edge) 0;" in css
+    assert "flex: 1 0 500px;" in css
+    assert "padding: 0.4rem 0.25rem 0 !important;" in css
+    assert "padding: 0.4rem 0.15rem 0 0.35rem;" in css
 
 
 @pytest.mark.parametrize(

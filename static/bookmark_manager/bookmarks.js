@@ -443,8 +443,27 @@
     const globalRefreshLabel = globalRefresh?.querySelector("[data-global-refresh-label]");
     const globalRefreshTime = globalRefresh?.querySelector("[data-global-refresh-time]");
     const globalRefreshProgress = globalRefresh?.querySelector("[data-global-refresh-progress]");
+    const globalRefreshTerminalStatuses = new Set([
+        "succeeded",
+        "succeeded_with_errors",
+        "failed",
+        "interrupted",
+    ]);
     let globalRefreshPollTimer = null;
-    let globalRefreshWasActive = globalRefresh?.dataset.active === "true";
+    let globalRefreshReloadPending = globalRefresh?.dataset.active === "true";
+    let globalRefreshReloadScheduled = false;
+
+    const reloadAfterGlobalRefresh = () => {
+        if (globalRefreshReloadScheduled) {
+            return;
+        }
+        globalRefreshReloadScheduled = true;
+        if (globalRefreshPollTimer) {
+            window.clearTimeout(globalRefreshPollTimer);
+            globalRefreshPollTimer = null;
+        }
+        window.setTimeout(() => window.location.reload(), 250);
+    };
 
     const formatRefreshTimestamp = (value) => {
         if (!value) {
@@ -465,11 +484,12 @@
             return;
         }
         const active = Boolean(refresh.active);
+        const status = refresh.status || "idle";
         const total = Number(refresh.total) || 0;
         const processed = Number(refresh.processed) || 0;
         const progress = Math.max(0, Math.min(100, Number(refresh.progress) || 0));
         globalRefresh.dataset.active = String(active);
-        globalRefresh.dataset.status = refresh.status || "idle";
+        globalRefresh.dataset.status = status;
         globalRefreshButton.disabled = active;
         globalRefreshButton.toggleAttribute("aria-busy", active);
         globalRefreshSpinner.hidden = !active;
@@ -512,14 +532,19 @@
               "Refresh every saved Confluence page, hierarchy, metadata, and searchable text";
         renderRefreshFailures(refresh.failures || []);
 
-        if (globalRefreshWasActive && !active) {
+        if (
+            globalRefreshReloadPending &&
+            !active &&
+            globalRefreshTerminalStatuses.has(status)
+        ) {
+            globalRefreshReloadPending = false;
             announce(
-                refresh.status === "succeeded"
+                status === "succeeded"
                     ? `Confluence refresh completed: ${refresh.succeeded} bookmarks updated.`
                     : refresh.detail || "Confluence refresh completed with errors.",
             );
+            reloadAfterGlobalRefresh();
         }
-        globalRefreshWasActive = active;
     };
 
     const pollGlobalRefresh = async () => {
@@ -575,12 +600,15 @@
             if (!response.ok) {
                 throw new Error(payload.detail || "The refresh could not start.");
             }
+            globalRefreshReloadPending = true;
             renderGlobalRefresh(payload.refresh);
             announce(payload.detail || "Confluence refresh started in the background.");
-            if (globalRefreshPollTimer) {
-                window.clearTimeout(globalRefreshPollTimer);
+            if (!globalRefreshReloadScheduled) {
+                if (globalRefreshPollTimer) {
+                    window.clearTimeout(globalRefreshPollTimer);
+                }
+                globalRefreshPollTimer = window.setTimeout(pollGlobalRefresh, 500);
             }
-            globalRefreshPollTimer = window.setTimeout(pollGlobalRefresh, 500);
         } catch (error) {
             const detail = error instanceof Error ? error.message : "The refresh could not start.";
             if (globalRefreshLabel) {
@@ -728,6 +756,7 @@
 
     const treeChecks = Array.from(document.querySelectorAll("[data-tree-check]"));
     const checkedBookmarks = readJsonObject(checkedStorageKey);
+    const selectAllCheckbox = document.querySelector("[data-tree-select-all]");
     const selectionCount = document.querySelector("[data-tree-selection-count]");
     const deleteSelectedButton = document.querySelector("[data-delete-selected]");
     let deleteRelockTimer = null;
@@ -803,8 +832,10 @@
         }
     };
 
+    const bookmarkTreeChecks = () =>
+        treeChecks.filter((checkbox) => checkbox.dataset.bookmarkId);
     const selectedBookmarkChecks = () =>
-        treeChecks.filter((checkbox) => checkbox.dataset.bookmarkId && checkbox.checked);
+        bookmarkTreeChecks().filter((checkbox) => checkbox.checked);
 
     const lockDeleteSelected = () => {
         if (!deleteSelectedButton) {
@@ -835,7 +866,14 @@
     };
 
     const refreshSelectionControls = () => {
+        const bookmarkChecks = bookmarkTreeChecks();
         const count = selectedBookmarkChecks().length;
+        if (selectAllCheckbox) {
+            selectAllCheckbox.disabled = bookmarkChecks.length === 0;
+            selectAllCheckbox.checked =
+                bookmarkChecks.length > 0 && count === bookmarkChecks.length;
+            selectAllCheckbox.indeterminate = count > 0 && count < bookmarkChecks.length;
+        }
         if (selectionCount) {
             selectionCount.textContent = `${count} selected`;
         }
@@ -875,6 +913,24 @@
     persistCheckedBookmarks();
     refreshSelectionControls();
 
+    selectAllCheckbox?.addEventListener("change", () => {
+        treeChecks.forEach((checkbox) => {
+            checkbox.checked = selectAllCheckbox.checked;
+            checkbox.indeterminate = false;
+        });
+        Array.from(document.querySelectorAll("[data-tree-item]"))
+            .reverse()
+            .forEach(refreshItemAggregate);
+        persistCheckedBookmarks();
+        refreshSelectionControls();
+        const count = selectedBookmarkChecks().length;
+        announce(
+            count
+                ? `All ${count} shown bookmark${count === 1 ? "" : "s"} selected`
+                : "All shown bookmarks cleared",
+        );
+    });
+
     treeChecks.forEach((checkbox) => {
         checkbox.addEventListener("change", () => {
             const item = checkbox.closest("[data-tree-item]");
@@ -902,6 +958,180 @@
             }
         });
     });
+
+    const tagAutocomplete = document.querySelector("[data-tag-autocomplete]");
+    const tagInput = tagAutocomplete?.querySelector("#bookmark-organisation-tags");
+    const tagSuggestionList = tagAutocomplete?.querySelector("[data-tag-suggestion-list]");
+    const tagSuggestionData = tagAutocomplete?.querySelector("#bookmark-tag-suggestions-data");
+    let tagSuggestions = [];
+    let activeTagSuggestion = -1;
+
+    if (tagSuggestionData) {
+        try {
+            const parsedSuggestions = JSON.parse(tagSuggestionData.textContent || "[]");
+            tagSuggestions = Array.isArray(parsedSuggestions)
+                ? parsedSuggestions.filter((value) => typeof value === "string")
+                : [];
+        } catch (_error) {
+            tagSuggestions = [];
+        }
+    }
+
+    const normalizedTag = (value) =>
+        String(value || "")
+            .normalize("NFKC")
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLocaleLowerCase();
+
+    const activeTagToken = () => {
+        if (!(tagInput instanceof HTMLInputElement)) {
+            return null;
+        }
+        const value = tagInput.value;
+        const cursor = tagInput.selectionStart ?? value.length;
+        const start = value.lastIndexOf(",", cursor - 1) + 1;
+        const nextComma = value.indexOf(",", cursor);
+        const end = nextComma === -1 ? value.length : nextComma;
+        const segment = value.slice(start, end);
+        return {
+            end,
+            query: segment.trim(),
+            start,
+            leadingSpace: segment.match(/^\s*/)?.[0] || "",
+            trailingSpace: segment.match(/\s*$/)?.[0] || "",
+        };
+    };
+
+    const tagSuggestionButtons = () =>
+        Array.from(tagSuggestionList?.querySelectorAll("[data-tag-suggestion]") || []);
+
+    const hideTagSuggestions = () => {
+        if (tagSuggestionList) {
+            tagSuggestionList.hidden = true;
+            tagSuggestionList.replaceChildren();
+        }
+        activeTagSuggestion = -1;
+        tagInput?.setAttribute("aria-expanded", "false");
+        tagInput?.removeAttribute("aria-activedescendant");
+    };
+
+    const activateTagSuggestion = (index) => {
+        const buttons = tagSuggestionButtons();
+        if (!buttons.length || !(tagInput instanceof HTMLInputElement)) {
+            return;
+        }
+        activeTagSuggestion = (index + buttons.length) % buttons.length;
+        buttons.forEach((button, buttonIndex) => {
+            const active = buttonIndex === activeTagSuggestion;
+            button.setAttribute("aria-selected", String(active));
+            button.classList.toggle("is-active", active);
+        });
+        const activeButton = buttons[activeTagSuggestion];
+        tagInput.setAttribute("aria-activedescendant", activeButton.id);
+        activeButton.scrollIntoView({ block: "nearest" });
+    };
+
+    const chooseTagSuggestion = (tagName) => {
+        const token = activeTagToken();
+        if (!token || !(tagInput instanceof HTMLInputElement)) {
+            return;
+        }
+        const replacement = `${token.leadingSpace}${tagName}${token.trailingSpace}`;
+        tagInput.value =
+            tagInput.value.slice(0, token.start) + replacement + tagInput.value.slice(token.end);
+        const caret = token.start + token.leadingSpace.length + tagName.length;
+        tagInput.setSelectionRange(caret, caret);
+        tagInput.dispatchEvent(new Event("change", { bubbles: true }));
+        hideTagSuggestions();
+        tagInput.focus();
+    };
+
+    const renderTagSuggestions = () => {
+        const token = activeTagToken();
+        if (!token || !tagSuggestionList || !(tagInput instanceof HTMLInputElement)) {
+            return;
+        }
+        const query = normalizedTag(token.query);
+        if (!query) {
+            hideTagSuggestions();
+            return;
+        }
+        const selectedTags = new Set(
+            `${tagInput.value.slice(0, token.start)},${tagInput.value.slice(token.end)}`
+                .split(",")
+                .map(normalizedTag)
+                .filter(Boolean),
+        );
+        const matches = tagSuggestions
+            .filter((tagName) => {
+                const candidate = normalizedTag(tagName);
+                return candidate.includes(query) && !selectedTags.has(candidate);
+            })
+            .slice(0, 8);
+
+        tagSuggestionList.replaceChildren();
+        matches.forEach((tagName, index) => {
+            const option = document.createElement("button");
+            option.type = "button";
+            option.id = `bookmark-tag-suggestion-${index}`;
+            option.className = "tag-suggestion";
+            option.dataset.tagSuggestion = tagName;
+            option.setAttribute("role", "option");
+            option.setAttribute("aria-selected", "false");
+            option.textContent = tagName;
+            tagSuggestionList.append(option);
+        });
+        if (!matches.length) {
+            hideTagSuggestions();
+            return;
+        }
+        tagSuggestionList.hidden = false;
+        activeTagSuggestion = -1;
+        tagInput.setAttribute("aria-expanded", "true");
+        tagInput.removeAttribute("aria-activedescendant");
+    };
+
+    tagInput?.addEventListener("input", renderTagSuggestions);
+    tagInput?.addEventListener("focus", renderTagSuggestions);
+    tagInput?.addEventListener("keydown", (event) => {
+        const buttons = tagSuggestionButtons();
+        if (event.key === "Escape") {
+            hideTagSuggestions();
+            return;
+        }
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            if (!buttons.length) {
+                renderTagSuggestions();
+            }
+            const available = tagSuggestionButtons();
+            if (available.length) {
+                event.preventDefault();
+                const direction = event.key === "ArrowDown" ? 1 : -1;
+                const nextIndex =
+                    activeTagSuggestion < 0 && direction < 0
+                        ? available.length - 1
+                        : activeTagSuggestion + direction;
+                activateTagSuggestion(nextIndex);
+            }
+            return;
+        }
+        if (event.key === "Enter" && activeTagSuggestion >= 0) {
+            const selected = buttons[activeTagSuggestion];
+            if (selected?.dataset.tagSuggestion) {
+                event.preventDefault();
+                chooseTagSuggestion(selected.dataset.tagSuggestion);
+            }
+        }
+    });
+    tagSuggestionList?.addEventListener("pointerdown", (event) => event.preventDefault());
+    tagSuggestionList?.addEventListener("click", (event) => {
+        const option = event.target.closest("[data-tag-suggestion]");
+        if (option?.dataset.tagSuggestion) {
+            chooseTagSuggestion(option.dataset.tagSuggestion);
+        }
+    });
+    tagInput?.addEventListener("blur", () => window.setTimeout(hideTagSuggestions, 100));
 
     const refreshBookmarkPresentation = (payload) => {
         if (!payload.bookmark_id) {
@@ -1084,11 +1314,42 @@
         }
     };
 
+    const copyFeedbackTimers = new WeakMap();
+    const resetCopyFeedback = (button) => {
+        const defaultLabel = button.dataset.copyDefaultLabel;
+        button.classList.remove("is-copied");
+        if (defaultLabel) {
+            button.setAttribute("aria-label", defaultLabel);
+            button.title = defaultLabel;
+        }
+        copyFeedbackTimers.delete(button);
+    };
+
+    const showCopyFeedback = (button) => {
+        if (!button.dataset.copyDefaultLabel) {
+            return;
+        }
+        const previousTimer = copyFeedbackTimers.get(button);
+        if (previousTimer) {
+            window.clearTimeout(previousTimer);
+        }
+        const successLabel = button.dataset.copySuccess || "Copied";
+        button.classList.add("is-copied");
+        button.setAttribute("aria-label", successLabel);
+        button.title = successLabel;
+        copyFeedbackTimers.set(
+            button,
+            window.setTimeout(() => resetCopyFeedback(button), 1000),
+        );
+    };
+
     document.querySelectorAll("[data-copy-value]").forEach((button) => {
         button.addEventListener("click", async () => {
             try {
                 await copyText(button.dataset.copyValue || "");
-                announce(button.dataset.copySuccess || "Copied");
+                const successLabel = button.dataset.copySuccess || "Copied";
+                showCopyFeedback(button);
+                announce(successLabel);
             } catch (_error) {
                 announce("Copy was not available. Select the value and copy it manually.");
             }
