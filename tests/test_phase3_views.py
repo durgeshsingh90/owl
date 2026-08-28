@@ -941,6 +941,7 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert "data-tree-collapse-all" in html
     assert 'id="bulk-delete-bookmarks"' in html
     assert "data-delete-selected" in html
+    assert "bookmarks.js?v=tree-bulk-delete-v2" in html
     assert f'name="bookmark_ids" value="{bookmark.pk}"' in html
     assert 'form="bulk-delete-bookmarks"' in html
     assert "data-productivity-form" in html
