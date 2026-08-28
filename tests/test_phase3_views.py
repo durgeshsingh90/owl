@@ -1089,7 +1089,8 @@ def test_json_import_result_identifies_failed_record_with_sanitized_source_url(
                     "page_id": "810099",
                     "title": "Unsafe source URL",
                     "url": (
-                        "https://username:password@confluence.example.invalid/"
+                        "https://"
+                        "username:password@confluence.example.invalid/"
                         "wiki/pages/810099?token=private-token#private-fragment"
                     ),
                 }

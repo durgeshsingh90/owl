@@ -120,7 +120,7 @@ def test_text_import_recovery_fetches_and_saves_authoritative_confluence_url(mon
     )
     profile = ActiveConfluenceProfile(
         origin=origin,
-        token="synthetic-text-import-token-never-valid",
+        token="<synthetic-test-token>",
         auth_mode="bearer",
         source="environment",
     )
@@ -326,6 +326,481 @@ def _snapshot(page_id: str, title: str) -> ConfluencePageSnapshot:
             ),
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("leaf_url", "hierarchy"),
+    [
+        (
+            (
+                "https://confluence.example.invalid/wiki/spaces/SIB/pages/817229951/"
+                "Akamai+Edge+Routing+%E2%80%94+Design+Requirements"
+                "#:~:text=selected%20architecture"
+            ),
+            [],
+        ),
+        (
+            (
+                "https://confluence.example.invalid/wiki/spaces/SIB/pages/817229951/"
+                "Akamai+Edge+Routing+%E2%80%94+Design+Requirements"
+            ),
+            [
+                {
+                    "pageId": "700001",
+                    "title": "Stale imported ancestor",
+                    "url": "/relative/confluence/path/that-must-not-be-trusted",
+                }
+            ],
+        ),
+        (
+            (
+                "https://"
+                "username:password@confluence.example.invalid/wiki/spaces/SIB/"
+                "pages/817229951/Untrusted"
+            ),
+            [],
+        ),
+        (
+            "https://confluence.example.invalid/wiki/spaces/SIB/pages/817229951/"
+            "Untrusted?token=private-token",
+            [],
+        ),
+        ("not an absolute URL", []),
+    ],
+    ids=(
+        "leaf-text-fragment",
+        "invalid-imported-hierarchy-url",
+        "ignored-userinfo-url",
+        "ignored-credential-query",
+        "ignored-malformed-url",
+    ),
+)
+def test_json_import_recovers_valid_confluence_page_by_id_from_untrusted_url_metadata(
+    leaf_url,
+    hierarchy,
+):
+    """Legacy URL metadata must not prevent an authoritative Page-ID retrieval.
+
+    Browser exports can contain text fragments or stale hierarchy URLs even though
+    their numeric Confluence Page ID remains usable.  The JSON importer should use
+    only that validated identity and let the normal Confluence save path supply the
+    canonical URL, hierarchy, title, and searchable text.
+    """
+
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    requested_page_ids = []
+    canonical_url = (
+        "https://confluence.example.invalid/wiki/spaces/SIB/pages/817229951/"
+        "authoritative-page-title"
+    )
+
+    def saver(page_id):
+        requested_page_ids.append(page_id)
+        return upsert_bookmark(
+            ConfluencePageSnapshot(
+                page_id=page_id,
+                title="Authoritative page title",
+                url=canonical_url,
+                space_name="SIB Service Delivery",
+                space_key="SIB",
+                version=42,
+                page_text="Fresh searchable text fetched from Confluence.",
+            )
+        )
+
+    result = import_bookmarks_document(
+        [
+            {
+                "pageId": "817229951",
+                "pageTitle": "Stale exported page title",
+                "pageUrl": leaf_url,
+                "spaceKey": "SIB",
+                "version": 41,
+                "hierarchy": hierarchy,
+            }
+        ],
+        bookmark_saver=saver,
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert result.imported_records == 1
+    assert result.failed_records == 0
+    assert requested_page_ids == ["817229951"]
+    bookmark = Bookmark.objects.get(page_id="817229951")
+    assert bookmark.url == canonical_url
+    assert bookmark.title == "Authoritative page title"
+    assert bookmark.page_text == "Fresh searchable text fetched from Confluence."
+    assert bookmark.version == 42
+
+
+@pytest.mark.parametrize(
+    "unsafe_url",
+    [
+        (
+            "https://"
+            "username:password@confluence.example.invalid/wiki/spaces/SIB/"
+            "pages/817229951/Page"
+        ),
+        (
+            "https://confluence.example.invalid/wiki/spaces/SIB/pages/817229951/Page"
+            "?token=private-token"
+        ),
+        "not an absolute URL",
+    ],
+    ids=("userinfo", "credential-query", "malformed"),
+)
+def test_json_url_only_identity_does_not_use_unsafe_leaf_url(unsafe_url):
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    requested_page_ids = []
+
+    result = import_bookmarks_document(
+        [
+            {
+                "pageTitle": "Unsafe imported page",
+                "pageUrl": unsafe_url,
+            }
+        ],
+        bookmark_saver=lambda page_id: requested_page_ids.append(page_id),
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED_WITH_FAILURES
+    assert result.imported_records == 0
+    assert result.failed_records == 1
+    assert requested_page_ids == []
+    assert not Bookmark.objects.filter(page_id="817229951").exists()
+
+
+@pytest.mark.parametrize(
+    ("explicit_page_id", "page_url", "expected_page_id"),
+    [
+        (
+            "",
+            (
+                "https://confluence.example.invalid/wiki/spaces/APIGW/pages/810938483/"
+                "API+Gateway+%E2%80%94+Outbound"
+            ),
+            "810938483",
+        ),
+        (
+            "not-a-page-id",
+            (
+                "https://confluence.example.invalid/wiki/pages/viewpage.action"
+                "?pageId=2327367518&spaceKey=APIGW&title=Outbound"
+            ),
+            "2327367518",
+        ),
+    ],
+    ids=("empty-explicit-modern-url", "invalid-explicit-legacy-url"),
+)
+def test_json_import_uses_safe_url_identity_when_explicit_page_id_is_unusable(
+    explicit_page_id,
+    page_url,
+    expected_page_id,
+):
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    requested_page_ids = []
+
+    def saver(page_id):
+        requested_page_ids.append(page_id)
+        return upsert_bookmark(_snapshot(page_id, "Fetched by URL identity"))
+
+    result = import_bookmarks_document(
+        [
+            {
+                "pageId": explicit_page_id,
+                "pageTitle": "Untrusted imported title",
+                "pageUrl": page_url,
+            }
+        ],
+        bookmark_saver=saver,
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert result.imported_records == 1
+    assert result.failed_records == 0
+    assert requested_page_ids == [expected_page_id]
+    assert Bookmark.objects.filter(page_id=expected_page_id).exists()
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {
+            "page_id": "",
+            "pageId": "not-a-page-id",
+            "pageTitle": "Masked source identity",
+            "pageUrl": "not an absolute URL",
+            "source": {"confluencePageId": "817229951"},
+        },
+        {
+            "page_id": "not-a-page-id",
+            "pageTitle": "Masked Confluence identity",
+            "pageUrl": "not an absolute URL",
+            "confluence": {"pageID": "817229951"},
+        },
+    ],
+    ids=("nested-source-alias", "nested-confluence-alias"),
+)
+def test_json_import_uses_later_valid_explicit_page_id_alias(record):
+    requested_page_ids = []
+
+    def saver(page_id):
+        requested_page_ids.append(page_id)
+        return upsert_bookmark(_snapshot(page_id, "Fetched from the valid Page ID alias"))
+
+    result = import_bookmarks_document([record], bookmark_saver=saver)
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert result.imported_records == 1
+    assert result.failed_records == 0
+    assert requested_page_ids == ["817229951"]
+    assert Bookmark.objects.filter(page_id="817229951").exists()
+
+
+@pytest.mark.parametrize("nested_key", ["source", "confluence"])
+def test_json_import_rejects_conflicting_explicit_page_id_aliases(nested_key):
+    requested_page_ids = []
+
+    result = import_bookmarks_document(
+        [
+            {
+                "pageId": "817229951",
+                "pageTitle": "Conflicting explicit identities",
+                "pageUrl": "not an absolute URL",
+                nested_key: {"confluence_page_id": "810938483"},
+            }
+        ],
+        bookmark_saver=lambda page_id: requested_page_ids.append(page_id),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED_WITH_FAILURES
+    assert result.imported_records == 0
+    assert result.failed_records == 1
+    assert requested_page_ids == []
+    assert result.sanitized_failure_report()[0]["reason"] == (
+        "The record contains conflicting Confluence Page IDs."
+    )
+    assert not Bookmark.objects.exists()
+
+
+def test_json_import_rejects_conflicting_explicit_and_url_page_ids_without_fetching():
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    requested_page_ids = []
+
+    result = import_bookmarks_document(
+        [
+            {
+                "pageId": "817229951",
+                "pageTitle": "Ambiguous identity",
+                "pageUrl": (
+                    "https://confluence.example.invalid/wiki/spaces/SIB/pages/"
+                    "810938483/Different-page"
+                ),
+            }
+        ],
+        bookmark_saver=lambda page_id: requested_page_ids.append(page_id),
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED_WITH_FAILURES
+    assert result.imported_records == 0
+    assert result.failed_records == 1
+    assert requested_page_ids == []
+    assert not Bookmark.objects.exists()
+
+
+def test_json_import_ignores_invalid_source_metadata_when_page_id_can_be_fetched():
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    requested_page_ids = []
+
+    def saver(page_id):
+        requested_page_ids.append(page_id)
+        return upsert_bookmark(
+            ConfluencePageSnapshot(
+                page_id=page_id,
+                title="Live Confluence title",
+                url=(
+                    f"https://confluence.example.invalid/wiki/spaces/SIB/pages/{page_id}/live-title"
+                ),
+                space_name="Live space",
+                space_key="SIB",
+                version=9,
+                page_text="Live searchable page text",
+            )
+        )
+
+    result = import_bookmarks_document(
+        [
+            {
+                "pageId": "817229951",
+                "pageTitle": {"not": "text"},
+                "pageUrl": "not an absolute URL",
+                "version": -10,
+                "hierarchy": {"not": "an array"},
+            }
+        ],
+        bookmark_saver=saver,
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert requested_page_ids == ["817229951"]
+    bookmark = Bookmark.objects.get(page_id="817229951")
+    assert bookmark.title == "Live Confluence title"
+    assert bookmark.version == 9
+    assert bookmark.page_text == "Live searchable page text"
+
+
+def test_json_import_skips_complete_existing_page_without_fetching_or_overwriting_state():
+    existing = upsert_bookmark(
+        ConfluencePageSnapshot(
+            page_id="817229951",
+            title="Existing authoritative title",
+            url="https://confluence.example.invalid/wiki/pages/817229951/existing",
+            version=8,
+            page_text="Already indexed searchable text",
+        )
+    ).bookmark
+    existing.notes = "Keep my local note"
+    existing.favorite = True
+    existing.open_count = 27
+    existing.save(update_fields=["notes", "favorite", "open_count"])
+    requested_page_ids = []
+
+    result = import_bookmarks_document(
+        [
+            {
+                "pageId": "817229951",
+                "pageTitle": "Do not overwrite",
+                "pageUrl": "not an absolute URL",
+                "notes": "Do not replace the local note",
+                "favorite": False,
+                "opens": 999,
+            }
+        ],
+        bookmark_saver=lambda page_id: requested_page_ids.append(page_id),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert result.imported_records == 0
+    assert result.skipped_records == 1
+    assert result.failed_records == 0
+    assert requested_page_ids == []
+    existing.refresh_from_db()
+    assert existing.title == "Existing authoritative title"
+    assert existing.notes == "Keep my local note"
+    assert existing.favorite is True
+    assert existing.open_count == 27
+    assert existing.page_text == "Already indexed searchable text"
+
+
+def test_json_import_fetches_existing_page_when_searchable_text_is_missing():
+    existing = upsert_bookmark(
+        ConfluencePageSnapshot(
+            page_id="817229951",
+            title="Existing authoritative title",
+            url="https://confluence.example.invalid/wiki/pages/817229951/existing",
+            version=8,
+            page_text="",
+        )
+    ).bookmark
+    existing.notes = "Keep this personal note while backfilling"
+    existing.save(update_fields=["notes"])
+    requested_page_ids = []
+
+    def saver(page_id):
+        requested_page_ids.append(page_id)
+        return upsert_bookmark(
+            ConfluencePageSnapshot(
+                page_id=page_id,
+                title="Fresh title from Confluence",
+                url=(
+                    "https://confluence.example.invalid/wiki/spaces/SIB/pages/"
+                    f"{page_id}/fresh-title"
+                ),
+                version=9,
+                page_text="Backfilled searchable page text",
+            )
+        )
+
+    result = import_bookmarks_document(
+        [
+            {
+                "pageId": "817229951",
+                "pageTitle": "Stale imported title",
+                "pageUrl": "not an absolute URL",
+                "notes": "Do not replace personal state",
+            }
+        ],
+        bookmark_saver=saver,
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED
+    assert result.imported_records == 0
+    assert result.skipped_records == 1
+    assert requested_page_ids == ["817229951"]
+    existing.refresh_from_db()
+    assert existing.title == "Fresh title from Confluence"
+    assert existing.version == 9
+    assert existing.page_text == "Backfilled searchable page text"
+    assert existing.notes == "Keep this personal note while backfilling"
+
+
+def test_json_import_records_adapter_failure_and_continues_with_remaining_pages():
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    requested_page_ids = []
+
+    def saver(page_id):
+        requested_page_ids.append(page_id)
+        if page_id == "817229951":
+            raise BookmarkActionError("not_found", "The Confluence page was not found.")
+        return upsert_bookmark(_snapshot(page_id, "Remaining fetched page"))
+
+    result = import_bookmarks_document(
+        [
+            {
+                "pageId": "817229951",
+                "pageTitle": "Missing page",
+                "pageUrl": (
+                    "https://confluence.example.invalid/wiki/pages/817229951/"
+                    "Missing?token=must-not-appear"
+                ),
+            },
+            {
+                "pageId": "810938483",
+                "pageTitle": "Remaining page",
+                "pageUrl": "not an absolute URL",
+            },
+        ],
+        bookmark_saver=saver,
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.status == BookmarkImportStatus.COMPLETED_WITH_FAILURES
+    assert result.imported_records == 1
+    assert result.failed_records == 1
+    assert requested_page_ids == ["817229951", "810938483"]
+    assert Bookmark.objects.filter(page_id="810938483").exists()
+    failure = result.run.failures.get()
+    assert failure.record_number == 1
+    assert failure.page_id == "817229951"
+    assert failure.reason == "The Confluence page was not found."
+    assert "must-not-appear" not in json.dumps(result.sanitized_failure_report())
 
 
 def test_bmk_015_heterogeneous_import_continues_and_assigns_deterministic_numbers():

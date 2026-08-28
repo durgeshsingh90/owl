@@ -141,6 +141,16 @@ python manage.py runserver
 `python --version` must report Python 3.13.x or 3.14.x. The activated interpreter shown by
 `where python` should be the `.venv\Scripts\python.exe` inside this checkout.
 
+After pulling a newer OWL version on Windows, update the database schema before restarting the
+app. This preserves your bookmarks while adding any columns required by the newer code:
+
+```bat
+git pull
+.venv\Scripts\activate.bat
+python manage.py migrate
+python manage.py runserver
+```
+
 The first start creates a strong machine-local Django key under `var/secrets/` when
 `DJANGO_SECRET_KEY` is blank. The key and the entire `var/` directory are ignored by Git.
 

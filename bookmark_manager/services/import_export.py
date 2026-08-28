@@ -19,12 +19,14 @@ from pathlib import PurePosixPath
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 from django.db import IntegrityError, transaction
+from django.db.models import F
 from django.utils import timezone
 
 from bookmark_manager.models import (
     Bookmark,
     BookmarkActivityType,
     BookmarkAvailability,
+    BookmarkDailyActivity,
     BookmarkImportFailure,
     BookmarkImportRun,
     BookmarkImportStatus,
@@ -54,7 +56,10 @@ MAX_TEXT_IMPORT_URLS = 5_000
 _MISSING = object()
 _SAFE_ERROR_CODE = re.compile(r"^[A-Za-z0-9_.-]*$")
 _SENSITIVE_QUERY_KEY = re.compile(
-    r"(?i)(?:auth|authorization|cookie|credential|key|pass|pat|secret|session|token)"
+    r"(?ix)^(?:"
+    r"auth|authorization|cookie|credential|key|pass|password|pat|secret|session|token|"
+    r"api[_-]?key|access[_-]?token|refresh[_-]?token|private[_-]?key"
+    r")$"
 )
 _PAGE_PATH_PATTERNS = (
     re.compile(r"/(?:pages|content)/0*([1-9][0-9]*)(?:/|$)", re.IGNORECASE),
@@ -157,6 +162,16 @@ class _NormalizedRecord:
     canonical_owl_number: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedJsonRecord:
+    record_number: int
+    raw: object
+    source_url: str
+    normalized: _NormalizedRecord | None
+    normalization_error: str
+    legacy_order: tuple[datetime, int]
+
+
 def export_bookmarks_document(*, generated_at: datetime | None = None) -> dict[str, object]:
     """Return a complete versioned bookmark export containing no configuration.
 
@@ -204,8 +219,17 @@ def import_bookmarks_document(
     imported_at: datetime | None = None,
     batch_size: int = 100,
     max_bytes: int = MAX_IMPORT_BYTES,
+    bookmark_saver=None,
+    profile_loader=None,
 ) -> BookmarkImportResult:
-    """Safely merge one current or legacy JSON collection into the local database."""
+    """Safely merge one current or legacy JSON collection into the local database.
+
+    Signed OWL exports remain an offline, deterministic restore format.  Legacy JSON
+    records use their validated numeric Confluence identity when a connection is
+    available, allowing the normal save path to retrieve the authoritative title,
+    URL, hierarchy, and searchable page text instead of trusting stale source
+    metadata from an older export.
+    """
 
     normalized_batch_size = _bounded_document_integer(
         batch_size,
@@ -225,6 +249,11 @@ def import_bookmarks_document(
     document, source_bytes = _decode_document(payload, max_bytes=normalized_max_bytes)
     records, schema_version = _extract_records(document)
     _verify_current_export(document)
+    current_owl_export = bool(
+        isinstance(document, Mapping)
+        and document.get("document_type") == DOCUMENT_TYPE
+        and document.get("schema_version") == EXPORT_SCHEMA_VERSION
+    )
     safe_filename = _safe_filename(filename)
     source_sha256 = hashlib.sha256(source_bytes).hexdigest()
 
@@ -237,80 +266,169 @@ def import_bookmarks_document(
         started_at=import_time,
     )
 
-    normalized: list[_NormalizedRecord] = []
+    saver = bookmark_saver or save_bookmark_input
+    load_profile = profile_loader or get_active_profile
+    profile_loaded = False
+    profile = None
+    profile_error = ""
+
+    def active_profile():
+        nonlocal profile_loaded, profile, profile_error
+        if not profile_loaded:
+            profile_loaded = True
+            try:
+                profile = load_profile()
+            except ConfigurationUnavailable:
+                profile_error = "Connect Confluence to retrieve this JSON record from its Page ID."
+        return profile
+
+    prepared: list[_PreparedJsonRecord] = []
     for record_number, raw_record in enumerate(records, start=1):
         source_url = _source_url_from_record(raw_record)
         try:
-            normalized.append(_normalize_record(raw_record, record_number=record_number))
+            normalized_record = _normalize_record(raw_record, record_number=record_number)
         except ImportRecordError as exc:
-            _record_failure(
-                run,
-                record_number,
-                "",
-                str(exc),
-                source_url=source_url,
-            )
+            normalized_record = None
+            normalization_error = str(exc)
         except Exception:
-            _record_failure(
-                run,
-                record_number,
-                "",
-                "The record could not be normalized safely.",
+            normalized_record = None
+            normalization_error = "The record could not be normalized safely."
+        else:
+            normalization_error = ""
+        prepared.append(
+            _PreparedJsonRecord(
+                record_number=record_number,
+                raw=raw_record,
                 source_url=source_url,
+                normalized=normalized_record,
+                normalization_error=normalization_error,
+                legacy_order=_legacy_json_import_order(raw_record, record_number),
             )
+        )
 
-    if schema_version == str(EXPORT_SCHEMA_VERSION):
-        normalized.sort(
-            key=lambda record: (
-                record.canonical_owl_number is None,
-                record.canonical_owl_number or record.record_number,
-                record.record_number,
+    if current_owl_export:
+        prepared.sort(
+            key=lambda item: (
+                item.normalized is None,
+                item.normalized.canonical_owl_number is None if item.normalized else True,
+                (
+                    item.normalized.canonical_owl_number or item.record_number
+                    if item.normalized
+                    else item.record_number
+                ),
+                item.record_number,
             )
         )
     else:
-        normalized.sort(key=_legacy_import_order)
+        prepared.sort(key=lambda item: item.legacy_order)
 
     imported = 0
     skipped = 0
-    processed = run.failed_records
-    for normalized_record in normalized:
+    custom_saver = bookmark_saver is not None
+    for processed, item in enumerate(prepared, start=1):
+        page_id = item.normalized.page_id if item.normalized is not None else ""
         try:
-            with transaction.atomic():
-                created = _merge_record(
-                    normalized_record,
-                    run=run,
-                    imported_at=import_time,
-                )
-        except ImportRecordError as exc:
+            if current_owl_export:
+                if item.normalized is None:
+                    raise ImportRecordError(item.normalization_error)
+                with transaction.atomic():
+                    created = _merge_record(
+                        item.normalized,
+                        run=run,
+                        imported_at=import_time,
+                    )
+            else:
+                explicit_page_id = _explicit_legacy_json_page_id(item.raw)
+                if explicit_page_id is not None:
+                    page_id = _validated_explicit_legacy_json_page_id(
+                        item.raw,
+                        explicit_page_id,
+                    )
+                elif item.normalized is None and not isinstance(item.raw, Mapping):
+                    raise ImportRecordError(item.normalization_error)
+                existing = Bookmark.objects.filter(page_id=page_id).first() if page_id else None
+                if existing is not None and existing.page_text:
+                    created = False
+                else:
+                    loaded_profile = (
+                        active_profile() if explicit_page_id is None or not custom_saver else None
+                    )
+                    if explicit_page_id is None and loaded_profile is not None:
+                        page_id = _validated_url_only_legacy_json_page_id(
+                            item.raw,
+                            loaded_profile.origin,
+                        )
+                    elif item.normalized is not None:
+                        page_id = item.normalized.page_id
+
+                    can_fetch = explicit_page_id is not None and (
+                        custom_saver or loaded_profile is not None
+                    )
+                    can_fetch = can_fetch or (
+                        explicit_page_id is None and loaded_profile is not None
+                    )
+                    if can_fetch:
+                        save_result = saver(page_id)
+                        if item.normalized is None:
+                            created = _apply_authoritative_import_state_from_raw(
+                                save_result,
+                                item.raw,
+                                run=run,
+                                record_number=item.record_number,
+                                imported_at=import_time,
+                                requested_page_id=page_id,
+                            )
+                        else:
+                            created = _apply_authoritative_import_state(
+                                save_result,
+                                item.normalized,
+                                run=run,
+                                imported_at=import_time,
+                                requested_page_id=page_id,
+                            )
+                    elif item.normalized is not None:
+                        # Backward-compatible offline import when no Confluence
+                        # profile is available and the legacy record is self-contained.
+                        with transaction.atomic():
+                            created = _merge_record(
+                                item.normalized,
+                                run=run,
+                                imported_at=import_time,
+                            )
+                    else:
+                        raise ImportRecordError(
+                            profile_error
+                            or "Connect Confluence to retrieve this JSON record from its Page ID."
+                        )
+        except (BookmarkActionError, ImportRecordError, PageInputError) as exc:
             _record_failure(
                 run,
-                normalized_record.record_number,
-                normalized_record.page_id,
+                item.record_number,
+                page_id,
                 str(exc),
-                source_url=normalized_record.url,
+                source_url=item.source_url,
             )
         except IntegrityError:
             _record_failure(
                 run,
-                normalized_record.record_number,
-                normalized_record.page_id,
+                item.record_number,
+                page_id,
                 "The record conflicts with existing bookmark data.",
-                source_url=normalized_record.url,
+                source_url=item.source_url,
             )
         except Exception:
             _record_failure(
                 run,
-                normalized_record.record_number,
-                normalized_record.page_id,
+                item.record_number,
+                page_id,
                 "The record could not be imported safely.",
-                source_url=normalized_record.url,
+                source_url=item.source_url,
             )
         else:
             if created:
                 imported += 1
             else:
                 skipped += 1
-        processed += 1
         if processed % normalized_batch_size == 0:
             _update_run_progress(run, processed, imported, skipped)
 
@@ -561,14 +679,7 @@ def _source_url_from_record(raw_record: object) -> str:
     if not isinstance(raw_record, Mapping):
         return ""
     source = _mapping(raw_record.get("source", raw_record.get("confluence")))
-    raw_url = _pick_many(
-        (source, raw_record),
-        "url",
-        "page_url",
-        "pageUrl",
-        "link",
-        default="",
-    )
+    raw_url = _record_url_value(source, raw_record)
     return _safe_failure_source_url(raw_url)
 
 
@@ -684,7 +795,7 @@ def _normalize_record(raw: object, *, record_number: int) -> _NormalizedRecord:
         "confluencePageId",
         default=_MISSING,
     )
-    raw_url = _pick_many((source, raw), "url", "page_url", "pageUrl", "link", default="")
+    raw_url = _record_url_value(source, raw)
     if raw_page_id is _MISSING:
         raw_page_id = _page_id_from_url(raw_url)
     if raw_page_id is _MISSING:
@@ -921,6 +1032,367 @@ def _merge_record(
     )
     _set_tags(bookmark, record.tags)
     return True
+
+
+def _explicit_legacy_json_page_id(raw: object) -> str | None:
+    if not isinstance(raw, Mapping):
+        return None
+    mappings = (
+        raw,
+        _mapping(raw.get("source")),
+        _mapping(raw.get("confluence")),
+    )
+    valid_page_ids: set[str] = set()
+    for mapping in mappings:
+        for field_name in (
+            "page_id",
+            "pageId",
+            "pageID",
+            "confluence_page_id",
+            "confluencePageId",
+        ):
+            raw_value = mapping.get(field_name, _MISSING)
+            if raw_value in (_MISSING, None, ""):
+                continue
+            try:
+                valid_page_ids.add(normalize_page_id(raw_value))
+            except (InvalidPageIdentity, TypeError):
+                continue
+    if len(valid_page_ids) > 1:
+        raise ImportRecordError("The record contains conflicting Confluence Page IDs.")
+    return next(iter(valid_page_ids), None)
+
+
+def _validated_explicit_legacy_json_page_id(raw: object, explicit_page_id: str) -> str:
+    """Accept a numeric imported identity but reject a second conflicting one."""
+
+    if not isinstance(raw, Mapping):
+        raise ImportRecordError("The record must be a JSON object.")
+    source = _mapping(raw.get("source", raw.get("confluence")))
+    url_page_id = _page_id_from_url(_record_url_value(source, raw))
+    if url_page_id is not _MISSING:
+        try:
+            normalized_url_page_id = normalize_page_id(url_page_id)
+        except (InvalidPageIdentity, TypeError):
+            normalized_url_page_id = None
+        if normalized_url_page_id and normalized_url_page_id != explicit_page_id:
+            raise ImportRecordError("The record contains conflicting Confluence Page IDs.")
+    return explicit_page_id
+
+
+def _validated_url_only_legacy_json_page_id(raw: object, origin) -> str:
+    """Use a URL identity only after structural and configured-origin validation."""
+
+    if not isinstance(raw, Mapping):
+        raise ImportRecordError("The record must be a JSON object.")
+    source = _mapping(raw.get("source", raw.get("confluence")))
+    raw_url = _record_url_value(source, raw)
+
+    if not isinstance(raw_url, str) or not raw_url.strip():
+        raise ImportRecordError("The record has no valid positive Confluence Page ID.")
+    try:
+        parsed_url = urlsplit(raw_url.strip())
+        without_fragment = parsed_url._replace(fragment="").geturl()
+    except ValueError as exc:
+        raise ImportRecordError("The record URL is invalid.") from exc
+    safe_url = _safe_url(without_fragment, required=True)
+    try:
+        parsed_input = parse_page_input(safe_url, origin)
+    except PageInputError as exc:
+        raise ImportRecordError(str(exc)) from exc
+    return parsed_input.page_id
+
+
+def _authoritative_save_result(
+    save_result,
+    *,
+    requested_page_id: str,
+) -> tuple[Bookmark, bool]:
+    bookmark = getattr(save_result, "bookmark", None)
+    created = getattr(save_result, "created", None)
+    if not isinstance(bookmark, Bookmark) or not isinstance(created, bool):
+        raise ImportRecordError("Confluence did not return a bookmark that could be imported.")
+    if bookmark.page_id != requested_page_id:
+        raise ImportRecordError(
+            "Confluence returned a bookmark for a different Page ID; nothing was imported."
+        )
+    return bookmark, created
+
+
+def _apply_authoritative_import_state(
+    save_result,
+    record: _NormalizedRecord,
+    *,
+    run: BookmarkImportRun,
+    imported_at: datetime,
+    requested_page_id: str,
+) -> bool:
+    """Keep authoritative source fields while restoring safe OWL-owned state."""
+
+    bookmark, created = _authoritative_save_result(
+        save_result,
+        requested_page_id=requested_page_id,
+    )
+    with transaction.atomic():
+        if not created:
+            _fill_existing_imported_local_blanks(bookmark, record, run)
+            return False
+
+        restored_saved_at = record.saved_at or imported_at
+        _move_added_activity(bookmark.saved_at, restored_saved_at)
+        bookmark.saved_at = restored_saved_at
+        bookmark.favorite = record.favorite
+        bookmark.pinned = record.pinned
+        bookmark.notes = record.notes
+        bookmark.notes_updated_at = record.notes_updated_at
+        bookmark.open_count = record.open_count
+        bookmark.first_opened_at = record.first_opened_at
+        bookmark.last_viewed_at = record.last_viewed_at
+        bookmark.last_viewed_version = record.last_viewed_version
+        bookmark.import_run = run
+        bookmark.import_record_number = record.record_number
+        bookmark.legacy_number = record.legacy_number
+        bookmark.save(
+            update_fields=[
+                "saved_at",
+                "favorite",
+                "pinned",
+                "notes",
+                "notes_updated_at",
+                "open_count",
+                "first_opened_at",
+                "last_viewed_at",
+                "last_viewed_version",
+                "import_run",
+                "import_record_number",
+                "legacy_number",
+            ]
+        )
+        _set_tags(bookmark, record.tags)
+    return True
+
+
+def _fill_existing_imported_local_blanks(
+    bookmark: Bookmark,
+    record: _NormalizedRecord,
+    run: BookmarkImportRun,
+) -> None:
+    """Merge only OWL-owned fields after an authoritative Confluence retrieval."""
+
+    changed: list[str] = []
+    if not bookmark.notes and record.notes:
+        bookmark.notes = record.notes
+        changed.append("notes")
+        if record.notes_updated_at is not None:
+            bookmark.notes_updated_at = record.notes_updated_at
+            changed.append("notes_updated_at")
+    if not bookmark.legacy_number and record.legacy_number:
+        bookmark.legacy_number = record.legacy_number
+        changed.append("legacy_number")
+    if bookmark.import_run_id is None:
+        bookmark.import_run = run
+        bookmark.import_record_number = record.record_number
+        changed.extend(("import_run", "import_record_number"))
+    if changed:
+        bookmark.save(update_fields=changed)
+    if not bookmark.tags.exists() and record.tags:
+        _set_tags(bookmark, record.tags)
+
+
+def _move_added_activity(created_at: datetime, restored_at: datetime) -> None:
+    """Keep the aggregate Added timeline aligned with a restored saved date."""
+
+    created_date = timezone.localdate(created_at)
+    restored_date = timezone.localdate(restored_at)
+    if created_date == restored_date:
+        return
+    counter = (
+        BookmarkDailyActivity.objects.select_for_update()
+        .filter(
+            activity_date=created_date,
+            activity_type=BookmarkActivityType.ADDED,
+        )
+        .first()
+    )
+    if counter is not None:
+        if counter.count == 1:
+            counter.delete()
+        else:
+            BookmarkDailyActivity.objects.filter(pk=counter.pk).update(count=F("count") - 1)
+    record_daily_activity(BookmarkActivityType.ADDED, occurred_at=restored_at)
+
+
+def _best_effort_value(parser, value, default):
+    try:
+        return parser(value)
+    except (ImportRecordError, TypeError, ValueError):
+        return default
+
+
+def _apply_authoritative_import_state_from_raw(
+    save_result,
+    raw: object,
+    *,
+    run: BookmarkImportRun,
+    record_number: int,
+    imported_at: datetime,
+    requested_page_id: str,
+) -> bool:
+    """Restore valid personal fields after source metadata required recovery.
+
+    Source fields are deliberately ignored here: the normal Confluence save path
+    already supplied their authoritative values.  Malformed optional personal data
+    is omitted instead of turning a successfully retrieved page back into a failed
+    record.
+    """
+
+    bookmark, created = _authoritative_save_result(
+        save_result,
+        requested_page_id=requested_page_id,
+    )
+    if not isinstance(raw, Mapping):
+        return created
+    personal = _mapping(raw.get("personal"))
+    usage = _mapping(raw.get("usage"))
+    provenance = _mapping(raw.get("provenance"))
+
+    favorite = _best_effort_value(
+        lambda value: _boolean(value, "favorite"),
+        _pick_many(
+            (personal, raw),
+            "favorite",
+            "favourite",
+            "starred",
+            "is_favorite",
+            default=False,
+        ),
+        False,
+    )
+    pinned = _best_effort_value(
+        lambda value: _boolean(value, "pin"),
+        _pick_many((personal, raw), "pinned", "pin", "is_pinned", default=False),
+        False,
+    )
+    notes = _best_effort_value(
+        lambda value: _optional_text(value, "notes", maximum=MAX_NOTE_LENGTH),
+        _pick_many((personal, raw), "notes", "note", "description", default=""),
+        "",
+    )
+    notes_updated_at = _best_effort_value(
+        lambda value: _optional_datetime(value, "notes updated time"),
+        _pick_many((personal, raw), "notes_updated_at", "notesUpdatedAt", default=None),
+        None,
+    )
+    tags = _best_effort_value(
+        _normalize_tags,
+        _pick_many((personal, raw), "tags", "tag_names", "tagNames", default=()),
+        (),
+    )
+    saved_at = _best_effort_value(
+        lambda value: _optional_datetime(value, "saved time"),
+        _pick_many(
+            (personal, raw),
+            "saved_at",
+            "savedAt",
+            "date_saved",
+            "dateAdded",
+            "added_at",
+            default=None,
+        ),
+        None,
+    )
+    open_count = _best_effort_value(
+        lambda value: _non_negative_int(value, "open count"),
+        _pick_many((usage, raw), "open_count", "openCount", "view_count", "opens", default=0),
+        0,
+    )
+    first_opened_at = _best_effort_value(
+        lambda value: _optional_datetime(value, "first opened time"),
+        _pick_many((usage, raw), "first_opened_at", "firstOpenedAt", default=None),
+        None,
+    )
+    last_viewed_at = _best_effort_value(
+        lambda value: _optional_datetime(value, "last viewed time"),
+        _pick_many(
+            (usage, raw),
+            "last_viewed_at",
+            "lastViewedAt",
+            "last_opened_at",
+            default=None,
+        ),
+        None,
+    )
+    last_viewed_version = _best_effort_value(
+        lambda value: _optional_positive_int(value, "last viewed version"),
+        _pick_many((usage, raw), "last_viewed_version", "lastViewedVersion", default=None),
+        None,
+    )
+    legacy_number = _best_effort_value(
+        lambda value: _optional_text(value, "legacy number", maximum=64),
+        _pick_many(
+            (provenance, raw),
+            "legacy_number",
+            "legacyNumber",
+            "owl_number",
+            "owlNumber",
+            default="",
+        ),
+        "",
+    )
+
+    with transaction.atomic():
+        if created:
+            restored_saved_at = saved_at or imported_at
+            _move_added_activity(bookmark.saved_at, restored_saved_at)
+            bookmark.saved_at = restored_saved_at
+            bookmark.favorite = favorite
+            bookmark.pinned = pinned
+            bookmark.notes = notes
+            bookmark.notes_updated_at = notes_updated_at
+            bookmark.open_count = open_count
+            bookmark.first_opened_at = first_opened_at
+            bookmark.last_viewed_at = last_viewed_at
+            bookmark.last_viewed_version = last_viewed_version
+            bookmark.import_run = run
+            bookmark.import_record_number = record_number
+            bookmark.legacy_number = legacy_number
+            bookmark.save(
+                update_fields=[
+                    "saved_at",
+                    "favorite",
+                    "pinned",
+                    "notes",
+                    "notes_updated_at",
+                    "open_count",
+                    "first_opened_at",
+                    "last_viewed_at",
+                    "last_viewed_version",
+                    "import_run",
+                    "import_record_number",
+                    "legacy_number",
+                ]
+            )
+            _set_tags(bookmark, tags)
+        else:
+            changed: list[str] = []
+            if not bookmark.notes and notes:
+                bookmark.notes = notes
+                changed.append("notes")
+                if notes_updated_at is not None:
+                    bookmark.notes_updated_at = notes_updated_at
+                    changed.append("notes_updated_at")
+            if not bookmark.legacy_number and legacy_number:
+                bookmark.legacy_number = legacy_number
+                changed.append("legacy_number")
+            if bookmark.import_run_id is None:
+                bookmark.import_run = run
+                bookmark.import_record_number = record_number
+                changed.extend(("import_run", "import_record_number"))
+            if changed:
+                bookmark.save(update_fields=changed)
+            if not bookmark.tags.exists() and tags:
+                _set_tags(bookmark, tags)
+    return created
 
 
 def _fill_existing_personal_blanks(
@@ -1338,9 +1810,27 @@ def _export_hierarchy(
     ]
 
 
-def _legacy_import_order(record: _NormalizedRecord) -> tuple[datetime, int]:
+def _legacy_json_import_order(raw: object, record_number: int) -> tuple[datetime, int]:
+    """Best-effort stable order even when stale source fields prevent normalization."""
+
     latest = datetime.max.replace(tzinfo=UTC)
-    return (record.saved_at.astimezone(UTC) if record.saved_at else latest, record.record_number)
+    if not isinstance(raw, Mapping):
+        return (latest, record_number)
+    personal = _mapping(raw.get("personal"))
+    raw_saved_at = _pick_many(
+        (personal, raw),
+        "saved_at",
+        "savedAt",
+        "date_saved",
+        "dateAdded",
+        "added_at",
+        default=None,
+    )
+    try:
+        saved_at = _optional_datetime(raw_saved_at, "saved time")
+    except ImportRecordError:
+        saved_at = None
+    return (saved_at.astimezone(UTC) if saved_at else latest, record_number)
 
 
 def _record_failure(
@@ -1446,6 +1936,17 @@ def _person_value(
 
 def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _record_url_value(source: Mapping[str, object], raw: Mapping[str, object]) -> object:
+    """Choose the first non-empty URL alias without letting an empty nested value mask it."""
+
+    for mapping in (source, raw):
+        for name in ("url", "page_url", "pageUrl", "link"):
+            value = mapping.get(name, _MISSING)
+            if value not in (_MISSING, None, ""):
+                return value
+    return ""
 
 
 def _pick(mapping: Mapping[str, object], *names: str, default: object) -> object:
