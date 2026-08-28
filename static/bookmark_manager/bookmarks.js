@@ -6,6 +6,9 @@
     const settingsHeading = document.querySelector("[data-settings-heading]");
     let activeSettingsButton = null;
 
+    const csrfToken = () =>
+        document.querySelector("input[name='csrfmiddlewaretoken']")?.value || "";
+
     const openSettings = (trigger = settingsButtons[0]) => {
         activeSettingsButton = trigger || settingsButtons[0] || null;
         if (!settingsDialog || typeof settingsDialog.showModal !== "function") {
@@ -127,6 +130,7 @@
         busyButton,
         actionUrl = form.action,
         formData = new FormData(form),
+        redirectDelay = 0,
     ) => {
         busyButton?.setAttribute("aria-busy", "true");
         if (busyButton) {
@@ -156,7 +160,16 @@
             if (payload?.redirect) {
                 const target = new URL(payload.redirect, window.location.href);
                 if (target.origin === window.location.origin) {
-                    window.location.assign(target.href);
+                    if (statusTarget) {
+                        statusTarget.hidden = false;
+                        statusTarget.textContent = `${payload.label} — ${payload.detail}`;
+                        statusTarget.dataset.state = payload.state || "success";
+                    }
+                    if (redirectDelay > 0) {
+                        window.setTimeout(() => window.location.assign(target.href), redirectDelay);
+                    } else {
+                        window.location.assign(target.href);
+                    }
                     return;
                 }
             }
@@ -190,6 +203,7 @@
     });
 
     const bookmarkUnifiedForm = document.querySelector("[data-bookmark-unified-form]");
+    const bookmarkSaveButton = bookmarkUnifiedForm?.querySelector("[data-bookmark-save]");
     const bookmarkSaveResult = document.querySelector("[data-bookmark-save-result]");
     bookmarkUnifiedForm?.addEventListener("submit", async (event) => {
         const submitter = event.submitter;
@@ -197,19 +211,63 @@
             return;
         }
         event.preventDefault();
+        window.clearTimeout(searchTimer);
         if (!bookmarkUnifiedForm.reportValidity()) {
             return;
         }
         const saveAction = submitter.getAttribute("formaction") || bookmarkUnifiedForm.action;
         const formData = new FormData(bookmarkUnifiedForm);
-        formData.set("csrfmiddlewaretoken", bookmarkUnifiedForm.dataset.csrfToken || "");
+        formData.set("csrfmiddlewaretoken", csrfToken());
+        if (bookmarkSaveResult) {
+            const value = String(formData.get("q") || "");
+            const confluenceLike = /(?:confluence|\/spaces\/[^/]+\/pages\/|pageid=)/i.test(
+                value,
+            );
+            bookmarkSaveResult.hidden = false;
+            bookmarkSaveResult.dataset.state = "progress";
+            bookmarkSaveResult.textContent = confluenceLike
+                ? "Retrieving the Confluence page, hierarchy, and searchable text…"
+                : "Adding bookmark…";
+        }
         await submitLocalForm(
             bookmarkUnifiedForm,
             bookmarkSaveResult,
             submitter,
             saveAction,
             formData,
+            500,
         );
+    });
+
+    document.querySelectorAll("[data-bookmark-import-form]").forEach((form) => {
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            if (!form.reportValidity()) {
+                return;
+            }
+            const button = form.querySelector("[data-import-submit]");
+            const progress = form.querySelector("[data-import-progress]");
+            const label = form.querySelector("[data-import-progress-label]");
+            const status = form.querySelector("[data-import-status]");
+            const file = form.querySelector("input[type='file']")?.files?.[0];
+            if (progress) {
+                progress.hidden = false;
+            }
+            if (status) {
+                status.hidden = true;
+                status.textContent = "";
+                status.dataset.state = "progress";
+            }
+            if (label) {
+                label.textContent = file?.name?.toLowerCase().endsWith(".txt")
+                    ? "Extracting URLs, checking Confluence Page IDs, and retrieving pages…"
+                    : "Validating records and saving bookmarks…";
+            }
+            await submitLocalForm(form, status, button);
+            if (progress) {
+                progress.hidden = true;
+            }
+        });
     });
 
     document.querySelectorAll("[data-remove-credential-form]").forEach((form) => {
@@ -246,12 +304,252 @@
         }
     });
 
+    const peopleSearchToggle = document.querySelector("[data-people-search-toggle]");
+    const peopleSearchPanel = document.querySelector("[data-people-search-panel]");
+    const peopleSearchInput = document.querySelector("[data-people-search-input]");
+    const peopleSearchStatus = document.querySelector("[data-people-search-status]");
+    const peopleEntries = Array.from(document.querySelectorAll("[data-people-entry]"));
+    const peopleNoResults = document.querySelector("[data-people-no-results]");
+
+    const normalizedPersonName = (value) =>
+        String(value || "")
+            .normalize("NFKD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .toLocaleLowerCase()
+            .trim();
+
+    const filterPeople = () => {
+        const terms = normalizedPersonName(peopleSearchInput?.value).split(/\s+/).filter(Boolean);
+        let visibleCount = 0;
+        peopleEntries.forEach((entry) => {
+            const personName = normalizedPersonName(entry.dataset.personName);
+            const matches = terms.every((term) => personName.includes(term));
+            entry.hidden = !matches;
+            if (matches) {
+                visibleCount += 1;
+            }
+        });
+        if (peopleNoResults) {
+            peopleNoResults.hidden = visibleCount !== 0 || terms.length === 0;
+        }
+        if (peopleSearchStatus) {
+            if (terms.length === 0) {
+                peopleSearchStatus.textContent = `${peopleEntries.length} ${peopleEntries.length === 1 ? "person" : "people"} available`;
+            } else if (visibleCount === 0) {
+                peopleSearchStatus.textContent = "No people found";
+            } else {
+                peopleSearchStatus.textContent = `${visibleCount} ${visibleCount === 1 ? "person" : "people"} found`;
+            }
+        }
+    };
+
+    const closePeopleSearch = () => {
+        if (!peopleSearchPanel || !peopleSearchToggle) {
+            return;
+        }
+        peopleSearchPanel.hidden = true;
+        peopleSearchToggle.setAttribute("aria-expanded", "false");
+        if (peopleSearchInput) {
+            peopleSearchInput.value = "";
+        }
+        filterPeople();
+        peopleSearchToggle.focus();
+    };
+
+    peopleSearchToggle?.addEventListener("click", () => {
+        if (!peopleSearchPanel) {
+            return;
+        }
+        const opening = peopleSearchPanel.hidden;
+        if (!opening) {
+            closePeopleSearch();
+            return;
+        }
+        peopleSearchPanel.hidden = false;
+        peopleSearchToggle.setAttribute("aria-expanded", "true");
+        peopleSearchInput?.focus();
+    });
+    peopleSearchInput?.addEventListener("input", filterPeople);
+    peopleSearchInput?.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+            event.preventDefault();
+            closePeopleSearch();
+        }
+    });
+
     const statusText = document.querySelector("[data-global-status-text]");
     const announce = (message) => {
         if (statusText && message) {
             statusText.textContent = message;
         }
     };
+
+    const globalRefresh = document.querySelector("[data-global-refresh]");
+    const globalRefreshButton = globalRefresh?.querySelector("[data-global-refresh-button]");
+    const globalRefreshSpinner = globalRefresh?.querySelector("[data-global-refresh-spinner]");
+    const globalRefreshLabel = globalRefresh?.querySelector("[data-global-refresh-label]");
+    const globalRefreshTime = globalRefresh?.querySelector("[data-global-refresh-time]");
+    const globalRefreshProgress = globalRefresh?.querySelector("[data-global-refresh-progress]");
+    let globalRefreshPollTimer = null;
+    let globalRefreshWasActive = globalRefresh?.dataset.active === "true";
+
+    const formatRefreshTimestamp = (value) => {
+        if (!value) {
+            return "";
+        }
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) {
+            return "";
+        }
+        return new Intl.DateTimeFormat(undefined, {
+            dateStyle: "medium",
+            timeStyle: "short",
+        }).format(parsed);
+    };
+
+    const renderGlobalRefresh = (refresh) => {
+        if (!globalRefresh || !refresh) {
+            return;
+        }
+        const active = Boolean(refresh.active);
+        const total = Number(refresh.total) || 0;
+        const processed = Number(refresh.processed) || 0;
+        const progress = Math.max(0, Math.min(100, Number(refresh.progress) || 0));
+        globalRefresh.dataset.active = String(active);
+        globalRefresh.dataset.status = refresh.status || "idle";
+        globalRefreshButton.disabled = active;
+        globalRefreshButton.toggleAttribute("aria-busy", active);
+        globalRefreshSpinner.hidden = !active;
+        globalRefreshProgress.style.width = `${progress}%`;
+
+        if (globalRefreshLabel) {
+            if (active) {
+                globalRefreshLabel.textContent =
+                    refresh.status === "queued"
+                        ? "Refresh queued"
+                        : `Refreshing ${processed} / ${total}`;
+            } else if (refresh.status === "succeeded") {
+                globalRefreshLabel.textContent = `${refresh.succeeded} refreshed`;
+            } else if (refresh.status === "succeeded_with_errors") {
+                globalRefreshLabel.textContent = `${refresh.succeeded} refreshed · ${refresh.failed} failed`;
+            } else if (["failed", "interrupted"].includes(refresh.status)) {
+                globalRefreshLabel.textContent = "Refresh needs attention";
+            } else {
+                globalRefreshLabel.textContent = "Refresh Confluence";
+            }
+        }
+
+        const completedAt = refresh.last_completed_at || refresh.completed_at;
+        if (globalRefreshTime) {
+            const formatted = formatRefreshTimestamp(completedAt);
+            globalRefreshTime.textContent = formatted
+                ? `Last completed ${formatted}`
+                : refresh.detail || "Never refreshed globally";
+            if (completedAt) {
+                const time = document.createElement("time");
+                time.dateTime = completedAt;
+                time.textContent = formatted;
+                globalRefreshTime.textContent = "Last completed ";
+                globalRefreshTime.append(time);
+            }
+        }
+        globalRefreshButton.title = active
+            ? `Confluence refresh is running: ${processed} of ${total} processed`
+            : refresh.detail ||
+              "Refresh every saved Confluence page, hierarchy, metadata, and searchable text";
+
+        if (globalRefreshWasActive && !active) {
+            announce(
+                refresh.status === "succeeded"
+                    ? `Confluence refresh completed: ${refresh.succeeded} bookmarks updated.`
+                    : refresh.detail || "Confluence refresh completed with errors.",
+            );
+        }
+        globalRefreshWasActive = active;
+    };
+
+    const pollGlobalRefresh = async () => {
+        if (!globalRefresh?.dataset.statusUrl) {
+            return;
+        }
+        try {
+            const response = await fetch(globalRefresh.dataset.statusUrl, {
+                credentials: "same-origin",
+                headers: { Accept: "application/json" },
+                cache: "no-store",
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload.detail || "Refresh status is unavailable.");
+            }
+            renderGlobalRefresh(payload.refresh);
+            if (payload.refresh?.active) {
+                globalRefreshPollTimer = window.setTimeout(pollGlobalRefresh, 1500);
+            }
+        } catch (_error) {
+            if (globalRefreshLabel) {
+                globalRefreshLabel.textContent = "Refresh status unavailable";
+            }
+            globalRefreshButton.disabled = false;
+            globalRefreshButton.removeAttribute("aria-busy");
+            globalRefreshSpinner.hidden = true;
+        }
+    };
+
+    globalRefresh?.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        if (globalRefreshButton.disabled) {
+            return;
+        }
+        globalRefreshButton.disabled = true;
+        globalRefreshButton.setAttribute("aria-busy", "true");
+        globalRefreshSpinner.hidden = false;
+        if (globalRefreshLabel) {
+            globalRefreshLabel.textContent = "Starting refresh…";
+        }
+        try {
+            const response = await fetch(globalRefresh.action, {
+                method: "POST",
+                body: new FormData(globalRefresh),
+                credentials: "same-origin",
+                headers: {
+                    Accept: "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload.detail || "The refresh could not start.");
+            }
+            renderGlobalRefresh(payload.refresh);
+            announce(payload.detail || "Confluence refresh started in the background.");
+            if (globalRefreshPollTimer) {
+                window.clearTimeout(globalRefreshPollTimer);
+            }
+            globalRefreshPollTimer = window.setTimeout(pollGlobalRefresh, 500);
+        } catch (error) {
+            const detail = error instanceof Error ? error.message : "The refresh could not start.";
+            if (globalRefreshLabel) {
+                globalRefreshLabel.textContent = "Refresh could not start";
+            }
+            if (globalRefreshTime) {
+                globalRefreshTime.textContent = detail;
+            }
+            globalRefreshButton.disabled = false;
+            globalRefreshButton.removeAttribute("aria-busy");
+            globalRefreshSpinner.hidden = true;
+            announce(detail);
+        }
+    });
+
+    if (globalRefresh?.dataset.active === "true") {
+        globalRefreshPollTimer = window.setTimeout(pollGlobalRefresh, 300);
+    } else if (globalRefreshTime) {
+        const formatted = formatRefreshTimestamp(globalRefresh.dataset.lastCompletedAt);
+        if (formatted) {
+            globalRefreshTime.textContent = `Last completed ${formatted}`;
+        }
+    }
 
     const safeStorage = {
         get(key, fallback = null) {
@@ -358,12 +656,6 @@
         });
     }
 
-    document.querySelectorAll("[data-tree-select][data-bookmark-id]").forEach((link) => {
-        link.addEventListener("click", () => {
-            safeStorage.set(selectionStorageKey, link.dataset.bookmarkId);
-        });
-    });
-
     const treeRoot = document.querySelector("[data-bookmark-tree]");
     const storedSelection = safeStorage.get(selectionStorageKey, "");
     if (
@@ -372,11 +664,11 @@
         storedSelection &&
         !window.location.search
     ) {
-        const storedLink = treeRoot.querySelector(
-            `[data-tree-select][data-bookmark-id="${CSS.escape(storedSelection)}"]`,
+        const storedCheckbox = treeRoot.querySelector(
+            `[data-tree-check][data-bookmark-id="${CSS.escape(storedSelection)}"]`,
         );
-        if (storedLink) {
-            window.location.replace(storedLink.href);
+        if (storedCheckbox?.dataset.detailsUrl) {
+            window.location.replace(storedCheckbox.dataset.detailsUrl);
         }
     }
 
@@ -384,13 +676,23 @@
     const checkedBookmarks = readJsonObject(checkedStorageKey);
     const selectionCount = document.querySelector("[data-tree-selection-count]");
     const deleteSelectedButton = document.querySelector("[data-delete-selected]");
+    let deleteRelockTimer = null;
 
     const directTreeCheck = (item) =>
         item?.querySelector(":scope > [data-tree-row] [data-tree-check]") || null;
     const descendantTreeChecks = (item) =>
         Array.from(item?.querySelectorAll(":scope > ul [data-tree-check]") || []);
-    const directDetailsLink = (item) =>
-        item?.querySelector(":scope > [data-tree-row] [data-tree-select]") || null;
+    const detailsCheckboxForItem = (item) => {
+        const direct = directTreeCheck(item);
+        if (direct?.dataset.detailsUrl) {
+            return direct;
+        }
+        return (
+            descendantTreeChecks(item).find(
+                (candidate) => candidate.checked && candidate.dataset.detailsUrl,
+            ) || null
+        );
+    };
 
     const refreshItemAggregate = (item) => {
         const checkbox = directTreeCheck(item);
@@ -429,6 +731,26 @@
     const selectedBookmarkChecks = () =>
         treeChecks.filter((checkbox) => checkbox.dataset.bookmarkId && checkbox.checked);
 
+    const lockDeleteSelected = () => {
+        if (!deleteSelectedButton) {
+            return;
+        }
+        deleteSelectedButton.dataset.deleteLocked = "true";
+        const icon = deleteSelectedButton.querySelector("[data-delete-lock-icon]");
+        const label = deleteSelectedButton.querySelector("[data-delete-label]");
+        if (icon) {
+            icon.textContent = "🔒";
+        }
+        if (label) {
+            const count = selectedBookmarkChecks().length;
+            label.textContent = count ? `Delete selected (${count})` : "Delete selected";
+        }
+        if (deleteRelockTimer) {
+            window.clearTimeout(deleteRelockTimer);
+            deleteRelockTimer = null;
+        }
+    };
+
     const persistCheckedBookmarks = () => {
         const nextChecked = {};
         selectedBookmarkChecks().forEach((checkbox) => {
@@ -444,9 +766,27 @@
         }
         if (deleteSelectedButton) {
             deleteSelectedButton.disabled = count === 0;
-            deleteSelectedButton.textContent = count ? `Delete selected (${count})` : "Delete selected";
+            lockDeleteSelected();
         }
     };
+
+    deleteSelectedButton?.addEventListener("click", (event) => {
+        if (deleteSelectedButton.dataset.deleteLocked !== "true") {
+            return;
+        }
+        event.preventDefault();
+        deleteSelectedButton.dataset.deleteLocked = "false";
+        const icon = deleteSelectedButton.querySelector("[data-delete-lock-icon]");
+        const label = deleteSelectedButton.querySelector("[data-delete-label]");
+        if (icon) {
+            icon.textContent = "🔓";
+        }
+        if (label) {
+            label.textContent = "Click again to delete";
+        }
+        announce("Delete unlocked. Click again to remove the selected bookmarks.");
+        deleteRelockTimer = window.setTimeout(lockDeleteSelected, 10000);
+    });
 
     treeChecks.forEach((checkbox) => {
         checkbox.checked = Boolean(
@@ -474,14 +814,16 @@
             const count = selectedBookmarkChecks().length;
             announce(`${count} bookmark${count === 1 ? "" : "s"} selected`);
 
-            // A checked bookmark is also the page the user is working with.
-            // Reload through its details link after persisting the bulk selection so
-            // the right-hand panel is populated without losing checked descendants.
-            if (checkbox.checked && checkbox.dataset.bookmarkId) {
-                const detailsLink = directDetailsLink(item);
-                if (detailsLink && !detailsLink.matches('[aria-current="true"]')) {
-                    safeStorage.set(selectionStorageKey, checkbox.dataset.bookmarkId);
-                    window.location.assign(detailsLink.href);
+            // A checked row is also the page the user is working with. Folder-only
+            // rows open the first bookmarked child selected by the cascade.
+            if (checkbox.checked) {
+                const detailsCheckbox = detailsCheckboxForItem(item);
+                if (
+                    detailsCheckbox &&
+                    detailsCheckbox.dataset.bookmarkId !== treeRoot?.dataset.selectedBookmark
+                ) {
+                    safeStorage.set(selectionStorageKey, detailsCheckbox.dataset.bookmarkId);
+                    window.location.assign(detailsCheckbox.dataset.detailsUrl);
                 }
             }
         });
@@ -535,6 +877,15 @@
             }
             announce(payload.detail || payload.label || "Bookmark updated");
             refreshBookmarkPresentation(payload);
+
+            const currentQuery = new URLSearchParams(window.location.search);
+            const removedFromCurrentShortcut =
+                (currentQuery.get("favorite") === "on" && payload.favorite === false) ||
+                (currentQuery.get("pinned") === "on" && payload.pinned === false);
+            if (removedFromCurrentShortcut) {
+                window.location.reload();
+                return;
+            }
 
             if (payload.notes !== undefined) {
                 document
@@ -671,9 +1022,63 @@
     });
 
     let searchTimer = null;
+    const isCompleteHttpUrl = (value) => /^https?:\/\/\S+$/i.test(value.trim());
+    const clearUrlSearchScope = () => {
+        const category = bookmarkUnifiedForm?.querySelector("[name='category']");
+        if (category instanceof HTMLInputElement) {
+            category.value = "";
+        }
+    };
+
+    bookmarkSearch?.addEventListener("keydown", (event) => {
+        if (
+            event.key !== "Enter" ||
+            event.isComposing ||
+            event.ctrlKey ||
+            event.metaKey ||
+            event.altKey ||
+            event.shiftKey ||
+            !bookmarkUnifiedForm
+        ) {
+            return;
+        }
+
+        event.preventDefault();
+        window.clearTimeout(searchTimer);
+        const value = bookmarkSearch.value.trim();
+        if (!isCompleteHttpUrl(value)) {
+            bookmarkUnifiedForm.requestSubmit();
+            return;
+        }
+
+        clearUrlSearchScope();
+        const completedValue = (bookmarkUnifiedForm.dataset.completedSearch || "").trim();
+        const searchComplete =
+            bookmarkUnifiedForm.dataset.urlSearchComplete === "true" && completedValue === value;
+        if (!searchComplete) {
+            bookmarkUnifiedForm.requestSubmit();
+            return;
+        }
+
+        const matchCount = Number.parseInt(bookmarkUnifiedForm.dataset.urlMatchCount || "0", 10);
+        const matchHref = bookmarkUnifiedForm.dataset.urlMatchHref || "";
+        if (matchCount > 0) {
+            if (matchHref) {
+                window.location.assign(matchHref);
+            }
+            return;
+        }
+        if (bookmarkSaveButton instanceof HTMLElement) {
+            bookmarkUnifiedForm.requestSubmit(bookmarkSaveButton);
+        }
+    });
+
     bookmarkSearch?.addEventListener("input", (event) => {
         window.clearTimeout(searchTimer);
         const value = event.target.value.trim();
+        if (isCompleteHttpUrl(value)) {
+            clearUrlSearchScope();
+        }
         const delay = /^\d+$/.test(value) || /^https?:\/\//i.test(value) ? 0 : 350;
         searchTimer = window.setTimeout(() => event.target.form?.requestSubmit(), delay);
     });

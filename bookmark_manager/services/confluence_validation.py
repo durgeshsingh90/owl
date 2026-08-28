@@ -374,6 +374,100 @@ def _validated_page_id(value: str) -> str:
     return normalized
 
 
+_PAGE_ID_QUERY_KEYS = frozenset({"pageid", "contentid"})
+_PAGE_ID_PATH_MARKERS = frozenset({"page", "pages", "content"})
+
+
+def _normalized_query_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.casefold())
+
+
+def _page_id_from_url_parts(relative_path: str, query: str) -> tuple[str, bool]:
+    """Return one unambiguous page identity and whether it came from the URL path."""
+
+    try:
+        query_fields = parse_qs(query, keep_blank_values=True)
+    except ValueError as exc:
+        raise PageInputError(
+            "unsupported_page_url", "The Confluence page URL is malformed."
+        ) from exc
+
+    candidates: list[tuple[str, bool]] = []
+    for key, values in query_fields.items():
+        if _normalized_query_key(key) not in _PAGE_ID_QUERY_KEYS:
+            continue
+        if len(values) != 1:
+            raise PageInputError(
+                "unsupported_page_url", "The Confluence URL must contain one Page ID."
+            )
+        candidates.append((_validated_page_id(values[0]), False))
+
+    segments = [unquote(segment) for segment in relative_path.split("/") if segment]
+    marker_candidates: list[str] = []
+    for index, segment in enumerate(segments[:-1]):
+        next_segment = segments[index + 1]
+        if (
+            segment.casefold() in _PAGE_ID_PATH_MARKERS
+            and next_segment.isascii()
+            and next_segment.isdigit()
+        ):
+            marker_candidates.append(_validated_page_id(next_segment))
+
+    if marker_candidates:
+        candidates.extend((page_id, True) for page_id in marker_candidates)
+    else:
+        # Future Confluence routes may rename the marker before the ID. Accept a
+        # path only when it contains exactly one numeric segment, so dates and
+        # other ambiguous paths never silently select the wrong page.
+        numeric_segments = [
+            _validated_page_id(segment)
+            for segment in segments
+            if segment.isascii() and segment.isdigit()
+        ]
+        if len(numeric_segments) == 1:
+            candidates.append((numeric_segments[0], True))
+
+    identities = {page_id for page_id, _from_path in candidates}
+    if not identities:
+        raise PageInputError(
+            "unsupported_page_url", "The Confluence URL does not contain a Page ID."
+        )
+    if len(identities) != 1:
+        raise PageInputError(
+            "unsupported_page_url", "The Confluence URL contains conflicting Page IDs."
+        )
+    page_id = identities.pop()
+    return page_id, any(candidate == page_id and from_path for candidate, from_path in candidates)
+
+
+def extract_page_id_from_url(value: str) -> str | None:
+    """Return an unambiguous Page ID from any HTTP(S) URL without contacting Confluence.
+
+    This deliberately does not validate the URL against the configured Confluence
+    origin.  It is only a local bookmark-discovery helper; ``parse_page_input``
+    remains the security boundary before a URL can be fetched or saved.
+    """
+
+    raw = str(value or "").strip()
+    try:
+        parsed = urlsplit(raw)
+        _ = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    try:
+        page_id, _from_path = _page_id_from_url_parts(parsed.path, parsed.query)
+    except PageInputError:
+        return None
+    return page_id
+
+
 def parse_page_input(value: str, configured_origin: CanonicalOrigin) -> ParsedPageInput:
     """Parse a raw Page ID or a supported same-origin Confluence page URL."""
 
@@ -397,44 +491,18 @@ def parse_page_input(value: str, configured_origin: CanonicalOrigin) -> ParsedPa
         or parsed.password is not None
     ):
         raise PageInputError("invalid_page_url", "Enter a valid Confluence page URL.")
-    if not configured_origin.is_same_origin_url(raw):
+    origin_check_url = parsed._replace(fragment="").geturl()
+    if not configured_origin.is_same_origin_url(origin_check_url):
         raise PageInputError(
             "disallowed_origin", "The page URL must use the configured Confluence origin."
         )
-    if not configured_origin.contains_application_url(raw):
+    if not configured_origin.contains_application_url(origin_check_url):
         raise PageInputError(
             "disallowed_context", "The page URL must use the configured Confluence path."
         )
 
     relative_path = parsed.path[len(configured_origin.context_path) :]
-    modern = re.fullmatch(r"/spaces/[^/]+/pages/(?P<page_id>[0-9]+)(?:/[^?#]*)?/?", relative_path)
-    if modern:
-        if parsed.query:
-            raise PageInputError(
-                "unsupported_page_url", "The modern Confluence page URL cannot contain a query."
-            )
-        return ParsedPageInput(
-            _validated_page_id(modern.group("page_id")), PageInputKind.MODERN_URL
-        )
-
-    if relative_path in {"/pages/viewpage.action", "/viewpage.action"}:
-        try:
-            query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
-        except ValueError as exc:
-            raise PageInputError(
-                "unsupported_page_url", "The legacy Confluence page URL is malformed."
-            ) from exc
-        allowed_query_fields = {"pageId", "spaceKey", "title"}
-        if (
-            "pageId" not in query
-            or not set(query).issubset(allowed_query_fields)
-            or any(len(values) != 1 for values in query.values())
-        ):
-            raise PageInputError(
-                "unsupported_page_url", "The legacy Confluence URL must contain one Page ID."
-            )
-        return ParsedPageInput(_validated_page_id(query["pageId"][0]), PageInputKind.LEGACY_URL)
-
-    raise PageInputError(
-        "unsupported_page_url", "Use a supported modern or legacy Confluence page URL."
-    )
+    page_id, from_path = _page_id_from_url_parts(relative_path, parsed.query)
+    legacy_path = relative_path.casefold() in {"/pages/viewpage.action", "/viewpage.action"}
+    kind = PageInputKind.LEGACY_URL if legacy_path and not from_path else PageInputKind.MODERN_URL
+    return ParsedPageInput(page_id, kind)

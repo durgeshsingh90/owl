@@ -9,6 +9,7 @@ the valid collection.
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -22,6 +23,7 @@ from django.utils import timezone
 
 from bookmark_manager.models import (
     Bookmark,
+    BookmarkActivityType,
     BookmarkAvailability,
     BookmarkImportFailure,
     BookmarkImportRun,
@@ -29,11 +31,15 @@ from bookmark_manager.models import (
     ConfluencePageNode,
     Tag,
 )
+from bookmark_manager.services.bookmark_analytics import record_daily_activity
+from bookmark_manager.services.bookmark_application import BookmarkActionError, save_bookmark_input
 from bookmark_manager.services.bookmark_domain import InvalidPageIdentity, normalize_page_id
 from bookmark_manager.services.bookmark_outline import (
     ensure_outline_position,
     next_outline_position,
 )
+from bookmark_manager.services.configuration import ConfigurationUnavailable, get_active_profile
+from bookmark_manager.services.confluence_validation import PageInputError, parse_page_input
 from core.logging import redact_log_text
 
 DOCUMENT_TYPE = "owl.bookmark-export"
@@ -43,6 +49,7 @@ MAX_RECORDS = 50_000
 MAX_NOTE_LENGTH = 250_000
 MAX_TAGS_PER_BOOKMARK = 100
 MAX_HIERARCHY_DEPTH = 100
+MAX_TEXT_IMPORT_URLS = 5_000
 
 _MISSING = object()
 _SAFE_ERROR_CODE = re.compile(r"^[A-Za-z0-9_.-]*$")
@@ -53,6 +60,7 @@ _PAGE_PATH_PATTERNS = (
     re.compile(r"/(?:pages|content)/0*([1-9][0-9]*)(?:/|$)", re.IGNORECASE),
     re.compile(r"/viewpage\.action(?:/|$)", re.IGNORECASE),
 )
+_TEXT_URL_PATTERN = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
 
 class BookmarkImportError(ValueError):
@@ -307,6 +315,176 @@ def import_bookmarks_document(
         run.outcome = f"Imported {imported} and skipped {skipped} of {len(records)} records."
     run.save(update_fields=["status", "outcome", "completed_at"])
     return BookmarkImportResult(run=run)
+
+
+def import_bookmarks_text(
+    payload: bytes | str,
+    *,
+    filename: str = "bookmark-import.txt",
+    imported_at: datetime | None = None,
+    max_bytes: int = MAX_IMPORT_BYTES,
+    bookmark_saver=None,
+    profile_loader=None,
+) -> BookmarkImportResult:
+    """Extract HTTP(S) URLs from text and save each independently.
+
+    Probable Confluence URLs must expose one valid Page ID before any save is
+    attempted. One incomplete or unreachable page is recorded without stopping
+    the remaining URLs.
+    """
+
+    normalized_max_bytes = _bounded_document_integer(
+        max_bytes,
+        field_name="size limit",
+        maximum=MAX_IMPORT_BYTES,
+    )
+    source_bytes, text = _decode_text_import(payload, max_bytes=normalized_max_bytes)
+    urls = _extract_text_urls(text)
+    if not urls:
+        raise ImportDocumentError("The text import does not contain an HTTP or HTTPS URL.")
+    if len(urls) > MAX_TEXT_IMPORT_URLS:
+        raise ImportDocumentError("The text import contains too many URLs.")
+
+    import_time = imported_at or timezone.now()
+    if not isinstance(import_time, datetime) or timezone.is_naive(import_time):
+        raise ImportDocumentError("The import time must include a timezone.")
+
+    run = BookmarkImportRun.objects.create(
+        filename=_safe_filename(filename),
+        schema_version="text-urls-v1",
+        source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+        total_records=len(urls),
+        status=BookmarkImportStatus.RUNNING,
+        started_at=import_time,
+    )
+    saver = bookmark_saver or save_bookmark_input
+    load_profile = profile_loader or get_active_profile
+    profile_loaded = False
+    profile = None
+    profile_error = ""
+    imported = 0
+    skipped = 0
+
+    for record_number, url in enumerate(urls, start=1):
+        page_id = ""
+        try:
+            if "..." in url or "…" in url:
+                raise ImportRecordError("Incomplete or truncated URL.")
+            if _probably_confluence_url(url):
+                if not profile_loaded:
+                    profile_loaded = True
+                    try:
+                        profile = load_profile()
+                    except ConfigurationUnavailable:
+                        profile_error = (
+                            "Connect Confluence before importing Confluence URLs from text."
+                        )
+                if profile is None:
+                    raise ImportRecordError(profile_error)
+                parsed = parse_page_input(url, profile.origin)
+                page_id = parsed.page_id
+            result = saver(url)
+        except PageInputError as exc:
+            _record_failure(
+                run,
+                record_number,
+                page_id,
+                f"{_safe_text_url_reference(url)} — incomplete Confluence URL: {exc}",
+            )
+        except (BookmarkActionError, ImportRecordError) as exc:
+            _record_failure(
+                run,
+                record_number,
+                page_id,
+                f"{_safe_text_url_reference(url)} — {exc}",
+            )
+        except Exception:
+            _record_failure(
+                run,
+                record_number,
+                page_id,
+                f"{_safe_text_url_reference(url)} — the bookmark could not be saved.",
+            )
+        else:
+            if result.created:
+                imported += 1
+            else:
+                skipped += 1
+        _update_run_progress(run, record_number, imported, skipped)
+
+    run.completed_at = timezone.now()
+    if run.failed_records:
+        run.status = BookmarkImportStatus.COMPLETED_WITH_FAILURES
+        run.outcome = (
+            f"Completed {imported + skipped} of {len(urls)} extracted URLs; "
+            f"added {imported}, already present {skipped}, and incomplete or failed "
+            f"{run.failed_records}."
+        )
+    else:
+        run.status = BookmarkImportStatus.COMPLETED
+        run.outcome = (
+            f"Completed all {len(urls)} extracted URLs; added {imported} and "
+            f"already present {skipped}."
+        )
+    run.save(update_fields=["status", "outcome", "completed_at"])
+    return BookmarkImportResult(run=run)
+
+
+def _decode_text_import(payload: bytes | str, *, max_bytes: int) -> tuple[bytes, str]:
+    if isinstance(payload, str):
+        source_bytes = payload.encode("utf-8")
+    elif isinstance(payload, bytes):
+        source_bytes = payload
+    else:
+        raise ImportDocumentError("The text import must be a UTF-8 text file.")
+    if len(source_bytes) > max_bytes:
+        raise ImportDocumentError("The text import exceeds the configured size limit.")
+    try:
+        return source_bytes, source_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ImportDocumentError("The text import must be valid UTF-8.") from exc
+
+
+def _extract_text_urls(text: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in _TEXT_URL_PATTERN.finditer(text):
+        candidate = html.unescape(match.group(0)).rstrip(",;!?")
+        for opening, closing in (("(", ")"), ("[", "]"), ("{", "}")):
+            while candidate.endswith(closing) and candidate.count(closing) > candidate.count(
+                opening
+            ):
+                candidate = candidate[:-1]
+        if candidate.endswith(".") and not candidate.endswith("..."):
+            candidate = candidate[:-1]
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            urls.append(candidate)
+    return urls
+
+
+def _probably_confluence_url(value: str) -> bool:
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return "confluence" in value.casefold()
+    host = (parts.hostname or "").casefold()
+    path = parts.path.casefold()
+    return (
+        "confluence" in host
+        or ("/spaces/" in path and "/pages/" in path)
+        or "/content/" in path
+        or path.endswith("/viewpage.action")
+    )
+
+
+def _safe_text_url_reference(value: str) -> str:
+    try:
+        parts = urlsplit(value)
+        reference = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    except ValueError:
+        reference = "URL"
+    return redact_log_text(reference)[:140] or "URL"
 
 
 def _decode_document(
@@ -651,6 +829,10 @@ def _merge_record(
         import_run=run,
         import_record_number=record.record_number,
         legacy_number=record.legacy_number,
+    )
+    record_daily_activity(
+        BookmarkActivityType.ADDED,
+        occurred_at=bookmark.saved_at,
     )
     _set_tags(bookmark, record.tags)
     return True

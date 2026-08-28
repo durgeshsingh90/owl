@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from django.test import override_settings
@@ -18,6 +19,7 @@ from bookmark_manager.services.bookmark_domain import (
     ConfluencePageSnapshot,
     upsert_bookmark,
 )
+from bookmark_manager.services.confluence_validation import validate_confluence_origin
 from bookmark_manager.services.deletion import (
     DeleteConfirmationRequired,
     delete_local_bookmark,
@@ -30,9 +32,62 @@ from bookmark_manager.services.import_export import (
     export_bookmarks_document,
     export_bookmarks_json,
     import_bookmarks_document,
+    import_bookmarks_text,
 )
 
 pytestmark = pytest.mark.django_db
+
+
+def test_text_import_extracts_unique_urls_and_continues_after_incomplete_confluence_link():
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid/wiki", allow_test_targets=True
+    )
+    saved_urls = []
+
+    def saver(url):
+        saved_urls.append(url)
+        return SimpleNamespace(created=True)
+
+    result = import_bookmarks_text(
+        """
+        Complete https://confluence.example.invalid/wiki/spaces/ENG/pages/910001/Complete
+        Truncated https://confluence.example.invalid/wiki/spac...
+        Missing ID https://confluence.example.invalid/wiki/spaces/ENG/pages/
+        Web https://example.com/guides/complete?view=all
+        Duplicate https://example.com/guides/complete?view=all
+        """,
+        filename="meeting-chat.txt",
+        bookmark_saver=saver,
+        profile_loader=lambda: SimpleNamespace(origin=origin),
+    )
+
+    assert result.run.schema_version == "text-urls-v1"
+    assert result.run.total_records == 4
+    assert result.run.imported_records == 2
+    assert result.run.failed_records == 2
+    assert result.run.status == BookmarkImportStatus.COMPLETED_WITH_FAILURES
+    assert saved_urls == [
+        "https://confluence.example.invalid/wiki/spaces/ENG/pages/910001/Complete",
+        "https://example.com/guides/complete?view=all",
+    ]
+    failures = list(result.run.failures.all())
+    assert [failure.record_number for failure in failures] == [2, 3]
+    assert "confluence.example.invalid/wiki/spac..." in failures[0].reason
+    assert "Incomplete or truncated URL" in failures[0].reason
+    assert "confluence.example.invalid/wiki/spaces/ENG/pages/" in failures[1].reason
+    assert "incomplete Confluence URL" in failures[1].reason
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (b"plain meeting transcript without a link", "does not contain"),
+        (b"\xff\xfe", "valid UTF-8"),
+    ],
+)
+def test_text_import_rejects_files_without_extractable_utf8_urls(payload, message):
+    with pytest.raises(ImportDocumentError, match=message):
+        import_bookmarks_text(payload)
 
 
 def _legacy_record(page_id: str, title: str, saved_at: str, **overrides):

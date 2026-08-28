@@ -274,6 +274,12 @@
     background: var(--red-soft);
 }
 
+.inline-message[data-state="progress"] {
+    border-left-color: var(--teal);
+    color: var(--muted-strong);
+    background: var(--teal-soft);
+}
+
 .form-errors ul {
     margin: 0;
     padding-left: 1.2rem;
@@ -536,6 +542,40 @@
 
 .settings-data .import-form .button {
     width: fit-content;
+}
+
+.import-progress {
+    display: grid;
+    gap: 0.55rem;
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+}
+
+.import-progress[hidden] {
+    display: none;
+}
+
+.import-progress__heading {
+    display: grid;
+    gap: 0.18rem;
+    color: var(--ink);
+    font-size: 0.78rem;
+}
+
+.import-progress__heading span,
+.import-progress p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.72rem;
+}
+
+.import-progress progress {
+    width: 100%;
+    height: 0.65rem;
+    accent-color: var(--bookmark-accent);
 }
 
 .settings-data .import-result {
@@ -935,6 +975,15 @@
 
 .import-result details {
     flex-basis: 100%;
+}
+
+.import-result--partial details li {
+    margin-top: 0.35rem;
+    padding: 0.45rem 0.55rem;
+    border-left: 3px solid var(--red);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    color: var(--muted-strong);
+    background: var(--red-soft);
 }
 
 .tree-toolbar {
@@ -1591,6 +1640,88 @@
     stroke-width: 1.55;
 }
 
+.global-refresh-control {
+    display: flex;
+    min-width: 170px;
+    align-items: center;
+    gap: 0.42rem;
+    margin: 0;
+}
+
+.global-refresh-control__button {
+    position: relative;
+    border-color: var(--line);
+    color: var(--bookmark-accent);
+    background: color-mix(in srgb, var(--surface-subtle) 82%, transparent);
+}
+
+.global-refresh-control__button:disabled {
+    opacity: 1;
+    cursor: wait;
+}
+
+.global-refresh-control__spinner {
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    width: 10px;
+    height: 10px;
+    border: 2px solid var(--line-strong);
+    border-top-color: var(--teal);
+    border-radius: 50%;
+    background: var(--bookmark-panel);
+    animation: global-refresh-spin 0.8s linear infinite;
+}
+
+.global-refresh-control__meta {
+    display: grid;
+    width: 125px;
+    min-width: 0;
+    gap: 0.08rem;
+}
+
+.global-refresh-control__meta strong,
+.global-refresh-control__meta small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.global-refresh-control__meta strong {
+    color: var(--muted-strong);
+    font-size: 0.68rem;
+    font-weight: 700;
+}
+
+.global-refresh-control__meta small {
+    color: var(--muted);
+    font-size: 0.59rem;
+}
+
+.global-refresh-control__track {
+    display: block;
+    width: 100%;
+    height: 2px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--line);
+}
+
+.global-refresh-control__track > span {
+    display: block;
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--teal);
+    transition: width 180ms ease-out;
+}
+
+@keyframes global-refresh-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
 .bookmark-app-switcher {
     position: relative;
 }
@@ -1822,11 +1953,14 @@
 }
 
 .bookmark-manager-shell .bookmark-page {
+    width: 100%;
+    max-width: 2200px;
     min-width: 0;
     min-height: calc(100vh - 81px);
     grid-area: content;
     align-content: start;
     gap: 0.85rem !important;
+    margin-inline: auto;
     padding: 1.15rem 1.25rem 1.5rem;
 }
 
@@ -1947,14 +2081,124 @@
 
 .bookmark-manager-shell .people-panel-heading {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0.15rem;
+    justify-content: stretch;
     margin: 0;
     padding: 1rem 0.9rem 0.85rem;
     border-bottom: 1px solid var(--line);
 }
 
+.bookmark-manager-shell .people-panel-title {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
 .bookmark-manager-shell .people-panel-heading h2 {
+    margin: 0;
     font-size: 1rem;
+}
+
+.bookmark-manager-shell .people-search-toggle {
+    position: relative;
+    width: 32px;
+    height: 32px;
+    flex: 0 0 32px;
+    border: 1px solid var(--line-strong);
+    border-radius: 7px;
+    color: var(--muted-strong);
+    background: var(--surface);
+    cursor: pointer;
+}
+
+.bookmark-manager-shell .people-search-toggle::before {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    width: 10px;
+    height: 10px;
+    border: 2px solid currentcolor;
+    border-radius: 50%;
+    content: "";
+}
+
+.bookmark-manager-shell .people-search-toggle::after {
+    position: absolute;
+    top: 19px;
+    left: 19px;
+    width: 7px;
+    height: 2px;
+    border-radius: 999px;
+    background: currentcolor;
+    content: "";
+    transform: rotate(45deg);
+    transform-origin: left center;
+}
+
+.bookmark-manager-shell .people-search-toggle:hover,
+.bookmark-manager-shell .people-search-toggle[aria-expanded="true"] {
+    border-color: var(--bookmark-accent);
+    color: var(--bookmark-accent);
+    background: var(--bookmark-accent-soft);
+}
+
+.bookmark-manager-shell .people-search-toggle:focus-visible {
+    outline: 3px solid color-mix(in srgb, var(--bookmark-accent) 35%, transparent);
+    outline-offset: 2px;
+}
+
+.bookmark-manager-shell .people-search-toggle:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.bookmark-manager-shell[data-theme="dark"] .people-search-toggle {
+    border-color: #49677e;
+    color: #d7e1e8;
+    background: #10283b;
+}
+
+.bookmark-manager-shell[data-theme="dark"] .people-search-toggle:hover,
+.bookmark-manager-shell[data-theme="dark"] .people-search-toggle[aria-expanded="true"] {
+    border-color: #f2bd68;
+    color: #f2bd68;
+    background: #183248;
+}
+
+.bookmark-manager-shell .people-search {
+    display: grid;
+    gap: 0.35rem;
+    padding: 0.65rem 0.75rem 0;
+}
+
+.bookmark-manager-shell .people-search[hidden] {
+    display: none;
+}
+
+.bookmark-manager-shell .people-search input {
+    width: 100%;
+    min-width: 0;
+    padding: 0.55rem 0.65rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 7px;
+    color: var(--ink);
+    background: var(--surface);
+    font: inherit;
+    font-size: 0.72rem;
+}
+
+.bookmark-manager-shell .people-search input:focus {
+    border-color: var(--bookmark-accent);
+    outline: 3px solid color-mix(in srgb, var(--bookmark-accent) 22%, transparent);
+}
+
+.bookmark-manager-shell .people-search p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.6rem;
 }
 
 .bookmark-manager-shell .people-clear-filter {
@@ -2063,6 +2307,10 @@
 
 .bookmark-manager-shell .people-empty p {
     margin: 0.35rem 0 0;
+}
+
+.bookmark-manager-shell .people-empty--search {
+    margin-top: 0;
 }
 
 .bookmark-manager-shell .tree-toolbar {
@@ -2329,6 +2577,56 @@
     background: var(--bookmark-panel);
 }
 
+.bookmark-manager-shell .organisation-form--primary {
+    margin: 0.8rem 0;
+}
+
+.bookmark-manager-shell .organisation-form--primary textarea {
+    min-height: 190px;
+}
+
+.bookmark-manager-shell .detail-full-url {
+    display: grid;
+    gap: 0.25rem;
+    margin: -0.15rem 0 0.8rem;
+}
+
+.bookmark-manager-shell .detail-full-url strong {
+    color: var(--muted-strong);
+    font-size: 0.72rem;
+}
+
+.bookmark-manager-shell .detail-full-url span {
+    color: var(--muted);
+    font-size: 0.78rem;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.bookmark-manager-shell .detail-tag-editor {
+    display: grid;
+    gap: 0.45rem;
+    margin: 0.8rem 0;
+    padding: 0.7rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bookmark-panel);
+}
+
+.bookmark-manager-shell .detail-tag-editor label {
+    display: grid;
+    gap: 0.2rem;
+    color: var(--muted-strong);
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.bookmark-manager-shell .detail-tag-editor small {
+    color: var(--muted);
+    font-weight: 400;
+}
+
 .bookmark-manager-shell .bookmark-metadata {
     gap: 0;
     border-top: 1px solid var(--line);
@@ -2342,8 +2640,68 @@
 }
 
 .bookmark-manager-shell[data-theme="dark"] .button--danger {
-    color: var(--red);
-    background: transparent;
+    border-color: #b9575d;
+    color: #ffd8d8;
+    background: #3a2027;
+    box-shadow: 0 0 0 1px rgb(241 131 131 / 12%);
+}
+
+.bookmark-manager-shell[data-theme="dark"] .button--danger:hover {
+    border-color: #f18383;
+    color: #fff;
+    background: #5a2930;
+}
+
+.bookmark-manager-shell[data-theme="dark"] .button--primary {
+    border-color: #f0bc69;
+    color: #17120a;
+    background: #e4a84b;
+    box-shadow: 0 5px 16px rgb(0 0 0 / 24%);
+}
+
+.bookmark-manager-shell[data-theme="dark"] .button--primary:hover {
+    border-color: #ffd38d;
+    color: #0d0b08;
+    background: #f2bd68;
+}
+
+.bookmark-manager-shell[data-theme="dark"] .button--secondary {
+    border-color: #49677e;
+    color: #edf3f8;
+    background: #112a3e;
+    box-shadow: 0 3px 12px rgb(0 0 0 / 20%);
+}
+
+.bookmark-manager-shell[data-theme="dark"] .button--secondary:hover {
+    border-color: #7397b2;
+    color: #fff;
+    background: #193a54;
+}
+
+.bookmark-manager-shell[data-theme="dark"] .button:disabled {
+    border-color: #3c5265;
+    color: #91a3b3;
+    background: #102436;
+    box-shadow: none;
+    opacity: 0.78;
+}
+
+.bookmark-manager-shell[data-theme="dark"] .bookmark-icon-button {
+    border-color: var(--line);
+    color: #c8d5df;
+    background: rgb(255 255 255 / 2.5%);
+}
+
+.bookmark-manager-shell[data-theme="dark"] .bookmark-icon-button:hover {
+    border-color: #526f85;
+    color: #f2bd68;
+    background: #112a3e;
+}
+
+.bookmark-manager-shell[data-theme="dark"] .tree-toolbar .text-button {
+    border-color: #49677e;
+    color: #d7e1e8;
+    background: #10283b;
 }
 
 .bookmark-manager-shell[data-theme="dark"] input,
@@ -2362,7 +2720,32 @@
     color: var(--ink);
 }
 
+@media (max-width: 1500px) and (min-width: 1181px) {
+    .bookmark-manager-shell .bookmark-workspace {
+        grid-template-columns: minmax(480px, 1fr) minmax(300px, 350px);
+    }
+
+    .bookmark-manager-shell .bookmark-pane--people {
+        max-height: 250px;
+        grid-column: 1 / -1;
+        border-top: 1px solid var(--line);
+        border-left: 0;
+    }
+
+    .bookmark-manager-shell .confluence-people-list {
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    }
+}
+
 @media (max-width: 1180px) {
+    .global-refresh-control {
+        min-width: auto;
+    }
+
+    .global-refresh-control__meta {
+        width: 105px;
+    }
+
     .bookmark-manager-shell .bookmark-workspace {
         grid-template-columns: minmax(0, 1fr);
     }
@@ -2377,17 +2760,6 @@
         max-height: none;
         border-top: 1px solid var(--line);
         border-left: 0;
-    }
-}
-
-@media (max-width: 980px) {
-    .bookmark-connection-summary {
-        min-width: 0;
-        padding-inline: 0.5rem;
-    }
-
-    .bookmark-connection-summary small {
-        display: none;
     }
 }
 
@@ -2467,6 +2839,26 @@
 }
 
 @media (max-width: 620px) {
+    .bookmark-manager-shell .people-search-toggle {
+        width: 44px;
+        height: 44px;
+        flex-basis: 44px;
+    }
+
+    .bookmark-manager-shell .people-search-toggle::before {
+        top: 12px;
+        left: 12px;
+        width: 12px;
+        height: 12px;
+    }
+
+    .bookmark-manager-shell .people-search-toggle::after {
+        top: 25px;
+        left: 25px;
+    }
+}
+
+@media (max-width: 620px) {
     .bookmark-topbar {
         min-height: 64px;
         padding: 0.55rem 0.75rem;
@@ -2482,13 +2874,16 @@
     }
 
     .bookmark-app-title p,
-    .bookmark-connection-summary,
     .bookmark-local-avatar {
         display: none;
     }
 
     .bookmark-topbar__actions {
         gap: 0.15rem;
+    }
+
+    .global-refresh-control__meta {
+        display: none;
     }
 
     .bookmark-icon-button {

@@ -28,6 +28,8 @@ from bookmark_manager.models import (
     SavedBookmarkView,
     Tag,
 )
+from bookmark_manager.services.confluence_validation import extract_page_id_from_url
+from bookmark_manager.services.web_bookmarks import WebBookmarkError, canonicalize_web_url
 
 
 class InvalidBookmarkQuery(ValueError):
@@ -172,8 +174,8 @@ class BookmarkQuery:
 
     def __post_init__(self) -> None:
         search = str(self.search).strip()
-        if len(search) > 500:
-            raise InvalidBookmarkQuery("Bookmark search is limited to 500 characters.")
+        if len(search) > 4096:
+            raise InvalidBookmarkQuery("Bookmark search is limited to 4096 characters.")
         object.__setattr__(self, "search", search)
         object.__setattr__(self, "favorite", _optional_boolean(self.favorite, "favorite"))
         object.__setattr__(self, "pinned", _optional_boolean(self.pinned, "pinned"))
@@ -559,31 +561,77 @@ def _apply_database_filters(
 
 
 def _apply_local_search(queryset: QuerySet[Bookmark], raw_search: str) -> QuerySet[Bookmark]:
-    direct = (
-        Q(title__icontains=raw_search)
-        | Q(page_id__icontains=raw_search)
-        | Q(url__icontains=raw_search)
-        | Q(space_name__icontains=raw_search)
-        | Q(space_key__icontains=raw_search)
-        | Q(author_id__icontains=raw_search)
-        | Q(author_name__icontains=raw_search)
-        | Q(created_by_id__icontains=raw_search)
-        | Q(created_by_name__icontains=raw_search)
-        | Q(modified_by_id__icontains=raw_search)
-        | Q(modified_by_name__icontains=raw_search)
-        | Q(tags__name__icontains=raw_search)
-        | Q(notes__icontains=raw_search)
-        | Q(page_text__icontains=raw_search)
-        | Q(category__name__icontains=raw_search)
-        | Q(category__domain__icontains=raw_search)
+    url_identity = _url_identity_filter(raw_search)
+    if url_identity is not None:
+        return queryset.filter(url_identity).distinct()
+
+    for search_term in _independent_search_terms(raw_search):
+        direct = _direct_search_filter(search_term)
+        direct_ids = queryset.filter(direct).values_list("pk", flat=True)
+        path_node_ids = _node_ids_with_matching_breadcrumb(search_term)
+        queryset = queryset.filter(
+            Q(pk__in=direct_ids) | Q(tree_node_id__in=path_node_ids)
+        ).distinct()
+    return queryset
+
+
+def matching_bookmarks_for_url(value: str) -> tuple[Bookmark, ...]:
+    """Find every saved bookmark with the pasted URL or its embedded Page ID."""
+
+    identity = _url_identity_filter(value)
+    if identity is None:
+        return ()
+    return tuple(
+        Bookmark.objects.select_related("tree_node").filter(identity).distinct().order_by("pk")
     )
-    if raw_search.isdecimal():
-        direct |= Q(pk=int(raw_search))
-    elif raw_search.startswith("#") and raw_search[1:].isdecimal():
-        direct |= Q(pk=int(raw_search[1:]))
-    direct_ids = queryset.filter(direct).values_list("pk", flat=True)
-    path_node_ids = _node_ids_with_matching_breadcrumb(raw_search)
-    return queryset.filter(Q(pk__in=direct_ids) | Q(tree_node_id__in=path_node_ids)).distinct()
+
+
+def _url_identity_filter(value: str) -> Q | None:
+    """Build a network-free identity lookup for one complete HTTP(S) URL."""
+
+    candidate = str(value or "").strip()
+    try:
+        canonical_url, _hostname = canonicalize_web_url(candidate)
+    except WebBookmarkError:
+        return None
+
+    identity = Q(canonical_url=canonical_url) | Q(url__iexact=candidate)
+    page_id = extract_page_id_from_url(candidate)
+    if page_id is not None:
+        identity |= Q(page_id=page_id)
+    return identity
+
+
+def _direct_search_filter(search_term: str) -> Q:
+    direct = (
+        Q(title__icontains=search_term)
+        | Q(page_id__icontains=search_term)
+        | Q(url__icontains=search_term)
+        | Q(space_name__icontains=search_term)
+        | Q(space_key__icontains=search_term)
+        | Q(author_id__icontains=search_term)
+        | Q(author_name__icontains=search_term)
+        | Q(created_by_id__icontains=search_term)
+        | Q(created_by_name__icontains=search_term)
+        | Q(modified_by_id__icontains=search_term)
+        | Q(modified_by_name__icontains=search_term)
+        | Q(tags__name__icontains=search_term)
+        | Q(notes__icontains=search_term)
+        | Q(page_text__icontains=search_term)
+        | Q(category__name__icontains=search_term)
+        | Q(category__domain__icontains=search_term)
+    )
+    if search_term.isdecimal():
+        direct |= Q(pk=int(search_term))
+    elif search_term.startswith("#") and search_term[1:].isdecimal():
+        direct |= Q(pk=int(search_term[1:]))
+    return direct
+
+
+def _independent_search_terms(raw_search: str) -> tuple[str, ...]:
+    """Return unique whitespace-separated terms in the order the user entered them."""
+
+    return tuple(dict.fromkeys(_search_key(raw_search).split()))
 
 
 def _node_ids_with_matching_breadcrumb(search: str) -> frozenset[int]:

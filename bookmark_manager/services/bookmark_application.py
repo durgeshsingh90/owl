@@ -63,7 +63,7 @@ class BookmarkActionError(Exception):
         return self.message
 
 
-def _default_client_factory(profile: ActiveConfluenceProfile) -> ConfluenceClient:
+def build_confluence_client(profile: ActiveConfluenceProfile) -> ConfluenceClient:
     return ConfluenceAdapter(
         profile.origin,
         profile.token,
@@ -73,7 +73,7 @@ def _default_client_factory(profile: ActiveConfluenceProfile) -> ConfluenceClien
     )
 
 
-def _snapshot(page: ConfluencePage) -> ConfluencePageSnapshot:
+def snapshot_from_confluence_page(page: ConfluencePage) -> ConfluencePageSnapshot:
     ancestors = tuple(
         ConfluenceNodeSnapshot(
             page_id=ancestor.page_id,
@@ -101,7 +101,7 @@ def _snapshot(page: ConfluencePage) -> ConfluencePageSnapshot:
     )
 
 
-def _finish_confluence_bookmark(result: BookmarkSaveResult) -> BookmarkSaveResult:
+def finish_confluence_bookmark(result: BookmarkSaveResult) -> BookmarkSaveResult:
     canonical_url, hostname = canonicalize_web_url(result.bookmark.url)
     category = category_for_url(canonical_url, hostname)
     changed = []
@@ -167,9 +167,12 @@ def save_bookmark_input(
             ConnectionStatus.NOT_CONFIGURED,
         ) from exc
 
+    origin_check_candidate = candidate
+    if candidate.casefold().startswith(("http://", "https://")):
+        origin_check_candidate = urlsplit(candidate)._replace(fragment="").geturl()
     if candidate.casefold().startswith(
         ("http://", "https://")
-    ) and not profile.origin.contains_application_url(candidate):
+    ) and not profile.origin.contains_application_url(origin_check_candidate):
         if _looks_like_confluence_page_url(candidate):
             try:
                 parse_page_input(candidate, profile.origin)
@@ -210,7 +213,7 @@ def save_bookmark_input(
         parsed.kind.value,
     )
 
-    client = (client_factory or _default_client_factory)(profile)
+    client = (client_factory or build_confluence_client)(profile)
 
     def load_metadata(page_id: str) -> ConfluencePageSnapshot:
         logger.info("Fetching selected Confluence page page_id=%s descendants=false", page_id)
@@ -222,7 +225,7 @@ def save_bookmark_input(
                 result.code.value,
             )
             raise _result_error(result.code, result.message)
-        snapshot = _snapshot(result.page)
+        snapshot = snapshot_from_confluence_page(result.page)
         logger.info(
             "Confluence page loaded page_id=%s ancestors=%d page_text_characters=%d",
             page_id,
@@ -239,7 +242,7 @@ def save_bookmark_input(
         )
     else:
         result = save_bookmark_by_page_id(parsed.page_id, load_metadata)
-    result = _finish_confluence_bookmark(result)
+    result = finish_confluence_bookmark(result)
     logger.info(
         "Bookmark save completed page_id=%s bookmark_id=%s created=%s source_requested=%s",
         parsed.page_id,

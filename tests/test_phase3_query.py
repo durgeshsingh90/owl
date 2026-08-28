@@ -20,6 +20,7 @@ from bookmark_manager.services.bookmark_query import (
     DatePreset,
     InvalidBookmarkQuery,
     active_filter_descriptors,
+    matching_bookmarks_for_url,
     query_bookmarks,
     sort_requires_flat_mode,
     visible_node_ids_with_ancestors,
@@ -124,6 +125,75 @@ def test_numeric_search_also_finds_the_permanent_owl_number():
 
     assert target in result.bookmarks
     assert hash_result.bookmarks == (target,)
+
+
+def test_space_separated_search_terms_match_independently_across_fields():
+    target = _bookmark(
+        "810001",
+        "Alpha architecture",
+        page_text="Contains omega guidance",
+    )
+    _bookmark("810002", "Alpha only")
+    _bookmark("810003", "Omega only")
+
+    result = query_bookmarks(BookmarkQuery(search="alpha   omega"))
+
+    assert result.bookmarks == (target,)
+
+
+@pytest.mark.parametrize(
+    "search",
+    [
+        "https://confluence.example.test/spaces/ENG/pages/000810001/Renamed+Page",
+        "https://confluence.example.test/pages/viewpage.action?pageId=810001&title=Old",
+        "https://confluence.example.test/future/content-route/810001#section",
+    ],
+)
+def test_pasted_url_matches_saved_confluence_page_by_exact_page_id(search):
+    target = _bookmark("810001", "Original page title")
+    _bookmark("1810001", "Similar digits are a different page")
+
+    result = query_bookmarks(BookmarkQuery(search=search))
+
+    assert result.bookmarks == (target,)
+    assert matching_bookmarks_for_url(search) == (target,)
+
+
+def test_pasted_web_url_matches_fragment_free_canonical_identity():
+    target = _bookmark(
+        "w-example",
+        "Example guide",
+        url="https://www.example.com/guides/start",
+        canonical_url="https://www.example.com/guides/start",
+    )
+    _bookmark("810002", "Unrelated page")
+
+    result = query_bookmarks(
+        BookmarkQuery(search="https://www.Example.com:443/guides/start#overview")
+    )
+
+    assert result.bookmarks == (target,)
+
+
+def test_pasted_url_without_an_identity_match_does_not_match_incidental_page_text():
+    _bookmark(
+        "810003",
+        "Text mentions a URL",
+        page_text="See https://other.example.test/pages/999 for background.",
+    )
+
+    result = query_bookmarks(BookmarkQuery(search="https://other.example.test/pages/999"))
+
+    assert result.bookmarks == ()
+
+
+def test_owl_number_can_be_combined_with_an_independent_search_term():
+    target = _bookmark("820001", "Alpha numbered bookmark")
+    _bookmark("820002", "Alpha second bookmark")
+
+    result = query_bookmarks(BookmarkQuery(search=f"#{target.pk} alpha"))
+
+    assert result.bookmarks == (target,)
 
 
 def test_combined_filters_use_and_between_groups_and_all_selected_tags():

@@ -41,6 +41,7 @@ from bookmark_manager.models import (
     Bookmark,
     BookmarkCategory,
     BookmarkImportRun,
+    BookmarkRefreshRun,
     BookmarkSource,
     ConfluenceConfiguration,
     ConfluencePageNode,
@@ -69,7 +70,14 @@ from bookmark_manager.services.bookmark_query import (
     BookmarkQueryResult,
     BookmarkSort,
     InvalidBookmarkQuery,
+    matching_bookmarks_for_url,
     query_bookmarks,
+)
+from bookmark_manager.services.bookmark_refresh import (
+    create_or_get_refresh_run,
+    launch_refresh_worker,
+    mark_refresh_launch_failed,
+    refresh_status_snapshot,
 )
 from bookmark_manager.services.configuration import (
     ConfigurationSummary,
@@ -85,8 +93,13 @@ from bookmark_manager.services.import_export import (
     BookmarkImportError,
     export_bookmarks_json,
     import_bookmarks_document,
+    import_bookmarks_text,
 )
-from bookmark_manager.services.web_bookmarks import WebBookmarkError, rename_bookmark_category
+from bookmark_manager.services.web_bookmarks import (
+    WebBookmarkError,
+    canonicalize_web_url,
+    rename_bookmark_category,
+)
 
 
 @dataclass(slots=True)
@@ -312,9 +325,12 @@ def _tree_items(
     items_by_id: dict[int, BookmarkTreeItem] = {}
     for node in visible_nodes:
         try:
-            bookmark = node.bookmark
+            node_bookmark = node.bookmark
         except Bookmark.DoesNotExist:
-            bookmark = None
+            node_bookmark = None
+        # Ancestors remain visible so a filtered result keeps its full breadcrumb,
+        # but an ancestor that did not match is folder context rather than a result.
+        bookmark = node_bookmark if node.pk in query_result.matched_node_ids else None
         items_by_id[node.pk] = BookmarkTreeItem(
             node=node,
             bookmark=bookmark,
@@ -333,6 +349,26 @@ def _tree_items(
         else:
             item.depth = parent_item.depth + 1
             parent_item.children.append(item)
+
+    if query_result.flat_mode:
+        match_rank = {
+            bookmark.tree_node_id: rank for rank, bookmark in enumerate(query_result.bookmarks)
+        }
+        fallback_rank = len(match_rank)
+
+        def sort_branch(item: BookmarkTreeItem) -> int:
+            child_ranks = [(sort_branch(child), child) for child in item.children]
+            child_ranks.sort(key=lambda ranked: (ranked[0], ranked[1].node.pk))
+            item.children[:] = [child for _rank, child in child_ranks]
+            ranks = [rank for rank, _child in child_ranks]
+            if item.node.pk in match_rank:
+                ranks.append(match_rank[item.node.pk])
+            rank = min(ranks, default=fallback_rank)
+            return rank
+
+        root_ranks = [(sort_branch(item), item) for item in roots]
+        root_ranks.sort(key=lambda ranked: (ranked[0], ranked[1].node.pk))
+        roots[:] = [item for _rank, item in root_ranks]
     return roots, outline_numbers
 
 
@@ -593,6 +629,50 @@ def _active_bookmark_section(request: HttpRequest, *, open_settings: bool) -> st
     return "all"
 
 
+def _global_bookmark_counts() -> dict[str, int]:
+    """Return stable sidebar counts that do not change with the active shortcut."""
+
+    return Bookmark.objects.aggregate(
+        all_bookmarks=Count("pk"),
+        favorites=Count("pk", filter=Q(favorite=True)),
+        pinned=Count("pk", filter=Q(pinned=True)),
+        viewed=Count("pk", filter=Q(open_count__gte=1)),
+        never_viewed=Count("pk", filter=Q(open_count=0)),
+    )
+
+
+def _refresh_run_payload(
+    run: BookmarkRefreshRun | None,
+    completed: BookmarkRefreshRun | None,
+) -> dict[str, object]:
+    active = bool(run and run.is_active)
+    processed = run.processed_bookmarks if run else 0
+    total = run.total_bookmarks if run else 0
+    progress = round((processed / total) * 100) if total else (0 if active else 100)
+    return {
+        "run_id": run.pk if run else None,
+        "status": run.status if run else "idle",
+        "status_label": run.get_status_display() if run else "Ready",
+        "active": active,
+        "total": total,
+        "processed": processed,
+        "succeeded": run.succeeded_bookmarks if run else 0,
+        "failed": run.failed_bookmarks if run else 0,
+        "progress": progress,
+        "requested_at": run.requested_at.isoformat() if run else None,
+        "started_at": run.started_at.isoformat() if run and run.started_at else None,
+        "heartbeat_at": run.heartbeat_at.isoformat() if run and run.heartbeat_at else None,
+        "completed_at": run.completed_at.isoformat() if run and run.completed_at else None,
+        "last_completed_at": (
+            completed.completed_at.isoformat()
+            if completed is not None and completed.completed_at is not None
+            else None
+        ),
+        "last_completed_status": completed.status if completed else "",
+        "detail": run.last_error_message if run else "",
+    }
+
+
 def _index_context(
     request: HttpRequest,
     *,
@@ -606,6 +686,22 @@ def _index_context(
     query, filter_form, active_saved_view, filter_error = _resolve_bookmark_query(request)
     query_result = query_bookmarks(query)
     search_term = query.search
+    url_search_active = False
+    if search_term:
+        try:
+            canonicalize_web_url(search_term)
+        except WebBookmarkError:
+            pass
+        else:
+            url_search_active = True
+    url_identity_matches = matching_bookmarks_for_url(search_term) if url_search_active else ()
+    first_url_identity_match = url_identity_matches[0] if url_identity_matches else None
+    first_url_identity_match_href = (
+        f"{reverse('bookmark_manager:index')}?"
+        f"{urlencode({'selected': first_url_identity_match.pk, 'located': first_url_identity_match.pk})}"
+        if first_url_identity_match is not None
+        else ""
+    )
     selected_pk = _positive_query_integer(request, "selected")
     located_pk = _positive_query_integer(request, "located")
     selected = (
@@ -691,6 +787,7 @@ def _index_context(
     selected_breadcrumb = _bookmark_breadcrumb(selected)
     tag_text = ", ".join(tag.name for tag in selected.tags.all()) if selected else ""
 
+    refresh_run, completed_refresh = refresh_status_snapshot()
     return {
         "active_nav": "bookmarks",
         "active_app": "bookmarks",
@@ -708,9 +805,14 @@ def _index_context(
         if selected
         else None,
         "search_term": search_term,
+        "url_search_active": url_search_active,
+        "url_identity_matches": url_identity_matches,
+        "url_identity_match_count": len(url_identity_matches),
+        "first_url_identity_match_href": first_url_identity_match_href,
         "bookmark_query": query,
         "query_result": query_result,
-        "bookmark_counts": query_result.counts,
+        "bookmark_counts": _global_bookmark_counts(),
+        "refresh_status": _refresh_run_payload(refresh_run, completed_refresh),
         "active_filters": query_result.active_filters,
         "current_query_string": _clean_current_query_string(request),
         "timeline_query_string": _timeline_query_string(request),
@@ -752,6 +854,72 @@ def index(request: HttpRequest) -> HttpResponse:
     return render(request, "bookmark_manager/index.html", _index_context(request))
 
 
+@require_POST
+@csrf_protect
+@never_cache
+def start_global_refresh(request: HttpRequest) -> HttpResponse:
+    """Queue one global refresh and return before the worker contacts Confluence."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    summary = get_configuration_summary()
+    if not summary.complete:
+        return JsonResponse(
+            {
+                "state": "configuration_required",
+                "label": "Confluence connection required",
+                "detail": "Save a complete Confluence connection before refreshing bookmarks.",
+            },
+            status=400,
+        )
+    run, created = create_or_get_refresh_run()
+    if created:
+        try:
+            launch_refresh_worker(run.pk)
+        except OSError:
+            mark_refresh_launch_failed(run.pk)
+            run.refresh_from_db()
+            latest, completed = refresh_status_snapshot()
+            return JsonResponse(
+                {
+                    "state": "worker_unavailable",
+                    "label": "Refresh could not start",
+                    "detail": run.last_error_message,
+                    "refresh": _refresh_run_payload(latest, completed),
+                },
+                status=503,
+            )
+    latest, completed = refresh_status_snapshot()
+    payload = _refresh_run_payload(latest, completed)
+    response = JsonResponse(
+        {
+            "state": "queued" if created else "already_running",
+            "label": "Refresh queued" if created else "Refresh already running",
+            "detail": (
+                "A background worker is retrieving current Confluence page details and text."
+                if created
+                else "The existing background refresh will continue."
+            ),
+            "refresh": payload,
+        },
+        status=202,
+    )
+    return response
+
+
+@require_GET
+@never_cache
+def global_refresh_status(request: HttpRequest) -> JsonResponse:
+    """Expose compact, secret-free progress for the top-bar tracker."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    latest, completed = refresh_status_snapshot()
+    return JsonResponse({"refresh": _refresh_run_payload(latest, completed)})
+
+
 @require_GET
 @never_cache
 def settings_page(request: HttpRequest) -> HttpResponse:
@@ -771,17 +939,14 @@ def _settings_page_context(
     """Build the full settings page, including the shared bookmark navigation."""
 
     summary = get_configuration_summary()
-    bookmark_counts = Bookmark.objects.aggregate(
-        all_bookmarks=Count("pk"),
-        favorites=Count("pk", filter=Q(favorite=True)),
-        pinned=Count("pk", filter=Q(pinned=True)),
-    )
+    bookmark_counts = _global_bookmark_counts()
     import_run = None
     import_run_pk = _positive_query_integer(request, "import_run")
     if import_run_pk:
         import_run = (
             BookmarkImportRun.objects.prefetch_related("failures").filter(pk=import_run_pk).first()
         )
+    refresh_run, completed_refresh = refresh_status_snapshot()
     return {
         "active_nav": "bookmarks",
         "active_app": "bookmarks",
@@ -795,6 +960,7 @@ def _settings_page_context(
         "last_import_run": import_run,
         "inline_error": inline_error,
         "bookmark_counts": bookmark_counts,
+        "refresh_status": _refresh_run_payload(refresh_run, completed_refresh),
         "total_bookmarks": bookmark_counts["all_bookmarks"],
         "bookmark_categories": BookmarkCategory.objects.annotate(bookmark_count=Count("bookmarks")),
         "selected_category": None,
@@ -1039,7 +1205,24 @@ def save_bookmark(request: HttpRequest) -> HttpResponse:
     }
     if result.similar_bookmarks:
         query["similar"] = "1"
-    return HttpResponseRedirect(f"{reverse('bookmark_manager:index')}?{urlencode(query)}")
+    target = f"{reverse('bookmark_manager:index')}?{urlencode(query)}"
+    if _is_async_form(request):
+        is_confluence = result.bookmark.source_type == BookmarkSource.CONFLUENCE
+        return JsonResponse(
+            {
+                "state": "success",
+                "label": "Page added" if result.created else "Bookmark already saved",
+                "detail": (
+                    "Confluence page, hierarchy, and searchable text retrieved."
+                    if is_confluence and result.created
+                    else "The existing bookmark is ready."
+                    if not result.created
+                    else "Web bookmark added."
+                ),
+                "redirect": target,
+            }
+        )
+    return HttpResponseRedirect(target)
 
 
 @require_POST
@@ -1353,14 +1536,21 @@ def export_bookmarks(request: HttpRequest) -> HttpResponse:
 @csrf_protect
 @never_cache
 def import_bookmarks(request: HttpRequest) -> HttpResponse:
-    """Merge one explicitly uploaded JSON document record by record."""
+    """Merge an uploaded JSON collection or URLs extracted from UTF-8 text."""
 
     local_error = _require_local_action(request)
     if local_error:
         return local_error
     form = BookmarkImportForm(request.POST, request.FILES)
     if not form.is_valid():
-        detail = "Choose a valid UTF-8 .json bookmark file within the configured size limit."
+        detail = "Choose a valid UTF-8 .json or .txt file within the configured size limit."
+        if _is_async_form(request):
+            return _action_json(
+                state="invalid",
+                label="Import not started",
+                detail=detail,
+                status=400,
+            )
         if request.POST.get("return_to") == "settings":
             return render(
                 request,
@@ -1381,8 +1571,18 @@ def import_bookmarks(request: HttpRequest) -> HttpResponse:
         )
     uploaded = form.cleaned_data["import_file"]
     try:
-        result = import_bookmarks_document(uploaded.read(), filename=uploaded.name)
+        if uploaded.name.casefold().endswith(".txt"):
+            result = import_bookmarks_text(uploaded.read(), filename=uploaded.name)
+        else:
+            result = import_bookmarks_document(uploaded.read(), filename=uploaded.name)
     except BookmarkImportError as exc:
+        if _is_async_form(request):
+            return _action_json(
+                state="invalid",
+                label="Import could not be completed",
+                detail=str(exc),
+                status=400,
+            )
         if request.POST.get("return_to") == "settings":
             return render(
                 request,

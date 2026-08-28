@@ -1,26 +1,82 @@
 # OWL
 
-OWL (Organised Workspace Locator) is a private, local workspace with two connected tools:
+OWL (Organised Workspace Locator) is a private, local knowledge workspace with a homepage and
+two app areas:
 
-- a Confluence bookmark manager built around Page ID identity and the real page tree;
-- a fast local search tool for PDFs synchronized from Git or Bitbucket repositories.
+- **Bookmark Manager** is the working app for ordinary web bookmarks and locally stored Confluence
+  pages;
+- **Bitbucket Search** is the prepared interface for future repository PDF synchronization and
+  local search. Its repository and indexing backend is not implemented yet.
 
 OWL runs on your own computer and listens only on `127.0.0.1`. The repository is public, but
 your credentials, databases, repository checkouts, PDF contents, indexes, and logs must remain
 local.
 
-## Current implementation stage
+## What the OWL apps do
 
-Phase 3 implements the Bookmark Manager tree and productivity scope defined by the master
-requirements and validated by work prompt `002`: secure Confluence setup, Page ID identity,
-permanent OWL numbers, the real hierarchy, advanced local search/filter/sort views, notes, tags,
-favorites, pins, usage tracking, saved views, and portable JSON import/export. Durable Confluence
-refresh jobs, PDF repository synchronization, and indexing remain later numbered phases.
+### Home
 
-The shared UI has **Home**, **Bookmark Manager**, and **Bitbucket Search**. Home is a compact
-overview; Bookmark Manager and Bitbucket Search are the two working tools. Each tool keeps its
-own functions in a labelled left sidebar; shared System Status remains a footer/sidebar utility,
-and unfinished Global Search is not presented as another application.
+Home is the launcher and local analytics dashboard for the workspace. Alongside the two app cards
+and light/dark theme control, it shows bookmark totals, indexed searchable-text size, OWL open
+counts, refresh issues, a Top 10 most-viewed table, and useful recent/unopened page lists. Its
+GitHub-style yearly calendar can be filtered by pages added, opened, refreshed, and note edits.
+Historical saved dates are complete; detailed daily opens, refreshes, and note edits are counted
+from the analytics migration onward because older versions stored only aggregate open counts.
+Home reads OWL's local database and does not contact an external service by itself.
+
+### Bookmark Manager — working
+
+Bookmark Manager is the main implemented app. It can:
+
+- save any complete HTTP or HTTPS URL once and group ordinary web bookmarks automatically by
+  domain; domain categories can be renamed without changing their stable identity;
+- connect read-only to one trusted Confluence Data Center origin using a Personal Access Token;
+- identify Confluence pages by their stable numeric Page ID across modern, legacy, renamed, and
+  fragment-bearing URLs;
+- save exactly the selected Confluence page, its root-to-page hierarchy, its title and people
+  metadata, and the selected page's searchable text. Ancestor nodes build the tree but their body
+  text is not stored;
+- display the hierarchy as a numbered outline such as `1`, `1.1`, and `1.1.1`, while every saved
+  bookmark also keeps a permanent OWL database ID;
+- search locally as you type across saved titles, Page IDs, URLs, notes, people, breadcrumbs,
+  tags, and stored Confluence page text. Pasting a URL first finds existing Page-ID or canonical
+  URL matches; pressing Enter adds it only when no saved match exists;
+- browse All, Favorites, Pinned, Recently viewed, Frequently viewed, Never viewed, and automatic
+  domain categories from the left sidebar;
+- keep quick notes and tags locally, track opens and viewed versions, show Confluence writers and
+  editors, and filter the People column by name;
+- select a tree branch, include its children, and delete selected bookmarks from OWL without
+  deleting anything in Confluence;
+- import OWL or legacy JSON backups, extract URLs from UTF-8 text files, continue after individual
+  failures, and export a credential-free JSON backup;
+- refresh all saved Confluence pages in a separate background worker so titles, hierarchy,
+  metadata, timestamps, availability, and searchable text can update while you continue working.
+  The header shows progress and the last completed refresh time.
+
+All searching and organization happen against OWL's local SQLite database. Confluence is contacted
+only for an explicit connection test, a save/import that retrieves a Confluence page, or a refresh
+operation.
+
+### Bitbucket Search — interface foundation
+
+Bitbucket Search currently provides the responsive light/dark interface and truthful zero state
+for the planned PDF workflow. It shows where repository setup, PDF search, result tables, totals,
+and indexing progress will live. At this stage:
+
+- no Bitbucket or Git repository is connected;
+- no clone, pull, or other Git command is run by the page;
+- no PDF is scanned, parsed, copied, or indexed;
+- repository search, PDF search, filters, result actions, and indexing controls remain disabled.
+
+The future workflow is intended to synchronize approved repositories into private local working
+copies and build a local PDF index. The interface does not claim those unavailable capabilities
+are working today.
+
+### Shared utilities
+
+**System Status** provides a redacted local health summary for OWL's database, configuration, and
+app foundations. **Global Search** is a planned shared capability rather than a third app; it will
+eventually combine Bookmark Manager data with indexed Bitbucket PDFs.
 
 The complete product contract is in [work_prompts](work_prompts/README.md).
 
@@ -100,8 +156,17 @@ python manage.py runserver 127.0.0.1:8000
 Then open [http://127.0.0.1:8000/](http://127.0.0.1:8000/) in your browser. Press `Control-C`
 in Terminal when you want to stop OWL.
 
-Phase 3 has no separate background-worker command. A worker command will be added and documented
-when durable refresh, repository synchronization, and indexing are implemented.
+The Bookmark Manager's global refresh button starts a separate local worker process automatically.
+That worker retrieves saved Confluence pages with up to five concurrent read-only requests while
+the web app remains available. Progress and the last completed time appear beside the refresh icon.
+For diagnostics or recovery, a queued run can also be processed directly with:
+
+```bash
+python manage.py bookmark_refresh_worker --run-id RUN_ID
+```
+
+The durable run record survives page navigation and app restarts. A stopped worker remains visible
+as interrupted and can be followed by a new global refresh.
 
 ## Connect Confluence and save a bookmark
 
@@ -112,13 +177,16 @@ when durable refresh, repository synchronization, and indexing are implemented.
 4. Enter a PAT, select **Test connection**, and review the sanitized result.
 5. Select **Save settings**. OWL encrypts the PAT locally, using the operating-system credential
    store when available and its encrypted SQLite field as the fallback.
-6. Paste a modern or legacy Confluence page URL, or its numeric Page ID, into **Save bookmark**.
+6. Paste a modern or legacy Confluence page URL into the shared search/add field. OWL first checks
+   the local database for the same Page ID; if there is no match, press Enter or select
+   **Add bookmark**. A numeric Page ID can also be added directly.
 7. OWL saves exactly that page as one bookmark. Its root-to-page ancestors become hierarchy-only
    tree nodes, and searchable body text is stored only for the selected page.
 
-The terminal running `python manage.py runserver` reports the safe save stages: extracted Page ID,
-selected-page fetch, ancestor count, page-text character count, and final bookmark ID. It never
-logs the PAT, pasted credential-bearing URL, or page body.
+The terminal running `python manage.py runserver` reports the save stages: extracted Page ID,
+selected-page fetch, ancestor count, page-text character count, and final bookmark ID. OWL does not
+log the PAT or page body. Django's development-server request line can contain the search query, so
+never paste a URL containing credentials, tokens, or other secrets.
 
 Reopening settings never returns the stored PAT. Changing to a different canonical origin requires
 a new PAT. Removing the connection deletes the secure credential while keeping local bookmarks.
@@ -129,27 +197,33 @@ Bearer-PAT flow; it does not create, edit, or delete Confluence content.
 
 The Bookmark Manager keeps its hierarchy and every productivity field locally:
 
-- type `/` to focus search, or search by title, Page ID, URL, space, person, breadcrumb, tag, or
-  note;
-- combine status, tag, person, space, date, usage, favorite, and pin filters, then save the current
-  filter/sort combination as a named view;
+- type `/` to focus search, or search by title, Page ID, URL, person, breadcrumb, tag, quick note,
+  or stored Confluence page text;
+- enter multiple words separated by spaces to require every word, even when the words match
+  different fields;
+- paste a URL to match its canonical URL and any embedded Confluence Page ID before deciding
+  whether Enter should select an existing bookmark or add a new one;
 - add quick notes and comma-separated tags, and mark favorites and pins independently;
-- use recent, frequent, never-viewed, favorite, pinned, or flat sorted views without changing the
-  stored Confluence tree;
-- use the arrow keys to move through the tree, `E` to expand/collapse, `F` for favorite, `P` for
-  pin, and `Enter` to open details;
+- use recent, frequent, never-viewed, favorite, pinned, or domain views without changing the
+  stored tree;
+- use the arrow keys to move through the tree, `E` to expand/collapse, `F` for favorite, and `P`
+  for pin; selecting a bookmark checkbox shows that page's details;
 - copy a Page ID, breadcrumb, or validated source URL, and open a page through OWL to update local
-  usage and viewed-version history.
+  usage and viewed-version history;
+- use the People search icon to narrow the locally summarized Confluence writers and editors,
+  then select a person to show their written or updated pages.
 
 **Export JSON** downloads a versioned, SHA-256-protected local backup that excludes credentials and
-connection configuration. **Import a backup** accepts current OWL exports and heterogeneous legacy
-JSON collections, continues after malformed records, and reports sanitized record-level failures.
-Re-importing is idempotent, and existing OWL-owned notes, tags, favorites, pins, and usage win over
-incoming values. Deleting a bookmark requires confirmation and affects OWL only, never Confluence.
+connection configuration. **Import bookmarks** accepts current OWL exports, heterogeneous legacy
+JSON collections, and UTF-8 text files containing URLs. It continues after malformed or incomplete
+records, reports sanitized record-level failures, and keeps successfully processed URLs. Re-importing
+is idempotent, and existing OWL-owned notes, tags, favorites, pins, and usage win over incoming
+values. Deleting a bookmark requires confirmation and affects OWL only, never Confluence.
 
 Tree expansion, selection, scroll position, and multi-selection are retained in the browser for
-the local workspace. Refresh One, Refresh Selected, Refresh All, and source-driven change
-transitions are intentionally part of Phase 4 because they require durable background jobs.
+the local workspace. The global refresh action uses a durable run record and a separate worker;
+its progress survives navigation, and stale or interrupted work is reported instead of silently
+appearing successful.
 
 ## Run all local checks
 

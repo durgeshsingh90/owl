@@ -135,10 +135,12 @@ def configured_profile(monkeypatch) -> ActiveConfluenceProfile:
     [
         " 00300 ",
         "https://confluence.example.invalid/wiki/spaces/ENG/pages/00300/private-dns",
+        "https://confluence.example.invalid/wiki/spaces/ENG/pages/00300/private-dns"
+        "#:~:text=searchable%20architecture",
         "https://confluence.example.invalid/wiki/pages/viewpage.action"
         "?pageId=00300&spaceKey=ENG&title=Untrusted%20URL%20Title",
     ],
-    ids=("raw-page-id", "modern-url", "legacy-url"),
+    ids=("raw-page-id", "modern-url", "modern-url-text-fragment", "legacy-url"),
 )
 def test_supported_page_inputs_map_adapter_page_and_build_hierarchy(
     configured_profile,

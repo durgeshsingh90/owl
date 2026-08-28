@@ -168,6 +168,24 @@ class BookmarkImportStatus(models.TextChoices):
     FAILED = "failed", "Failed"
 
 
+class BookmarkRefreshStatus(models.TextChoices):
+    QUEUED = "queued", "Queued"
+    RUNNING = "running", "Running"
+    SUCCEEDED = "succeeded", "Succeeded"
+    SUCCEEDED_WITH_ERRORS = "succeeded_with_errors", "Succeeded with errors"
+    FAILED = "failed", "Failed"
+    INTERRUPTED = "interrupted", "Interrupted"
+
+
+class BookmarkActivityType(models.TextChoices):
+    """Exact local activity kinds retained as daily aggregate counters."""
+
+    ADDED = "added", "Added"
+    OPENED = "opened", "Opened"
+    REFRESHED = "refreshed", "Refreshed"
+    NOTES = "notes", "Notes updated"
+
+
 class ConfluencePageNode(models.Model):
     """One real node in the locally reconstructed Confluence hierarchy.
 
@@ -460,6 +478,118 @@ class BookmarkImportRun(models.Model):
             raise ValidationError(errors)
 
 
+class BookmarkRefreshRun(models.Model):
+    """Durable progress for one user-requested global Confluence refresh."""
+
+    status = models.CharField(
+        max_length=32,
+        choices=BookmarkRefreshStatus,
+        default=BookmarkRefreshStatus.QUEUED,
+        db_index=True,
+    )
+    total_bookmarks = models.PositiveIntegerField(default=0)
+    processed_bookmarks = models.PositiveIntegerField(default=0)
+    succeeded_bookmarks = models.PositiveIntegerField(default=0)
+    failed_bookmarks = models.PositiveIntegerField(default=0)
+    requested_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    heartbeat_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    completed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    worker_pid = models.PositiveIntegerField(null=True, blank=True)
+    last_error_message = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        ordering = ["-requested_at", "-id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(processed_bookmarks__lte=models.F("total_bookmarks")),
+                name="bookmark_refresh_processed_within_total",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    processed_bookmarks=(
+                        models.F("succeeded_bookmarks") + models.F("failed_bookmarks")
+                    )
+                ),
+                name="bookmark_refresh_results_match_processed",
+            ),
+            models.UniqueConstraint(
+                models.Value(1),
+                condition=models.Q(status__in=("queued", "running")),
+                name="bookmark_refresh_one_active_run",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"Refresh #{self.pk} — {self.get_status_display()}"
+
+    @property
+    def is_active(self) -> bool:
+        return self.status in {
+            BookmarkRefreshStatus.QUEUED,
+            BookmarkRefreshStatus.RUNNING,
+        }
+
+
+class BookmarkActivityCoverage(models.Model):
+    """Singleton boundary separating backfilled saves from new exact activity."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    detailed_tracking_started_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        verbose_name = "bookmark activity coverage"
+        verbose_name_plural = "bookmark activity coverage"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(id=1),
+                name="bookmark_activity_single_coverage",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"Detailed activity tracked from {self.detailed_tracking_started_at}"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        return super().save(*args, **kwargs)
+
+
+class BookmarkDailyActivity(models.Model):
+    """One exact local counter per calendar day and activity kind.
+
+    The table deliberately stores aggregate counts rather than URLs, titles, page
+    content, or personal notes. This keeps the Home timeline useful without creating
+    another source of retained bookmark data.
+    """
+
+    activity_date = models.DateField(db_index=True)
+    activity_type = models.CharField(
+        max_length=20,
+        choices=BookmarkActivityType,
+        db_index=True,
+    )
+    count = models.PositiveBigIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-activity_date", "activity_type"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("activity_date", "activity_type"),
+                name="bookmark_activity_one_counter_per_day",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(count__gte=1),
+                name="bookmark_activity_count_positive",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.activity_date}: {self.get_activity_type_display()} × {self.count}"
+
+
 class Bookmark(models.Model):
     """A saved page with a permanent internal OWL ID.
 
@@ -507,6 +637,11 @@ class Bookmark(models.Model):
         related_name="bookmarks",
     )
     page_text = models.TextField(blank=True)
+    page_text_size_bytes = models.PositiveBigIntegerField(
+        default=0,
+        editable=False,
+        help_text="UTF-8 byte size of the locally indexed page text only.",
+    )
 
     # OWL-owned identity, personal state, and usage.
     saved_at = models.DateTimeField(default=timezone.now, editable=False, db_index=True)
@@ -581,6 +716,14 @@ class Bookmark(models.Model):
 
     def __str__(self) -> str:
         return f"#{self.pk} {self.title}"
+
+    def save(self, *args, **kwargs):
+        update_fields = kwargs.get("update_fields")
+        if update_fields is None or "page_text" in update_fields:
+            self.page_text_size_bytes = len((self.page_text or "").encode("utf-8"))
+            if update_fields is not None:
+                kwargs["update_fields"] = set(update_fields) | {"page_text_size_bytes"}
+        return super().save(*args, **kwargs)
 
     @property
     def changed_since_viewed(self) -> bool:

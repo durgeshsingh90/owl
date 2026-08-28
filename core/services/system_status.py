@@ -10,6 +10,7 @@ from django.conf import settings
 from django.db import connection, transaction
 from django.utils import timezone
 
+from bookmark_manager.services.bookmark_refresh import refresh_status_snapshot
 from bookmark_manager.services.configuration import get_configuration_summary
 from bookmark_manager.services.secret_store import get_secret_store
 
@@ -127,6 +128,41 @@ def _confluence_status() -> ComponentStatus:
     )
 
 
+def _worker_status() -> ComponentStatus:
+    latest, completed = refresh_status_snapshot()
+    if latest is not None and latest.is_active:
+        return ComponentStatus(
+            key="worker",
+            label="Background worker",
+            state="ready",
+            summary=latest.get_status_display(),
+            detail=(
+                f"Global Confluence refresh #{latest.pk}: "
+                f"{latest.processed_bookmarks} of {latest.total_bookmarks} processed."
+            ),
+        )
+    if latest is not None and latest.status in {"failed", "interrupted"}:
+        return ComponentStatus(
+            key="worker",
+            label="Background worker",
+            state="attention",
+            summary=latest.get_status_display(),
+            detail=latest.last_error_message or "The last refresh did not complete.",
+        )
+    completed_detail = (
+        f"Last Confluence refresh completed at {completed.completed_at.isoformat()}."
+        if completed is not None and completed.completed_at is not None
+        else "No global Confluence refresh has completed yet."
+    )
+    return ComponentStatus(
+        key="worker",
+        label="Background worker",
+        state="ready",
+        summary="Idle",
+        detail=completed_detail,
+    )
+
+
 def get_system_status() -> dict[str, object]:
     components = [
         _database_status(),
@@ -134,13 +170,7 @@ def get_system_status() -> dict[str, object]:
         _data_root_status(),
         _credential_store_status(),
         _confluence_status(),
-        ComponentStatus(
-            key="worker",
-            label="Background worker",
-            state="planned",
-            summary="Not required yet",
-            detail="The durable worker is introduced with refresh and indexing phases.",
-        ),
+        _worker_status(),
     ]
     blocking = {"database", "fts5", "data_root"}
     overall = "ready"

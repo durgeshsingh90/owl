@@ -126,6 +126,8 @@ def test_bookmark_manager_topbar_matches_the_app_workspace_contract(loopback_cli
     assert "<h1>Bookmark Manager</h1>" in html
     assert 'class="bookmark-app-title"' in html
     assert 'class="bookmark-topbar__actions"' in html
+    assert "bookmark-connection-summary" not in html
+    assert "bookmarks.css?v=url-search-v10" in html
     assert 'aria-label="Applications"' in html
     assert 'aria-label="Confluence settings"' in html
     assert "data-theme-toggle" in html
@@ -271,7 +273,10 @@ def test_phase_two_settings_page_uses_a_blank_secure_pat_field(loopback_client):
     assert "Bookmark data" in html
     assert 'href="/bookmarks/export/">Export JSON</a>' in html
     assert 'action="/bookmarks/import/"' in html
-    assert "Import JSON" in html
+    assert "Import bookmarks" in html
+    assert 'accept=".json,.txt,application/json,text/plain"' in html
+    assert "data-bookmark-import-form" in html
+    assert "data-import-progress" in html
 
 
 def test_bookmark_manager_settings_gear_has_the_required_accessible_name(loopback_client):
@@ -321,11 +326,13 @@ def test_bookmark_manager_uses_one_input_for_search_and_saving(loopback_client):
     assert controls is not None
     assert 'class="bookmark-unified-form"' in html
     assert 'placeholder="Search bookmarks, or paste any URL"' in html
-    assert "Search bookmarks" in html
+    assert ">Search bookmarks</button>" not in html
+    assert "Separate words with spaces to match each word independently" in html
     assert 'formaction="/bookmarks/save/"' in html
     assert "Add bookmark" in html
     assert 'name="csrfmiddlewaretoken"' not in controls.group(1)
-    assert 'data-csrf-token="' in html
+    assert 'data-csrf-token="' not in html
+    assert 'name="csrfmiddlewaretoken"' in html
     assert "bookmark-save-form" not in html
     assert "bookmark-search-form" not in html
 

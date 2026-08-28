@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from django.db import transaction
 from django.utils import timezone
 
-from bookmark_manager.models import Bookmark, SavedBookmarkView, Tag
+from bookmark_manager.models import Bookmark, BookmarkActivityType, SavedBookmarkView, Tag
+from bookmark_manager.services.bookmark_analytics import record_daily_activity
 
 _TAG_SEPARATOR = re.compile(r"[,;\n]+")
 _MAX_TAGS_PER_BOOKMARK = 30
@@ -69,8 +70,13 @@ def update_bookmark_organisation(
     normalized_notes = notes.replace("\r\n", "\n").replace("\r", "\n")
     if bookmark.notes != normalized_notes:
         bookmark.notes = normalized_notes
-        bookmark.notes_updated_at = timezone.now()
+        notes_updated_at = timezone.now()
+        bookmark.notes_updated_at = notes_updated_at
         bookmark.save(update_fields=("notes", "notes_updated_at"))
+        record_daily_activity(
+            BookmarkActivityType.NOTES,
+            occurred_at=notes_updated_at,
+        )
 
     tags = [Tag.objects.get_or_create_normalized(name)[0] for name in tag_names]
     bookmark.tags.set(tags)

@@ -168,7 +168,7 @@ class BookmarkFilterForm(forms.Form):
     )
 
     q = forms.CharField(
-        max_length=500,
+        max_length=4096,
         required=False,
         strip=True,
         widget=forms.SearchInput(
@@ -247,6 +247,7 @@ class BookmarkOrganisationForm(forms.Form):
         strip=True,
         widget=forms.TextInput(
             attrs={
+                "form": "bookmark-organisation-form",
                 "id": "bookmark-organisation-tags",
                 "placeholder": "network, architecture, review",
             }
@@ -268,10 +269,16 @@ class SavedBookmarkViewForm(forms.Form):
 
 class BookmarkImportForm(forms.Form):
     import_file = forms.FileField(
-        label="JSON backup or legacy bookmark file",
-        help_text="Choose a UTF-8 JSON file. Valid records continue if another record fails.",
+        label="JSON backup or text file containing URLs",
+        help_text=(
+            "Choose a UTF-8 .json or .txt file. Text imports extract every unique URL, "
+            "continue after failures, and verify Confluence Page IDs before saving."
+        ),
         widget=forms.ClearableFileInput(
-            attrs={"accept": ".json,application/json", "id": "bookmark-import-file"}
+            attrs={
+                "accept": ".json,.txt,application/json,text/plain",
+                "id": "bookmark-import-file",
+            }
         ),
     )
 
@@ -282,6 +289,6 @@ class BookmarkImportForm(forms.Form):
             raise forms.ValidationError(
                 f"The import is larger than the configured {maximum:,}-byte limit."
             )
-        if not uploaded.name.casefold().endswith(".json"):
-            raise forms.ValidationError("Choose a .json file.")
+        if not uploaded.name.casefold().endswith((".json", ".txt")):
+            raise forms.ValidationError("Choose a .json or .txt file.")
         return uploaded

@@ -468,9 +468,41 @@ def test_search_finds_title_url_page_id_and_owl_number(loopback_client, query):
     assert "Storage Operations Handbook" not in html
     assert response.context["result_count"] == 1
     assert "Filtered" in html
-    assert f'href="?selected={matched.pk}' in html
+    assert f'data-details-url="?selected={matched.pk}' in html
     assert f'action="/bookmarks/{matched.pk}/open/"' in html
     assert "Open link ↗" not in html
+
+
+def test_pasted_confluence_url_searches_by_page_id_before_enter_can_add(loopback_client):
+    matched = create_bookmark()
+    changed_url = f"{SYNTHETIC_ORIGIN}/pages/viewpage.action?pageId=000300&title=Renamed"
+
+    response = loopback_client.get(reverse("bookmark_manager:index"), {"q": changed_url})
+    html = response_html(response)
+
+    assert response.status_code == 200
+    assert response.context["result_count"] == 1
+    assert response.context["url_identity_matches"] == (matched,)
+    assert 'data-url-search-complete="true"' in html
+    assert 'data-url-match-count="1"' in html
+    assert (
+        f'data-url-match-href="/bookmarks/?selected={matched.pk}&amp;located={matched.pk}"' in html
+    )
+    assert "1 saved bookmark matches this Page ID or URL" in html
+
+
+def test_unmatched_pasted_url_is_marked_ready_for_enter_to_add(loopback_client):
+    unmatched_url = f"{SYNTHETIC_ORIGIN}/spaces/ENG/pages/987654/New"
+
+    response = loopback_client.get(reverse("bookmark_manager:index"), {"q": unmatched_url})
+    html = response_html(response)
+
+    assert response.status_code == 200
+    assert response.context["result_count"] == 0
+    assert response.context["url_identity_matches"] == ()
+    assert 'data-url-search-complete="true"' in html
+    assert 'data-url-match-count="0"' in html
+    assert "No saved bookmark matches this Page ID or URL. Press Enter to add it." in html
 
 
 def test_existing_page_post_reveals_the_saved_tree_node(
@@ -539,6 +571,26 @@ def test_unified_bookmark_input_can_save_a_page_from_its_search_field(
 
     assert response.status_code == 302
     assert "selected=" in response.headers["Location"]
+
+
+def test_async_bookmark_save_reports_retrieval_success_before_redirect(
+    loopback_client,
+    monkeypatch,
+):
+    new_result = upsert_bookmark(page_snapshot("302", "Async page", ancestors=()))
+    monkeypatch.setattr(views, "save_bookmark_input", lambda _value: new_result)
+
+    response = loopback_client.post(
+        reverse("bookmark_manager:save"),
+        {"q": "302"},
+        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "success"
+    assert response.json()["label"] == "Page added"
+    assert "searchable text retrieved" in response.json()["detail"]
+    assert response.json()["redirect"].startswith("/bookmarks/?selected=")
 
 
 def test_open_is_post_only_tracks_success_and_uses_safe_redirect_headers(

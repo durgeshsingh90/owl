@@ -280,6 +280,96 @@ def test_slim_sidebar_keeps_browse_links_and_domain_categories_only(loopback_cli
     assert dict(ConfluencePageNode.objects.values_list("pk", "parent_id")) == parents_before
 
 
+def test_sidebar_shortcuts_filter_and_order_the_expected_bookmarks(loopback_client):
+    now = timezone.now()
+    favorite = _create_bookmark("811001", "Favorite only", ancestors=())
+    pinned = _create_bookmark("811002", "Pinned and frequent", ancestors=())
+    recent = _create_bookmark("811003", "Recently viewed", ancestors=())
+    never = _create_bookmark("811004", "Never viewed", ancestors=())
+    _set_bookmark_values(
+        favorite,
+        favorite=True,
+        open_count=2,
+        last_viewed_at=now - timedelta(days=4),
+    )
+    _set_bookmark_values(
+        pinned,
+        pinned=True,
+        open_count=9,
+        last_viewed_at=now - timedelta(days=2),
+    )
+    _set_bookmark_values(
+        recent,
+        open_count=1,
+        last_viewed_at=now - timedelta(minutes=5),
+    )
+
+    favorites_response = loopback_client.get(
+        reverse("bookmark_manager:index"), {"favorite": "on", "sort": "added_newest"}
+    )
+    pinned_response = loopback_client.get(
+        reverse("bookmark_manager:index"), {"pinned": "on", "sort": "added_newest"}
+    )
+    recent_response = loopback_client.get(
+        reverse("bookmark_manager:index"), {"min_open": "1", "sort": "recently_opened"}
+    )
+    frequent_response = loopback_client.get(
+        reverse("bookmark_manager:index"), {"min_open": "1", "sort": "most_opened"}
+    )
+    never_response = loopback_client.get(
+        reverse("bookmark_manager:index"), {"max_open": "0", "sort": "added_newest"}
+    )
+
+    assert favorites_response.context["query_result"].bookmarks == (favorite,)
+    assert pinned_response.context["query_result"].bookmarks == (pinned,)
+    assert [item.bookmark for item in recent_response.context["tree_items"]] == [
+        recent,
+        pinned,
+        favorite,
+    ]
+    assert [item.bookmark for item in frequent_response.context["tree_items"]] == [
+        pinned,
+        favorite,
+        recent,
+    ]
+    assert never_response.context["query_result"].bookmarks == (never,)
+    assert never_response.context["bookmark_counts"] == {
+        "all_bookmarks": 4,
+        "favorites": 1,
+        "pinned": 1,
+        "viewed": 3,
+        "never_viewed": 1,
+    }
+    sidebar = _sidebar_html(recent_response)
+    assert "?min_open=1&amp;sort=recently_opened" in sidebar
+    assert "?min_open=1&amp;sort=most_opened" in sidebar
+    assert 'data-count="3" aria-current="page" class="is-active">Recently viewed' in sidebar
+
+
+def test_filtered_tree_renders_unmatched_bookmarked_ancestor_as_folder_context(loopback_client):
+    parent = _create_bookmark("812001", "Parent page", ancestors=())
+    child = _create_bookmark(
+        "812002",
+        "Favorite child",
+        ancestors=(_node_snapshot(parent.page_id, parent.title, space_key="ARC"),),
+    )
+    _set_bookmark_values(child, favorite=True)
+
+    response = loopback_client.get(
+        reverse("bookmark_manager:index"), {"favorite": "on", "sort": "added_newest"}
+    )
+    root = response.context["tree_items"][0]
+
+    assert response.context["query_result"].bookmarks == (child,)
+    assert root.node.pk == parent.tree_node_id
+    assert root.bookmark is None
+    assert root.children[0].bookmark == child
+    html = _html(response)
+    assert html.count('data-bookmark-id="') >= 1
+    assert f'data-bookmark-id="{parent.pk}"' not in html
+    assert f'data-bookmark-id="{child.pk}"' in html
+
+
 def test_bookmark_timeline_context_paginates_without_rendering_sidebar_timeline(
     loopback_client,
 ):
@@ -485,7 +575,9 @@ def test_tree_opens_titles_shows_usage_and_keeps_quick_note_in_details(loopback_
     assert "Added " in html
     assert "Written " in html
     assert "Updated " in html
-    assert ">Quick note <small>Stored locally and never sent to Confluence</small>" in html
+    assert ">Quick notes <small>Stored locally and never sent to Confluence</small>" in html
+    assert 'id="bookmark-organisation-form"' in html
+    assert 'form="bookmark-organisation-form"' in html
     assert "Review the routing notes" in html
 
 
@@ -520,6 +612,11 @@ def test_confluence_people_column_counts_unique_pages_and_filters_by_name(loopba
     assert "Web Writer" not in contacts
     assert "Web Editor" not in contacts
     assert 'class="bookmark-pane bookmark-pane--people"' in html
+    assert 'aria-label="Search people"' in html
+    assert 'aria-controls="people-search-panel"' in html
+    assert "data-people-search-input" in html
+    assert 'data-person-name="Alice Author"' in html
+    assert "data-people-no-results" in html
     assert "?person=Alice%20Author&amp;sort=updated_newest" in html
 
     filtered = loopback_client.get(
@@ -714,6 +811,116 @@ def test_import_http_journey_returns_to_settings_and_renders_partial_result(
     assert "The record must be a JSON object." in html
 
 
+def test_browser_style_async_json_import_passes_csrf_and_redirects_to_result():
+    csrf_client = Client(
+        enforce_csrf_checks=True,
+        HTTP_HOST="127.0.0.1",
+        REMOTE_ADDR="127.0.0.1",
+    )
+    page = csrf_client.get(reverse("bookmark_manager:settings"))
+    token = re.search(
+        r'name="csrfmiddlewaretoken" value="(?P<token>[^"]+)"',
+        _html(page),
+    )
+    assert token is not None
+    upload = SimpleUploadedFile(
+        "browser-import.json",
+        json.dumps(
+            [_legacy_record("810003", "Browser imported page", "2026-08-20T09:30:00Z")]
+        ).encode("utf-8"),
+        content_type="application/json",
+    )
+
+    response = csrf_client.post(
+        reverse("bookmark_manager:import"),
+        {
+            "csrfmiddlewaretoken": token.group("token"),
+            "import_file": upload,
+            "return_to": "settings",
+        },
+        HTTP_ORIGIN="http://127.0.0.1",
+        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        HTTP_ACCEPT="application/json",
+    )
+
+    assert response.status_code == 302
+    assert response["Location"].startswith(f"{reverse('bookmark_manager:settings')}?import_run=")
+    assert Bookmark.objects.filter(page_id="810003", title="Browser imported page").exists()
+
+
+def test_async_import_validation_returns_panel_feedback(loopback_client):
+    response = loopback_client.post(
+        reverse("bookmark_manager:import"),
+        {"return_to": "settings"},
+        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        HTTP_ACCEPT="application/json",
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "state": "invalid",
+        "label": "Import not started",
+        "detail": "Choose a valid UTF-8 .json or .txt file within the configured size limit.",
+    }
+
+
+def test_null_origin_import_remains_rejected_even_with_a_valid_csrf_token():
+    csrf_client = Client(
+        enforce_csrf_checks=True,
+        HTTP_HOST="127.0.0.1",
+        REMOTE_ADDR="127.0.0.1",
+    )
+    page = csrf_client.get(reverse("bookmark_manager:settings"))
+    token = re.search(
+        r'name="csrfmiddlewaretoken" value="(?P<token>[^"]+)"',
+        _html(page),
+    )
+    assert token is not None
+
+    response = csrf_client.post(
+        reverse("bookmark_manager:import"),
+        {"csrfmiddlewaretoken": token.group("token"), "return_to": "settings"},
+        HTTP_ORIGIN="null",
+        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+    )
+
+    assert response.status_code == 403
+
+
+def test_text_import_http_journey_adds_valid_urls_and_reports_incomplete_ones(
+    loopback_client,
+):
+    upload = SimpleUploadedFile(
+        "meeting-chat.txt",
+        (
+            b"Useful link https://example.com/guides/complete\n"
+            b"Truncated link https://example.com/guides/incomplete...\n"
+        ),
+        content_type="text/plain",
+    )
+
+    response = loopback_client.post(
+        reverse("bookmark_manager:import"),
+        {"import_file": upload, "return_to": "settings"},
+    )
+
+    assert response.status_code == 302
+    run = BookmarkImportRun.objects.get()
+    assert run.schema_version == "text-urls-v1"
+    assert run.total_records == 2
+    assert run.imported_records == 1
+    assert run.failed_records == 1
+    assert Bookmark.objects.filter(canonical_url="https://example.com/guides/complete").exists()
+
+    result_page = loopback_client.get(response["Location"])
+    html = _html(result_page)
+    assert "Completed 1 of 2 extracted URLs" in html
+    assert "incomplete or failed 1" in html
+    assert "Review incomplete or failed URLs" in html
+    assert "example.com/guides/incomplete..." in html
+    assert "Incomplete or truncated URL" in html
+
+
 def test_invalid_import_returning_to_settings_renders_field_and_error_feedback(
     loopback_client,
 ):
@@ -726,8 +933,8 @@ def test_invalid_import_returning_to_settings_renders_field_and_error_feedback(
     assert response.status_code == 400
     assert response.context["import_form"].errors["import_file"]
     assert "Bookmark data" in html
-    assert "Import JSON" in html
-    assert "Choose a valid UTF-8 .json bookmark file" in html
+    assert "Import bookmarks" in html
+    assert "Choose a valid UTF-8 .json or .txt file" in html
     assert "This field is required." in html
     assert 'name="return_to" value="settings"' in html
     assert "Advanced settings" not in html
@@ -937,11 +1144,16 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert "data-located-bookmark" in html
     assert "data-tree-toggle" in html
     assert "data-tree-check" in html
+    assert f'data-details-url="?selected={bookmark.pk}' in html
+    assert "tree-details-link" not in html
+    assert ">Page details</a>" not in html
     assert "data-tree-expand-all" in html
     assert "data-tree-collapse-all" in html
     assert 'id="bulk-delete-bookmarks"' in html
     assert "data-delete-selected" in html
-    assert "bookmarks.js?v=tree-bulk-delete-v2" in html
+    assert 'data-delete-locked="true"' in html
+    assert "🔒" in html
+    assert "bookmarks.js?v=url-search-v10" in html
     assert f'name="bookmark_ids" value="{bookmark.pk}"' in html
     assert 'form="bulk-delete-bookmarks"' in html
     assert "data-productivity-form" in html
@@ -950,7 +1162,11 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert 'aria-pressed="true"' in html
     assert 'data-copy-value="730003"' in html
     assert 'data-confirm-message="Delete this bookmark from OWL?' in html
-    assert 'role="status" aria-live="polite" aria-atomic="true"' in html
+    assert "bookmark-connection-summary" not in html
+    assert html.index("organisation-form--primary") < html.index("detail-actions")
+    assert html.index("organisation-form--primary") < html.index("detail-full-url")
+    assert html.index("detail-full-url") < html.index("detail-actions")
+    assert bookmark.url in html
     assert "<time datetime=" in html and 'tabindex="0"' in html
     sidebar = _sidebar_html(response)
     assert "Shortcuts:" not in sidebar
@@ -973,7 +1189,16 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
         "owl.bookmark-manager.tree-expansion.v1",
         "owl.bookmark-manager.selection.v1",
         "owl.bookmark-manager.tree-scroll.v1",
-        "window.location.assign(detailsLink.href)",
+        "window.location.assign(detailsCheckbox.dataset.detailsUrl)",
+        'deleteSelectedButton.dataset.deleteLocked = "false"',
+        'label.textContent = "Click again to delete"',
+        "window.setTimeout(lockDeleteSelected, 10000)",
+        "[data-bookmark-import-form]",
+        "Extracting URLs, checking Confluence Page IDs, and retrieving pages",
+        "Retrieving the Confluence page, hierarchy, and searchable text",
+        "bookmarkUnifiedForm.dataset.urlSearchComplete",
+        "bookmarkUnifiedForm.requestSubmit(bookmarkSaveButton)",
+        "window.clearTimeout(searchTimer)",
         "element.textContent = payload.notes",
         "data-external-open-form",
     ):

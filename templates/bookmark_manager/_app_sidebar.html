@@ -23,9 +23,9 @@
             <a href="{% url 'bookmark_manager:index' %}" data-count="{{ bookmark_counts.all_bookmarks }}"{% if active_section == 'all' %} aria-current="page" class="is-active"{% endif %}>All bookmarks</a>
             <a href="{% url 'bookmark_manager:index' %}?favorite=on&amp;sort=added_newest" data-count="{{ bookmark_counts.favorites }}"{% if active_section == 'favorites' %} aria-current="page" class="is-active"{% endif %}>Favorites</a>
             <a href="{% url 'bookmark_manager:index' %}?pinned=on&amp;sort=added_newest" data-count="{{ bookmark_counts.pinned }}"{% if active_section == 'pinned' %} aria-current="page" class="is-active"{% endif %}>Pinned</a>
-            <a href="{% url 'bookmark_manager:index' %}?sort=recently_opened"{% if active_section == 'recent' %} aria-current="page" class="is-active"{% endif %}>Recently viewed</a>
-            <a href="{% url 'bookmark_manager:index' %}?sort=most_opened"{% if active_section == 'frequent' %} aria-current="page" class="is-active"{% endif %}>Frequently viewed</a>
-            <a href="{% url 'bookmark_manager:index' %}?max_open=0&amp;sort=added_newest"{% if active_section == 'never' %} aria-current="page" class="is-active"{% endif %}>Never viewed</a>
+            <a href="{% url 'bookmark_manager:index' %}?min_open=1&amp;sort=recently_opened" data-count="{{ bookmark_counts.viewed }}"{% if active_section == 'recent' %} aria-current="page" class="is-active"{% endif %}>Recently viewed</a>
+            <a href="{% url 'bookmark_manager:index' %}?min_open=1&amp;sort=most_opened" data-count="{{ bookmark_counts.viewed }}"{% if active_section == 'frequent' %} aria-current="page" class="is-active"{% endif %}>Frequently viewed</a>
+            <a href="{% url 'bookmark_manager:index' %}?max_open=0&amp;sort=added_newest" data-count="{{ bookmark_counts.never_viewed }}"{% if active_section == 'never' %} aria-current="page" class="is-active"{% endif %}>Never viewed</a>
             {% if bookmark_categories %}
             <div class="domain-categories" aria-label="Domain categories">
                 <h4>Domains</h4>

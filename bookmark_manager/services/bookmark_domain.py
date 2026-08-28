@@ -19,9 +19,11 @@ from django.utils import timezone
 
 from bookmark_manager.models import (
     Bookmark,
+    BookmarkActivityType,
     BookmarkAvailability,
     ConfluencePageNode,
 )
+from bookmark_manager.services.bookmark_analytics import record_daily_activity
 from bookmark_manager.services.bookmark_outline import next_outline_position
 
 type PageIdentity = str | int
@@ -207,8 +209,17 @@ def upsert_bookmark(
 
     if created:
         bookmark.save(force_insert=True)
+        record_daily_activity(
+            BookmarkActivityType.ADDED,
+            occurred_at=bookmark.saved_at,
+        )
     else:
         bookmark.save(update_fields=tuple(source_values))
+    if record_refresh:
+        record_daily_activity(
+            BookmarkActivityType.REFRESHED,
+            occurred_at=observation_time,
+        )
 
     for old_parent_id in reversed(tuple(dict.fromkeys(previous_parent_ids))):
         old_parent = ConfluencePageNode.objects.filter(pk=old_parent_id).first()
@@ -248,6 +259,39 @@ def record_successful_open(
         first_opened_at=Coalesce("first_opened_at", date_value),
         last_viewed_at=open_time,
         last_viewed_version=models.F("version"),
+    )
+    if updated != 1:
+        raise Bookmark.DoesNotExist(f"Bookmark {bookmark_pk} does not exist.")
+    record_daily_activity(BookmarkActivityType.OPENED, occurred_at=open_time)
+    return Bookmark.objects.select_related("tree_node").get(pk=bookmark_pk)
+
+
+@transaction.atomic
+def record_refresh_failure(
+    bookmark_or_pk: Bookmark | int,
+    *,
+    error_code: str,
+    error_message: str,
+    availability_status: str = BookmarkAvailability.REFRESH_ERROR,
+    attempted_at: datetime | None = None,
+) -> Bookmark:
+    """Persist one sanitized failed refresh without changing last-good source data."""
+
+    bookmark_pk = bookmark_or_pk.pk if isinstance(bookmark_or_pk, Bookmark) else bookmark_or_pk
+    if bookmark_pk is None:
+        raise Bookmark.DoesNotExist("An unsaved bookmark cannot record a refresh failure.")
+    attempt_time = attempted_at or timezone.now()
+    _require_aware_datetime(attempt_time, "attempted_at")
+    safe_code = str(error_code or "refresh_error").strip()[:64]
+    safe_message = " ".join(str(error_message or "Refresh failed.").split())[:255]
+    if availability_status not in BookmarkAvailability.values:
+        availability_status = BookmarkAvailability.REFRESH_ERROR
+    updated = Bookmark.objects.filter(pk=bookmark_pk).update(
+        last_refresh_attempt_at=attempt_time,
+        availability_status=availability_status,
+        last_error_code=safe_code,
+        last_error_message=safe_message,
+        last_error_at=attempt_time,
     )
     if updated != 1:
         raise Bookmark.DoesNotExist(f"Bookmark {bookmark_pk} does not exist.")

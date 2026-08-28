@@ -10,11 +10,13 @@ from django.db import transaction
 
 from bookmark_manager.models import (
     Bookmark,
+    BookmarkActivityType,
     BookmarkAvailability,
     BookmarkCategory,
     BookmarkSource,
     ConfluencePageNode,
 )
+from bookmark_manager.services.bookmark_analytics import record_daily_activity
 from bookmark_manager.services.bookmark_domain import BookmarkSaveResult
 from bookmark_manager.services.bookmark_outline import (
     ensure_outline_position,
@@ -122,6 +124,10 @@ def save_web_bookmark(value: str) -> BookmarkSaveResult:
         category=category,
         source_type=BookmarkSource.WEB,
         availability_status=BookmarkAvailability.ACTIVE,
+    )
+    record_daily_activity(
+        BookmarkActivityType.ADDED,
+        occurred_at=bookmark.saved_at,
     )
     return BookmarkSaveResult(bookmark, created=True, source_requested=False)
 

@@ -9,6 +9,7 @@ from bookmark_manager.services.confluence_validation import (
     OriginValidationError,
     PageInputError,
     PageInputKind,
+    extract_page_id_from_url,
     parse_page_input,
     resolve_safe_addresses,
     validate_confluence_origin,
@@ -212,6 +213,72 @@ def test_legacy_page_url_with_display_metadata_works_at_root_context():
 
 
 @pytest.mark.parametrize(
+    ("value", "page_id"),
+    [
+        (
+            "https://confluence.example.invalid/spaces/APIGW/pages/810938483/"
+            "API+Gateway+-+Enabling+Outbound+Authentication+and+Authorization"
+            "#:~:text=existing%20Outbound%20APIs",
+            "810938483",
+        ),
+        (
+            "https://confluence.example.invalid/documents/v2/987654/Future+Page?src=nav",
+            "987654",
+        ),
+        (
+            "https://confluence.example.invalid/new-page-route?content_id=765432&src=nav",
+            "765432",
+        ),
+    ],
+)
+def test_page_input_tolerates_fragments_and_future_unambiguous_url_shapes(value, page_id):
+    origin = validate_confluence_origin(
+        "https://confluence.example.invalid", allow_test_targets=True
+    )
+
+    parsed = parse_page_input(value, origin)
+
+    assert parsed.page_id == page_id
+    assert parsed.kind == PageInputKind.MODERN_URL
+
+
+@pytest.mark.parametrize(
+    ("value", "page_id"),
+    [
+        (
+            "https://confluence.example.invalid/spaces/OWL/pages/0001234/Changed+Title"
+            "#:~:text=changed",
+            "1234",
+        ),
+        (
+            "https://confluence.example.invalid/pages/viewpage.action"
+            "?spaceKey=OWL&pageId=1234&title=Changed",
+            "1234",
+        ),
+        (
+            "https://confluence.example.invalid/future/content-route/765432?src=nav",
+            "765432",
+        ),
+    ],
+)
+def test_local_url_identity_extractor_supports_confluence_url_variants(value, page_id):
+    assert extract_page_id_from_url(value) == page_id
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not a URL",
+        "ftp://confluence.example.invalid/pages/1234",
+        "https://confluence.example.invalid/archive/2025/1234/Page",
+        "https://confluence.example.invalid/pages/1234?content_id=5678",
+    ],
+)
+def test_local_url_identity_extractor_rejects_invalid_or_ambiguous_values(value):
+    assert extract_page_id_from_url(value) is None
+
+
+@pytest.mark.parametrize(
     ("value", "code"),
     [
         ("not a page", "invalid_page_url"),
@@ -219,22 +286,14 @@ def test_legacy_page_url_with_display_metadata_works_at_root_context():
         ("https://other.example.invalid/wiki/spaces/X/pages/123/Title", "disallowed_origin"),
         ("https://confluence.example.invalid/spaces/X/pages/123/Title", "disallowed_context"),
         (
-            "https://confluence.example.invalid/wiki/spaces/X/pages/123/Title?to" + "ken=value",
-            "unsupported_page_url",
-        ),
-        (
             "https://confluence.example.invalid/wiki/pages/viewpage.action?pageId=123&pageId=456",
             "unsupported_page_url",
         ),
         (
-            "https://confluence.example.invalid/wiki/pages/viewpage.action?pageId=123&src=nav",
+            "https://confluence.example.invalid/wiki/spaces/X/pages/123/Title?pageId=456",
             "unsupported_page_url",
         ),
-        (
-            "https://confluence.example.invalid/wiki/pages/viewpage.action"
-            "?pageId=123&spaceKey=OWL&spaceKey=OTHER",
-            "unsupported_page_url",
-        ),
+        ("https://confluence.example.invalid/wiki/archive/2025/123/Page", "unsupported_page_url"),
     ],
 )
 def test_page_input_rejects_unsupported_or_cross_origin_values(value: str, code: str):

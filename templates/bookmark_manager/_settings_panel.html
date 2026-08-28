@@ -69,7 +69,7 @@
         <section class="settings-data" aria-labelledby="bookmark-data-settings-heading">
             <div>
                 <h3 id="bookmark-data-settings-heading">Bookmark data</h3>
-                <p>Download a local JSON backup or merge bookmarks from an OWL JSON export. Credentials are never included.</p>
+                <p>Download a local JSON backup, merge an OWL JSON export, or extract bookmarks from a text file containing URLs. Credentials are never included.</p>
             </div>
 
             {% if inline_error %}<div class="form-errors" role="alert">{{ inline_error }}</div>{% endif %}
@@ -87,7 +87,7 @@
                 </dl>
                 {% if last_import_run.failures.all %}
                 <details>
-                    <summary>Review sanitized record failures</summary>
+                    <summary>{% if last_import_run.schema_version == "text-urls-v1" %}Review incomplete or failed URLs{% else %}Review sanitized record failures{% endif %}</summary>
                     <ul>
                         {% for failure in last_import_run.failures.all %}
                         <li>Record {{ failure.record_number }}{% if failure.page_id %} · Page ID {{ failure.page_id }}{% endif %}: {{ failure.reason }}</li>
@@ -100,14 +100,20 @@
 
             <div class="settings-data__actions">
                 <a class="button button--secondary" href="{% url 'bookmark_manager:export' %}">Export JSON</a>
-                <form class="import-form" method="post" action="{% url 'bookmark_manager:import' %}" enctype="multipart/form-data">
+                <form class="import-form" method="post" action="{% url 'bookmark_manager:import' %}" enctype="multipart/form-data" data-bookmark-import-form>
                     {% csrf_token %}
                     <input type="hidden" name="return_to" value="{{ return_to }}">
                     <label for="{{ import_form.import_file.id_for_label }}">{{ import_form.import_file.label }}</label>
                     {{ import_form.import_file }}
                     {% if import_form.import_file.errors %}<div class="field-error" role="alert">{{ import_form.import_file.errors|striptags }}</div>{% endif %}
                     <p class="field-help" id="id_import_file_helptext">{{ import_form.import_file.help_text }} Existing personal values win.</p>
-                    <button class="button button--secondary" type="submit">Import JSON</button>
+                    <button class="button button--secondary" type="submit" data-import-submit>Import bookmarks</button>
+                    <div class="import-progress" hidden data-import-progress>
+                        <div class="import-progress__heading"><strong>Importing bookmarks</strong><span data-import-progress-label>Preparing file…</span></div>
+                        <progress aria-label="Bookmark import progress"></progress>
+                        <p>Completed URLs stay saved if another URL is incomplete or fails.</p>
+                    </div>
+                    <p class="test-result" role="status" aria-live="polite" hidden data-import-status></p>
                 </form>
             </div>
         </section>

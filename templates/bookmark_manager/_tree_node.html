@@ -8,6 +8,7 @@
         {% if item.children %}aria-expanded="true"{% endif %}
         tabindex="{% if item.selected or item.located %}0{% else %}-1{% endif %}"
         data-tree-row
+        {% if item.located %}data-located-bookmark{% endif %}
     >
         <span class="tree-node-disclosure">
             {% if item.children %}
@@ -31,7 +32,7 @@
                 data-tree-check
                 data-node-id="{{ item.node.pk }}"
                 aria-label="{% if item.bookmark %}Select bookmark {{ item.outline_number }} and its child bookmarks{% else %}Select all bookmarks under {{ item.node.title }}{% endif %}"
-                {% if item.bookmark %}name="bookmark_ids" value="{{ item.bookmark.pk }}" form="bulk-delete-bookmarks" data-bookmark-id="{{ item.bookmark.pk }}"{% endif %}
+                {% if item.bookmark %}name="bookmark_ids" value="{{ item.bookmark.pk }}" form="bulk-delete-bookmarks" data-bookmark-id="{{ item.bookmark.pk }}" data-details-url="?selected={{ item.bookmark.pk }}{% if current_query_string %}&amp;{{ current_query_string }}{% endif %}"{% endif %}
             >
         </label>
         {% if item.bookmark %}
@@ -56,14 +57,6 @@
             {% if item.bookmark.availability_status != "active" %}{{ item.bookmark.get_availability_status_display }}{% else %}{{ item.bookmark.recency_status.label }}{% endif %}
         </span>
         <span class="tree-node-metrics">
-            <a
-                class="tree-details-link"
-                href="?selected={{ item.bookmark.pk }}{% if current_query_string %}&amp;{{ current_query_string }}{% endif %}"
-                {% if item.selected %}aria-current="true"{% endif %}
-                {% if item.located %}data-located-bookmark{% endif %}
-                data-tree-select
-                data-bookmark-id="{{ item.bookmark.pk }}"
-            >Page details</a>
             <span><strong>Bookmark {{ item.outline_number }}</strong></span>
             <span>OWL ID #{{ item.bookmark.pk }}</span>
             <span><strong>{{ item.bookmark.open_count }}</strong> open{{ item.bookmark.open_count|pluralize }}</span>

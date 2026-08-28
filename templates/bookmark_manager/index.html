@@ -2,7 +2,7 @@
 {% load static bookmark_display %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bookmark_manager/bookmarks.css' %}?v=owl-brand-topbar">
+<link rel="stylesheet" href="{% static 'bookmark_manager/bookmarks.css' %}?v=url-search-v10">
 {% endblock %}
 
 {% block body_class %}bookmark-manager-shell{% endblock %}
@@ -26,20 +26,42 @@
         </a>
 
         <div class="bookmark-topbar__actions">
-            <button
-                class="bookmark-connection-summary"
-                type="button"
-                aria-label="Confluence status: {{ configuration.label }}. Open settings"
-                data-settings-open
-                data-settings-fallback="{% url 'bookmark_manager:settings' %}"
+            {% firstof refresh_status.last_completed_at refresh_status.completed_at as refresh_timestamp %}
+            <form
+                class="global-refresh-control"
+                method="post"
+                action="{% url 'bookmark_manager:refresh_start' %}"
+                data-global-refresh
+                data-status-url="{% url 'bookmark_manager:refresh_status' %}"
+                data-active="{{ refresh_status.active|yesno:'true,false' }}"
+                data-status="{{ refresh_status.status }}"
+                data-processed="{{ refresh_status.processed }}"
+                data-total="{{ refresh_status.total }}"
+                data-progress="{{ refresh_status.progress }}"
+                data-last-completed-at="{{ refresh_timestamp|default:'' }}"
             >
-                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="M8.5 12h7M12 8.5V12"/></svg>
-                <span role="status" aria-live="polite" aria-atomic="true">
-                    <strong>Confluence</strong>
-                    <b data-state="{{ configuration.state }}">{{ configuration.label }}</b>
-                    <small>{{ total_bookmarks }} bookmark{{ total_bookmarks|pluralize }} saved</small>
+                {% csrf_token %}
+                <button
+                    class="bookmark-icon-button global-refresh-control__button"
+                    type="submit"
+                    aria-label="Refresh all Confluence bookmarks"
+                    title="Refresh every saved Confluence page, hierarchy, metadata, and searchable text"
+                    data-global-refresh-button
+                    {% if refresh_status.active %}disabled aria-busy="true"{% endif %}
+                >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19 8a7.5 7.5 0 1 0 1 7"/><path d="M19 3v5h-5"/></svg>
+                    <span class="global-refresh-control__spinner" aria-hidden="true" data-global-refresh-spinner{% if not refresh_status.active %} hidden{% endif %}></span>
+                </button>
+                <span class="global-refresh-control__meta">
+                    <strong data-global-refresh-label>
+                        {% if refresh_status.active %}Refreshing {{ refresh_status.processed }} / {{ refresh_status.total }}{% elif refresh_status.status == 'succeeded' or refresh_status.status == 'succeeded_with_errors' %}Confluence refreshed{% elif refresh_status.status == 'failed' or refresh_status.status == 'interrupted' %}Refresh needs attention{% else %}Refresh Confluence{% endif %}
+                    </strong>
+                    <small data-global-refresh-time>
+                        {% if refresh_timestamp %}Last completed <time datetime="{{ refresh_timestamp }}">{{ refresh_timestamp }}</time>{% else %}Never refreshed globally{% endif %}
+                    </small>
+                    <span class="global-refresh-control__track" aria-hidden="true"><span data-global-refresh-progress style="width: {{ refresh_status.progress }}%"></span></span>
                 </span>
-            </button>
+            </form>
             <details class="bookmark-app-switcher">
                 <summary class="bookmark-icon-button" aria-label="Applications">
                     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><rect x="14" y="14" width="6" height="6"/></svg>
@@ -91,7 +113,7 @@
         </dl>
         {% if last_import_run.failures.all %}
         <details>
-            <summary>Review sanitized record failures</summary>
+            <summary>{% if last_import_run.schema_version == "text-urls-v1" %}Review incomplete or failed URLs{% else %}Review sanitized record failures{% endif %}</summary>
             <ul>
                 {% for failure in last_import_run.failures.all %}
                 <li>Record {{ failure.record_number }}{% if failure.page_id %} · Page ID {{ failure.page_id }}{% endif %}: {{ failure.reason }}</li>
@@ -103,11 +125,21 @@
     {% endif %}
 
     <section class="bookmark-controls" aria-label="Bookmark controls">
-        <form id="bookmark-filter-form" class="bookmark-unified-form" method="get" action="{% url 'bookmark_manager:index' %}" role="search" data-bookmark-unified-form data-csrf-token="{{ csrf_token }}">
+        <form
+            id="bookmark-filter-form"
+            class="bookmark-unified-form"
+            method="get"
+            action="{% url 'bookmark_manager:index' %}"
+            role="search"
+            data-bookmark-unified-form
+            data-completed-search="{{ search_term }}"
+            data-url-search-complete="{{ url_search_active|yesno:'true,false' }}"
+            data-url-match-count="{{ url_identity_match_count }}"
+            data-url-match-href="{{ first_url_identity_match_href }}"
+        >
             <label for="{{ filter_form.q.id_for_label }}" class="visually-hidden">Search bookmarks or add a URL</label>
             {{ filter_form.q }}
             {{ filter_form.category }}
-            <button class="button button--secondary" type="submit">Search bookmarks</button>
             <button
                 class="button button--primary"
                 type="submit"
@@ -116,7 +148,16 @@
                 data-bookmark-save
             >Add bookmark</button>
             {% if bookmark_form.page.errors %}<div class="field-error" role="alert">{{ bookmark_form.page.errors|striptags }}</div>{% endif %}
-            <p class="field-help">Search titles, URLs, notes, and indexed Confluence page text, or paste any URL to save it.</p>
+            <p class="field-help">Search as you type. Separate words with spaces to match each word independently. Paste a URL to find its saved URL or Confluence Page ID; when no match exists, press Enter to add it.</p>
+            {% if url_search_active %}
+            <p class="inline-message" role="status" data-url-search-result data-state="{% if url_identity_match_count %}match{% else %}ready{% endif %}">
+                {% if url_identity_match_count %}
+                {{ url_identity_match_count }} saved bookmark{{ url_identity_match_count|pluralize }} match{{ url_identity_match_count|pluralize:"es," }} this Page ID or URL. Press Enter to select the first match.
+                {% else %}
+                No saved bookmark matches this Page ID or URL. Press Enter to add it.
+                {% endif %}
+            </p>
+            {% endif %}
             {% if active_filters %}<a class="text-link" href="{% url 'bookmark_manager:index' %}">Clear all</a>{% endif %}
             <p class="inline-message" role="status" hidden data-bookmark-save-result></p>
         </form>
@@ -144,12 +185,11 @@
                         id="bulk-delete-bookmarks"
                         method="post"
                         action="{% url 'bookmark_manager:delete_selected' %}"
-                        data-confirm-message="Delete the selected bookmarks from OWL? Their local notes, tags, favorites, pins, and usage will be removed. Confluence pages will not be changed."
                         data-local-redirect-form
                     >
                         {% csrf_token %}
                         <input type="hidden" name="confirm" value="delete-selected">
-                        <button class="button button--danger button--compact" type="submit" disabled data-delete-selected>Delete selected</button>
+                        <button class="button button--danger button--compact" type="submit" disabled data-delete-selected data-delete-locked="true"><span aria-hidden="true" data-delete-lock-icon>🔒</span> <span data-delete-label>Delete selected</span></button>
                     </form>
                     <button type="button" class="text-button" data-tree-expand-all>Expand all</button>
                     <button type="button" class="text-button" data-tree-collapse-all>Collapse all</button>
@@ -183,6 +223,16 @@
                     <span class="detail-status" data-availability="{{ selected_bookmark.availability_status }}">{% if selected_bookmark.availability_status != "active" %}{{ selected_bookmark.get_availability_status_display }}{% else %}{{ selected_bookmark.recency_status.label }}{% endif %}</span>
                 </div>
                 {% if selected_bookmark.changed_since_viewed %}<div class="changed-notice" role="status"><strong>Changed since you last opened it</strong><span>Last viewed version {{ selected_bookmark.last_viewed_version }} · Current version {{ selected_bookmark.version }}</span></div>{% endif %}
+                <form id="bookmark-organisation-form" class="organisation-form organisation-form--primary" method="post" action="{% url 'bookmark_manager:organise' selected_bookmark.pk %}" data-productivity-form>
+                    {% csrf_token %}
+                    <label for="{{ organisation_form.notes.id_for_label }}">Quick notes <small>Stored locally and never sent to Confluence</small></label>
+                    {{ organisation_form.notes }}
+                    <button class="button button--secondary" type="submit">Save quick notes</button>
+                </form>
+                <div class="detail-full-url">
+                    <strong>Full URL</strong>
+                    <span>{{ selected_bookmark.url }}</span>
+                </div>
                 <div class="inline-actions detail-actions">
                     <form method="post" action="{% url 'bookmark_manager:open' selected_bookmark.pk %}" target="_blank" rel="noopener noreferrer" data-external-open-form>{% csrf_token %}<button class="button button--primary" type="submit">{% if selected_bookmark.source_type == 'confluence' %}Open in Confluence{% else %}Open website{% endif %}</button></form>
                     {% if selected_parent and selected_bookmark.source_type == 'confluence' %}<form method="post" action="{% url 'bookmark_manager:open_parent' selected_bookmark.pk %}" target="_blank" rel="noopener noreferrer" data-external-open-form>{% csrf_token %}<button class="button button--secondary" type="submit">Open parent</button></form>{% endif %}
@@ -194,15 +244,11 @@
                     <button class="text-button" type="button" data-copy-value="{% for item in selected_breadcrumb %}{% if not forloop.first %} › {% endif %}{{ item.title }}{% endfor %}" data-copy-success="Breadcrumb copied">Copy breadcrumb</button>
                     <button class="text-button" type="button" data-copy-value="{{ selected_bookmark.url }}" data-copy-success="URL copied">Copy URL</button>
                 </div>
-
-                <form class="organisation-form" method="post" action="{% url 'bookmark_manager:organise' selected_bookmark.pk %}" data-productivity-form>
-                    {% csrf_token %}
-                    <label for="{{ organisation_form.notes.id_for_label }}">Quick note <small>Stored locally and never sent to Confluence</small></label>
-                    {{ organisation_form.notes }}
+                <div class="detail-tag-editor">
                     <label for="{{ organisation_form.tags.id_for_label }}">Tags <small>Separate with commas</small></label>
                     {{ organisation_form.tags }}
-                    <button class="button button--secondary" type="submit">Save quick note and tags</button>
-                </form>
+                    <button class="button button--secondary" type="submit" form="bookmark-organisation-form">Save tags</button>
+                </div>
                 <p class="note-preview" data-notes-display data-bookmark-id="{{ selected_bookmark.pk }}">{{ selected_bookmark.notes|default:"No quick note yet." }}</p>
                 <p class="tag-preview"><strong>Tags:</strong> <span data-tags-display data-bookmark-id="{{ selected_bookmark.pk }}">{% for tag in selected_bookmark.tags.all %}{{ tag.name }}{% if not forloop.last %}, {% endif %}{% empty %}No tags{% endfor %}</span></p>
 
@@ -236,16 +282,40 @@
 
         <aside class="bookmark-pane bookmark-pane--people" aria-labelledby="confluence-people-heading">
             <div class="pane-heading people-panel-heading">
-                <h2 id="confluence-people-heading">People</h2>
+                <div class="people-panel-title">
+                    <h2 id="confluence-people-heading">People</h2>
+                    <button
+                        class="people-search-toggle"
+                        type="button"
+                        aria-label="Search people"
+                        aria-controls="people-search-panel"
+                        aria-expanded="false"
+                        title="Search people"
+                        data-people-search-toggle
+                        {% if not confluence_contacts %}disabled{% endif %}
+                    ></button>
+                </div>
                 <span>Confluence writers &amp; editors</span>
+            </div>
+            <div class="people-search" id="people-search-panel" hidden data-people-search-panel>
+                <label class="visually-hidden" for="people-search-input">Search people by name</label>
+                <input
+                    id="people-search-input"
+                    type="search"
+                    placeholder="Search people…"
+                    autocomplete="off"
+                    spellcheck="false"
+                    data-people-search-input
+                >
+                <p role="status" aria-live="polite" data-people-search-status>{{ confluence_contacts|length }} people available</p>
             </div>
             {% if active_contact %}
             <a class="people-clear-filter" href="{% url 'bookmark_manager:index' %}">Show everyone</a>
             {% endif %}
             {% if confluence_contacts %}
-            <ol class="confluence-people-list">
+            <ol class="confluence-people-list" data-people-list>
                 {% for contact in confluence_contacts %}
-                <li>
+                <li data-people-entry data-person-name="{{ contact.name }}">
                     <a href="{% url 'bookmark_manager:index' %}?person={{ contact.name|urlencode }}&amp;sort=updated_newest"{% if active_contact == contact.name %} class="is-active" aria-current="true"{% endif %} title="Show every page written or updated by {{ contact.name }}">
                         <span class="contact-avatar" aria-hidden="true">{{ contact.name|slice:":1"|upper }}</span>
                         <span class="contact-copy">
@@ -257,6 +327,7 @@
                 </li>
                 {% endfor %}
             </ol>
+            <div class="people-empty people-empty--search" hidden data-people-no-results><strong>No matching people</strong><p>Try another name.</p></div>
             {% else %}
             <div class="people-empty"><strong>No Confluence people yet</strong><p>Writers and editors appear after Confluence pages with author metadata are saved.</p></div>
             {% endif %}
@@ -271,4 +342,4 @@
 {% endblock %}
 
 {% block global_status %}{% endblock %}
-{% block scripts %}<script src="{% static 'bookmark_manager/bookmarks.js' %}?v=tree-bulk-delete-v2" defer></script>{% endblock %}
+{% block scripts %}<script src="{% static 'bookmark_manager/bookmarks.js' %}?v=url-search-v10" defer></script>{% endblock %}

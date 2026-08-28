@@ -3,6 +3,7 @@
 from django.shortcuts import render
 from django.views.decorators.http import require_GET
 
+from bookmark_manager.services.bookmark_analytics import get_bookmark_dashboard
 from core.services.system_status import get_system_status
 
 
@@ -10,6 +11,10 @@ from core.services.system_status import get_system_status
 def dashboard(request):
     """Render OWL's compact Home overview."""
 
+    bookmark_dashboard = get_bookmark_dashboard(
+        year=request.GET.get("year"),
+        activity_type=request.GET.get("activity", "all"),
+    )
     return render(
         request,
         "core/dashboard.html",
@@ -18,6 +23,7 @@ def dashboard(request):
             "active_app": "home",
             "page_title": "Home",
             "status_message": "Ready · Home",
+            "dashboard": bookmark_dashboard,
         },
     )
 
