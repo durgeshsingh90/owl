@@ -8,6 +8,7 @@
         {% if item.children %}aria-expanded="true"{% endif %}
         tabindex="{% if item.selected or item.located %}0{% else %}-1{% endif %}"
         data-tree-row
+        {% if item.bookmark %}data-details-url="?selected={{ item.bookmark.pk }}{% if current_query_string %}&amp;{{ current_query_string }}{% endif %}" data-bookmark-id="{{ item.bookmark.pk }}"{% endif %}
         {% if item.located %}data-located-bookmark{% endif %}
     >
         <span class="tree-node-disclosure">

@@ -25,6 +25,7 @@ from bookmark_manager.models import (
 )
 from bookmark_manager.services.bookmark_analytics import record_daily_activity
 from bookmark_manager.services.bookmark_outline import next_outline_position
+from core.logging import redact_log_text
 
 type PageIdentity = str | int
 type MetadataLoader = Callable[[str], "ConfluencePageSnapshot"]
@@ -283,7 +284,7 @@ def record_refresh_failure(
     attempt_time = attempted_at or timezone.now()
     _require_aware_datetime(attempt_time, "attempted_at")
     safe_code = str(error_code or "refresh_error").strip()[:64]
-    safe_message = " ".join(str(error_message or "Refresh failed.").split())[:255]
+    safe_message = redact_log_text(" ".join(str(error_message or "Refresh failed.").split()))[:255]
     if availability_status not in BookmarkAvailability.values:
         availability_status = BookmarkAvailability.REFRESH_ERROR
     updated = Bookmark.objects.filter(pk=bookmark_pk).update(

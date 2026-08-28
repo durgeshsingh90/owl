@@ -234,6 +234,22 @@ class ConfluencePageNode(models.Model):
                 condition=~models.Q(id=models.F("parent_id")),
                 name="bookmark_node_is_not_its_own_parent",
             ),
+            models.UniqueConstraint(
+                fields=["outline_position"],
+                condition=models.Q(
+                    parent__isnull=True,
+                    outline_position__isnull=False,
+                ),
+                name="bmk_node_root_outline_uniq",
+            ),
+            models.UniqueConstraint(
+                fields=["parent", "outline_position"],
+                condition=models.Q(
+                    parent__isnull=False,
+                    outline_position__isnull=False,
+                ),
+                name="bmk_node_child_outline_uniq",
+            ),
         ]
         indexes = [
             models.Index(
@@ -529,6 +545,43 @@ class BookmarkRefreshRun(models.Model):
             BookmarkRefreshStatus.QUEUED,
             BookmarkRefreshStatus.RUNNING,
         }
+
+
+class BookmarkRefreshFailure(models.Model):
+    """One final, sanitized bookmark failure from a completed refresh run."""
+
+    refresh_run = models.ForeignKey(
+        BookmarkRefreshRun,
+        on_delete=models.CASCADE,
+        related_name="failures",
+    )
+    bookmark = models.ForeignKey(
+        "Bookmark",
+        on_delete=models.CASCADE,
+        related_name="refresh_failures",
+    )
+    page_id = models.CharField(max_length=64)
+    url = models.URLField(max_length=2048, blank=True)
+    error_code = models.CharField(max_length=64, blank=True)
+    reason = models.CharField(max_length=500)
+    attempt_count = models.PositiveSmallIntegerField(default=3)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["bookmark_id", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("refresh_run", "bookmark"),
+                name="bookmark_refresh_one_failure_per_bookmark",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(attempt_count__gte=1),
+                name="bookmark_refresh_failure_attempt_positive",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"Refresh #{self.refresh_run_id}, bookmark #{self.bookmark_id}: {self.reason}"
 
 
 class BookmarkActivityCoverage(models.Model):

@@ -986,6 +986,102 @@
     background: var(--red-soft);
 }
 
+.operation-result__heading {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 320px;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.8rem;
+}
+
+.operation-result__heading > div {
+    min-width: 0;
+}
+
+.operation-result__dismiss {
+    display: inline-grid;
+    width: 34px;
+    height: 34px;
+    flex: 0 0 34px;
+    place-items: center;
+    padding: 0;
+    border: 1px solid var(--line-strong);
+    border-radius: 50%;
+    color: var(--muted-strong);
+    background: var(--surface);
+    cursor: pointer;
+    font: inherit;
+    font-size: 1.25rem;
+    line-height: 1;
+}
+
+.operation-result__dismiss:hover,
+.operation-result__dismiss:focus-visible {
+    border-color: var(--red);
+    color: var(--red);
+    outline: 3px solid color-mix(in srgb, var(--red) 24%, transparent);
+    outline-offset: 2px;
+}
+
+.refresh-result {
+    display: grid;
+    gap: 0.7rem;
+    padding: 0.8rem 0.9rem;
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--red);
+    border-radius: var(--radius-sm);
+    background: var(--red-soft);
+}
+
+.refresh-result[hidden] {
+    display: none;
+}
+
+.refresh-result h2,
+.refresh-result p {
+    margin: 0;
+}
+
+.refresh-result h2 {
+    font-size: 0.92rem;
+}
+
+.refresh-result p {
+    margin-top: 0.2rem;
+    color: var(--muted-strong);
+    font-size: 0.75rem;
+}
+
+.operation-failure-list {
+    display: grid;
+    gap: 0.45rem;
+    width: 100%;
+    margin: 0.55rem 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.operation-failure-list li {
+    display: grid;
+    min-width: 0;
+    gap: 0.18rem;
+    padding: 0.55rem 0.65rem;
+    border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line));
+    border-radius: var(--radius-sm);
+    color: var(--muted-strong);
+    background: color-mix(in srgb, var(--surface) 86%, var(--red-soft));
+    font-size: 0.74rem;
+}
+
+.operation-failure-list code {
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 0.72rem;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
 .tree-toolbar {
     position: sticky;
     z-index: 3;
@@ -2042,7 +2138,8 @@
 }
 
 .bookmark-manager-shell .bookmark-workspace {
-    min-height: clamp(570px, calc(100vh - 355px), 850px) !important;
+    height: clamp(620px, calc(100dvh - 250px), 1120px);
+    min-height: clamp(620px, calc(100dvh - 250px), 1120px) !important;
     margin-top: 1.15rem;
     grid-template-columns: minmax(430px, 1fr) minmax(300px, 340px) minmax(210px, 250px);
     border-color: var(--line);
@@ -2055,7 +2152,9 @@
 .bookmark-manager-shell .bookmark-pane--details,
 .bookmark-manager-shell .bookmark-pane--tree,
 .bookmark-manager-shell .bookmark-pane--people {
-    max-height: clamp(570px, calc(100vh - 355px), 850px);
+    height: 100%;
+    max-height: none;
+    overflow-y: auto;
 }
 
 .bookmark-manager-shell .bookmark-pane--details {
@@ -2423,6 +2522,10 @@
     background: var(--bookmark-row-hover);
 }
 
+.bookmark-manager-shell .tree-node-row[data-details-url] {
+    cursor: pointer;
+}
+
 .bookmark-manager-shell .tree-node-row.is-selected {
     background: var(--bookmark-accent-soft);
     box-shadow: inset 3px 0 0 var(--bookmark-accent);
@@ -2587,21 +2690,30 @@
 
 .bookmark-manager-shell .detail-full-url {
     display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 0.25rem;
     margin: -0.15rem 0 0.8rem;
 }
 
 .bookmark-manager-shell .detail-full-url strong {
+    grid-column: 1 / -1;
     color: var(--muted-strong);
     font-size: 0.72rem;
 }
 
-.bookmark-manager-shell .detail-full-url span {
+.bookmark-manager-shell .detail-full-url code {
+    min-width: 0;
     color: var(--muted);
+    font-family: inherit;
     font-size: 0.78rem;
     line-height: 1.45;
     overflow-wrap: anywhere;
     word-break: break-word;
+}
+
+.bookmark-manager-shell .detail-full-url .text-button {
+    align-self: start;
+    white-space: nowrap;
 }
 
 .bookmark-manager-shell .detail-tag-editor {
@@ -2722,18 +2834,12 @@
 
 @media (max-width: 1500px) and (min-width: 1181px) {
     .bookmark-manager-shell .bookmark-workspace {
-        grid-template-columns: minmax(480px, 1fr) minmax(300px, 350px);
+        grid-template-columns: minmax(410px, 1fr) minmax(280px, 330px) minmax(190px, 230px);
     }
 
     .bookmark-manager-shell .bookmark-pane--people {
-        max-height: 250px;
-        grid-column: 1 / -1;
-        border-top: 1px solid var(--line);
-        border-left: 0;
-    }
-
-    .bookmark-manager-shell .confluence-people-list {
-        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        border-top: 0;
+        border-left: 1px solid var(--line);
     }
 }
 
@@ -2747,16 +2853,25 @@
     }
 
     .bookmark-manager-shell .bookmark-workspace {
+        height: auto;
+        min-height: 0 !important;
         grid-template-columns: minmax(0, 1fr);
+        overflow: visible;
+    }
+
+    .bookmark-manager-shell .bookmark-pane--tree {
+        height: min(72vh, 760px);
     }
 
     .bookmark-manager-shell .bookmark-pane--details {
+        height: auto;
         max-height: none;
         border-top: 1px solid var(--line);
         border-left: 0;
     }
 
     .bookmark-manager-shell .bookmark-pane--people {
+        height: auto;
         max-height: none;
         border-top: 1px solid var(--line);
         border-left: 0;

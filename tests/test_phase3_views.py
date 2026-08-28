@@ -18,6 +18,9 @@ from bookmark_manager.models import (
     BookmarkAvailability,
     BookmarkCategory,
     BookmarkImportRun,
+    BookmarkRefreshFailure,
+    BookmarkRefreshRun,
+    BookmarkRefreshStatus,
     BookmarkSource,
     ConfluenceConfiguration,
     ConfluencePageNode,
@@ -581,6 +584,39 @@ def test_tree_opens_titles_shows_usage_and_keeps_quick_note_in_details(loopback_
     assert "Review the routing notes" in html
 
 
+def test_refresh_failure_status_renders_wrapped_url_reason_and_dismiss_control(
+    loopback_client,
+):
+    bookmark = _create_bookmark()
+    run = BookmarkRefreshRun.objects.create(
+        status=BookmarkRefreshStatus.SUCCEEDED_WITH_ERRORS,
+        total_bookmarks=1,
+        processed_bookmarks=1,
+        succeeded_bookmarks=0,
+        failed_bookmarks=1,
+        completed_at=timezone.now(),
+    )
+    BookmarkRefreshFailure.objects.create(
+        refresh_run=run,
+        bookmark=bookmark,
+        page_id=bookmark.page_id,
+        url=bookmark.url,
+        error_code="upstream_unavailable",
+        reason="Confluence did not return this page after 3 attempts.",
+        attempt_count=3,
+    )
+
+    response = loopback_client.get(reverse("bookmark_manager:index"))
+    html = _html(response)
+
+    assert response.status_code == 200
+    assert "data-refresh-result" in html
+    assert "data-refresh-failure-list" in html
+    assert 'aria-label="Dismiss refresh issues"' in html
+    assert bookmark.url in html
+    assert "Confluence did not return this page after 3 attempts." in html
+
+
 def test_confluence_people_column_counts_unique_pages_and_filters_by_name(loopback_client):
     first = _create_bookmark()
     second = _create_bookmark("730004", "Second architecture page", ancestors=())
@@ -809,6 +845,10 @@ def test_import_http_journey_returns_to_settings_and_renders_partial_result(
     assert "<dt>Rejected</dt><dd>1</dd>" in html
     assert "Record 2" in html
     assert "The record must be a JSON object." in html
+    assert "data-import-result" in html
+    assert 'aria-label="Dismiss import result"' in html
+    assert "data-dismiss-import-result" in html
+    assert 'class="operation-failure-list"' in html
 
 
 def test_browser_style_async_json_import_passes_csrf_and_redirects_to_result():
@@ -1153,7 +1193,7 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert "data-delete-selected" in html
     assert 'data-delete-locked="true"' in html
     assert "🔒" in html
-    assert "bookmarks.js?v=url-search-v10" in html
+    assert "bookmarks.js?v=workspace-ui-v11" in html
     assert f'name="bookmark_ids" value="{bookmark.pk}"' in html
     assert 'form="bulk-delete-bookmarks"' in html
     assert "data-productivity-form" in html
@@ -1166,6 +1206,8 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert html.index("organisation-form--primary") < html.index("detail-actions")
     assert html.index("organisation-form--primary") < html.index("detail-full-url")
     assert html.index("detail-full-url") < html.index("detail-actions")
+    assert f"<code>{bookmark.url}</code>" in html
+    assert f'data-copy-value="{bookmark.url}"' in html
     assert bookmark.url in html
     assert "<time datetime=" in html and 'tabindex="0"' in html
     sidebar = _sidebar_html(response)
@@ -1189,7 +1231,13 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
         "owl.bookmark-manager.tree-expansion.v1",
         "owl.bookmark-manager.selection.v1",
         "owl.bookmark-manager.tree-scroll.v1",
-        "window.location.assign(detailsCheckbox.dataset.detailsUrl)",
+        'treeRoot?.addEventListener("click"',
+        "showTreeRowDetails(row)",
+        'event.target.closest("button, input, label, a, form, select, textarea")',
+        "keyTarget instanceof HTMLButtonElement",
+        "keyTarget instanceof HTMLAnchorElement",
+        'removeQueryParameter("import_run")',
+        "renderRefreshFailures(refresh.failures || [])",
         'deleteSelectedButton.dataset.deleteLocked = "false"',
         'label.textContent = "Click again to delete"',
         "window.setTimeout(lockDeleteSelected, 10000)",

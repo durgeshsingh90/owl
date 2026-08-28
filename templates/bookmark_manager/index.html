@@ -2,7 +2,7 @@
 {% load static bookmark_display %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bookmark_manager/bookmarks.css' %}?v=url-search-v10">
+<link rel="stylesheet" href="{% static 'bookmark_manager/bookmarks.css' %}?v=workspace-ui-v11">
 {% endblock %}
 
 {% block body_class %}bookmark-manager-shell{% endblock %}
@@ -101,10 +101,13 @@
     {% endif %}
 
     {% if last_import_run %}
-    <section class="import-result{% if last_import_run.failed_records %} import-result--partial{% endif %}" aria-labelledby="import-result-heading">
-        <div>
+    <section class="import-result{% if last_import_run.failed_records %} import-result--partial{% endif %}" aria-labelledby="import-result-heading" data-import-result>
+        <div class="operation-result__heading">
+            <div>
             <h2 id="import-result-heading">Import {{ last_import_run.get_status_display|lower }}</h2>
             <p>{{ last_import_run.outcome }}</p>
+            </div>
+            <button class="operation-result__dismiss" type="button" aria-label="Dismiss import result" title="Dismiss import result" data-dismiss-import-result><span aria-hidden="true">×</span></button>
         </div>
         <dl>
             <div><dt>Imported</dt><dd>{{ last_import_run.imported_records }}</dd></div>
@@ -114,15 +117,38 @@
         {% if last_import_run.failures.all %}
         <details>
             <summary>{% if last_import_run.schema_version == "text-urls-v1" %}Review incomplete or failed URLs{% else %}Review sanitized record failures{% endif %}</summary>
-            <ul>
+            <ul class="operation-failure-list">
                 {% for failure in last_import_run.failures.all %}
-                <li>Record {{ failure.record_number }}{% if failure.page_id %} · Page ID {{ failure.page_id }}{% endif %}: {{ failure.reason }}</li>
+                <li>
+                    <strong>Record {{ failure.record_number }}{% if failure.page_id %} · Page ID {{ failure.page_id }}{% endif %}</strong>
+                    {% if failure.url %}<code>{{ failure.url }}</code>{% elif failure.source_url %}<code>{{ failure.source_url }}</code>{% endif %}
+                    <span>{{ failure.reason }}</span>
+                </li>
                 {% endfor %}
             </ul>
         </details>
         {% endif %}
     </section>
     {% endif %}
+
+    <section class="refresh-result" aria-labelledby="refresh-result-heading" data-refresh-result{% if not refresh_status.failures %} hidden{% endif %}>
+        <div class="operation-result__heading">
+            <div>
+                <h2 id="refresh-result-heading">Refresh needs attention</h2>
+                <p>These pages could not be refreshed after all retry attempts. Other bookmarks remain available.</p>
+            </div>
+            <button class="operation-result__dismiss" type="button" aria-label="Dismiss refresh issues" title="Dismiss refresh issues" data-dismiss-refresh-result><span aria-hidden="true">×</span></button>
+        </div>
+        <ul class="operation-failure-list" data-refresh-failure-list>
+            {% for failure in refresh_status.failures %}
+            <li>
+                <strong>{% if failure.page_id %}Page ID {{ failure.page_id }}{% elif failure.bookmark_id %}Bookmark #{{ failure.bookmark_id }}{% else %}Saved bookmark{% endif %}</strong>
+                {% if failure.url %}<code>{{ failure.url }}</code>{% endif %}
+                <span>{{ failure.reason }}</span>
+            </li>
+            {% endfor %}
+        </ul>
+    </section>
 
     <section class="bookmark-controls" aria-label="Bookmark controls">
         <form
@@ -231,7 +257,8 @@
                 </form>
                 <div class="detail-full-url">
                     <strong>Full URL</strong>
-                    <span>{{ selected_bookmark.url }}</span>
+                    <code>{{ selected_bookmark.url }}</code>
+                    <button class="text-button" type="button" data-copy-value="{{ selected_bookmark.url }}" data-copy-success="URL copied">Copy URL</button>
                 </div>
                 <div class="inline-actions detail-actions">
                     <form method="post" action="{% url 'bookmark_manager:open' selected_bookmark.pk %}" target="_blank" rel="noopener noreferrer" data-external-open-form>{% csrf_token %}<button class="button button--primary" type="submit">{% if selected_bookmark.source_type == 'confluence' %}Open in Confluence{% else %}Open website{% endif %}</button></form>
@@ -242,7 +269,6 @@
                 <div class="copy-actions">
                     {% if selected_bookmark.source_type == 'confluence' %}<button class="text-button" type="button" data-copy-value="{{ selected_bookmark.page_id }}" data-copy-success="Page ID copied">Copy Page ID</button>{% endif %}
                     <button class="text-button" type="button" data-copy-value="{% for item in selected_breadcrumb %}{% if not forloop.first %} › {% endif %}{{ item.title }}{% endfor %}" data-copy-success="Breadcrumb copied">Copy breadcrumb</button>
-                    <button class="text-button" type="button" data-copy-value="{{ selected_bookmark.url }}" data-copy-success="URL copied">Copy URL</button>
                 </div>
                 <div class="detail-tag-editor">
                     <label for="{{ organisation_form.tags.id_for_label }}">Tags <small>Separate with commas</small></label>
@@ -342,4 +368,4 @@
 {% endblock %}
 
 {% block global_status %}{% endblock %}
-{% block scripts %}<script src="{% static 'bookmark_manager/bookmarks.js' %}?v=url-search-v10" defer></script>{% endblock %}
+{% block scripts %}<script src="{% static 'bookmark_manager/bookmarks.js' %}?v=workspace-ui-v11" defer></script>{% endblock %}

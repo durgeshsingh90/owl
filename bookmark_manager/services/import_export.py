@@ -1027,15 +1027,51 @@ def _merge_provisional_node(
     if Bookmark.objects.filter(tree_node=provisional).exists():
         return
     if canonical.parent_id == provisional.pk:
+        replacement_position = provisional.outline_position
+        # The canonical node replaces this hierarchy-only placeholder. Release the
+        # placeholder's slot first so the stable branch number can be retained while
+        # the database uniqueness constraint remains active.
+        provisional.outline_position = None
+        provisional.save(update_fields=["outline_position", "metadata_updated_at"])
         canonical.parent_id = provisional.parent_id
-        canonical.save(update_fields=["parent", "metadata_updated_at"])
+        canonical.outline_position = _available_or_next_outline_position(
+            canonical,
+            parent_id=provisional.parent_id,
+            preferred=replacement_position,
+        )
+        canonical.save(update_fields=["parent", "outline_position", "metadata_updated_at"])
     for child in provisional.children.select_for_update():
         if child.pk == canonical.pk:
             continue
         child.parent = canonical
-        child.save(update_fields=["parent", "metadata_updated_at"])
+        child.outline_position = _available_or_next_outline_position(
+            child,
+            parent_id=canonical.pk,
+        )
+        child.save(update_fields=["parent", "outline_position", "metadata_updated_at"])
     if not provisional.children.exists():
         provisional.delete()
+
+
+def _available_or_next_outline_position(
+    node: ConfluencePageNode,
+    *,
+    parent_id: int | None,
+    preferred: int | None = None,
+) -> int:
+    """Keep a moved node's serial when available; otherwise fill the lowest gap."""
+
+    position = preferred if preferred is not None else node.outline_position
+    if position is not None and not (
+        ConfluencePageNode.objects.filter(
+            parent_id=parent_id,
+            outline_position=position,
+        )
+        .exclude(pk=node.pk)
+        .exists()
+    ):
+        return position
+    return next_outline_position(parent_id=parent_id)
 
 
 def _normalize_hierarchy(

@@ -5,21 +5,40 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable
 
-from django.db.models import Max
+from django.db import transaction
 
 from bookmark_manager.models import ConfluencePageNode
 
 
 def next_outline_position(*, parent_id: int | None) -> int:
-    """Return the next durable local position beneath one parent."""
+    """Return the lowest unused durable position beneath one parent.
 
-    maximum = (
-        ConfluencePageNode.objects.filter(parent_id=parent_id).aggregate(
-            maximum=Max("outline_position")
-        )["maximum"]
-        or 0
-    )
-    return maximum + 1
+    Existing positions remain authoritative: this allocator only fills a gap left by
+    a pruned node.  When called inside a transaction, locking the parent and current
+    siblings serializes normal writers.  Database uniqueness constraints remain the
+    final race-safety boundary, including the first root created in an empty tree.
+    """
+
+    connection = transaction.get_connection()
+    if connection.in_atomic_block and parent_id is not None:
+        # All normal child writers lock the same parent before inspecting its slots.
+        ConfluencePageNode.objects.select_for_update().filter(pk=parent_id).exists()
+
+    siblings = ConfluencePageNode.objects.filter(
+        parent_id=parent_id,
+        outline_position__isnull=False,
+    ).order_by("outline_position")
+    if connection.in_atomic_block:
+        siblings = siblings.select_for_update()
+
+    candidate = 1
+    for position in siblings.values_list("outline_position", flat=True):
+        if position < candidate:
+            continue
+        if position > candidate:
+            break
+        candidate += 1
+    return candidate
 
 
 def ensure_outline_position(

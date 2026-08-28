@@ -75,10 +75,13 @@
             {% if inline_error %}<div class="form-errors" role="alert">{{ inline_error }}</div>{% endif %}
 
             {% if last_import_run %}
-            <div class="import-result{% if last_import_run.failed_records %} import-result--partial{% endif %}" aria-labelledby="settings-import-result-heading">
-                <div>
+            <div class="import-result{% if last_import_run.failed_records %} import-result--partial{% endif %}" aria-labelledby="settings-import-result-heading" data-import-result>
+                <div class="operation-result__heading">
+                    <div>
                     <h4 id="settings-import-result-heading">Import {{ last_import_run.get_status_display|lower }}</h4>
                     <p>{{ last_import_run.outcome }}</p>
+                    </div>
+                    <button class="operation-result__dismiss" type="button" aria-label="Dismiss import result" title="Dismiss import result" data-dismiss-import-result><span aria-hidden="true">×</span></button>
                 </div>
                 <dl>
                     <div><dt>Imported</dt><dd>{{ last_import_run.imported_records }}</dd></div>
@@ -88,9 +91,13 @@
                 {% if last_import_run.failures.all %}
                 <details>
                     <summary>{% if last_import_run.schema_version == "text-urls-v1" %}Review incomplete or failed URLs{% else %}Review sanitized record failures{% endif %}</summary>
-                    <ul>
+                    <ul class="operation-failure-list">
                         {% for failure in last_import_run.failures.all %}
-                        <li>Record {{ failure.record_number }}{% if failure.page_id %} · Page ID {{ failure.page_id }}{% endif %}: {{ failure.reason }}</li>
+                        <li>
+                            <strong>Record {{ failure.record_number }}{% if failure.page_id %} · Page ID {{ failure.page_id }}{% endif %}</strong>
+                            {% if failure.url %}<code>{{ failure.url }}</code>{% elif failure.source_url %}<code>{{ failure.source_url }}</code>{% endif %}
+                            <span>{{ failure.reason }}</span>
+                        </li>
                         {% endfor %}
                     </ul>
                 </details>

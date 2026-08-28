@@ -649,6 +649,21 @@ def _refresh_run_payload(
     processed = run.processed_bookmarks if run else 0
     total = run.total_bookmarks if run else 0
     progress = round((processed / total) * 100) if total else (0 if active else 100)
+    failures = (
+        tuple(
+            {
+                "bookmark_id": failure.bookmark_id,
+                "page_id": failure.page_id,
+                "url": failure.url,
+                "reason": failure.reason,
+                "error_code": failure.error_code,
+                "attempts": failure.attempt_count,
+            }
+            for failure in run.failures.all()
+        )
+        if run is not None
+        else ()
+    )
     return {
         "run_id": run.pk if run else None,
         "status": run.status if run else "idle",
@@ -658,6 +673,7 @@ def _refresh_run_payload(
         "processed": processed,
         "succeeded": run.succeeded_bookmarks if run else 0,
         "failed": run.failed_bookmarks if run else 0,
+        "failures": failures,
         "progress": progress,
         "requested_at": run.requested_at.isoformat() if run else None,
         "started_at": run.started_at.isoformat() if run and run.started_at else None,

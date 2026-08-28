@@ -384,6 +384,59 @@
         }
     };
 
+    const removeQueryParameter = (name) => {
+        const nextUrl = new URL(window.location.href);
+        nextUrl.searchParams.delete(name);
+        const nextLocation = `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`;
+        window.history.replaceState(window.history.state, "", nextLocation);
+    };
+
+    document.querySelectorAll("[data-dismiss-import-result]").forEach((button) => {
+        button.addEventListener("click", () => {
+            document.querySelectorAll("[data-import-result]").forEach((result) => result.remove());
+            removeQueryParameter("import_run");
+            announce("Import result dismissed");
+            document
+                .querySelector("[data-bookmark-search], [data-import-submit], [data-settings-heading]")
+                ?.focus();
+        });
+    });
+
+    const refreshResult = document.querySelector("[data-refresh-result]");
+    const refreshFailureList = refreshResult?.querySelector("[data-refresh-failure-list]");
+    refreshResult?.querySelector("[data-dismiss-refresh-result]")?.addEventListener("click", () => {
+        refreshResult.hidden = true;
+        announce("Refresh issues dismissed");
+        document.querySelector("[data-global-refresh-button]")?.focus();
+    });
+
+    const renderRefreshFailures = (failures) => {
+        if (!refreshResult || !refreshFailureList || !Array.isArray(failures)) {
+            return;
+        }
+        refreshFailureList.replaceChildren();
+        failures.forEach((failure) => {
+            const item = document.createElement("li");
+            const label = document.createElement("strong");
+            label.textContent = failure.page_id
+                ? `Page ID ${failure.page_id}`
+                : failure.bookmark_id
+                  ? `Bookmark #${failure.bookmark_id}`
+                  : "Saved bookmark";
+            item.append(label);
+            if (failure.url) {
+                const url = document.createElement("code");
+                url.textContent = failure.url;
+                item.append(url);
+            }
+            const reason = document.createElement("span");
+            reason.textContent = failure.reason || "The page could not be refreshed.";
+            item.append(reason);
+            refreshFailureList.append(item);
+        });
+        refreshResult.hidden = failures.length === 0;
+    };
+
     const globalRefresh = document.querySelector("[data-global-refresh]");
     const globalRefreshButton = globalRefresh?.querySelector("[data-global-refresh-button]");
     const globalRefreshSpinner = globalRefresh?.querySelector("[data-global-refresh-spinner]");
@@ -457,6 +510,7 @@
             ? `Confluence refresh is running: ${processed} of ${total} processed`
             : refresh.detail ||
               "Refresh every saved Confluence page, hierarchy, metadata, and searchable text";
+        renderRefreshFailures(refresh.failures || []);
 
         if (globalRefreshWasActive && !active) {
             announce(
@@ -678,6 +732,27 @@
     const deleteSelectedButton = document.querySelector("[data-delete-selected]");
     let deleteRelockTimer = null;
 
+    const showTreeRowDetails = (row) => {
+        const detailsUrl = row?.dataset.detailsUrl;
+        const bookmarkId = row?.dataset.bookmarkId;
+        if (!detailsUrl || !bookmarkId) {
+            return;
+        }
+        safeStorage.set(selectionStorageKey, bookmarkId);
+        window.location.assign(detailsUrl);
+    };
+
+    treeRoot?.addEventListener("click", (event) => {
+        const row = event.target.closest("[data-tree-row]");
+        if (
+            !row?.dataset.detailsUrl ||
+            event.target.closest("button, input, label, a, form, select, textarea")
+        ) {
+            return;
+        }
+        showTreeRowDetails(row);
+    });
+
     const directTreeCheck = (item) =>
         item?.querySelector(":scope > [data-tree-row] [data-tree-check]") || null;
     const descendantTreeChecks = (item) =>
@@ -822,8 +897,7 @@
                     detailsCheckbox &&
                     detailsCheckbox.dataset.bookmarkId !== treeRoot?.dataset.selectedBookmark
                 ) {
-                    safeStorage.set(selectionStorageKey, detailsCheckbox.dataset.bookmarkId);
-                    window.location.assign(detailsCheckbox.dataset.detailsUrl);
+                    showTreeRowDetails(detailsCheckbox.closest("[data-tree-row]"));
                 }
             }
         });
@@ -1092,6 +1166,8 @@
         const keyTarget = event.target;
         if (
             keyTarget instanceof HTMLInputElement ||
+            keyTarget instanceof HTMLButtonElement ||
+            keyTarget instanceof HTMLAnchorElement ||
             keyTarget instanceof HTMLTextAreaElement ||
             keyTarget instanceof HTMLSelectElement ||
             keyTarget?.isContentEditable
@@ -1105,7 +1181,7 @@
         const rows = visibleTreeRows();
         const index = rows.indexOf(row);
         const toggle = row.querySelector("[data-tree-toggle]");
-        const selectLink = row.querySelector("[data-tree-select]");
+        const detailsUrl = row.dataset.detailsUrl;
         const shortcut = event.key.toLowerCase();
 
         if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -1142,9 +1218,12 @@
                     }
                 }
             }
-        } else if (event.key === "Enter" && selectLink) {
+        } else if (event.key === "Enter" && detailsUrl) {
             event.preventDefault();
-            selectLink.click();
+            showTreeRowDetails(row);
+        } else if (event.key === "Enter" && toggle) {
+            event.preventDefault();
+            toggle.click();
         } else if (shortcut === "e" && toggle) {
             event.preventDefault();
             toggle.click();

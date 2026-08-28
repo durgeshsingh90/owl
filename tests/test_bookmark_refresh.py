@@ -13,6 +13,7 @@ from django.utils import timezone
 from bookmark_manager.models import (
     Bookmark,
     BookmarkAvailability,
+    BookmarkRefreshFailure,
     BookmarkRefreshRun,
     BookmarkRefreshStatus,
 )
@@ -178,6 +179,198 @@ def test_failed_page_keeps_last_good_text_and_records_refresh_diagnostics():
     assert bookmark.last_error_code == "not_found"
     assert bookmark.last_refresh_attempt_at is not None
     assert bookmark.last_refreshed_at is None
+
+
+def test_failed_page_succeeds_on_retry_without_retaining_a_failure():
+    bookmark = _bookmark("930101", "Retry me")
+    run = BookmarkRefreshRun.objects.create()
+    attempts = 0
+
+    def fetcher(_profile, bookmark_id: int, page_id: str) -> RefreshFetchResult:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return RefreshFetchResult(
+                bookmark_id=bookmark_id,
+                page_id=page_id,
+                error_code="temporarily_unavailable",
+                error_message="Confluence was temporarily unavailable.",
+            )
+        return RefreshFetchResult(
+            bookmark_id=bookmark_id,
+            page_id=page_id,
+            snapshot=_snapshot(page_id, "Recovered on retry", version=2),
+        )
+
+    completed = execute_refresh_run(
+        run.pk,
+        profile=_profile(),
+        fetcher=fetcher,
+        max_workers=1,
+    )
+
+    assert completed is not None
+    assert attempts == 2
+    assert completed.status == BookmarkRefreshStatus.SUCCEEDED
+    assert (
+        completed.processed_bookmarks,
+        completed.succeeded_bookmarks,
+        completed.failed_bookmarks,
+    ) == (1, 1, 0)
+    assert BookmarkRefreshFailure.objects.filter(refresh_run=run).exists() is False
+    bookmark.refresh_from_db()
+    assert bookmark.title == "Recovered on retry"
+    assert bookmark.last_error_code == ""
+    assert bookmark.last_error_message == ""
+
+
+def test_failed_page_is_finalized_only_after_three_attempts():
+    bookmark = _bookmark("930102", "Always unavailable")
+    run = BookmarkRefreshRun.objects.create()
+    attempts = 0
+
+    def fetcher(_profile, bookmark_id: int, page_id: str) -> RefreshFetchResult:
+        nonlocal attempts
+        attempts += 1
+        return RefreshFetchResult(
+            bookmark_id=bookmark_id,
+            page_id=page_id,
+            error_code="not_found",
+            error_message="The Confluence page was not found.",
+            availability_status=BookmarkAvailability.NOT_FOUND,
+        )
+
+    completed = execute_refresh_run(
+        run.pk,
+        profile=_profile(),
+        fetcher=fetcher,
+        max_workers=1,
+    )
+
+    assert completed is not None
+    assert attempts == 3
+    assert completed.status == BookmarkRefreshStatus.SUCCEEDED_WITH_ERRORS
+    assert (
+        completed.processed_bookmarks,
+        completed.succeeded_bookmarks,
+        completed.failed_bookmarks,
+    ) == (1, 0, 1)
+    failure = BookmarkRefreshFailure.objects.get(refresh_run=run, bookmark=bookmark)
+    assert failure.page_id == bookmark.page_id
+    assert failure.reason == "The Confluence page was not found."
+    assert failure.error_code == "not_found"
+    assert failure.attempt_count == 3
+    bookmark.refresh_from_db()
+    assert bookmark.availability_status == BookmarkAvailability.NOT_FOUND
+    assert bookmark.last_error_code == "not_found"
+
+
+def test_refresh_retries_failed_pages_after_every_initial_page_finishes():
+    first = _bookmark("930201", "First page")
+    second = _bookmark("930202", "Second page")
+    third = _bookmark("930203", "Third page")
+    run = BookmarkRefreshRun.objects.create()
+    calls: list[str] = []
+    attempts: dict[str, int] = {}
+
+    def fetcher(_profile, bookmark_id: int, page_id: str) -> RefreshFetchResult:
+        calls.append(page_id)
+        attempts[page_id] = attempts.get(page_id, 0) + 1
+        if page_id == first.page_id or (page_id == third.page_id and attempts[page_id] == 1):
+            return RefreshFetchResult(
+                bookmark_id=bookmark_id,
+                page_id=page_id,
+                error_code="temporarily_unavailable",
+                error_message="Retry this page.",
+            )
+        return RefreshFetchResult(
+            bookmark_id=bookmark_id,
+            page_id=page_id,
+            snapshot=_snapshot(page_id, f"Refreshed {page_id}", version=2),
+        )
+
+    completed = execute_refresh_run(
+        run.pk,
+        profile=_profile(),
+        fetcher=fetcher,
+        max_workers=1,
+    )
+
+    assert completed is not None
+    assert calls == [
+        first.page_id,
+        second.page_id,
+        third.page_id,
+        first.page_id,
+        third.page_id,
+        first.page_id,
+    ]
+    assert (
+        completed.processed_bookmarks,
+        completed.succeeded_bookmarks,
+        completed.failed_bookmarks,
+    ) == (3, 2, 1)
+    assert list(
+        BookmarkRefreshFailure.objects.filter(refresh_run=run).values_list("bookmark_id", flat=True)
+    ) == [first.pk]
+
+
+def test_refresh_status_reports_sanitized_final_failure_url_and_reason(client):
+    bookmark = _bookmark("930301", "Secret-safe failure")
+    bookmark.url = (
+        f"https://confluence.example.invalid/wiki/pages/viewpage.action?"
+        f"pageId={bookmark.page_id}&token=url-secret#private-fragment"
+    )
+    bookmark.save(update_fields=("url",))
+    run = BookmarkRefreshRun.objects.create()
+
+    def fetcher(_profile, bookmark_id: int, page_id: str) -> RefreshFetchResult:
+        return RefreshFetchResult(
+            bookmark_id=bookmark_id,
+            page_id=page_id,
+            error_code="AUTH TOKEN / LEAK",
+            error_message=(
+                "Confluence denied this page. "
+                f"Authorization: Bearer {SYNTHETIC_PAT} token=message-secret"
+            ),
+            availability_status=BookmarkAvailability.ACCESS_DENIED,
+        )
+
+    completed = execute_refresh_run(
+        run.pk,
+        profile=_profile(),
+        fetcher=fetcher,
+        max_workers=1,
+    )
+
+    assert completed is not None
+    failure = BookmarkRefreshFailure.objects.get(refresh_run=run, bookmark=bookmark)
+    assert failure.url == (
+        f"https://confluence.example.invalid/wiki/pages/viewpage.action?pageId={bookmark.page_id}"
+    )
+    assert "Confluence denied this page." in failure.reason
+    assert "[REDACTED]" in failure.reason
+    assert SYNTHETIC_PAT not in failure.reason
+    assert "message-secret" not in failure.reason
+    assert "url-secret" not in failure.url
+    assert "private-fragment" not in failure.url
+
+    client.defaults.update(HTTP_HOST="127.0.0.1", REMOTE_ADDR="127.0.0.1")
+    response = client.get(reverse("bookmark_manager:refresh_status"))
+    payload = response.json()["refresh"]
+
+    assert response.status_code == 200
+    assert payload["failed"] == 1
+    assert payload["failures"] == [
+        {
+            "bookmark_id": bookmark.pk,
+            "page_id": bookmark.page_id,
+            "url": failure.url,
+            "reason": failure.reason,
+            "error_code": "auth_token_leak",
+            "attempts": 3,
+        }
+    ]
 
 
 def test_refresh_start_returns_immediately_and_reuses_an_active_run(
