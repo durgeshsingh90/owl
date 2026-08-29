@@ -2,7 +2,7 @@
 {% load static bookmark_display %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bookmark_manager/bookmarks.css' %}?v=workspace-ui-v17">
+<link rel="stylesheet" href="{% static 'bookmark_manager/bookmarks.css' %}?v=workspace-ui-v22">
 {% endblock %}
 
 {% block body_class %}bookmark-manager-shell{% endblock %}
@@ -34,6 +34,7 @@
                 data-global-refresh
                 data-status-url="{% url 'bookmark_manager:refresh_status' %}"
                 data-active="{{ refresh_status.active|yesno:'true,false' }}"
+                data-run-id="{{ refresh_status.run_id|default:'' }}"
                 data-status="{{ refresh_status.status }}"
                 data-processed="{{ refresh_status.processed }}"
                 data-total="{{ refresh_status.total }}"
@@ -62,6 +63,7 @@
                     <span class="global-refresh-control__track" aria-hidden="true"><span data-global-refresh-progress style="width: {{ refresh_status.progress }}%"></span></span>
                 </span>
             </form>
+            {% include "owl/_notification_center.html" %}
             <details class="bookmark-app-switcher">
                 <summary class="bookmark-icon-button" aria-label="Applications">
                     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><rect x="14" y="14" width="6" height="6"/></svg>
@@ -106,6 +108,7 @@
             <div>
             <h2 id="import-result-heading">Import {{ last_import_run.get_status_display|lower }}</h2>
             <p>{{ last_import_run.outcome }}</p>
+            {% if last_import_run.completed_at %}<p class="operation-result__timestamp">Completed <time datetime="{{ last_import_run.completed_at|date:'c' }}">{{ last_import_run.completed_at|date:"j M Y, H:i:s T" }}</time></p>{% endif %}
             </div>
             <button class="operation-result__dismiss" type="button" aria-label="Dismiss import result" title="Dismiss import result" data-dismiss-import-result><span aria-hidden="true">×</span></button>
         </div>
@@ -131,16 +134,24 @@
     </section>
     {% endif %}
 
-    <section class="refresh-result" aria-labelledby="refresh-result-heading" data-refresh-result{% if not refresh_status.failures %} hidden{% endif %}>
+    <section
+        class="refresh-result"
+        id="refresh-result"
+        aria-labelledby="refresh-result-heading"
+        data-refresh-result
+        data-history-locked="{{ refresh_result_is_historical|yesno:'true,false' }}"
+        {% if not refresh_result_status.failures %}hidden{% endif %}
+    >
         <div class="operation-result__heading">
             <div>
                 <h2 id="refresh-result-heading">Refresh needs attention</h2>
-                <p>These pages could not be refreshed after all retry attempts. Other bookmarks remain available.</p>
+                <p>These pages could not be refreshed. Temporary failures are retried automatically; other bookmarks remain available.</p>
+                {% if refresh_result_status.completed_at %}<p class="operation-result__timestamp">Completed <time datetime="{{ refresh_result_status.completed_at }}">{{ refresh_result_status.completed_display }}</time></p>{% endif %}
             </div>
             <button class="operation-result__dismiss" type="button" aria-label="Dismiss refresh issues" title="Dismiss refresh issues" data-dismiss-refresh-result><span aria-hidden="true">×</span></button>
         </div>
         <ul class="operation-failure-list" data-refresh-failure-list>
-            {% for failure in refresh_status.failures %}
+            {% for failure in refresh_result_status.failures %}
             <li>
                 <strong>{% if failure.page_id %}Page ID {{ failure.page_id }}{% elif failure.bookmark_id %}Bookmark #{{ failure.bookmark_id }}{% else %}Saved bookmark{% endif %}</strong>
                 {% if failure.url %}<code>{{ failure.url }}</code>{% endif %}
@@ -166,6 +177,8 @@
             <label for="{{ filter_form.q.id_for_label }}" class="visually-hidden">Search bookmarks or add a URL</label>
             {{ filter_form.q }}
             {{ filter_form.category }}
+            {{ filter_form.person }}
+            {{ filter_form.sort.as_hidden }}
             <button
                 class="button button--primary"
                 type="submit"
@@ -203,9 +216,63 @@
             <div class="tree-toolbar">
                 <div class="pane-heading">
                     <h2 id="bookmark-tree-heading">Bookmark tree</h2>
-                    <span>{% if query_result.flat_mode %}Sorted matches in hierarchy{% elif active_filters %}Filtered tree{% else %}Bookmark hierarchy{% endif %}</span>
+                    <span>{% if query_result.flat_mode %}Sorted matches in hierarchy{% elif active_filters %}Filtered tree{% elif manual_folder_items %}Personal folders and Confluence hierarchy{% else %}Bookmark hierarchy{% endif %}</span>
                 </div>
+                <nav class="tree-sort-controls" aria-label="Sort bookmarks">
+                    {% for control in sort_controls %}
+                    <a
+                        class="tree-sort-control{% if control.active %} is-active{% endif %}"
+                        href="{{ control.href }}"
+                        aria-label="{{ control.aria_label }}"
+                        title="{{ control.aria_label }}"
+                        data-sort-key="{{ control.key }}"
+                        data-sort-direction="{{ control.direction }}"
+                        {% if control.active %}aria-current="true"{% endif %}
+                    >
+                        {% if control.key == "open_count" %}
+                        <svg class="tree-sort-control__icon" aria-hidden="true" viewBox="0 0 24 24">
+                            <path d="M2.8 12s3.4-5.4 9.2-5.4 9.2 5.4 9.2 5.4-3.4 5.4-9.2 5.4S2.8 12 2.8 12Z"></path>
+                            <circle cx="12" cy="12" r="2.6"></circle>
+                        </svg>
+                        {% elif control.key == "updated" %}
+                        <svg class="tree-sort-control__icon" aria-hidden="true" viewBox="0 0 24 24">
+                            <path d="M19.6 8.2A8.2 8.2 0 1 0 20 15"></path>
+                            <path d="M19.6 3.8v4.4h-4.4"></path>
+                            <path d="M12 7.8V12l2.8 1.8"></path>
+                        </svg>
+                        {% elif control.key == "created" %}
+                        <svg class="tree-sort-control__icon" aria-hidden="true" viewBox="0 0 24 24">
+                            <path d="M5.5 3.5h8l5 5v12h-13Z"></path>
+                            <path d="M13.5 3.5v5h5"></path>
+                            <path d="m9 16.6 4.8-4.8 1.8 1.8-4.8 4.8-2.3.5Z"></path>
+                        </svg>
+                        {% else %}
+                        <svg class="tree-sort-control__icon" aria-hidden="true" viewBox="0 0 24 24">
+                            <path d="M6.5 3.5h11v17L12 17l-5.5 3.5Z"></path>
+                        </svg>
+                        {% endif %}
+                        <svg class="tree-sort-control__direction" aria-hidden="true" viewBox="0 0 12 12">
+                            {% if control.direction == "ascending" %}
+                            <path d="m2.5 7.5 3.5-3 3.5 3"></path>
+                            {% elif control.direction == "descending" %}
+                            <path d="m2.5 4.5 3.5 3 3.5-3"></path>
+                            {% else %}
+                            <path d="M3.5 4 6 2l2.5 2M3.5 8 6 10l2.5-2"></path>
+                            {% endif %}
+                        </svg>
+                    </a>
+                    {% endfor %}
+                </nav>
                 <div class="compact-actions tree-bulk-actions">
+                    <button
+                        class="tree-create-folder"
+                        type="button"
+                        aria-label="Create personal bookmark folder"
+                        title="Create personal bookmark folder"
+                        aria-controls="bookmark-folder-create-panel"
+                        aria-expanded="false"
+                        data-folder-create-toggle
+                    ><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 7.5h6l1.8 2h9.2v10h-17z"/><path d="M4.5 7.5V5h5l1.8 2.5M12 14h5M14.5 11.5v5"/></svg></button>
                     <label class="tree-select-all">
                         <input type="checkbox" data-tree-select-all aria-label="Select all bookmarks shown in the tree">
                         <span>Select all</span>
@@ -226,8 +293,33 @@
                 </div>
             </div>
 
-            {% if tree_items %}
-            <ul class="bookmark-tree" role="tree" aria-label="Bookmark hierarchy" data-bookmark-tree data-selected-bookmark="{{ selected_bookmark.pk|default:'' }}">
+            <div class="folder-create-panel" id="bookmark-folder-create-panel" data-folder-create-panel hidden>
+                <form method="post" action="{% url 'bookmark_manager:folder_create' %}" data-folder-create-form>
+                    {% csrf_token %}
+                    {{ bookmark_folder_form.name }}
+                    <input type="hidden" name="return_to" value="{{ request.get_full_path }}">
+                    <button class="button button--primary button--compact" type="submit">Create folder</button>
+                    <button class="text-button" type="button" data-folder-create-cancel>Cancel</button>
+                </form>
+            </div>
+
+            {% if manual_folder_items %}
+            <div class="source-hierarchy-drop-zone" data-folder-drop-target="" aria-label="Drop here to return bookmarks to the Confluence hierarchy">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 7.5h6l1.8 2h9.2v10h-17z"/><path d="M4.5 7.5V5h5l1.8 2.5"/></svg>
+                <span>Confluence hierarchy</span>
+                <small>Drop here to remove personal-folder grouping</small>
+            </div>
+            {% endif %}
+
+            {% if tree_has_items %}
+            <ul class="bookmark-tree" role="tree" aria-label="Bookmark hierarchy" data-bookmark-tree
+                data-selected-bookmark="{{ selected_bookmark.pk|default:'' }}"
+                data-folder-move-url="{% url 'bookmark_manager:folder_move' %}"
+                data-folder-return-url="{{ request.get_full_path }}"
+            >
+                {% for folder in manual_folder_items %}
+                    {% include "bookmark_manager/_manual_folder.html" with folder=folder current_query_string=current_query_string csrf_token=csrf_token only %}
+                {% endfor %}
                 {% for item in tree_items %}
                     {% include "bookmark_manager/_tree_node.html" with item=item current_query_string=current_query_string csrf_token=csrf_token only %}
                 {% endfor %}
@@ -259,6 +351,25 @@
                     <label for="{{ organisation_form.notes.id_for_label }}">Quick notes <small>Stored locally and never sent to Confluence</small></label>
                     {{ organisation_form.notes }}
                     <button class="button button--secondary" type="submit">Save quick notes</button>
+                </form>
+                <form
+                    class="bookmark-folder-move-form"
+                    method="post"
+                    action="{% url 'bookmark_manager:folder_move' %}"
+                    data-folder-move-form
+                    data-bookmark-id="{{ selected_bookmark.pk }}"
+                >
+                    {% csrf_token %}
+                    <input type="hidden" name="bookmark_ids" value="{{ selected_bookmark.pk }}">
+                    <input type="hidden" name="return_to" value="{{ request.get_full_path }}">
+                    <label for="bookmark-folder-destination">Personal folder <small>Drag the row, or use this list. Checked bookmarks move together.</small></label>
+                    <div>
+                        <select id="bookmark-folder-destination" name="folder_id" aria-label="Move bookmark to personal folder">
+                            <option value=""{% if not selected_bookmark.manual_folder_id %} selected{% endif %}>Confluence hierarchy (no personal folder)</option>
+                            {% for folder in bookmark_folders %}<option value="{{ folder.pk }}"{% if selected_bookmark.manual_folder_id == folder.pk %} selected{% endif %}>{{ folder.name }}</option>{% endfor %}
+                        </select>
+                        <button class="button button--secondary button--compact" type="submit">Move</button>
+                    </div>
                 </form>
                 <div class="detail-full-url">
                     <strong>Full URL</strong>
@@ -329,7 +440,15 @@
         <aside class="bookmark-pane bookmark-pane--people" aria-labelledby="confluence-people-heading">
             <div class="pane-heading people-panel-heading">
                 <div class="people-panel-title">
-                    <h2 id="confluence-people-heading">People</h2>
+                    <div class="people-panel-label">
+                        <h2 id="confluence-people-heading">People</h2>
+                        <span
+                            class="people-total-count"
+                            aria-label="{{ confluence_contacts|length }} {{ confluence_contacts|length|pluralize:'person,people' }} total"
+                            title="{{ confluence_contacts|length }} {{ confluence_contacts|length|pluralize:'person,people' }} total"
+                            data-people-total-count
+                        >{{ confluence_contacts|length }}</span>
+                    </div>
                     <button
                         class="people-search-toggle"
                         type="button"
@@ -355,24 +474,30 @@
                 >
                 <p role="status" aria-live="polite" data-people-search-status>{{ confluence_contacts|length }} people available</p>
             </div>
-            {% if active_contact %}
-            <a class="people-clear-filter" href="{% url 'bookmark_manager:index' %}">Show everyone</a>
-            {% endif %}
             {% if confluence_contacts %}
-            <ol class="confluence-people-list" data-people-list>
-                {% for contact in confluence_contacts %}
-                <li data-people-entry data-person-name="{{ contact.name }}">
-                    <a href="{% url 'bookmark_manager:index' %}?person={{ contact.name|urlencode }}&amp;sort=updated_newest"{% if active_contact == contact.name %} class="is-active" aria-current="true"{% endif %} title="Show every page written or updated by {{ contact.name }}">
+            <form class="people-filter-form" method="get" action="{% url 'bookmark_manager:index' %}" data-people-filter-form>
+                {% for name, value in people_filter_hidden_fields %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+                <div class="people-filter-actions">
+                    <span role="status" aria-live="polite" data-people-selection-status>{{ active_contacts|length }} selected</span>
+                    <button class="button button--secondary button--compact" type="submit" data-people-filter-submit>Show pages</button>
+                    {% if active_contacts %}<a class="people-clear-filter" href="{{ people_filter_clear_href }}">Clear</a>{% endif %}
+                </div>
+                <ol class="confluence-people-list" data-people-list>
+                    {% for contact in confluence_contacts %}
+                    <li data-people-entry data-person-name="{{ contact.name }}">
+                    <label class="people-filter-option{% if contact.selected %} is-active{% endif %}" title="Include pages written or last updated by {{ contact.name }}">
+                        <input type="checkbox" name="person" value="{{ contact.name }}" data-person-select{% if contact.selected %} checked{% endif %}>
                         <span class="contact-avatar" aria-hidden="true">{{ contact.name|slice:":1"|upper }}</span>
                         <span class="contact-copy">
                             <strong>{{ contact.name }}</strong>
                             <small><span>{{ contact.written_count }} written</span><span>{{ contact.updated_count }} updated</span></small>
                         </span>
                         <b title="{{ contact.page_count }} unique page{{ contact.page_count|pluralize }}">{{ contact.page_count }}</b>
-                    </a>
-                </li>
-                {% endfor %}
-            </ol>
+                    </label>
+                    </li>
+                    {% endfor %}
+                </ol>
+            </form>
             <div class="people-empty people-empty--search" hidden data-people-no-results><strong>No matching people</strong><p>Try another name.</p></div>
             {% else %}
             <div class="people-empty"><strong>No Confluence people yet</strong><p>Writers and editors appear after Confluence pages with author metadata are saved.</p></div>
@@ -388,4 +513,4 @@
 {% endblock %}
 
 {% block global_status %}{% endblock %}
-{% block scripts %}<script src="{% static 'bookmark_manager/bookmarks.js' %}?v=workspace-ui-v17" defer></script>{% endblock %}
+{% block scripts %}<script src="{% static 'bookmark_manager/bookmarks.js' %}?v=workspace-ui-v22" defer></script>{% endblock %}

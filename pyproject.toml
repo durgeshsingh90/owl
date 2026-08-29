@@ -12,6 +12,7 @@ dependencies = [
     "cryptography==50.0.0",
     "Django==6.1",
     "keyring==25.7.0",
+    "pypdf==6.16.2",
     "python-dotenv==1.2.3",
 ]
 

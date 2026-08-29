@@ -1415,7 +1415,7 @@
 
 /* Tree-first Bookmark Manager shell. */
 .bookmark-manager-shell {
-    --bookmark-page-inline-edge: clamp(0.2rem, 0.35vw, 0.35rem);
+    --bookmark-page-inline-edge: 0rem;
     --bookmark-accent: #d99a37;
     --bookmark-accent-soft: #fff2d8;
     --bookmark-panel: #fbfcfd;
@@ -1740,7 +1740,7 @@
 
 .global-refresh-control {
     display: flex;
-    min-width: 170px;
+    min-width: 245px;
     align-items: center;
     gap: 0.42rem;
     margin: 0;
@@ -1773,16 +1773,15 @@
 
 .global-refresh-control__meta {
     display: grid;
-    width: 125px;
+    width: 200px;
     min-width: 0;
     gap: 0.08rem;
 }
 
 .global-refresh-control__meta strong,
 .global-refresh-control__meta small {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
+    white-space: normal;
 }
 
 .global-refresh-control__meta strong {
@@ -1794,6 +1793,7 @@
 .global-refresh-control__meta small {
     color: var(--muted);
     font-size: 0.59rem;
+    line-height: 1.25;
 }
 
 .global-refresh-control__track {
@@ -2099,14 +2099,14 @@
 .bookmark-manager-shell .bookmark-page {
     display: flex;
     width: 100%;
-    max-width: 2200px;
+    max-width: none;
     min-width: 0;
     min-height: calc(100dvh - 81px);
     flex-direction: column;
     grid-area: content;
     align-content: start;
     gap: 0.85rem !important;
-    margin-inline: auto;
+    margin-inline: 0;
     padding: 1.15rem var(--bookmark-page-inline-edge) 0;
 }
 
@@ -2254,9 +2254,32 @@
     gap: 0.5rem;
 }
 
+.bookmark-manager-shell .people-panel-label {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.4rem;
+}
+
 .bookmark-manager-shell .people-panel-heading h2 {
     margin: 0;
     font-size: 1rem;
+}
+
+.bookmark-manager-shell .people-total-count {
+    display: inline-grid;
+    min-width: 1.65rem;
+    min-height: 1.4rem;
+    flex: 0 0 auto;
+    place-items: center;
+    padding: 0.1rem 0.35rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--muted);
+    background: var(--surface-subtle);
+    font-size: 0.68rem;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
 }
 
 .bookmark-manager-shell .people-search-toggle {
@@ -2358,11 +2381,40 @@
     font-size: 0.6rem;
 }
 
+.bookmark-manager-shell .people-filter-form {
+    display: grid;
+    min-width: 0;
+}
+
+.bookmark-manager-shell .people-filter-actions {
+    display: flex;
+    min-height: 42px;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.42rem 0.25rem 0.42rem 0.65rem;
+    border-bottom: 1px solid var(--line);
+}
+
+.bookmark-manager-shell .people-filter-actions > span {
+    min-width: 0;
+    flex: 1 1 auto;
+    color: var(--muted);
+    font-size: 0.62rem;
+    white-space: nowrap;
+}
+
+.bookmark-manager-shell .people-filter-actions .button {
+    flex: 0 0 auto;
+}
+
 .bookmark-manager-shell .people-clear-filter {
-    display: block;
-    margin: 0.65rem 0.75rem 0;
+    display: inline-flex;
+    min-height: 30px;
+    align-items: center;
+    margin: 0;
+    padding: 0.25rem 0.2rem;
     color: var(--bookmark-accent);
-    font-size: 0.68rem;
+    font-size: 0.64rem;
     font-weight: 700;
     text-decoration: none;
 }
@@ -2375,27 +2427,42 @@
     list-style: none;
 }
 
-.bookmark-manager-shell .confluence-people-list a {
+.bookmark-manager-shell .people-filter-option {
     display: grid;
     min-width: 0;
-    grid-template-columns: 34px minmax(0, 1fr) auto;
+    grid-template-columns: 16px 34px minmax(0, 1fr) auto;
     align-items: center;
-    gap: 0.55rem;
+    gap: 0.42rem;
     padding: 0.5rem 0.25rem 0.5rem 0.45rem;
     border: 1px solid transparent;
     border-radius: 7px;
     color: var(--ink);
-    text-decoration: none;
+    cursor: pointer;
 }
 
-.bookmark-manager-shell .confluence-people-list a:hover,
-.bookmark-manager-shell .confluence-people-list a.is-active {
+.bookmark-manager-shell .people-filter-option:hover,
+.bookmark-manager-shell .people-filter-option.is-active,
+.bookmark-manager-shell .people-filter-option:has(input:checked) {
     border-color: var(--line-strong);
     background: var(--surface-subtle);
 }
 
-.bookmark-manager-shell .confluence-people-list a.is-active {
+.bookmark-manager-shell .people-filter-option.is-active,
+.bookmark-manager-shell .people-filter-option:has(input:checked) {
     box-shadow: inset 3px 0 0 var(--bookmark-accent);
+}
+
+.bookmark-manager-shell .people-filter-option:has(input:focus-visible) {
+    border-color: var(--bookmark-accent);
+    outline: 2px solid color-mix(in srgb, var(--bookmark-accent) 24%, transparent);
+    outline-offset: 1px;
+}
+
+.bookmark-manager-shell .people-filter-option input {
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    accent-color: var(--bookmark-accent);
 }
 
 .bookmark-manager-shell .contact-avatar {
@@ -2438,7 +2505,7 @@
     content: "·";
 }
 
-.bookmark-manager-shell .confluence-people-list a > b {
+.bookmark-manager-shell .people-filter-option > b {
     display: grid;
     min-width: 26px;
     height: 26px;
@@ -2472,6 +2539,7 @@
 
 .bookmark-manager-shell .tree-toolbar {
     align-items: center;
+    flex-wrap: wrap;
     padding: 0.8rem 0.4rem !important;
     background: var(--bookmark-panel);
 }
@@ -2484,6 +2552,82 @@
 
 .bookmark-manager-shell .tree-toolbar h2 {
     font-size: 1rem;
+}
+
+.bookmark-manager-shell .tree-sort-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin-left: auto;
+}
+
+.bookmark-manager-shell .tree-sort-control {
+    position: relative;
+    display: inline-grid;
+    width: 32px;
+    height: 32px;
+    flex: 0 0 32px;
+    place-items: center;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--muted-strong);
+    background: var(--bookmark-panel-alt);
+    text-decoration: none;
+}
+
+.bookmark-manager-shell .tree-sort-control:hover,
+.bookmark-manager-shell .tree-sort-control:focus-visible {
+    border-color: var(--line-strong);
+    color: var(--bookmark-accent);
+    background: var(--bookmark-accent-soft);
+    outline: none;
+}
+
+.bookmark-manager-shell .tree-sort-control:focus-visible {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--bookmark-accent) 24%, transparent);
+}
+
+.bookmark-manager-shell .tree-sort-control.is-active {
+    border-color: var(--bookmark-accent);
+    color: var(--bookmark-accent);
+    background: var(--bookmark-accent-soft);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bookmark-accent) 20%, transparent);
+}
+
+.bookmark-manager-shell .tree-sort-control__icon {
+    width: 17px;
+    height: 17px;
+}
+
+.bookmark-manager-shell .tree-sort-control__direction {
+    position: absolute;
+    right: 1px;
+    bottom: 1px;
+    width: 11px;
+    height: 11px;
+    padding: 1px;
+    border-radius: 3px;
+    color: inherit;
+    background: var(--bookmark-panel);
+}
+
+.bookmark-manager-shell .tree-sort-control__icon path,
+.bookmark-manager-shell .tree-sort-control__icon circle,
+.bookmark-manager-shell .tree-sort-control__direction path {
+    fill: none;
+    stroke: currentcolor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.7;
+}
+
+.bookmark-manager-shell .tree-sort-control__direction path {
+    stroke-width: 1.5;
+}
+
+.bookmark-manager-shell .tree-sort-control[data-sort-direction="inactive"]
+    .tree-sort-control__direction {
+    color: var(--muted);
 }
 
 .bookmark-manager-shell .tree-toolbar .text-button {
@@ -2502,6 +2646,91 @@
 .bookmark-manager-shell .tree-bulk-actions {
     align-items: center;
     justify-content: flex-end;
+}
+
+.bookmark-manager-shell .tree-create-folder {
+    display: inline-grid;
+    width: 32px;
+    height: 32px;
+    flex: 0 0 32px;
+    place-items: center;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--muted-strong);
+    background: var(--bookmark-panel-alt);
+    cursor: pointer;
+}
+
+.bookmark-manager-shell .tree-create-folder:hover,
+.bookmark-manager-shell .tree-create-folder:focus-visible,
+.bookmark-manager-shell .tree-create-folder[aria-expanded="true"] {
+    border-color: var(--bookmark-accent);
+    color: var(--bookmark-accent);
+    background: var(--bookmark-accent-soft);
+    outline: none;
+}
+
+.bookmark-manager-shell .tree-create-folder svg,
+.bookmark-manager-shell .source-hierarchy-drop-zone svg {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentcolor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.6;
+}
+
+.bookmark-manager-shell .folder-create-panel {
+    position: sticky;
+    z-index: 3;
+    top: 65px;
+    margin: 0 !important;
+    padding: 0.55rem;
+    border-bottom: 1px solid var(--line);
+    background: var(--bookmark-panel-alt);
+}
+
+.bookmark-manager-shell .folder-create-panel[hidden] {
+    display: none;
+}
+
+.bookmark-manager-shell .folder-create-panel form {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0;
+}
+
+.bookmark-manager-shell .folder-create-panel input {
+    min-width: 150px;
+    flex: 1 1 220px;
+}
+
+.bookmark-manager-shell .source-hierarchy-drop-zone {
+    display: grid;
+    min-height: 38px;
+    grid-template-columns: 24px auto minmax(120px, 1fr);
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.4rem 0.25rem 0 !important;
+    padding: 0.42rem 0.55rem;
+    border: 1px dashed var(--line-strong);
+    border-radius: 6px;
+    color: var(--muted-strong);
+    background: var(--bookmark-panel-alt);
+    transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.bookmark-manager-shell .source-hierarchy-drop-zone span {
+    font-size: 0.75rem;
+    font-weight: 720;
+}
+
+.bookmark-manager-shell .source-hierarchy-drop-zone small {
+    justify-self: end;
+    color: var(--muted);
+    font-size: 0.62rem;
 }
 
 .bookmark-manager-shell .tree-bulk-actions form {
@@ -2582,7 +2811,7 @@
 }
 
 .bookmark-manager-shell .tree-node-row {
-    grid-template-columns: 20px minmax(32px, auto) 18px 24px minmax(150px, 1fr) auto auto;
+    grid-template-columns: 20px minmax(32px, auto) 18px 22px 24px minmax(150px, 1fr) auto auto;
     gap: 0.38rem;
     min-height: 38px;
     margin: 0;
@@ -2605,6 +2834,37 @@
 
 .bookmark-manager-shell .tree-select-check {
     grid-column: 3;
+}
+
+.bookmark-manager-shell .tree-drag-handle {
+    display: inline-grid;
+    width: 22px;
+    height: 28px;
+    grid-column: 4;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    color: var(--muted);
+    background: transparent;
+    cursor: grab;
+}
+
+.bookmark-manager-shell .tree-drag-handle:hover,
+.bookmark-manager-shell .tree-drag-handle:focus-visible {
+    color: var(--bookmark-accent);
+    background: var(--bookmark-accent-soft);
+    outline: 2px solid color-mix(in srgb, var(--bookmark-accent) 32%, transparent);
+}
+
+.bookmark-manager-shell .tree-drag-handle:active {
+    cursor: grabbing;
+}
+
+.bookmark-manager-shell .tree-drag-handle svg {
+    width: 18px;
+    height: 18px;
+    fill: currentcolor;
 }
 
 .bookmark-manager-shell .tree-node-row:hover {
@@ -2636,7 +2896,7 @@
     display: grid;
     width: 22px;
     height: 22px;
-    grid-column: 4;
+    grid-column: 5;
     place-items: center;
     color: var(--muted);
 }
@@ -2659,7 +2919,7 @@
     width: fit-content;
     max-width: 100%;
     min-width: 0;
-    grid-column: 5;
+    grid-column: 6;
     justify-self: start;
     margin: 0;
 }
@@ -2688,7 +2948,7 @@
 }
 
 .bookmark-manager-shell .tree-node-link--path {
-    grid-column: 5;
+    grid-column: 6;
     align-self: center;
     color: var(--muted-strong);
     cursor: default;
@@ -2696,7 +2956,7 @@
 }
 
 .bookmark-manager-shell .tree-node-link--unavailable {
-    grid-column: 5;
+    grid-column: 6;
     align-self: center;
     color: var(--muted-strong);
     cursor: default;
@@ -2713,17 +2973,17 @@
 }
 
 .bookmark-manager-shell .tree-personal-actions {
-    grid-column: 6;
+    grid-column: 7;
 }
 
 .bookmark-manager-shell .tree-status {
-    grid-column: 7;
+    grid-column: 8;
 }
 
 .bookmark-manager-shell .tree-node-metrics {
     display: flex;
     min-width: 0;
-    grid-column: 5 / -1;
+    grid-column: 6 / -1;
     grid-row: 2;
     flex-wrap: wrap;
     align-items: center;
@@ -2749,12 +3009,75 @@
 }
 
 .bookmark-manager-shell .tree-folder-summary {
-    grid-column: 6 / -1;
+    grid-column: 7 / -1;
     display: flex;
     align-items: center;
     justify-self: end;
     gap: 0.42rem;
     white-space: nowrap;
+}
+
+.bookmark-manager-shell .tree-node-row--manual-folder {
+    border: 1px dashed transparent;
+}
+
+.bookmark-manager-shell [data-folder-drop-target].is-drop-target {
+    border-color: var(--bookmark-accent);
+    color: var(--ink);
+    background: var(--bookmark-accent-soft);
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--bookmark-accent) 42%, transparent);
+}
+
+.bookmark-manager-shell .tree-node-row.is-dragging {
+    opacity: 0.55;
+}
+
+.bookmark-manager-shell .tree-outline-number--manual {
+    font-size: 0.64rem;
+    text-transform: uppercase;
+}
+
+.bookmark-manager-shell .manual-folder-empty {
+    padding: 0.5rem 0.65rem;
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-style: italic;
+}
+
+.bookmark-manager-shell .bookmark-folder-move-form {
+    display: grid;
+    gap: 0.35rem;
+    padding: 0.7rem 0;
+    border-bottom: 1px solid var(--line);
+}
+
+.bookmark-manager-shell .bookmark-folder-move-form label {
+    display: grid;
+    gap: 0.15rem;
+    color: var(--muted-strong);
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.bookmark-manager-shell .bookmark-folder-move-form label small {
+    color: var(--muted);
+    font-weight: 400;
+}
+
+.bookmark-manager-shell .bookmark-folder-move-form > div {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.bookmark-manager-shell .bookmark-folder-move-form select {
+    width: 0;
+    min-width: 0;
+    flex: 1 1 0;
+}
+
+.bookmark-manager-shell .bookmark-folder-move-form button {
+    flex: 0 0 auto;
 }
 
 .bookmark-manager-shell .tree-folder-clicks {
@@ -3044,6 +3367,37 @@
     background: #10283b;
 }
 
+.bookmark-manager-shell[data-theme="dark"] .tree-sort-control {
+    border-color: #49677e;
+    color: #d7e1e8;
+    background: #10283b;
+}
+
+.bookmark-manager-shell[data-theme="dark"] .tree-sort-control:hover,
+.bookmark-manager-shell[data-theme="dark"] .tree-sort-control:focus-visible,
+.bookmark-manager-shell[data-theme="dark"] .tree-sort-control.is-active {
+    border-color: #e4a84b;
+    color: #ffd58d;
+    background: #3b2d1a;
+}
+
+.bookmark-manager-shell[data-theme="dark"] .tree-create-folder,
+.bookmark-manager-shell[data-theme="dark"] .source-hierarchy-drop-zone,
+.bookmark-manager-shell[data-theme="dark"] .folder-create-panel {
+    border-color: #49677e;
+    color: #d7e1e8;
+    background: #10283b;
+}
+
+.bookmark-manager-shell[data-theme="dark"] .tree-create-folder:hover,
+.bookmark-manager-shell[data-theme="dark"] .tree-create-folder:focus-visible,
+.bookmark-manager-shell[data-theme="dark"] .tree-create-folder[aria-expanded="true"],
+.bookmark-manager-shell[data-theme="dark"] [data-folder-drop-target].is-drop-target {
+    border-color: #e4a84b;
+    color: #ffd58d;
+    background: #3b2d1a;
+}
+
 .bookmark-manager-shell[data-theme="dark"] input,
 .bookmark-manager-shell[data-theme="dark"] select,
 .bookmark-manager-shell[data-theme="dark"] textarea {
@@ -3077,7 +3431,7 @@
     }
 
     .global-refresh-control__meta {
-        width: 105px;
+        width: 170px;
     }
 
     .bookmark-manager-shell .bookmark-workspace {
@@ -3269,30 +3623,63 @@
     }
 
     .bookmark-manager-shell .tree-node-row {
-        grid-template-columns: 20px 18px 22px minmax(120px, 1fr) auto;
+        grid-template-columns: 20px 18px 44px 22px minmax(120px, 1fr) auto;
     }
 
-    .bookmark-manager-shell .tree-node-number,
+    .bookmark-manager-shell .tree-outline-number,
     .bookmark-manager-shell .tree-status,
     .bookmark-manager-shell .tree-pin {
         display: none;
     }
 
-    .bookmark-manager-shell .tree-open-form,
-    .bookmark-manager-shell .tree-node-link--path {
+    .bookmark-manager-shell .tree-select-check {
+        grid-column: 2;
+    }
+
+    .bookmark-manager-shell .tree-drag-handle {
+        width: 44px;
+        height: 44px;
+        grid-column: 3;
+    }
+
+    .bookmark-manager-shell .tree-node-icon {
         grid-column: 4;
     }
 
-    .bookmark-manager-shell .tree-personal-actions {
+    .bookmark-manager-shell .tree-open-form,
+    .bookmark-manager-shell .tree-node-link--path,
+    .bookmark-manager-shell .tree-node-link--unavailable {
         grid-column: 5;
+    }
+
+    .bookmark-manager-shell .tree-personal-actions {
+        grid-column: 6;
     }
 
     .bookmark-manager-shell .tree-folder-summary {
-        grid-column: 5;
+        grid-column: 6;
     }
 
     .bookmark-manager-shell .tree-node-metrics {
-        grid-column: 4 / -1;
+        grid-column: 5 / -1;
+    }
+
+    .bookmark-manager-shell .folder-create-panel form,
+    .bookmark-manager-shell .bookmark-folder-move-form > div {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .bookmark-manager-shell .bookmark-folder-move-form select {
+        width: 100%;
+    }
+
+    .bookmark-manager-shell .source-hierarchy-drop-zone {
+        grid-template-columns: 24px minmax(0, 1fr);
+    }
+
+    .bookmark-manager-shell .source-hierarchy-drop-zone small {
+        display: none;
     }
 }
 

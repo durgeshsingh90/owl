@@ -125,6 +125,44 @@ class BookmarkInputForm(forms.Form):
     )
 
 
+class RepeatedTextField(forms.Field):
+    """Accept one or more repeated, individually validated text query values."""
+
+    widget = forms.MultipleHiddenInput
+
+    def __init__(
+        self,
+        *args,
+        max_length: int,
+        max_items: int = 100,
+        **kwargs,
+    ) -> None:
+        self.max_length = max_length
+        self.max_items = max_items
+        super().__init__(*args, **kwargs)
+
+    def clean(self, value) -> tuple[str, ...]:
+        if value in self.empty_values:
+            return ()
+        raw_values = (value,) if isinstance(value, str) else tuple(value)
+        if len(raw_values) > self.max_items:
+            raise forms.ValidationError(
+                f"Choose no more than {self.max_items} people.",
+                code="too_many_values",
+            )
+        item_field = forms.CharField(max_length=self.max_length, required=True, strip=True)
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw_value in raw_values:
+            item = item_field.clean(raw_value)
+            identity = item.casefold()
+            if identity in seen:
+                continue
+            seen.add(identity)
+            cleaned.append(item)
+        return tuple(cleaned)
+
+
 class BookmarkFilterForm(forms.Form):
     """Validated local-only bookmark search, filter, and sort controls."""
 
@@ -183,7 +221,7 @@ class BookmarkFilterForm(forms.Form):
     favorite = forms.BooleanField(required=False)
     pinned = forms.BooleanField(required=False)
     tags = forms.MultipleChoiceField(required=False)
-    person = forms.CharField(max_length=500, required=False, strip=True)
+    person = RepeatedTextField(max_length=500, max_items=100, required=False)
     space = forms.CharField(max_length=255, required=False, strip=True)
     availability = forms.MultipleChoiceField(
         required=False,
@@ -256,6 +294,22 @@ class BookmarkOrganisationForm(forms.Form):
                 "id": "bookmark-organisation-tags",
                 "placeholder": "network, architecture, review",
                 "role": "combobox",
+            }
+        ),
+    )
+
+
+class BookmarkFolderForm(forms.Form):
+    """Validate one user-owned folder name without touching source hierarchy."""
+
+    name = forms.CharField(
+        max_length=120,
+        strip=True,
+        widget=forms.TextInput(
+            attrs={
+                "autocomplete": "off",
+                "placeholder": "Folder name",
+                "aria-label": "Personal folder name",
             }
         ),
     )

@@ -4,7 +4,7 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -17,6 +17,7 @@ from bookmark_manager.models import (
     Bookmark,
     BookmarkAvailability,
     BookmarkCategory,
+    BookmarkFolder,
     BookmarkImportRun,
     BookmarkRefreshFailure,
     BookmarkRefreshRun,
@@ -1017,6 +1018,46 @@ def test_refresh_failure_status_renders_wrapped_url_reason_and_dismiss_control(
     assert "Confluence did not return this page after 3 attempts." in html
 
 
+def test_historical_refresh_notification_target_keeps_its_failure_details_visible(
+    loopback_client,
+):
+    bookmark = _create_bookmark()
+    historical = BookmarkRefreshRun.objects.create(
+        status=BookmarkRefreshStatus.SUCCEEDED_WITH_ERRORS,
+        total_bookmarks=1,
+        processed_bookmarks=1,
+        failed_bookmarks=1,
+        completed_at=timezone.now() - timedelta(hours=3),
+    )
+    failure = BookmarkRefreshFailure.objects.create(
+        refresh_run=historical,
+        bookmark=bookmark,
+        page_id=bookmark.page_id,
+        url=bookmark.url,
+        error_code="unreachable",
+        reason="Confluence was temporarily unreachable.",
+        attempt_count=3,
+    )
+    BookmarkRefreshRun.objects.create(
+        status=BookmarkRefreshStatus.SUCCEEDED,
+        total_bookmarks=1,
+        processed_bookmarks=1,
+        succeeded_bookmarks=1,
+        completed_at=timezone.now(),
+    )
+
+    response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"refresh_run": historical.pk},
+    )
+    html = _html(response)
+
+    assert response.status_code == 200
+    assert 'data-history-locked="true"' in html
+    assert failure.url in html
+    assert failure.reason in html
+
+
 @pytest.mark.parametrize(
     ("status", "expected_label"),
     (
@@ -1064,13 +1105,14 @@ def test_completed_refresh_timestamp_shows_both_local_date_and_time(loopback_cli
 
     response = loopback_client.get(reverse("bookmark_manager:index"))
     html = _html(response)
-    expected_display = timezone.localtime(completed_at).strftime("%d %b %Y, %H:%M")
+    expected_display = timezone.localtime(completed_at).strftime("%d %b %Y, %H:%M:%S %Z")
 
     assert response.status_code == 200
     assert f'<time datetime="{completed_at.isoformat()}">{expected_display}</time>' in html
     assert response.context["refresh_status"]["last_completed_display"]
     assert re.search(
-        r"Last completed <time datetime=\"[^\"]+\">\d{2} \w{3} \d{4}, \d{2}:\d{2}</time>",
+        r"Last completed <time datetime=\"[^\"]+\">"
+        r"\d{2} \w{3} \d{4}, \d{2}:\d{2}:\d{2} \w+</time>",
         html,
     )
 
@@ -1096,6 +1138,8 @@ def test_global_refresh_javascript_schedules_one_reload_for_every_terminal_outco
     assert submit_script.index("globalRefreshReloadPending = true;") < submit_script.index(
         "renderGlobalRefresh(payload.refresh);"
     )
+    assert "runId !== globalRefreshObservedRunId" in refresh_script
+    assert 'window.addEventListener("owl:refresh-status"' in refresh_script
 
     # Success, partial success, and final failures all finish the background run
     # and therefore must refresh the bookmark names, text, dates, and status UI.
@@ -1144,6 +1188,10 @@ def test_confluence_people_column_counts_unique_pages_and_filters_by_name(loopba
     response = loopback_client.get(reverse("bookmark_manager:index"))
     contacts = {contact.name: contact for contact in response.context["confluence_contacts"]}
     html = _html(response)
+    people_header = html.split(
+        '<aside class="bookmark-pane bookmark-pane--people"',
+        1,
+    )[1].split('<div class="people-search"', 1)[0]
 
     assert contacts["Alice Author"].page_count == 2
     assert contacts["Alice Author"].written_count == 2
@@ -1156,10 +1204,14 @@ def test_confluence_people_column_counts_unique_pages_and_filters_by_name(loopba
     assert 'class="bookmark-pane bookmark-pane--people"' in html
     assert 'aria-label="Search people"' in html
     assert 'aria-controls="people-search-panel"' in html
+    assert "data-people-total-count" in people_header
+    assert 'aria-label="3 people total"' in people_header
+    assert re.search(r"data-people-total-count[^>]*>\s*3\s*<", people_header)
     assert "data-people-search-input" in html
     assert 'data-person-name="Alice Author"' in html
     assert "data-people-no-results" in html
-    assert "?person=Alice%20Author&amp;sort=updated_newest" in html
+    assert "data-people-filter-form" in html
+    assert 'name="person" value="Alice Author" data-person-select' in html
 
     filtered = loopback_client.get(
         reverse("bookmark_manager:index"),
@@ -1169,6 +1221,142 @@ def test_confluence_people_column_counts_unique_pages_and_filters_by_name(loopba
     assert set(filtered.context["query_result"].bookmarks) == {first, second}
     assert web not in filtered.context["query_result"].bookmarks
     assert filtered.context["active_contact"] == "Alice Author"
+    assert filtered.context["active_contacts"] == ("Alice Author",)
+    filtered_html = _html(filtered)
+    filtered_header = filtered_html.split(
+        '<aside class="bookmark-pane bookmark-pane--people"',
+        1,
+    )[1].split('<div class="people-search"', 1)[0]
+    assert 'aria-label="3 people total"' in filtered_header
+    assert re.search(r"data-people-total-count[^>]*>\s*3\s*<", filtered_header)
+    assert filtered_html.count("data-people-entry") == 3
+    assert 'value="Alice Author" data-person-select checked' in filtered_html
+
+
+def test_people_filter_accepts_multiple_people_and_matches_any_confluence_role(
+    loopback_client,
+):
+    alice_page = _create_bookmark("731001", "Alice architecture page", ancestors=())
+    zoe_page = _create_bookmark("731002", "Zoe operations page", ancestors=())
+    unrelated_page = _create_bookmark("731003", "Unrelated platform page", ancestors=())
+    web_collision = _create_bookmark("731004", "Alice web page", ancestors=())
+    _set_bookmark_values(
+        zoe_page,
+        author_id="dana-1",
+        author_name="Dana Writer",
+        created_by_id="dana-1",
+        created_by_name="Dana Writer",
+        modified_by_id="zoe-2",
+        modified_by_name="Zoe Editor",
+    )
+    _set_bookmark_values(
+        unrelated_page,
+        author_id="uma-3",
+        author_name="Uma Writer",
+        created_by_id="uma-3",
+        created_by_name="Uma Writer",
+        modified_by_id="victor-4",
+        modified_by_name="Victor Editor",
+    )
+    _set_bookmark_values(
+        web_collision,
+        source_type=BookmarkSource.WEB,
+        author_name="Alice Author",
+        created_by_name="Alice Author",
+        modified_by_name="Zoe Editor",
+    )
+    path = (
+        reverse("bookmark_manager:index")
+        + "?"
+        + urlencode(
+            [
+                ("q", "page"),
+                ("person", "Alice Author"),
+                ("person", "Zoe Editor"),
+                ("sort", "updated_newest"),
+            ]
+        )
+    )
+
+    response = loopback_client.get(path)
+
+    assert response.status_code == 200
+    assert response.context["bookmark_query"].people == (
+        "Alice Author",
+        "Zoe Editor",
+    )
+    assert response.context["active_contacts"] == ("Alice Author", "Zoe Editor")
+    assert set(response.context["query_result"].bookmarks) == {alice_page, zoe_page}
+    assert unrelated_page not in response.context["query_result"].bookmarks
+    assert web_collision not in response.context["query_result"].bookmarks
+    assert [
+        active.value for active in response.context["active_filters"] if active.key == "person"
+    ] == ["Alice Author", "Zoe Editor"]
+    assert parse_qs(urlparse(response.context["people_filter_clear_href"]).query) == {
+        "people_filter": ["1"],
+        "q": ["page"],
+        "sort": ["updated_newest"],
+    }
+    html = _html(response)
+    assert html.count("data-person-select checked") == 2
+    assert html.count('type="hidden" name="person"') == 2
+    assert "2 selected" in html
+    assert 'name="q" value="page"' in html
+
+
+def test_people_filter_explicitly_overrides_people_from_a_saved_view(loopback_client):
+    alice_page = _create_bookmark("731011", "Alice saved-view page", ancestors=())
+    zoe_page = _create_bookmark("731012", "Zoe saved-view page", ancestors=())
+    _set_bookmark_values(
+        zoe_page,
+        author_name="Zoe Editor",
+        created_by_name="Zoe Editor",
+        modified_by_name="Zoe Editor",
+    )
+    saved_view = SavedBookmarkView.objects.create(
+        name="Alice pages",
+        filters={"people": ["Alice Author"]},
+        sort="added_newest",
+    )
+    path = (
+        reverse("bookmark_manager:index")
+        + "?"
+        + urlencode(
+            [
+                ("saved_view", saved_view.pk),
+                ("people_filter", "1"),
+                ("person", "Zoe Editor"),
+            ]
+        )
+    )
+
+    response = loopback_client.get(path)
+
+    assert response.status_code == 200
+    assert response.context["bookmark_query"].people == ("Zoe Editor",)
+    assert response.context["query_result"].bookmarks == (zoe_page,)
+    assert alice_page not in response.context["query_result"].bookmarks
+
+
+def test_people_header_always_shows_zero_total_with_empty_rail(loopback_client):
+    response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"q": "no saved bookmark can match this search"},
+    )
+    html = _html(response)
+    people_header = html.split(
+        '<aside class="bookmark-pane bookmark-pane--people"',
+        1,
+    )[1].split('<div class="people-search"', 1)[0]
+
+    assert response.status_code == 200
+    assert response.context["confluence_contacts"] == ()
+    assert "data-people-total-count" in people_header
+    assert 'aria-label="0 people total"' in people_header
+    assert re.search(r"data-people-total-count[^>]*>\s*0\s*<", people_header)
+    assert "data-people-search-toggle\n                        disabled" in people_header
+    assert "data-people-entry" not in html
+    assert "No Confluence people yet" in html
 
 
 def test_combined_http_filters_and_flat_sort_preserve_the_tree(loopback_client):
@@ -1243,6 +1431,323 @@ def test_combined_http_filters_and_flat_sort_preserve_the_tree(loopback_client):
     assert dict(ConfluencePageNode.objects.values_list("pk", "parent_id")) == parents_before
 
 
+def test_sort_icons_preserve_filters_and_selection_and_toggle_the_active_direction(
+    loopback_client,
+):
+    target = _create_bookmark()
+    _set_bookmark_values(target, favorite=True, open_count=9)
+    category = BookmarkCategory.objects.create(
+        domain="architecture.example.invalid",
+        name="Architecture",
+    )
+    _set_bookmark_values(target, category=category)
+
+    response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {
+            "q": target.title,
+            "favorite": "on",
+            "category": target.category_id,
+            "selected": target.pk,
+            "located": target.pk,
+            "sort": "most_opened",
+            "saved": "new",
+        },
+    )
+
+    assert response.status_code == 200
+    controls = {control.key: control for control in response.context["sort_controls"]}
+    open_count = controls["open_count"]
+    assert open_count.active is True
+    assert open_count.direction == "descending"
+    next_open_query = parse_qs(urlparse(open_count.href).query)
+    assert next_open_query["sort"] == ["least_opened"]
+    assert next_open_query["q"] == [target.title]
+    assert next_open_query["favorite"] == ["on"]
+    assert next_open_query["category"] == [str(target.category_id)]
+    assert next_open_query["selected"] == [str(target.pk)]
+    assert next_open_query["located"] == [str(target.pk)]
+    assert "saved" not in next_open_query
+
+    updated = controls["updated"]
+    assert updated.active is False
+    assert updated.direction == "inactive"
+    assert parse_qs(urlparse(updated.href).query)["sort"] == ["updated_newest"]
+
+    html = _html(response)
+    assert 'type="hidden" name="sort" value="most_opened"' in html
+    assert 'data-sort-key="open_count"' in html
+    assert 'data-sort-direction="descending"' in html
+    assert 'aria-label="Sort by Open count, lowest first"' in html
+    assert 'aria-current="true"' in html
+
+    toggled = loopback_client.get(open_count.href)
+    assert toggled.context["bookmark_query"].sort == "least_opened"
+    assert toggled.context["selected_bookmark"] == target
+    toggled_control = {control.key: control for control in toggled.context["sort_controls"]}[
+        "open_count"
+    ]
+    assert toggled_control.direction == "ascending"
+    assert parse_qs(urlparse(toggled_control.href).query)["sort"] == ["most_opened"]
+
+
+@pytest.mark.parametrize(
+    ("key", "descending", "ascending"),
+    (
+        ("open_count", "most_opened", "least_opened"),
+        ("updated", "updated_newest", "updated_oldest"),
+        ("created", "created_newest", "created_oldest"),
+        ("saved", "added_newest", "added_oldest"),
+    ),
+)
+def test_each_sort_icon_is_a_two_state_get_toggle(
+    loopback_client,
+    key,
+    descending,
+    ascending,
+):
+    descending_response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"sort": descending},
+    )
+    descending_control = {
+        control.key: control for control in descending_response.context["sort_controls"]
+    }[key]
+    assert descending_control.active is True
+    assert descending_control.direction == "descending"
+    assert parse_qs(urlparse(descending_control.href).query)["sort"] == [ascending]
+
+    ascending_response = loopback_client.get(descending_control.href)
+    ascending_control = {
+        control.key: control for control in ascending_response.context["sort_controls"]
+    }[key]
+    assert ascending_control.active is True
+    assert ascending_control.direction == "ascending"
+    assert parse_qs(urlparse(ascending_control.href).query)["sort"] == [descending]
+
+
+@pytest.mark.parametrize(
+    ("sort", "expected_titles"),
+    (
+        ("most_opened", ["Bravo", "Charlie", "Alpha"]),
+        ("least_opened", ["Alpha", "Charlie", "Bravo"]),
+        ("updated_newest", ["Bravo", "Alpha", "Charlie"]),
+        ("updated_oldest", ["Charlie", "Alpha", "Bravo"]),
+        ("created_newest", ["Alpha", "Charlie", "Bravo"]),
+        ("created_oldest", ["Bravo", "Charlie", "Alpha"]),
+        ("added_newest", ["Charlie", "Bravo", "Alpha"]),
+        ("added_oldest", ["Alpha", "Bravo", "Charlie"]),
+    ),
+)
+def test_sort_icons_reorder_rendered_bookmark_branches(sort, expected_titles):
+    now = timezone.now()
+    alpha = _create_bookmark("813001", "Alpha", ancestors=())
+    bravo = _create_bookmark("813002", "Bravo", ancestors=())
+    charlie = _create_bookmark("813003", "Charlie", ancestors=())
+    _set_bookmark_values(
+        alpha,
+        open_count=1,
+        saved_at=now - timedelta(days=3),
+        created_at=now - timedelta(days=1),
+        updated_at=now - timedelta(days=2),
+    )
+    _set_bookmark_values(
+        bravo,
+        open_count=3,
+        saved_at=now - timedelta(days=2),
+        created_at=now - timedelta(days=3),
+        updated_at=now - timedelta(days=1),
+    )
+    _set_bookmark_values(
+        charlie,
+        open_count=2,
+        saved_at=now - timedelta(days=1),
+        created_at=now - timedelta(days=2),
+        updated_at=now - timedelta(days=3),
+    )
+
+    query_result = views.query_bookmarks(views.BookmarkQuery(sort=sort))
+    tree_items, _outline_numbers = views._tree_items(
+        query_result,
+        selected_pk=None,
+        located_pk=None,
+    )
+
+    assert [item.node.title for item in tree_items] == expected_titles
+
+
+def test_explicit_sort_link_overrides_only_the_saved_view_sort(loopback_client):
+    target = _create_bookmark()
+    _set_bookmark_values(target, favorite=True, open_count=9)
+    saved = SavedBookmarkView.objects.create(
+        name="Favorite architecture",
+        search_text=target.title,
+        filters={"favorite": True},
+        sort="most_opened",
+    )
+
+    response = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {
+            "saved_view": saved.pk,
+            "sort": "least_opened",
+            "selected": target.pk,
+            "located": target.pk,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.context["active_saved_view"] == saved
+    assert response.context["bookmark_query"].sort == "least_opened"
+    assert response.context["bookmark_query"].favorite is True
+    assert response.context["bookmark_query"].search == target.title
+    assert response.context["query_result"].bookmarks == (target,)
+    assert response.context["selected_bookmark"] == target
+    open_count = {control.key: control for control in response.context["sort_controls"]}[
+        "open_count"
+    ]
+    next_query = parse_qs(urlparse(open_count.href).query)
+    assert next_query["saved_view"] == [str(saved.pk)]
+    assert next_query["sort"] == ["most_opened"]
+
+
+def test_personal_folder_create_move_render_and_unfile_preserve_confluence_hierarchy(
+    loopback_client,
+):
+    first = _create_bookmark("811001", "General platform guide")
+    second = _create_bookmark("811002", "General operations guide")
+    all_nodes = list(
+        ConfluencePageNode.objects.order_by(
+            "parent_id", "outline_position", "sibling_position", "title", "id"
+        )
+    )
+    original_numbers = outline_number_map(all_nodes)
+    canonical_before = {
+        bookmark.pk: (
+            bookmark.tree_node_id,
+            bookmark.tree_node.parent_id,
+            bookmark.tree_node.outline_position,
+        )
+        for bookmark in (first, second)
+    }
+
+    created = _async_post(
+        loopback_client,
+        reverse("bookmark_manager:folder_create"),
+        {
+            "name": "General",
+            "return_to": "/bookmarks/?sort=most_opened",
+        },
+    )
+
+    assert created.status_code == 200
+    assert created.json()["state"] == "success"
+    assert "sort=most_opened" in created.json()["redirect"]
+    folder = BookmarkFolder.objects.get(normalized_name="general")
+    empty_folder_html = _html(loopback_client.get(reverse("bookmark_manager:index")))
+    assert "Drop bookmarks here" in empty_folder_html
+    assert empty_folder_html.count(f'data-folder-drop-target="{folder.pk}"') == 2
+
+    moved = _async_post(
+        loopback_client,
+        reverse("bookmark_manager:folder_move"),
+        {
+            "bookmark_ids": [str(first.pk), str(second.pk)],
+            "folder_id": str(folder.pk),
+            "return_to": "/bookmarks/?sort=most_opened",
+        },
+    )
+
+    assert moved.status_code == 200
+    assert moved.json()["updated_count"] == 2
+    assert moved.json()["detail"] == "Moved 2 bookmarks to personal folder “General”."
+    first.refresh_from_db()
+    second.refresh_from_db()
+    assert first.manual_folder == folder
+    assert second.manual_folder == folder
+    assert {
+        bookmark.pk: (
+            bookmark.tree_node_id,
+            bookmark.tree_node.parent_id,
+            bookmark.tree_node.outline_position,
+        )
+        for bookmark in (first, second)
+    } == canonical_before
+
+    page = loopback_client.get(
+        reverse("bookmark_manager:index"),
+        {"selected": first.pk, "sort": "most_opened"},
+    )
+
+    assert page.status_code == 200
+    folder_item = page.context["manual_folder_items"][0]
+    assert folder_item.folder == folder
+    assert {item.bookmark for item in folder_item.items} == {first, second}
+    assert {item.bookmark.pk: item.outline_number for item in folder_item.items} == {
+        first.pk: original_numbers[first.tree_node_id],
+        second.pk: original_numbers[second.tree_node_id],
+    }
+    canonical_bookmark_ids: set[int] = set()
+
+    def collect_canonical_bookmarks(items):
+        for item in items:
+            if item.bookmark is not None:
+                canonical_bookmark_ids.add(item.bookmark.pk)
+            collect_canonical_bookmarks(item.children)
+
+    collect_canonical_bookmarks(page.context["tree_items"])
+    assert first.pk not in canonical_bookmark_ids
+    assert second.pk not in canonical_bookmark_ids
+    html = _html(page)
+    assert "data-folder-create-toggle" in html
+    assert f'data-folder-drop-target="{folder.pk}"' in html
+    assert "data-bookmark-drag" in html
+    assert f'data-bookmark-id="{first.pk}"' in html
+    assert "data-folder-move-form" in html
+    assert "Confluence hierarchy (no personal folder)" in html
+
+    unfiled = _async_post(
+        loopback_client,
+        reverse("bookmark_manager:folder_move"),
+        {
+            "bookmark_ids": [str(first.pk), str(second.pk)],
+            "folder_id": "",
+            "return_to": "/bookmarks/",
+        },
+    )
+
+    assert unfiled.status_code == 200
+    first.refresh_from_db()
+    second.refresh_from_db()
+    assert first.manual_folder is None
+    assert second.manual_folder is None
+
+
+def test_personal_folder_endpoint_rejects_duplicate_names_and_partial_moves(loopback_client):
+    bookmark = _create_bookmark("812001", "Folder validation page")
+    folder = BookmarkFolder.objects.create(name="Architecture")
+
+    duplicate = _async_post(
+        loopback_client,
+        reverse("bookmark_manager:folder_create"),
+        {"name": "  ARCHITECTURE  "},
+    )
+    invalid_move = _async_post(
+        loopback_client,
+        reverse("bookmark_manager:folder_move"),
+        {
+            "bookmark_ids": [str(bookmark.pk), "999999"],
+            "folder_id": str(folder.pk),
+        },
+    )
+
+    assert duplicate.status_code == 400
+    assert duplicate.json()["state"] == "invalid_folder"
+    assert invalid_move.status_code == 400
+    bookmark.refresh_from_db()
+    assert bookmark.manual_folder is None
+
+
 def test_saved_view_ajax_round_trip_restores_validated_query_not_tree_state(loopback_client):
     target = _create_bookmark()
     _set_bookmark_values(target, favorite=True, open_count=9)
@@ -1296,7 +1801,7 @@ def test_export_response_is_sensitive_attachment_and_excludes_credentials(
     _set_bookmark_values(bookmark, notes="A safe local export note")
     _add_tag(bookmark, "Backup")
 
-    response = loopback_client.get(reverse("bookmark_manager:export"))
+    response = loopback_client.post(reverse("bookmark_manager:export"))
     rendered = response.content.decode("utf-8")
     document = json.loads(rendered)
 
@@ -1604,14 +2109,16 @@ def test_phase_three_routes_enforce_declared_http_methods(loopback_client):
         reverse("bookmark_manager:view_save"),
         reverse("bookmark_manager:view_delete", args=(saved_view.pk,)),
         reverse("bookmark_manager:import"),
+        reverse("bookmark_manager:export"),
         reverse("bookmark_manager:delete", args=(bookmark.pk,)),
         reverse("bookmark_manager:delete_selected"),
         reverse("bookmark_manager:open_parent", args=(bookmark.pk,)),
+        reverse("bookmark_manager:folder_create"),
+        reverse("bookmark_manager:folder_move"),
     )
 
     for path in post_only:
         assert loopback_client.get(path).status_code == 405
-    assert loopback_client.post(reverse("bookmark_manager:export")).status_code == 405
 
 
 def test_every_phase_three_state_change_requires_csrf():
@@ -1632,12 +2139,18 @@ def test_every_phase_three_state_change_requires_csrf():
             {"confirm": "delete"},
         ),
         (reverse("bookmark_manager:import"), {}),
+        (reverse("bookmark_manager:export"), {}),
         (reverse("bookmark_manager:delete", args=(bookmark.pk,)), {"confirm": "delete"}),
         (
             reverse("bookmark_manager:delete_selected"),
             {"confirm": "delete-selected", "bookmark_ids": [bookmark.pk]},
         ),
         (reverse("bookmark_manager:open_parent", args=(bookmark.pk,)), {}),
+        (reverse("bookmark_manager:folder_create"), {"name": "CSRF folder"}),
+        (
+            reverse("bookmark_manager:folder_move"),
+            {"bookmark_ids": [bookmark.pk], "folder_id": ""},
+        ),
     )
 
     for path, data in actions:
@@ -1658,17 +2171,22 @@ def test_phase_three_actions_and_export_are_loopback_only():
             {"confirm": "delete"},
         ),
         (reverse("bookmark_manager:import"), {}),
+        (reverse("bookmark_manager:export"), {}),
         (reverse("bookmark_manager:delete", args=(bookmark.pk,)), {"confirm": "delete"}),
         (
             reverse("bookmark_manager:delete_selected"),
             {"confirm": "delete-selected", "bookmark_ids": [bookmark.pk]},
         ),
         (reverse("bookmark_manager:open_parent", args=(bookmark.pk,)), {}),
+        (reverse("bookmark_manager:folder_create"), {"name": "Remote folder"}),
+        (
+            reverse("bookmark_manager:folder_move"),
+            {"bookmark_ids": [bookmark.pk], "folder_id": ""},
+        ),
     )
 
     for path, data in post_actions:
         assert remote_client.post(path, data).status_code == 403
-    assert remote_client.get(reverse("bookmark_manager:export")).status_code == 403
 
 
 def test_async_open_returns_only_a_validated_target_and_tracks_usage(loopback_client):
@@ -1835,7 +2353,7 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert "data-delete-selected" in html
     assert 'data-delete-locked="true"' in html
     assert "🔒" in html
-    assert "bookmarks.js?v=workspace-ui-v17" in html
+    assert "bookmarks.js?v=workspace-ui-v22" in html
     assert f'name="bookmark_ids" value="{bookmark.pk}"' in html
     assert 'form="bulk-delete-bookmarks"' in html
     assert "data-productivity-form" in html

@@ -4,6 +4,7 @@ from django.shortcuts import render
 from django.views.decorators.http import require_GET
 
 from bookmark_manager.services.bookmark_analytics import get_bookmark_dashboard
+from core.services.database_stats import get_database_stats
 from core.services.system_status import get_system_status
 
 
@@ -24,6 +25,7 @@ def dashboard(request):
             "page_title": "Home",
             "status_message": "Ready · Home",
             "dashboard": bookmark_dashboard,
+            "database_stats": get_database_stats(),
         },
     )
 

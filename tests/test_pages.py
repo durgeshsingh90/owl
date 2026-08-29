@@ -21,8 +21,8 @@ def loopback_client(client):
         ("/bookmarks/", "Bookmark Manager"),
         ("/bookmarks/settings/", "Confluence Settings"),
         ("/pdfs/", "Bitbucket Search"),
-        ("/pdfs/repositories/", "Connect repositories safely"),
-        ("/pdfs/status/", "Track durable background work"),
+        ("/pdfs/repositories/", "Bitbucket Search"),
+        ("/pdfs/status/", "Repository sync activity"),
         ("/system-status/", "System Status"),
     ],
 )
@@ -127,7 +127,7 @@ def test_bookmark_manager_topbar_matches_the_app_workspace_contract(loopback_cli
     assert 'class="bookmark-app-title"' in html
     assert 'class="bookmark-topbar__actions"' in html
     assert "bookmark-connection-summary" not in html
-    assert "bookmarks.css?v=workspace-ui-v17" in html
+    assert "bookmarks.css?v=workspace-ui-v22" in html
     assert 'aria-label="Applications"' in html
     assert 'aria-label="Confluence settings"' in html
     assert "data-theme-toggle" in html
@@ -143,7 +143,9 @@ def test_bookmark_manager_workspace_uses_minimal_edges_and_fills_page_height():
     with open(asset_path, encoding="utf-8") as stylesheet:
         css = stylesheet.read()
 
-    assert "--bookmark-page-inline-edge: clamp(0.2rem, 0.35vw, 0.35rem);" in css
+    assert "--bookmark-page-inline-edge: 0rem;" in css
+    assert "max-width: none;" in css
+    assert "margin-inline: 0;" in css
     assert "padding-bottom: 0;" in css
     assert "padding: 1.15rem var(--bookmark-page-inline-edge) 0;" in css
     assert "flex: 1 0 500px;" in css
@@ -189,7 +191,7 @@ def test_each_app_route_uses_its_own_left_sidebar(
     assert response.context["active_app"] == active_app
     app_name = "Bookmark Manager" if active_app == "bookmarks" else "Bitbucket Search"
     sidebar_id = "bookmark-app-sidebar" if active_app == "bookmarks" else "bitbucket-app-sidebar"
-    if path == "/pdfs/":
+    if path in {"/pdfs/", "/pdfs/repositories/"}:
         assert 'class="bitbucket-workspace"' in html
         sidebar = re.search(
             rf'<nav class="bb-rail-links" aria-label="{re.escape(sidebar_label)}">(.*?)</nav>',
@@ -237,27 +239,32 @@ def test_bitbucket_search_uses_the_repository_workspace_shell(loopback_client):
     assert 'class="bb-rail-links" aria-label="Bitbucket Search functions"' in html
     assert 'href="/pdfs/" aria-current="page"' in html
     assert 'role="status" aria-live="polite" aria-atomic="true"' in html
-    assert "Repository setup" in html
+    assert "Add Repository" in html
     assert 'aria-label="System status"' in html
     assert "System status and help" not in html
     assert 'placeholder="Search repositories…" disabled' in html
-    assert 'placeholder="Search repositories, file names, content, paths…" disabled' in html
+    assert 'placeholder="Type a phrase, then press Enter…"' in html
+    assert "data-pdf-search-input disabled" not in html
     assert "No repositories connected" in html
     assert "Showing <strong>0 PDFs</strong>" in html
     assert "Not configured" in html
-    assert "<dt>Total repositories</dt><dd>0</dd>" in html
-    assert "<dt>Total PDFs</dt><dd>0</dd>" in html
+    assert "<dt>Total repositories</dt><dd data-total-repositories>0</dd>" in html
+    assert "<dt>PDF files</dt><dd data-total-pdfs>0</dd>" in html
+    assert "<dt>VSDX files</dt><dd data-total-vsdx>0</dd>" in html
     assert "18,420 PDFs" not in html
     assert "Up to date" not in html
     assert "networking" not in html
-    assert '<button class="bb-control-button" type="button" disabled>' in html
+    assert (
+        '<button class="bb-control-button bb-search-submit" type="submit">Search</button>' in html
+    )
+    assert '<details class="bb-search-filter-menu">' in html
     assert re.search(r'<button type="button" disabled>.*?Copy all \(0\)', html, re.DOTALL)
     assert re.search(r'<button type="button" disabled>.*?Open all \(0\)', html, re.DOTALL)
     assert re.search(r'<button type="button" disabled>.*?Export list', html, re.DOTALL)
     assert '<button type="button" disabled aria-label="List view">' in html
     assert '<button type="button" disabled aria-label="Grid view">' in html
-    assert "<select disabled><option>50</option></select>" in html
-    assert '<input type="number" value="1" min="1" disabled>' in html
+    assert "Rows per page" not in html
+    assert 'aria-label="PDF result pages"' not in html
 
 
 def test_security_headers_are_present_on_visible_pages(loopback_client):
@@ -286,7 +293,8 @@ def test_phase_two_settings_page_uses_a_blank_secure_pat_field(loopback_client):
     assert "Authentication mode" not in html
     assert ">Advanced<" not in html
     assert "Bookmark data" in html
-    assert 'href="/bookmarks/export/">Export JSON</a>' in html
+    assert 'action="/bookmarks/export/"' in html
+    assert ">Export JSON</button>" in html
     assert 'action="/bookmarks/import/"' in html
     assert "Import bookmarks" in html
     assert 'accept=".json,.txt,application/json,text/plain"' in html
@@ -353,19 +361,35 @@ def test_bookmark_manager_uses_one_input_for_search_and_saving(loopback_client):
     assert "bookmark-search-form" not in html
 
 
-def test_pdf_preview_foundation_uses_the_master_plan_phase(loopback_client):
+def test_pdf_search_page_exposes_active_indexing_and_phrase_controls(loopback_client):
     response = loopback_client.get("/pdfs/")
     html = response.content.decode()
 
-    assert "PDF indexing and search are not active yet" in html
-    assert "No repository has been accessed" in html
-    assert "matched-page preview will appear here in Phase 7" in html
-    assert "People &amp; commits" in html
-    assert "Missing push evidence will be labelled <strong>Unavailable</strong>" in html
+    assert response.status_code == 200
+    assert "data-pdf-search-form" in html
+    assert 'placeholder="Type a phrase, then press Enter…"' in html
+    assert "<legend>Phrase matching</legend>" in html
+    assert "<legend>Search in</legend>" in html
+    assert 'value="content" checked' in html
+    assert "Exact phrase search" in html
     assert (
-        "author, committer, pusher, PR creator, fulfilled-state merger, and non-merge closer roles separate"
-        in html
+        "Clone, refresh, PDF extraction, and indexing all happen outside this web request" in html
     )
+    assert "PDF indexing and search are not active yet" not in html
+
+
+def test_bitbucket_status_page_reports_active_daily_refresh_instead_of_a_placeholder(
+    loopback_client,
+):
+    response = loopback_client.get("/pdfs/status/")
+    html = response.content.decode()
+
+    assert response.status_code == 200
+    assert "Repository sync activity" in html
+    assert "Daily automation" in html
+    assert "Repository workers" in html
+    assert "PDF catalogue" in html
+    assert "This feature is not active yet" not in html
 
 
 def test_state_changes_use_dedicated_post_only_routes(loopback_client):
@@ -375,3 +399,4 @@ def test_state_changes_use_dedicated_post_only_routes(loopback_client):
     assert loopback_client.get("/bookmarks/save/").status_code == 405
     assert loopback_client.get("/bookmarks/settings/save/").status_code == 405
     assert loopback_client.get("/bookmarks/settings/remove/").status_code == 405
+    assert loopback_client.get("/pdfs/repositories/add/").status_code == 405

@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from django.conf import settings
 from django.core.cache import cache
-from django.db import OperationalError, ProgrammingError
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, OperationalError, ProgrammingError
 from django.db.models import Count, Q
 from django.http import (
     HttpRequest,
@@ -31,6 +33,7 @@ from django.views.decorators.http import require_GET, require_POST
 from bookmark_manager.forms import (
     BookmarkCategoryRenameForm,
     BookmarkFilterForm,
+    BookmarkFolderForm,
     BookmarkImportForm,
     BookmarkInputForm,
     BookmarkOrganisationForm,
@@ -41,11 +44,15 @@ from bookmark_manager.models import (
     Bookmark,
     BookmarkAvailability,
     BookmarkCategory,
+    BookmarkFolder,
     BookmarkImportRun,
     BookmarkRefreshRun,
     BookmarkSource,
     ConfluenceConfiguration,
     ConfluencePageNode,
+    Notification,
+    NotificationKind,
+    NotificationState,
     SavedBookmarkView,
     Tag,
 )
@@ -57,6 +64,12 @@ from bookmark_manager.services.bookmark_application import (
 from bookmark_manager.services.bookmark_domain import (
     find_similar_title_bookmarks,
     record_successful_open,
+)
+from bookmark_manager.services.bookmark_folders import (
+    BookmarkFolderError,
+    create_bookmark_folder,
+    move_bookmarks_to_folder,
+    unfile_bookmarks,
 )
 from bookmark_manager.services.bookmark_outline import outline_number_map
 from bookmark_manager.services.bookmark_productivity import (
@@ -78,6 +91,9 @@ from bookmark_manager.services.bookmark_refresh import (
     create_or_get_refresh_run,
     launch_refresh_worker,
     mark_refresh_launch_failed,
+    publish_refresh_notification,
+    queue_due_scheduled_refresh,
+    refresh_schedule_snapshot,
     refresh_status_snapshot,
 )
 from bookmark_manager.services.configuration import (
@@ -96,11 +112,20 @@ from bookmark_manager.services.import_export import (
     import_bookmarks_document,
     import_bookmarks_text,
 )
+from bookmark_manager.services.notifications import (
+    list_notification_payloads,
+    mark_all_notifications_read,
+    mark_notification_read,
+    publish_notification,
+    unread_notification_count,
+)
 from bookmark_manager.services.web_bookmarks import (
     WebBookmarkError,
     canonicalize_web_url,
     rename_bookmark_category,
 )
+
+logger = logging.getLogger("owl.bookmarks.views")
 
 
 @dataclass(slots=True)
@@ -131,6 +156,64 @@ class FlatBookmarkItem:
     breadcrumb: tuple[BreadcrumbItem, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ManualFolderTreeItem:
+    """One OWL-owned folder and its currently visible bookmark rows."""
+
+    folder: BookmarkFolder
+    items: tuple[BookmarkTreeItem, ...]
+    bookmark_count: int
+    open_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class BookmarkSortControl:
+    """One compact two-state sort link rendered above the bookmark tree."""
+
+    key: str
+    label: str
+    href: str
+    active: bool
+    direction: str
+    aria_label: str
+
+
+_BOOKMARK_SORT_CONTROL_DEFINITIONS = (
+    (
+        "open_count",
+        "Open count",
+        BookmarkSort.MOST_OPENED,
+        BookmarkSort.LEAST_OPENED,
+        "highest first",
+        "lowest first",
+    ),
+    (
+        "updated",
+        "Confluence updated date",
+        BookmarkSort.UPDATED_NEWEST,
+        BookmarkSort.UPDATED_OLDEST,
+        "newest first",
+        "oldest first",
+    ),
+    (
+        "created",
+        "Confluence written date",
+        BookmarkSort.CREATED_NEWEST,
+        BookmarkSort.CREATED_OLDEST,
+        "newest first",
+        "oldest first",
+    ),
+    (
+        "saved",
+        "OWL saved date",
+        BookmarkSort.ADDED_NEWEST,
+        BookmarkSort.ADDED_OLDEST,
+        "newest first",
+        "oldest first",
+    ),
+)
+
+
 @dataclass(slots=True)
 class ConfluenceContactSummary:
     """One real Confluence contributor with page-level role counts."""
@@ -138,6 +221,7 @@ class ConfluenceContactSummary:
     name: str
     written_page_ids: set[int] = field(default_factory=set)
     updated_page_ids: set[int] = field(default_factory=set)
+    selected: bool = False
 
     @property
     def page_count(self) -> int:
@@ -316,14 +400,30 @@ def _tree_items(
     selected_pk: int | None,
     located_pk: int | None,
 ) -> tuple[list[BookmarkTreeItem], dict[int, str]]:
+    manually_filed_node_ids = {
+        bookmark.tree_node_id
+        for bookmark in query_result.bookmarks
+        if bookmark.manual_folder_id is not None
+    }
+    canonical_matched_node_ids = query_result.matched_node_ids - manually_filed_node_ids
     all_nodes = list(
-        ConfluencePageNode.objects.select_related("bookmark", "parent").order_by(
-            "parent_id", "outline_position", "sibling_position", "title", "id"
-        )
+        ConfluencePageNode.objects.select_related(
+            "bookmark",
+            "parent",
+        ).order_by("parent_id", "outline_position", "sibling_position", "title", "id")
     )
+    parent_ids = {node.pk: node.parent_id for node in all_nodes}
+    canonical_visible_node_ids: set[int] = set()
+    for matched_node_id in canonical_matched_node_ids:
+        current_id: int | None = matched_node_id
+        branch_seen: set[int] = set()
+        while current_id is not None and current_id in parent_ids and current_id not in branch_seen:
+            branch_seen.add(current_id)
+            canonical_visible_node_ids.add(current_id)
+            current_id = parent_ids[current_id]
     outline_numbers = outline_number_map(all_nodes)
     subtree_open_counts = _subtree_open_counts(all_nodes)
-    visible_nodes = [node for node in all_nodes if node.pk in query_result.visible_node_ids]
+    visible_nodes = [node for node in all_nodes if node.pk in canonical_visible_node_ids]
 
     items_by_id: dict[int, BookmarkTreeItem] = {}
     for node in visible_nodes:
@@ -333,13 +433,17 @@ def _tree_items(
             node_bookmark = None
         # Ancestors remain visible so a filtered result keeps its full breadcrumb,
         # but an ancestor that did not match is folder context rather than a result.
-        bookmark = node_bookmark if node.pk in query_result.matched_node_ids else None
+        bookmark = (
+            node_bookmark
+            if node.pk in canonical_matched_node_ids and node_bookmark is not None
+            else None
+        )
         items_by_id[node.pk] = BookmarkTreeItem(
             node=node,
             bookmark=bookmark,
             selected=bool(bookmark and bookmark.pk == selected_pk),
             located=bool(bookmark and bookmark.pk == located_pk),
-            matches=node.pk in query_result.matched_node_ids,
+            matches=node.pk in canonical_matched_node_ids,
             outline_number=outline_numbers.get(node.pk, ""),
             subtree_open_count=subtree_open_counts.get(node.pk, 0),
         )
@@ -354,26 +458,69 @@ def _tree_items(
             item.depth = parent_item.depth + 1
             parent_item.children.append(item)
 
-    if query_result.flat_mode:
-        match_rank = {
-            bookmark.tree_node_id: rank for rank, bookmark in enumerate(query_result.bookmarks)
-        }
-        fallback_rank = len(match_rank)
+    match_rank = {
+        bookmark.tree_node_id: rank
+        for rank, bookmark in enumerate(query_result.bookmarks)
+        if bookmark.manual_folder_id is None
+    }
+    fallback_rank = len(match_rank)
 
-        def sort_branch(item: BookmarkTreeItem) -> int:
-            child_ranks = [(sort_branch(child), child) for child in item.children]
-            child_ranks.sort(key=lambda ranked: (ranked[0], ranked[1].node.pk))
-            item.children[:] = [child for _rank, child in child_ranks]
-            ranks = [rank for rank, _child in child_ranks]
-            if item.node.pk in match_rank:
-                ranks.append(match_rank[item.node.pk])
-            rank = min(ranks, default=fallback_rank)
-            return rank
+    def sort_branch(item: BookmarkTreeItem) -> int:
+        child_ranks = [(sort_branch(child), child) for child in item.children]
+        child_ranks.sort(key=lambda ranked: (ranked[0], ranked[1].node.pk))
+        item.children[:] = [child for _rank, child in child_ranks]
+        ranks = [rank for rank, _child in child_ranks]
+        if item.node.pk in match_rank:
+            ranks.append(match_rank[item.node.pk])
+        rank = min(ranks, default=fallback_rank)
+        return rank
 
-        root_ranks = [(sort_branch(item), item) for item in roots]
-        root_ranks.sort(key=lambda ranked: (ranked[0], ranked[1].node.pk))
-        roots[:] = [item for _rank, item in root_ranks]
+    root_ranks = [(sort_branch(item), item) for item in roots]
+    root_ranks.sort(key=lambda ranked: (ranked[0], ranked[1].node.pk))
+    roots[:] = [item for _rank, item in root_ranks]
     return roots, outline_numbers
+
+
+def _manual_folder_items(
+    query_result: BookmarkQueryResult,
+    *,
+    outline_numbers: dict[int, str],
+    selected_pk: int | None,
+    located_pk: int | None,
+) -> tuple[ManualFolderTreeItem, ...]:
+    """Compose personal folders without changing the canonical Confluence tree."""
+
+    bookmarks_by_folder: dict[int, list[BookmarkTreeItem]] = {}
+    for bookmark in query_result.bookmarks:
+        if bookmark.manual_folder_id is None:
+            continue
+        bookmarks_by_folder.setdefault(bookmark.manual_folder_id, []).append(
+            BookmarkTreeItem(
+                node=bookmark.tree_node,
+                bookmark=bookmark,
+                selected=bookmark.pk == selected_pk,
+                located=bookmark.pk == located_pk,
+                depth=2,
+                outline_number=outline_numbers.get(bookmark.tree_node_id, str(bookmark.pk)),
+                subtree_open_count=bookmark.open_count,
+            )
+        )
+
+    show_empty_folders = query_result.active_filter_count == 0
+    folders: list[ManualFolderTreeItem] = []
+    for folder in BookmarkFolder.objects.order_by("normalized_name", "id"):
+        items = tuple(bookmarks_by_folder.get(folder.pk, ()))
+        if not items and not show_empty_folders:
+            continue
+        folders.append(
+            ManualFolderTreeItem(
+                folder=folder,
+                items=items,
+                bookmark_count=len(items),
+                open_count=sum(item.bookmark.open_count for item in items if item.bookmark),
+            )
+        )
+    return tuple(folders)
 
 
 def _subtree_open_counts(nodes: Iterable[ConfluencePageNode]) -> dict[int, int]:
@@ -427,7 +574,9 @@ def _attach_outline_numbers(
         bookmark.outline_number = outline_numbers.get(bookmark.tree_node_id, str(bookmark.pk))
 
 
-def _confluence_contacts() -> tuple[ConfluenceContactSummary, ...]:
+def _confluence_contacts(
+    selected_people: Iterable[str] = (),
+) -> tuple[ConfluenceContactSummary, ...]:
     """Summarize saved Confluence creators/authors/modifiers without double-counting pages."""
 
     contacts: dict[str, ConfluenceContactSummary] = {}
@@ -459,6 +608,9 @@ def _confluence_contacts() -> tuple[ConfluenceContactSummary, ...]:
             record(writer_name, bookmark.pk, role="written")
         record(bookmark.modified_by_name, bookmark.pk, role="updated")
 
+    selected_keys = {name.strip().casefold() for name in selected_people if name.strip()}
+    for key, contact in contacts.items():
+        contact.selected = key in selected_keys
     return tuple(
         sorted(
             contacts.values(),
@@ -494,7 +646,7 @@ def _query_from_filter_form(form: BookmarkFilterForm) -> BookmarkQuery:
         favorite=True if values.get("favorite") else None,
         pinned=True if values.get("pinned") else None,
         tags=tuple(values.get("tags", ())),
-        people=(values["person"],) if values.get("person") else (),
+        people=tuple(values.get("person", ())),
         spaces=(values["space"],) if values.get("space") else (),
         category_ids=(values["category"],) if values.get("category") else (),
         availability=tuple(values.get("availability", ())),
@@ -514,7 +666,7 @@ def _filter_form_initial(query: BookmarkQuery) -> dict[str, object]:
         "favorite": query.favorite is True,
         "pinned": query.pinned is True,
         "tags": [Tag.normalize_name(value) for value in query.tags],
-        "person": query.people[0] if query.people else "",
+        "person": list(query.people),
         "space": query.spaces[0] if query.spaces else "",
         "category": query.category_ids[0] if query.category_ids else None,
         "availability": list(query.availability),
@@ -549,6 +701,17 @@ def _resolve_bookmark_query(
     try:
         if saved_view is not None:
             query = BookmarkQuery.from_saved_view(saved_view)
+            if request.GET.get("people_filter") == "1":
+                try:
+                    requested_people = BookmarkFilterForm.base_fields["person"].clean(
+                        request.GET.getlist("person")
+                    )
+                except ValidationError as exc:
+                    raise InvalidBookmarkQuery(exc.messages[0]) from exc
+                query = replace(query, people=requested_people)
+            explicit_sort = request.GET.get("sort", "").strip()
+            if explicit_sort:
+                query = replace(query, sort=explicit_sort)
             form = BookmarkFilterForm(initial=_filter_form_initial(query))
         elif not request.GET:
             query = BookmarkQuery()
@@ -579,6 +742,109 @@ def _clean_current_query_string(request: HttpRequest) -> str:
     ):
         values.pop(key, None)
     return values.urlencode()
+
+
+def _people_filter_navigation(
+    request: HttpRequest,
+    query: BookmarkQuery,
+) -> tuple[tuple[tuple[str, str], ...], str]:
+    """Preserve active filters while replacing only the selected people."""
+
+    values = request.GET.copy()
+    for key in (
+        "person",
+        "people_filter",
+        "selected",
+        "located",
+        "saved",
+        "similar",
+        "opened",
+        "open_error",
+        "open_parent_error",
+        "action",
+        "count",
+        "import_run",
+        "timeline",
+        "timeline_page",
+    ):
+        values.pop(key, None)
+    values["people_filter"] = "1"
+    if not values.get("sort"):
+        values["sort"] = (
+            query.sort.value if request.GET.get("saved_view") else BookmarkSort.UPDATED_NEWEST.value
+        )
+    hidden_fields = tuple(
+        (name, value) for name, field_values in values.lists() for value in field_values
+    )
+    clear_query = values.urlencode()
+    clear_href = reverse("bookmark_manager:index")
+    if clear_query:
+        clear_href = f"{clear_href}?{clear_query}"
+    return hidden_fields, clear_href
+
+
+def _bookmark_sort_href(request: HttpRequest, sort: BookmarkSort) -> str:
+    """Return an index link that changes only sorting, not filters or selection."""
+
+    values = request.GET.copy()
+    for key in (
+        "saved",
+        "similar",
+        "opened",
+        "open_error",
+        "open_parent_error",
+        "action",
+        "count",
+        "import_run",
+        "timeline",
+        "timeline_page",
+    ):
+        values.pop(key, None)
+    values["sort"] = sort.value
+    return f"{reverse('bookmark_manager:index')}?{values.urlencode()}"
+
+
+def _bookmark_sort_controls(
+    request: HttpRequest,
+    query: BookmarkQuery,
+) -> tuple[BookmarkSortControl, ...]:
+    """Build the four icon toggles, defaulting inactive controls to descending."""
+
+    controls: list[BookmarkSortControl] = []
+    for (
+        key,
+        label,
+        descending,
+        ascending,
+        descending_label,
+        ascending_label,
+    ) in _BOOKMARK_SORT_CONTROL_DEFINITIONS:
+        if query.sort == descending:
+            active = True
+            direction = "descending"
+            next_sort = ascending
+            next_direction_label = ascending_label
+        elif query.sort == ascending:
+            active = True
+            direction = "ascending"
+            next_sort = descending
+            next_direction_label = descending_label
+        else:
+            active = False
+            direction = "inactive"
+            next_sort = descending
+            next_direction_label = descending_label
+        controls.append(
+            BookmarkSortControl(
+                key=key,
+                label=label,
+                href=_bookmark_sort_href(request, next_sort),
+                active=active,
+                direction=direction,
+                aria_label=f"Sort by {label}, {next_direction_label}",
+            )
+        )
+    return tuple(controls)
 
 
 def _timeline_query_string(request: HttpRequest) -> str:
@@ -737,7 +1003,7 @@ def _refresh_run_payload(
         "heartbeat_at": run.heartbeat_at.isoformat() if run and run.heartbeat_at else None,
         "completed_at": run.completed_at.isoformat() if run and run.completed_at else None,
         "completed_display": (
-            timezone.localtime(run.completed_at).strftime("%d %b %Y, %H:%M")
+            timezone.localtime(run.completed_at).strftime("%d %b %Y, %H:%M:%S %Z")
             if run is not None and run.completed_at is not None
             else ""
         ),
@@ -747,13 +1013,29 @@ def _refresh_run_payload(
             else None
         ),
         "last_completed_display": (
-            timezone.localtime(completed.completed_at).strftime("%d %b %Y, %H:%M")
+            timezone.localtime(completed.completed_at).strftime("%d %b %Y, %H:%M:%S %Z")
             if completed is not None and completed.completed_at is not None
             else ""
         ),
         "last_completed_status": completed.status if completed else "",
+        "trigger": run.trigger if run else "",
         "detail": run.last_error_message if run else "",
     }
+
+
+def _publish_import_completion(run: BookmarkImportRun) -> None:
+    has_failures = bool(run.failed_records)
+    publish_notification(
+        event_key=f"bookmark-import:{run.pk}",
+        kind=NotificationKind.BOOKMARK_IMPORT,
+        state=NotificationState.WARNING if has_failures else NotificationState.SUCCESS,
+        title=(
+            "Bookmark import completed with issues" if has_failures else "Bookmark import completed"
+        ),
+        message=run.outcome,
+        target_path=(f"{reverse('bookmark_manager:index')}?{urlencode({'import_run': run.pk})}"),
+        occurred_at=run.completed_at or timezone.now(),
+    )
 
 
 def _index_context(
@@ -767,6 +1049,10 @@ def _index_context(
 ) -> dict[str, object]:
     summary = get_configuration_summary()
     query, filter_form, active_saved_view, filter_error = _resolve_bookmark_query(request)
+    people_filter_hidden_fields, people_filter_clear_href = _people_filter_navigation(
+        request,
+        query,
+    )
     query_result = query_bookmarks(query)
     search_term = query.search
     url_search_active = False
@@ -788,7 +1074,7 @@ def _index_context(
     selected_pk = _positive_query_integer(request, "selected")
     located_pk = _positive_query_integer(request, "located")
     selected = (
-        Bookmark.objects.select_related("tree_node", "category")
+        Bookmark.objects.select_related("tree_node", "category", "manual_folder")
         .prefetch_related("tags")
         .filter(pk=selected_pk)
         .first()
@@ -806,6 +1092,12 @@ def _index_context(
 
     tree_items, outline_numbers = _tree_items(
         query_result,
+        selected_pk=selected_pk,
+        located_pk=located_pk,
+    )
+    manual_folder_items = _manual_folder_items(
+        query_result,
+        outline_numbers=outline_numbers,
         selected_pk=selected_pk,
         located_pk=located_pk,
     )
@@ -876,6 +1168,24 @@ def _index_context(
         status_message = (
             "Added to pinned bookmarks" if selected.pinned else "Removed from pinned bookmarks"
         )
+    elif request.GET.get("action") == "folder_created":
+        folder = BookmarkFolder.objects.filter(
+            pk=_positive_query_integer(request, "folder")
+        ).first()
+        status_message = (
+            f"Created personal folder “{folder.name}”"
+            if folder is not None
+            else "Personal folder created"
+        )
+    elif request.GET.get("action") == "folder_moved":
+        folder = BookmarkFolder.objects.filter(
+            pk=_positive_query_integer(request, "folder")
+        ).first()
+        status_message = (
+            f"Moved bookmarks to personal folder “{folder.name}”"
+            if folder is not None
+            else "Returned bookmarks to their Confluence hierarchy"
+        )
     elif effective_error:
         status_message = effective_error
 
@@ -883,6 +1193,15 @@ def _index_context(
     tag_text = ", ".join(tag.name for tag in selected.tags.all()) if selected else ""
 
     refresh_run, completed_refresh = refresh_status_snapshot()
+    requested_refresh_run = None
+    requested_refresh_run_pk = _positive_query_integer(request, "refresh_run")
+    if requested_refresh_run_pk:
+        requested_refresh_run = (
+            BookmarkRefreshRun.objects.prefetch_related("failures")
+            .filter(pk=requested_refresh_run_pk)
+            .first()
+        )
+    refresh_result_run = requested_refresh_run or refresh_run
     return {
         "active_nav": "bookmarks",
         "active_app": "bookmarks",
@@ -893,6 +1212,7 @@ def _index_context(
         "bookmark_form": bookmark_form or BookmarkInputForm(),
         "filter_form": filter_form,
         "saved_view_form": SavedBookmarkViewForm(),
+        "bookmark_folder_form": BookmarkFolderForm(),
         "import_form": import_form or BookmarkImportForm(),
         "organisation_form": BookmarkOrganisationForm(
             initial={"notes": selected.notes, "tags": tag_text}
@@ -910,9 +1230,18 @@ def _index_context(
         "url_identity_match_count": len(url_identity_matches),
         "first_url_identity_match_href": first_url_identity_match_href,
         "bookmark_query": query,
+        "sort_controls": _bookmark_sort_controls(request, query),
         "query_result": query_result,
         "bookmark_counts": _global_bookmark_counts(),
         "refresh_status": _refresh_run_payload(refresh_run, completed_refresh),
+        "refresh_result_status": _refresh_run_payload(
+            refresh_result_run,
+            completed_refresh,
+        ),
+        "refresh_result_is_historical": bool(
+            requested_refresh_run is not None
+            and (refresh_run is None or requested_refresh_run.pk != refresh_run.pk)
+        ),
         "active_filters": query_result.active_filters,
         "current_query_string": _clean_current_query_string(request),
         "timeline_query_string": _timeline_query_string(request),
@@ -920,6 +1249,9 @@ def _index_context(
         "active_saved_view": active_saved_view,
         "saved_views": SavedBookmarkView.objects.all(),
         "tree_items": tree_items,
+        "manual_folder_items": manual_folder_items,
+        "tree_has_items": bool(tree_items or manual_folder_items),
+        "bookmark_folders": BookmarkFolder.objects.order_by("normalized_name", "id"),
         "flat_items": tuple(
             FlatBookmarkItem(bookmark, _bookmark_breadcrumb(bookmark))
             for bookmark in query_result.bookmarks
@@ -927,8 +1259,11 @@ def _index_context(
         "result_count": query_result.matching_count,
         "total_bookmarks": query_result.counts.all_bookmarks,
         "bookmark_categories": _bookmark_categories_with_totals(),
-        "confluence_contacts": _confluence_contacts(),
+        "confluence_contacts": _confluence_contacts(query.people),
         "active_contact": query.people[0] if query.people else "",
+        "active_contacts": query.people,
+        "people_filter_hidden_fields": people_filter_hidden_fields,
+        "people_filter_clear_href": people_filter_clear_href,
         "selected_category": BookmarkCategory.objects.filter(pk=query.category_ids[0]).first()
         if query.category_ids
         else None,
@@ -978,6 +1313,7 @@ def start_global_refresh(request: HttpRequest) -> HttpResponse:
         )
     run, created = create_or_get_refresh_run()
     if created:
+        publish_refresh_notification(run)
         try:
             launch_refresh_worker(run.pk)
         except OSError:
@@ -1021,6 +1357,83 @@ def global_refresh_status(request: HttpRequest) -> JsonResponse:
         return local_error
     latest, completed = refresh_status_snapshot()
     return JsonResponse({"refresh": _refresh_run_payload(latest, completed)})
+
+
+@require_GET
+@never_cache
+def notifications_status(request: HttpRequest) -> JsonResponse:
+    """Return read-only notification, refresh, and scheduler status for every app shell."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    latest = BookmarkRefreshRun.objects.prefetch_related("failures").first()
+    completed = (
+        BookmarkRefreshRun.objects.filter(
+            status__in=("succeeded", "succeeded_with_errors"),
+            completed_at__isnull=False,
+        )
+        .order_by("-completed_at", "-id")
+        .first()
+    )
+    return JsonResponse(
+        {
+            "notifications": list_notification_payloads(),
+            "unread_count": unread_notification_count(),
+            "refresh": _refresh_run_payload(latest, completed),
+            "schedule": refresh_schedule_snapshot(initialize=False),
+        }
+    )
+
+
+@require_POST
+@csrf_protect
+@never_cache
+def read_notification(request: HttpRequest) -> JsonResponse:
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    raw_notification_id = request.POST.get("notification_id", "")
+    if not raw_notification_id.isascii() or not raw_notification_id.isdigit():
+        return JsonResponse({"detail": "Choose a valid notification."}, status=400)
+    notification_id = int(raw_notification_id)
+    if not Notification.objects.filter(pk=notification_id).exists():
+        return JsonResponse({"detail": "That notification no longer exists."}, status=404)
+    mark_notification_read(notification_id)
+    return JsonResponse({"state": "read", "unread_count": unread_notification_count()})
+
+
+@require_POST
+@csrf_protect
+@never_cache
+def read_all_notifications(request: HttpRequest) -> JsonResponse:
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    marked = mark_all_notifications_read()
+    return JsonResponse({"state": "read", "marked": marked, "unread_count": 0})
+
+
+@require_POST
+@csrf_protect
+@never_cache
+def tick_refresh_schedule(request: HttpRequest) -> JsonResponse:
+    """Catch up a due schedule while the resident scheduler or browser is running."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    run, queued = queue_due_scheduled_refresh()
+    latest, completed = refresh_status_snapshot()
+    return JsonResponse(
+        {
+            "state": "queued" if queued else "waiting",
+            "run_id": run.pk if run is not None else None,
+            "refresh": _refresh_run_payload(latest, completed),
+            "schedule": refresh_schedule_snapshot(),
+        },
+        status=202 if queued else 200,
+    )
 
 
 @require_GET
@@ -1354,6 +1767,124 @@ def save_bookmark(request: HttpRequest) -> HttpResponse:
     return HttpResponseRedirect(target)
 
 
+def _folder_action_target(
+    request: HttpRequest,
+    *,
+    action: str,
+    folder: BookmarkFolder | None,
+) -> str:
+    """Keep only a local Bookmark Manager destination after a folder change."""
+
+    index_path = reverse("bookmark_manager:index")
+    candidate = str(request.POST.get("return_to", "")).strip()
+    parsed = urlsplit(candidate)
+    if parsed.scheme or parsed.netloc or parsed.path != index_path:
+        values = QueryDict("", mutable=True)
+    else:
+        values = QueryDict(parsed.query, mutable=True)
+    for key in ("saved", "similar", "opened", "open_error", "action", "folder"):
+        values.pop(key, None)
+    values["action"] = action
+    if folder is not None:
+        values["folder"] = str(folder.pk)
+    query_string = values.urlencode()
+    return f"{index_path}?{query_string}" if query_string else index_path
+
+
+def _folder_action_error(request: HttpRequest, detail: str) -> HttpResponse:
+    if _is_async_form(request):
+        return _action_json(
+            state="invalid_folder",
+            label="Folder not updated",
+            detail=detail,
+            status=400,
+        )
+    return HttpResponseBadRequest(detail)
+
+
+@require_POST
+@csrf_protect
+@never_cache
+def create_folder(request: HttpRequest) -> HttpResponse:
+    """Create a personal folder without adding a node to Confluence hierarchy."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    form = BookmarkFolderForm(request.POST)
+    if not form.is_valid():
+        return _folder_action_error(request, "Enter a folder name up to 120 characters.")
+    try:
+        folder = create_bookmark_folder(name=form.cleaned_data["name"])
+    except ValidationError as exc:
+        detail = exc.messages[0] if exc.messages else "Enter a valid folder name."
+        return _folder_action_error(request, detail)
+    except IntegrityError:
+        return _folder_action_error(request, "A personal folder with this name already exists.")
+
+    target = _folder_action_target(request, action="folder_created", folder=folder)
+    detail = f"Created personal folder “{folder.name}”. Drag bookmarks here or use Move."
+    if _is_async_form(request):
+        return JsonResponse(
+            {
+                "state": "success",
+                "label": "Folder created",
+                "detail": detail,
+                "folder_id": folder.pk,
+                "redirect": target,
+            }
+        )
+    return redirect(target)
+
+
+@require_POST
+@csrf_protect
+@never_cache
+def move_bookmarks_to_manual_folder(request: HttpRequest) -> HttpResponse:
+    """Move selected bookmarks to a personal folder, or back to source hierarchy."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    raw_ids = request.POST.getlist("bookmark_ids")
+    if not raw_ids or any(not value.isascii() or not value.isdigit() for value in raw_ids):
+        return _folder_action_error(request, "Select at least one valid bookmark to move.")
+    bookmark_ids = [int(value) for value in raw_ids]
+    raw_folder_id = request.POST.get("folder_id", "").strip()
+    try:
+        if raw_folder_id:
+            if not raw_folder_id.isascii() or not raw_folder_id.isdigit():
+                raise BookmarkFolder.DoesNotExist
+            result = move_bookmarks_to_folder(bookmark_ids, int(raw_folder_id))
+        else:
+            result = unfile_bookmarks(bookmark_ids)
+    except (Bookmark.DoesNotExist, BookmarkFolder.DoesNotExist, BookmarkFolderError):
+        return _folder_action_error(
+            request,
+            "One or more selected bookmarks or the destination folder no longer exists.",
+        )
+
+    target = _folder_action_target(request, action="folder_moved", folder=result.folder)
+    count = len(result.bookmark_ids)
+    destination = (
+        f"personal folder “{result.folder.name}”"
+        if result.folder is not None
+        else "the Confluence hierarchy"
+    )
+    detail = f"Moved {count} bookmark{'s' if count != 1 else ''} to {destination}."
+    if _is_async_form(request):
+        return JsonResponse(
+            {
+                "state": "success",
+                "label": "Bookmarks moved",
+                "detail": detail,
+                "updated_count": result.updated_count,
+                "redirect": target,
+            }
+        )
+    return redirect(target)
+
+
 @require_POST
 @csrf_protect
 @never_cache
@@ -1648,7 +2179,8 @@ def delete_view(request: HttpRequest, pk: int) -> HttpResponse:
     return redirect(f"{reverse('bookmark_manager:index')}?action=view_deleted")
 
 
-@require_GET
+@require_POST
+@csrf_protect
 @never_cache
 def export_bookmarks(request: HttpRequest) -> HttpResponse:
     """Download an explicit, sensitive local JSON backup with no credentials."""
@@ -1656,8 +2188,31 @@ def export_bookmarks(request: HttpRequest) -> HttpResponse:
     local_error = _require_local_action(request)
     if local_error:
         return local_error
-    payload = export_bookmarks_json()
-    filename = f"owl-bookmarks-{timezone.localdate().isoformat()}.json"
+    exported_at = timezone.now()
+    try:
+        payload = export_bookmarks_json(generated_at=exported_at)
+    except Exception:
+        logger.exception("Bookmark export failed")
+        publish_notification(
+            event_key=f"bookmark-export-error:{exported_at.strftime('%Y%m%d%H%M%S%f')}",
+            kind=NotificationKind.BOOKMARK_EXPORT,
+            state=NotificationState.ERROR,
+            title="Bookmark export failed",
+            message="OWL could not prepare the credential-free JSON backup.",
+            target_path=reverse("bookmark_manager:settings"),
+            occurred_at=exported_at,
+        )
+        return HttpResponse("OWL could not prepare the bookmark export.", status=500)
+    publish_notification(
+        event_key=f"bookmark-export:{exported_at.strftime('%Y%m%d%H%M%S%f')}",
+        kind=NotificationKind.BOOKMARK_EXPORT,
+        state=NotificationState.SUCCESS,
+        title="Bookmark export ready",
+        message="Your credential-free JSON bookmark backup was prepared for download.",
+        target_path=reverse("bookmark_manager:settings"),
+        occurred_at=exported_at,
+    )
+    filename = f"owl-bookmarks-{timezone.localdate(exported_at).isoformat()}.json"
     response = HttpResponse(payload, content_type="application/json; charset=utf-8")
     response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
     response.headers["Cache-Control"] = "no-store"
@@ -1677,6 +2232,16 @@ def import_bookmarks(request: HttpRequest) -> HttpResponse:
     form = BookmarkImportForm(request.POST, request.FILES)
     if not form.is_valid():
         detail = "Choose a valid UTF-8 .json or .txt file within the configured size limit."
+        failed_at = timezone.now()
+        publish_notification(
+            event_key=f"bookmark-import-error:{failed_at.strftime('%Y%m%d%H%M%S%f')}",
+            kind=NotificationKind.BOOKMARK_IMPORT,
+            state=NotificationState.ERROR,
+            title="Bookmark import not started",
+            message=detail,
+            target_path=reverse("bookmark_manager:settings"),
+            occurred_at=failed_at,
+        )
         if _is_async_form(request):
             return _action_json(
                 state="invalid",
@@ -1709,6 +2274,16 @@ def import_bookmarks(request: HttpRequest) -> HttpResponse:
         else:
             result = import_bookmarks_document(uploaded.read(), filename=uploaded.name)
     except BookmarkImportError as exc:
+        failed_at = timezone.now()
+        publish_notification(
+            event_key=f"bookmark-import-error:{failed_at.strftime('%Y%m%d%H%M%S%f')}",
+            kind=NotificationKind.BOOKMARK_IMPORT,
+            state=NotificationState.ERROR,
+            title="Bookmark import failed",
+            message=str(exc),
+            target_path=reverse("bookmark_manager:settings"),
+            occurred_at=failed_at,
+        )
         if _is_async_form(request):
             return _action_json(
                 state="invalid",
@@ -1734,6 +2309,7 @@ def import_bookmarks(request: HttpRequest) -> HttpResponse:
             ),
             status=400,
         )
+    _publish_import_completion(result.run)
     destination = (
         reverse("bookmark_manager:settings")
         if request.POST.get("return_to") == "settings"

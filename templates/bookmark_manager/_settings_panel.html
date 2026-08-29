@@ -80,6 +80,7 @@
                     <div>
                     <h4 id="settings-import-result-heading">Import {{ last_import_run.get_status_display|lower }}</h4>
                     <p>{{ last_import_run.outcome }}</p>
+                    {% if last_import_run.completed_at %}<p class="operation-result__timestamp">Completed <time datetime="{{ last_import_run.completed_at|date:'c' }}">{{ last_import_run.completed_at|date:"j M Y, H:i:s T" }}</time></p>{% endif %}
                     </div>
                     <button class="operation-result__dismiss" type="button" aria-label="Dismiss import result" title="Dismiss import result" data-dismiss-import-result><span aria-hidden="true">×</span></button>
                 </div>
@@ -106,7 +107,10 @@
             {% endif %}
 
             <div class="settings-data__actions">
-                <a class="button button--secondary" href="{% url 'bookmark_manager:export' %}">Export JSON</a>
+                <form method="post" action="{% url 'bookmark_manager:export' %}" data-bookmark-export-form>
+                    {% csrf_token %}
+                    <button class="button button--secondary" type="submit">Export JSON</button>
+                </form>
                 <form class="import-form" method="post" action="{% url 'bookmark_manager:import' %}" enctype="multipart/form-data" data-bookmark-import-form>
                     {% csrf_token %}
                     <input type="hidden" name="return_to" value="{{ return_to }}">

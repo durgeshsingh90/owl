@@ -469,7 +469,9 @@ Steps and checkpoints:
 3. Include a duplicate, disallowed host, unsupported protocol, and credential-bearing URL; verify safe record-level results and redaction.
 4. Start sync and confirm repositories clone once beneath the configured root.
 5. Open **Index & refresh status** from the same sidebar and observe queued/running phases, totals, progress, failure details, and worker state without freezing search/navigation.
-6. Confirm default-branch-only, case-insensitive PDF discovery and that all non-PDF files and escaping symlinks are excluded.
+6. Confirm the default-branch-only sparse working tree includes case-insensitive PDF and VSDX
+   files while excluding unrelated files and escaping symlinks; confirm only PDFs enter index
+   discovery.
 7. Confirm readable pages use one-based numbering and that no-text, corrupt, encrypted, parser-failure, and LFS-pointer inputs receive distinct safe states.
 8. Verify the initial published index becomes searchable only after validation.
 

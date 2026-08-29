@@ -10,7 +10,7 @@ import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -23,8 +23,12 @@ from bookmark_manager.models import (
     BookmarkAvailability,
     BookmarkRefreshFailure,
     BookmarkRefreshRun,
+    BookmarkRefreshSchedule,
     BookmarkRefreshStatus,
+    BookmarkRefreshTrigger,
     BookmarkSource,
+    NotificationKind,
+    NotificationState,
 )
 from bookmark_manager.services.bookmark_application import (
     ClientFactory,
@@ -43,6 +47,7 @@ from bookmark_manager.services.configuration import (
     get_active_profile,
 )
 from bookmark_manager.services.confluence_adapter import ConfluenceResultCode
+from bookmark_manager.services.notifications import publish_notification
 from core.logging import redact_log_text
 
 logger = logging.getLogger("owl.bookmarks.refresh")
@@ -59,6 +64,19 @@ TERMINAL_REFRESH_STATUSES = (
 )
 STALE_REFRESH_AFTER = timedelta(minutes=5)
 MAX_REFRESH_ATTEMPTS = 3
+RETRYABLE_REFRESH_ERROR_CODES = {
+    "access_denied",
+    "invalid_credential",
+    "rate_limited",
+    "refresh_error",
+    "unreachable",
+    "unsupported_response",
+}
+NON_RETRYABLE_IMMEDIATE_ERROR_CODES = {
+    "access_denied",
+    "invalid_credential",
+    "not_found",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,30 +209,199 @@ def fetch_confluence_snapshot(
     )
 
 
+def _refresh_interval() -> timedelta:
+    return timedelta(seconds=settings.CONFLUENCE_REFRESH_INTERVAL_SECONDS)
+
+
+def _refresh_retry_delay() -> timedelta:
+    return timedelta(seconds=settings.CONFLUENCE_REFRESH_RETRY_SECONDS)
+
+
+def _run_needs_scheduled_retry(run: BookmarkRefreshRun) -> bool:
+    """Retry interrupted/fatal runs and partial runs with temporary page failures."""
+
+    if run.status in {BookmarkRefreshStatus.FAILED, BookmarkRefreshStatus.INTERRUPTED}:
+        return True
+    if run.status != BookmarkRefreshStatus.SUCCEEDED_WITH_ERRORS:
+        return False
+    return run.failures.filter(error_code__in=RETRYABLE_REFRESH_ERROR_CODES).exists()
+
+
+def _initial_schedule_time(*, at: datetime) -> datetime:
+    latest = (
+        BookmarkRefreshRun.objects.filter(
+            status__in=TERMINAL_REFRESH_STATUSES,
+            completed_at__isnull=False,
+        )
+        .order_by("-completed_at", "-id")
+        .first()
+    )
+    if latest is None or latest.completed_at is None:
+        return at + _refresh_interval()
+    delay = _refresh_retry_delay() if _run_needs_scheduled_retry(latest) else _refresh_interval()
+    return max(at, latest.completed_at + delay)
+
+
+def _backfill_refresh_schedule_history(
+    schedule: BookmarkRefreshSchedule,
+    *,
+    at: datetime,
+) -> BookmarkRefreshSchedule:
+    """Populate schedule timestamps for installations upgraded with existing runs."""
+
+    if schedule.last_attempt_at is not None or schedule.last_run_id is not None:
+        return schedule
+    latest = (
+        BookmarkRefreshRun.objects.filter(
+            status__in=TERMINAL_REFRESH_STATUSES,
+            completed_at__isnull=False,
+        )
+        .prefetch_related("failures")
+        .order_by("-completed_at", "-id")
+        .first()
+    )
+    if latest is None or latest.completed_at is None:
+        return schedule
+    latest_success = next(
+        (
+            candidate
+            for candidate in BookmarkRefreshRun.objects.filter(
+                status__in=(
+                    BookmarkRefreshStatus.SUCCEEDED,
+                    BookmarkRefreshStatus.SUCCEEDED_WITH_ERRORS,
+                ),
+                completed_at__isnull=False,
+            )
+            .prefetch_related("failures")
+            .order_by("-completed_at", "-id")
+            if not _run_needs_scheduled_retry(candidate)
+        ),
+        None,
+    )
+    retry_required = _run_needs_scheduled_retry(latest)
+    schedule.last_run = latest
+    schedule.last_attempt_at = latest.completed_at
+    schedule.last_success_at = latest_success.completed_at if latest_success else None
+    schedule.consecutive_failures = 1 if retry_required else 0
+    delay = _refresh_retry_delay() if retry_required else _refresh_interval()
+    schedule.next_run_at = max(at, latest.completed_at + delay)
+    schedule.save(
+        update_fields=(
+            "last_run",
+            "last_attempt_at",
+            "last_success_at",
+            "consecutive_failures",
+            "next_run_at",
+            "updated_at",
+        )
+    )
+    return schedule
+
+
+def get_refresh_schedule(*, at=None) -> BookmarkRefreshSchedule:
+    """Return the singleton schedule, initializing its first weekly due time."""
+
+    observed_at = at or timezone.now()
+    schedule, _created = BookmarkRefreshSchedule.objects.get_or_create(
+        pk=1,
+        defaults={"next_run_at": _initial_schedule_time(at=observed_at)},
+    )
+    if schedule.next_run_at is None:
+        schedule.next_run_at = _initial_schedule_time(at=observed_at)
+        schedule.save(update_fields=("next_run_at", "updated_at"))
+    return _backfill_refresh_schedule_history(schedule, at=observed_at)
+
+
+def _update_refresh_schedule(
+    run: BookmarkRefreshRun,
+    *,
+    at=None,
+) -> BookmarkRefreshSchedule:
+    """Advance the durable schedule exactly once for one completed run."""
+
+    if run.status not in TERMINAL_REFRESH_STATUSES:
+        return get_refresh_schedule(at=at)
+    observed_at = at or run.completed_at or timezone.now()
+    with transaction.atomic():
+        schedule = BookmarkRefreshSchedule.objects.select_for_update().filter(pk=1).first()
+        if schedule is None:
+            schedule = BookmarkRefreshSchedule.objects.create(
+                pk=1,
+                next_run_at=_initial_schedule_time(at=observed_at),
+            )
+        if schedule.last_run_id == run.pk:
+            return schedule
+
+        retry_required = _run_needs_scheduled_retry(run)
+        schedule.last_run = run
+        schedule.last_attempt_at = run.completed_at or observed_at
+        if retry_required:
+            schedule.consecutive_failures += 1
+            schedule.next_run_at = observed_at + _refresh_retry_delay()
+        else:
+            schedule.consecutive_failures = 0
+            schedule.next_run_at = observed_at + _refresh_interval()
+            if run.status in {
+                BookmarkRefreshStatus.SUCCEEDED,
+                BookmarkRefreshStatus.SUCCEEDED_WITH_ERRORS,
+            }:
+                schedule.last_success_at = run.completed_at or observed_at
+        schedule.save(
+            update_fields=(
+                "last_run",
+                "last_attempt_at",
+                "last_success_at",
+                "consecutive_failures",
+                "next_run_at",
+                "updated_at",
+            )
+        )
+        return schedule
+
+
 def _interrupt_stale_runs(*, at=None) -> None:
     observed_at = at or timezone.now()
     cutoff = observed_at - STALE_REFRESH_AFTER
-    BookmarkRefreshRun.objects.filter(
+    stale_runs: list[BookmarkRefreshRun] = []
+    stale_running = BookmarkRefreshRun.objects.filter(
         status=BookmarkRefreshStatus.RUNNING,
         heartbeat_at__lt=cutoff,
-    ).update(
-        status=BookmarkRefreshStatus.INTERRUPTED,
-        completed_at=observed_at,
-        last_error_message="The background worker stopped before this refresh completed.",
     )
-    BookmarkRefreshRun.objects.filter(
+    running_ids = tuple(stale_running.values_list("pk", flat=True))
+    if running_ids:
+        stale_running.update(
+            status=BookmarkRefreshStatus.INTERRUPTED,
+            completed_at=observed_at,
+            last_error_message="The background worker stopped before this refresh completed.",
+        )
+        stale_runs.extend(BookmarkRefreshRun.objects.filter(pk__in=running_ids))
+
+    stale_queued = BookmarkRefreshRun.objects.filter(
         status=BookmarkRefreshStatus.QUEUED,
         requested_at__lt=cutoff,
-    ).update(
-        status=BookmarkRefreshStatus.INTERRUPTED,
-        completed_at=observed_at,
-        last_error_message="The background worker did not start this refresh.",
     )
+    queued_ids = tuple(stale_queued.values_list("pk", flat=True))
+    if queued_ids:
+        stale_queued.update(
+            status=BookmarkRefreshStatus.INTERRUPTED,
+            completed_at=observed_at,
+            last_error_message="The background worker did not start this refresh.",
+        )
+        stale_runs.extend(BookmarkRefreshRun.objects.filter(pk__in=queued_ids))
+
+    for stale_run in stale_runs:
+        _update_refresh_schedule(stale_run, at=observed_at)
+        publish_refresh_notification(stale_run)
 
 
-def create_or_get_refresh_run() -> tuple[BookmarkRefreshRun, bool]:
+def create_or_get_refresh_run(
+    *,
+    trigger: str = BookmarkRefreshTrigger.MANUAL,
+) -> tuple[BookmarkRefreshRun, bool]:
     """Create one queued run, or return the already active global refresh."""
 
+    if trigger not in BookmarkRefreshTrigger.values:
+        raise ValueError("The refresh trigger is not supported.")
     _interrupt_stale_runs()
     with transaction.atomic():
         active = (
@@ -225,12 +412,135 @@ def create_or_get_refresh_run() -> tuple[BookmarkRefreshRun, bool]:
         if active is not None:
             return active, False
         try:
-            return BookmarkRefreshRun.objects.create(), True
+            return BookmarkRefreshRun.objects.create(trigger=trigger), True
         except IntegrityError:
             active = BookmarkRefreshRun.objects.filter(status__in=ACTIVE_REFRESH_STATUSES).first()
             if active is None:
                 raise
             return active, False
+
+
+def publish_refresh_notification(run: BookmarkRefreshRun) -> None:
+    if run.status in ACTIVE_REFRESH_STATUSES:
+        state = NotificationState.RUNNING
+        title = (
+            "Scheduled Confluence refresh started"
+            if run.trigger != BookmarkRefreshTrigger.MANUAL
+            else "Confluence refresh started"
+        )
+        message = (
+            f"{run.processed_bookmarks} of {run.total_bookmarks} saved pages processed "
+            "in the background."
+        )
+        occurred_at = run.started_at or run.requested_at
+    elif run.status == BookmarkRefreshStatus.SUCCEEDED:
+        state = NotificationState.SUCCESS
+        title = "Confluence refresh completed"
+        message = f"Updated {run.succeeded_bookmarks} saved Confluence pages."
+        occurred_at = run.completed_at or timezone.now()
+    elif run.status == BookmarkRefreshStatus.SUCCEEDED_WITH_ERRORS:
+        state = NotificationState.WARNING
+        title = "Confluence refresh completed with issues"
+        retry_note = (
+            " Temporary failures will retry after two hours."
+            if _run_needs_scheduled_retry(run)
+            else " Deleted or inaccessible pages remain available as local references."
+        )
+        message = (
+            f"Updated {run.succeeded_bookmarks}; {run.failed_bookmarks} need attention.{retry_note}"
+        )
+        occurred_at = run.completed_at or timezone.now()
+    else:
+        state = NotificationState.ERROR
+        title = "Confluence refresh failed"
+        message = (
+            run.last_error_message or "The background refresh could not finish."
+        ) + " OWL will retry after two hours."
+        occurred_at = run.completed_at or timezone.now()
+
+    publish_notification(
+        event_key=f"confluence-refresh:{run.pk}",
+        kind=NotificationKind.CONFLUENCE_REFRESH,
+        state=state,
+        title=title,
+        message=message,
+        target_path=f"/bookmarks/?refresh_run={run.pk}#refresh-result",
+        occurred_at=occurred_at,
+    )
+
+
+def queue_due_scheduled_refresh(
+    *,
+    at=None,
+) -> tuple[BookmarkRefreshRun | None, bool]:
+    """Queue one due weekly/retry run without blocking the caller."""
+
+    observed_at = at or timezone.now()
+    _interrupt_stale_runs(at=observed_at)
+    get_refresh_schedule(at=observed_at)
+    with transaction.atomic():
+        schedule = BookmarkRefreshSchedule.objects.select_for_update().get(pk=1)
+        if (
+            not schedule.enabled
+            or schedule.next_run_at is None
+            or schedule.next_run_at > observed_at
+        ):
+            return None, False
+        trigger = (
+            BookmarkRefreshTrigger.RETRY
+            if schedule.consecutive_failures
+            else BookmarkRefreshTrigger.SCHEDULED
+        )
+        # Reserve the due slot before launching. Completion replaces this with the
+        # next weekly or two-hour retry time.
+        schedule.next_run_at = observed_at + _refresh_retry_delay()
+        schedule.save(update_fields=("next_run_at", "updated_at"))
+
+    run, created = create_or_get_refresh_run(trigger=trigger)
+    if not created:
+        return run, False
+    publish_refresh_notification(run)
+    try:
+        launch_refresh_worker(run.pk)
+    except OSError:
+        mark_refresh_launch_failed(run.pk)
+        run.refresh_from_db()
+        return run, False
+    return run, True
+
+
+def refresh_schedule_snapshot(
+    *,
+    at=None,
+    initialize: bool = True,
+) -> dict[str, object]:
+    observed_at = at or timezone.now()
+    schedule = (
+        get_refresh_schedule(at=observed_at)
+        if initialize
+        else BookmarkRefreshSchedule.objects.filter(pk=1).first()
+    )
+    if schedule is None:
+        return {
+            "enabled": True,
+            "next_run_at": _initial_schedule_time(at=observed_at).isoformat(),
+            "last_attempt_at": None,
+            "last_success_at": None,
+            "retrying": False,
+            "consecutive_failures": 0,
+        }
+    return {
+        "enabled": schedule.enabled,
+        "next_run_at": schedule.next_run_at.isoformat() if schedule.next_run_at else None,
+        "last_attempt_at": (
+            schedule.last_attempt_at.isoformat() if schedule.last_attempt_at else None
+        ),
+        "last_success_at": (
+            schedule.last_success_at.isoformat() if schedule.last_success_at else None
+        ),
+        "retrying": schedule.consecutive_failures > 0,
+        "consecutive_failures": schedule.consecutive_failures,
+    }
 
 
 def launch_refresh_worker(run_id: int) -> subprocess.Popen[bytes]:
@@ -247,6 +557,7 @@ def launch_refresh_worker(run_id: int) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         command,
         cwd=settings.BASE_DIR,
+        stdin=subprocess.DEVNULL,
         close_fds=True,
         start_new_session=os.name != "nt",
     )
@@ -254,7 +565,7 @@ def launch_refresh_worker(run_id: int) -> subprocess.Popen[bytes]:
 
 def mark_refresh_launch_failed(run_id: int) -> None:
     now = timezone.now()
-    BookmarkRefreshRun.objects.filter(
+    updated = BookmarkRefreshRun.objects.filter(
         pk=run_id,
         status=BookmarkRefreshStatus.QUEUED,
     ).update(
@@ -264,11 +575,15 @@ def mark_refresh_launch_failed(run_id: int) -> None:
         completed_at=now,
         last_error_message="OWL could not start the background refresh worker.",
     )
+    if updated:
+        run = BookmarkRefreshRun.objects.get(pk=run_id)
+        _update_refresh_schedule(run, at=now)
+        publish_refresh_notification(run)
 
 
 def mark_refresh_worker_failed(run_id: int) -> None:
     now = timezone.now()
-    BookmarkRefreshRun.objects.filter(
+    updated = BookmarkRefreshRun.objects.filter(
         pk=run_id,
         status__in=ACTIVE_REFRESH_STATUSES,
     ).update(
@@ -277,6 +592,10 @@ def mark_refresh_worker_failed(run_id: int) -> None:
         completed_at=now,
         last_error_message="The background worker stopped before this refresh completed.",
     )
+    if updated:
+        run = BookmarkRefreshRun.objects.get(pk=run_id)
+        _update_refresh_schedule(run, at=now)
+        publish_refresh_notification(run)
 
 
 def _claim_run(run_id: int) -> tuple[BookmarkRefreshRun, tuple[tuple[int, str], ...]] | None:
@@ -304,6 +623,7 @@ def _claim_run(run_id: int) -> tuple[BookmarkRefreshRun, tuple[tuple[int, str], 
                 "worker_pid",
             )
         )
+        publish_refresh_notification(run)
         return run, bookmarks
 
 
@@ -324,6 +644,8 @@ def _finish_run(run: BookmarkRefreshRun, *, fatal_message: str = "") -> Bookmark
         run.status = BookmarkRefreshStatus.SUCCEEDED
         run.last_error_message = ""
     run.save(update_fields=("status", "heartbeat_at", "completed_at", "last_error_message"))
+    _update_refresh_schedule(run, at=now)
+    publish_refresh_notification(run)
     return run
 
 
@@ -463,6 +785,7 @@ def execute_refresh_run(
 
     pending = list(bookmarks)
     latest_failures: dict[int, RefreshFetchResult] = {}
+    attempt_counts: dict[int, int] = {}
     close_old_connections()
     try:
         with ThreadPoolExecutor(
@@ -536,7 +859,9 @@ def execute_refresh_run(
                             continue
 
                     latest_failures[bookmark_id] = fetched
-                    failed_ids.add(bookmark_id)
+                    attempt_counts[bookmark_id] = attempt_number
+                    if fetched.error_code not in NON_RETRYABLE_IMMEDIATE_ERROR_CODES:
+                        failed_ids.add(bookmark_id)
                     _save_run_progress(run)
 
                 # Preserve original bookmark order for each retry round. No retry is
@@ -545,13 +870,12 @@ def execute_refresh_run(
     finally:
         close_old_connections()
 
-    for bookmark_id, _page_id in pending:
-        fetched = latest_failures[bookmark_id]
+    for bookmark_id, fetched in latest_failures.items():
         _finalize_bookmark_failure(
             run,
             fetched,
             attempted_at=timezone.now(),
-            attempt_count=MAX_REFRESH_ATTEMPTS,
+            attempt_count=attempt_counts.get(bookmark_id, 1),
             profile_token=active_profile.token,
         )
         _save_run_progress(run, outcome="failed")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import uuid
 from datetime import timedelta
 from urllib.parse import urlsplit
 
@@ -164,6 +165,52 @@ class BookmarkCategory(models.Model):
         return hostname.removeprefix("www.") or hostname
 
 
+class BookmarkFolder(models.Model):
+    """A flat, user-owned folder independent of the canonical source hierarchy."""
+
+    public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    name = models.CharField(max_length=120)
+    normalized_name = models.CharField(max_length=255, unique=True, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["normalized_name", "id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(normalized_name=""),
+                name="bookmark_folder_name_not_blank",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return self.name
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            kwargs["update_fields"] = set(update_fields) | {
+                "name",
+                "normalized_name",
+                "updated_at",
+            }
+        return super().save(*args, **kwargs)
+
+    @staticmethod
+    def normalize_name(value: object) -> str:
+        return _normalized_personal_name(value)
+
+    def clean(self) -> None:
+        super().clean()
+        self.name = _canonical_personal_name(self.name)
+        self.normalized_name = self.normalize_name(self.name)
+        if not self.normalized_name:
+            raise ValidationError({"name": "A bookmark-folder name cannot be empty."})
+        if len(self.name) > self._meta.get_field("name").max_length:
+            raise ValidationError({"name": "A bookmark-folder name cannot exceed 120 characters."})
+
+
 class BookmarkImportStatus(models.TextChoices):
     PENDING = "pending", "Pending"
     RUNNING = "running", "Running"
@@ -179,6 +226,108 @@ class BookmarkRefreshStatus(models.TextChoices):
     SUCCEEDED_WITH_ERRORS = "succeeded_with_errors", "Succeeded with errors"
     FAILED = "failed", "Failed"
     INTERRUPTED = "interrupted", "Interrupted"
+
+
+class BookmarkRefreshTrigger(models.TextChoices):
+    MANUAL = "manual", "Manual"
+    SCHEDULED = "scheduled", "Scheduled"
+    RETRY = "retry", "Scheduled retry"
+
+
+class NotificationKind(models.TextChoices):
+    BOOKMARK_IMPORT = "bookmark_import", "Bookmark import"
+    BOOKMARK_EXPORT = "bookmark_export", "Bookmark export"
+    CONFLUENCE_REFRESH = "confluence_refresh", "Confluence refresh"
+
+
+class NotificationState(models.TextChoices):
+    RUNNING = "running", "Running"
+    SUCCESS = "success", "Success"
+    WARNING = "warning", "Warning"
+    ERROR = "error", "Error"
+
+
+class Notification(models.Model):
+    """One durable, secret-safe import, export, or refresh notification card."""
+
+    event_key = models.CharField(max_length=128, unique=True)
+    kind = models.CharField(max_length=32, choices=NotificationKind, db_index=True)
+    state = models.CharField(max_length=16, choices=NotificationState, db_index=True)
+    title = models.CharField(max_length=200)
+    message = models.CharField(max_length=500, blank=True)
+    target_path = models.CharField(max_length=2048, blank=True)
+    occurred_at = models.DateTimeField(default=timezone.now, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    read_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        ordering = ["-occurred_at", "-id"]
+        indexes = [
+            models.Index(
+                fields=["read_at", "-occurred_at"],
+                name="bmk_notif_unread_time_idx",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.get_kind_display()} — {self.title}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            kwargs["update_fields"] = set(update_fields) | {
+                "event_key",
+                "title",
+                "message",
+                "target_path",
+                "updated_at",
+            }
+        return super().save(*args, **kwargs)
+
+    def clean(self) -> None:
+        super().clean()
+        self.event_key = str(self.event_key or "").strip().casefold()
+        self.title = _sanitized_single_line(self.title, fallback="OWL notification")
+        self.message = _sanitized_single_line(self.message)
+        raw_target_path = str(self.target_path or "").strip()
+        self.target_path = raw_target_path
+
+        errors: dict[str, str] = {}
+        if not re.fullmatch(r"[a-z0-9][a-z0-9:._-]{0,127}", self.event_key):
+            errors["event_key"] = "Use a stable lowercase notification event key."
+        if self.kind not in NotificationKind.values:
+            errors["kind"] = "The notification kind is not supported."
+        if self.state not in NotificationState.values:
+            errors["state"] = "The notification state is not supported."
+        if len(self.title) > self._meta.get_field("title").max_length:
+            errors["title"] = "A notification title cannot exceed 200 characters."
+        if len(self.message) > self._meta.get_field("message").max_length:
+            errors["message"] = "A notification message cannot exceed 500 characters."
+        if raw_target_path:
+            try:
+                parsed_target = urlsplit(raw_target_path)
+            except ValueError:
+                parsed_target = None
+            if (
+                parsed_target is None
+                or parsed_target.scheme
+                or parsed_target.netloc
+                or not raw_target_path.startswith("/")
+                or raw_target_path.startswith("//")
+                or "\\" in raw_target_path
+                or any(not character.isprintable() for character in raw_target_path)
+            ):
+                errors["target_path"] = "A notification target must be a safe local OWL path."
+            elif len(raw_target_path) > self._meta.get_field("target_path").max_length:
+                errors["target_path"] = "A notification target cannot exceed 2048 characters."
+        for field_name in ("occurred_at", "read_at"):
+            value = getattr(self, field_name)
+            if value is not None and timezone.is_naive(value):
+                errors[field_name] = "Notification timestamps must include a timezone."
+        if errors:
+            raise ValidationError(errors)
 
 
 class BookmarkActivityType(models.TextChoices):
@@ -507,6 +656,12 @@ class BookmarkRefreshRun(models.Model):
         default=BookmarkRefreshStatus.QUEUED,
         db_index=True,
     )
+    trigger = models.CharField(
+        max_length=16,
+        choices=BookmarkRefreshTrigger,
+        default=BookmarkRefreshTrigger.MANUAL,
+        db_index=True,
+    )
     total_bookmarks = models.PositiveIntegerField(default=0)
     processed_bookmarks = models.PositiveIntegerField(default=0)
     succeeded_bookmarks = models.PositiveIntegerField(default=0)
@@ -549,6 +704,42 @@ class BookmarkRefreshRun(models.Model):
             BookmarkRefreshStatus.QUEUED,
             BookmarkRefreshStatus.RUNNING,
         }
+
+
+class BookmarkRefreshSchedule(models.Model):
+    """Singleton schedule for weekly refreshes and recoverable two-hour retries."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    enabled = models.BooleanField(default=True)
+    next_run_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    consecutive_failures = models.PositiveIntegerField(default=0)
+    last_run = models.ForeignKey(
+        BookmarkRefreshRun,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="schedule_updates",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "bookmark refresh schedule"
+        verbose_name_plural = "bookmark refresh schedule"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(id=1),
+                name="bookmark_refresh_single_schedule",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return "Weekly Confluence refresh"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        return super().save(*args, **kwargs)
 
 
 class BookmarkRefreshFailure(models.Model):
@@ -688,6 +879,13 @@ class Bookmark(models.Model):
     canonical_url = models.URLField(max_length=2048, null=True, blank=True, unique=True)
     category = models.ForeignKey(
         BookmarkCategory,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="bookmarks",
+    )
+    manual_folder = models.ForeignKey(
+        BookmarkFolder,
         null=True,
         blank=True,
         on_delete=models.PROTECT,

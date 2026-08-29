@@ -361,6 +361,9 @@
     const peopleSearchStatus = document.querySelector("[data-people-search-status]");
     const peopleEntries = Array.from(document.querySelectorAll("[data-people-entry]"));
     const peopleNoResults = document.querySelector("[data-people-no-results]");
+    const peopleSelectionInputs = Array.from(document.querySelectorAll("[data-person-select]"));
+    const peopleSelectionStatus = document.querySelector("[data-people-selection-status]");
+    const peopleFilterSubmit = document.querySelector("[data-people-filter-submit]");
 
     const normalizedPersonName = (value) =>
         String(value || "")
@@ -391,6 +394,19 @@
             } else {
                 peopleSearchStatus.textContent = `${visibleCount} ${visibleCount === 1 ? "person" : "people"} found`;
             }
+        }
+    };
+
+    const renderPeopleSelection = () => {
+        const selectedCount = peopleSelectionInputs.filter((input) => input.checked).length;
+        peopleSelectionInputs.forEach((input) => {
+            input.closest(".people-filter-option")?.classList.toggle("is-active", input.checked);
+        });
+        if (peopleSelectionStatus) {
+            peopleSelectionStatus.textContent = `${selectedCount} selected`;
+        }
+        if (peopleFilterSubmit) {
+            peopleFilterSubmit.textContent = selectedCount === 0 ? "Show all" : "Show pages";
         }
     };
 
@@ -427,6 +443,10 @@
             closePeopleSearch();
         }
     });
+    peopleSelectionInputs.forEach((input) => {
+        input.addEventListener("change", renderPeopleSelection);
+    });
+    renderPeopleSelection();
 
     const statusText = document.querySelector("[data-global-status-text]");
     const announce = (message) => {
@@ -455,14 +475,20 @@
 
     const refreshResult = document.querySelector("[data-refresh-result]");
     const refreshFailureList = refreshResult?.querySelector("[data-refresh-failure-list]");
+    let refreshResultHistoryLocked = refreshResult?.dataset.historyLocked === "true";
     refreshResult?.querySelector("[data-dismiss-refresh-result]")?.addEventListener("click", () => {
         refreshResult.hidden = true;
+        refreshResultHistoryLocked = false;
+        removeQueryParameter("refresh_run");
         announce("Refresh issues dismissed");
         document.querySelector("[data-global-refresh-button]")?.focus();
     });
 
     const renderRefreshFailures = (failures) => {
         if (!refreshResult || !refreshFailureList || !Array.isArray(failures)) {
+            return;
+        }
+        if (refreshResultHistoryLocked) {
             return;
         }
         refreshFailureList.replaceChildren();
@@ -503,6 +529,7 @@
     let globalRefreshPollTimer = null;
     let globalRefreshReloadPending = globalRefresh?.dataset.active === "true";
     let globalRefreshReloadScheduled = false;
+    let globalRefreshObservedRunId = Number(globalRefresh?.dataset.runId) || 0;
 
     const reloadAfterGlobalRefresh = () => {
         if (globalRefreshReloadScheduled) {
@@ -526,7 +553,7 @@
         }
         return new Intl.DateTimeFormat(undefined, {
             dateStyle: "medium",
-            timeStyle: "short",
+            timeStyle: "medium",
         }).format(parsed);
     };
 
@@ -536,6 +563,14 @@
         }
         const active = Boolean(refresh.active);
         const status = refresh.status || "idle";
+        const runId = Number(refresh.run_id) || 0;
+        if (runId && runId !== globalRefreshObservedRunId) {
+            globalRefreshObservedRunId = runId;
+            globalRefreshReloadPending = true;
+        }
+        if (active) {
+            globalRefreshReloadPending = true;
+        }
         const total = Number(refresh.total) || 0;
         const processed = Number(refresh.processed) || 0;
         const progress = Math.max(0, Math.min(100, Number(refresh.progress) || 0));
@@ -634,6 +669,7 @@
         globalRefreshButton.disabled = true;
         globalRefreshButton.setAttribute("aria-busy", "true");
         globalRefreshSpinner.hidden = false;
+        refreshResultHistoryLocked = false;
         if (globalRefreshLabel) {
             globalRefreshLabel.textContent = "Starting refresh…";
         }
@@ -683,6 +719,10 @@
             globalRefreshTime.textContent = `Last completed ${formatted}`;
         }
     }
+
+    window.addEventListener("owl:refresh-status", (event) => {
+        renderGlobalRefresh(event.detail || {});
+    });
 
     const safeStorage = {
         get(key, fallback = null) {
@@ -790,6 +830,9 @@
     }
 
     const treeRoot = document.querySelector("[data-bookmark-tree]");
+    if (treeRoot && !treeRoot.querySelector('[data-tree-row][tabindex="0"]')) {
+        treeRoot.querySelector("[data-tree-row]")?.setAttribute("tabindex", "0");
+    }
     const storedSelection = safeStorage.get(selectionStorageKey, "");
     if (
         treeRoot &&
@@ -1025,6 +1068,197 @@
                     detailsCheckbox.dataset.bookmarkId !== treeRoot?.dataset.selectedBookmark
                 ) {
                     showTreeRowDetails(detailsCheckbox.closest("[data-tree-row]"));
+                }
+            }
+        });
+    });
+
+    const folderMoveUrl = treeRoot?.dataset.folderMoveUrl || "";
+    const folderReturnUrl =
+        treeRoot?.dataset.folderReturnUrl || `${window.location.pathname}${window.location.search}`;
+    const folderDropTargets = Array.from(document.querySelectorAll("[data-folder-drop-target]"));
+    const bookmarkDragHandles = Array.from(document.querySelectorAll("[data-bookmark-drag]"));
+    let draggedBookmarkId = "";
+    let draggedBookmarkTitle = "";
+
+    const folderActionPayload = async (response) => {
+        let payload = {};
+        try {
+            payload = await response.json();
+        } catch (_error) {
+            payload = {};
+        }
+        if (!response.ok) {
+            throw new Error(payload.detail || "The personal-folder change could not be saved.");
+        }
+        return payload;
+    };
+
+    const selectedIdsForFolderMove = (fallbackId) => {
+        const selected = selectedBookmarkChecks().map((checkbox) => checkbox.dataset.bookmarkId);
+        return selected.includes(String(fallbackId)) && selected.length > 1
+            ? selected
+            : [String(fallbackId)];
+    };
+
+    const moveBookmarksToFolder = async (bookmarkIds, folderId) => {
+        if (!folderMoveUrl || !bookmarkIds.length) {
+            return;
+        }
+        const body = new FormData();
+        bookmarkIds.forEach((bookmarkId) => body.append("bookmark_ids", bookmarkId));
+        body.append("folder_id", folderId || "");
+        body.append("return_to", folderReturnUrl);
+        const response = await fetch(folderMoveUrl, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "X-CSRFToken": csrfToken(),
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            body,
+        });
+        const payload = await folderActionPayload(response);
+        announce(payload.detail || "Bookmark folder updated");
+        window.location.assign(payload.redirect || folderReturnUrl);
+    };
+
+    bookmarkDragHandles.forEach((handle) => {
+        handle.addEventListener("dragstart", (event) => {
+            draggedBookmarkId = handle.dataset.bookmarkId || "";
+            draggedBookmarkTitle = handle.dataset.bookmarkTitle || "bookmark";
+            if (!draggedBookmarkId || !event.dataTransfer) {
+                event.preventDefault();
+                return;
+            }
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", draggedBookmarkId);
+            handle.closest("[data-tree-row]")?.classList.add("is-dragging");
+            announce(`Moving ${draggedBookmarkTitle}. Drop it on a personal folder.`);
+        });
+        handle.addEventListener("dragend", () => {
+            handle.closest("[data-tree-row]")?.classList.remove("is-dragging");
+            folderDropTargets.forEach((target) => target.classList.remove("is-drop-target"));
+            draggedBookmarkId = "";
+            draggedBookmarkTitle = "";
+        });
+    });
+
+    folderDropTargets.forEach((target) => {
+        target.addEventListener("dragenter", (event) => {
+            if (!draggedBookmarkId) {
+                return;
+            }
+            event.preventDefault();
+            target.classList.add("is-drop-target");
+        });
+        target.addEventListener("dragover", (event) => {
+            if (!draggedBookmarkId) {
+                return;
+            }
+            event.preventDefault();
+            if (event.dataTransfer) {
+                event.dataTransfer.dropEffect = "move";
+            }
+        });
+        target.addEventListener("dragleave", (event) => {
+            const relatedTarget = event.relatedTarget;
+            if (!(relatedTarget instanceof Node) || !target.contains(relatedTarget)) {
+                target.classList.remove("is-drop-target");
+            }
+        });
+        target.addEventListener("drop", async (event) => {
+            if (!draggedBookmarkId) {
+                return;
+            }
+            event.preventDefault();
+            target.classList.remove("is-drop-target");
+            const folderId = target.dataset.folderDropTarget || "";
+            const bookmarkIds = selectedIdsForFolderMove(draggedBookmarkId);
+            try {
+                await moveBookmarksToFolder(bookmarkIds, folderId);
+            } catch (error) {
+                announce(error instanceof Error ? error.message : "The bookmark could not be moved.");
+            }
+        });
+    });
+
+    const folderCreateForm = document.querySelector("[data-folder-create-form]");
+    const folderCreateToggle = document.querySelector("[data-folder-create-toggle]");
+    const folderCreatePanel = document.querySelector("[data-folder-create-panel]");
+    const folderNameInput = folderCreateForm?.querySelector("[name='name']");
+    const closeFolderCreate = () => {
+        if (folderCreatePanel) {
+            folderCreatePanel.hidden = true;
+        }
+        folderCreateToggle?.setAttribute("aria-expanded", "false");
+    };
+    folderCreateToggle?.addEventListener("click", () => {
+        const opening = Boolean(folderCreatePanel?.hidden);
+        if (folderCreatePanel) {
+            folderCreatePanel.hidden = !opening;
+        }
+        folderCreateToggle.setAttribute("aria-expanded", String(opening));
+        if (opening) {
+            folderNameInput?.focus();
+        }
+    });
+    folderCreateForm?.querySelector("[data-folder-create-cancel]")?.addEventListener("click", () => {
+        closeFolderCreate();
+        folderCreateToggle?.focus();
+    });
+    folderCreateForm?.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+            event.preventDefault();
+            closeFolderCreate();
+            folderCreateToggle?.focus();
+        }
+    });
+    folderCreateForm?.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const submitButton = folderCreateForm.querySelector("button[type='submit']");
+        if (submitButton) {
+            submitButton.disabled = true;
+        }
+        try {
+            const response = await fetch(folderCreateForm.action, {
+                method: "POST",
+                credentials: "same-origin",
+                headers: {
+                    "X-CSRFToken": csrfToken(),
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                body: new FormData(folderCreateForm),
+            });
+            const payload = await folderActionPayload(response);
+            announce(payload.detail || "Personal folder created");
+            window.location.assign(payload.redirect || folderReturnUrl);
+        } catch (error) {
+            announce(error instanceof Error ? error.message : "The folder could not be created.");
+            folderNameInput?.focus();
+        } finally {
+            if (submitButton) {
+                submitButton.disabled = false;
+            }
+        }
+    });
+
+    document.querySelectorAll("[data-folder-move-form]").forEach((form) => {
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const fallbackId = form.dataset.bookmarkId || "";
+            const folderSelect = form.querySelector("[name='folder_id']");
+            const bookmarkIds = selectedIdsForFolderMove(fallbackId);
+            const submitButton = form.querySelector("button[type='submit']");
+            if (submitButton) {
+                submitButton.disabled = true;
+            }
+            try {
+                await moveBookmarksToFolder(bookmarkIds, folderSelect?.value || "");
+            } catch (error) {
+                announce(error instanceof Error ? error.message : "The bookmark could not be moved.");
+                if (submitButton) {
+                    submitButton.disabled = false;
                 }
             }
         });

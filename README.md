@@ -5,8 +5,8 @@ two app areas:
 
 - **Bookmark Manager** is the working app for ordinary web bookmarks and locally stored Confluence
   pages;
-- **Bitbucket Search** is the prepared interface for future repository PDF synchronization and
-  local search. Its repository and indexing backend is not implemented yet.
+- **Bitbucket Search** manages approved Git/Bitbucket repositories with background clone and
+  refresh workers, extracts PDF text page by page, and searches a local full-text index.
 
 OWL runs on your own computer and listens only on `127.0.0.1`. The repository is public, but
 your credentials, databases, repository checkouts, PDF contents, indexes, and logs must remain
@@ -22,7 +22,9 @@ counts, refresh issues, a Top 10 most-viewed table, and useful recent/unopened p
 GitHub-style yearly calendar can be filtered by pages added, opened, refreshed, and note edits.
 Historical saved dates are complete; detailed daily opens, refreshes, and note edits are counted
 from the analytics migration onward because older versions stored only aggregate open counts.
-Home reads OWL's local database and does not contact an external service by itself.
+Home also shows a cached approximation of the local database size, table count, total stored table
+entries, and the exact date and time of that measurement. Home reads OWL's local database and does
+not contact an external service by itself.
 
 ### Bookmark Manager — working
 
@@ -51,26 +53,60 @@ Bookmark Manager is the main implemented app. It can:
   failures, and export a credential-free JSON backup;
 - refresh all saved Confluence pages in a separate background worker so titles, hierarchy,
   metadata, timestamps, availability, and searchable text can update while you continue working.
-  The header shows progress and the last completed refresh time.
+  The header shows progress and the exact last-completed date and time. OWL schedules this weekly;
+  temporary or credential failures retry after two hours until a later success, while permanently
+  deleted pages remain visible as references without causing an endless retry loop.
+
+The notification bell shared by every OWL app shows unread import, export, and Confluence refresh
+cards. It also shows live background progress, the next weekly refresh, retry state, and exact local
+timestamps. Notifications are stored locally and contain sanitized status text rather than
+credentials or Confluence page bodies.
 
 All searching and organization happen against OWL's local SQLite database. Confluence is contacted
 only for an explicit connection test, a save/import that retrieves a Confluence page, or a refresh
 operation.
 
-### Bitbucket Search — interface foundation
+### Bitbucket Search — repository synchronization and PDF search working
 
-Bitbucket Search currently provides the responsive light/dark interface and truthful zero state
-for the planned PDF workflow. It shows where repository setup, PDF search, result tables, totals,
-and indexing progress will live. At this stage:
+Bitbucket Search now provides repository registration and durable background synchronization:
 
-- no Bitbucket or Git repository is connected;
-- no clone, pull, or other Git command is run by the page;
-- no PDF is scanned, parsed, copied, or indexed;
-- repository search, PDF search, filters, result actions, and indexing controls remain disabled.
+- add an approved SSH or HTTPS repository URL from the left repository rail;
+- clone it once in a detached background worker, then use fetch plus fast-forward refreshes;
+- refresh every enabled repository once per local calendar day with a bounded parallel repository
+  worker pool. A failed daily attempt retries after two hours, up to three retries after the initial
+  attempt during that day's cycle; a success stops that repository's remaining retries;
+- show queued/downloading/updating progress, a green ready tick, and safe failure states;
+- keep managed checkouts under `var/media/bitbucket/repositories/` by default;
+- use partial clone and sparse checkout to materialize case-insensitive PDF and VSDX files. If a
+  server does not support partial filtering—or the repository has no commits inside the configured
+  history window—OWL falls back to a depth-one checkout while keeping the working tree
+  document-only;
+- keep durable queued work waiting for an available worker and publish regular heartbeats during
+  long, otherwise-silent Git and document-discovery steps;
+- hydrate PDF/VSDX Git LFS objects with a document-filtered pull when Git LFS is available, and
+  refuse to report unresolved pointer files as downloaded documents;
+- block refresh instead of resetting, cleaning, or overwriting a dirty, locally-ahead, or diverged
+  checkout;
+- queue new or changed PDFs for a separate durable background extraction worker only after
+  repository synchronization is idle;
+- run the permissively licensed `pypdf` parser in bounded child processes, store normalized text
+  by one-based page, and isolate encrypted, corrupt, pointer, timeout, and resource-limit failures
+  to the affected PDF;
+- reuse byte-identical extracted revisions and atomically publish SQLite FTS5 entries. If a changed
+  PDF fails, OWL keeps its last published text searchable and labels it stale;
+- search locally with removable exact-phrase chips, ALL/ANY matching across repository, path,
+  filename, and separate PDF pages, plus repository/index-state filters, relevance sorts, matched
+  page explanations, and bounded highlighted snippets;
+- keep the existing newest-first Today, Yesterday, week, month, six-month, current-year, last-year,
+  and older-year timeline when no search is active.
 
-The future workflow is intended to synchronize approved repositories into private local working
-copies and build a local PDF index. The interface does not claim those unavailable capabilities
-are working today.
+Repository URLs are canonicalized and deduplicated. Credentials embedded in URLs are rejected;
+Git uses the existing SSH agent or external credential manager. `bitbucket.org` is approved by
+default. Set `BITBUCKET_ALLOWED_HOSTS` to a comma-separated host list for internal Bitbucket
+servers, or set it explicitly blank to disable repository additions.
+
+VSDX extraction and OCR remain out of scope. Image-only PDFs are catalogued and reported as having
+no machine-readable text; OWL does not invent text that the parser cannot read.
 
 ### Shared utilities
 
@@ -85,6 +121,7 @@ The complete product contract is in [work_prompts](work_prompts/README.md).
 - macOS, Linux, or Windows 10/11;
 - Python 3.13 or 3.14;
 - Git;
+- Git LFS when a managed repository stores its PDF or VSDX content in LFS;
 - an internet connection while cloning OWL and downloading the pinned Python packages.
 
 You do not need a Confluence PAT for setup or automated tests. You need a Confluence Data Center
@@ -135,7 +172,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 if not exist .env copy .env.example .env
 python manage.py migrate
-python manage.py runserver
+python manage.py run_owl
 ```
 
 `python --version` must report Python 3.13.x or 3.14.x. The activated interpreter shown by
@@ -148,7 +185,7 @@ app. This preserves your bookmarks while adding any columns required by the newe
 git pull
 .venv\Scripts\activate.bat
 python manage.py migrate
-python manage.py runserver
+python manage.py run_owl
 ```
 
 The first start creates a strong machine-local Django key under `var/secrets/` when
@@ -160,23 +197,66 @@ From `/Users/durgesh/Projects/owl`, run:
 
 ```bash
 source .venv/bin/activate
-python manage.py runserver 127.0.0.1:8000
+python manage.py run_owl 127.0.0.1:8000
 ```
 
 Then open [http://127.0.0.1:8000/](http://127.0.0.1:8000/) in your browser. Press `Control-C`
 in Terminal when you want to stop OWL.
 
-The Bookmark Manager's global refresh button starts a separate local worker process automatically.
-That worker retrieves saved Confluence pages with up to five concurrent read-only requests while
-the web app remains available. Progress and the last completed time appear beside the refresh icon.
+`run_owl` starts the local website, its resident weekly Confluence scheduler, a bounded parallel
+Bitbucket repository-worker pool, and a separate bounded PDF-worker pool. The Bitbucket supervisor
+queues every enabled repository once per local calendar day. Each failed daily attempt waits two
+hours before retrying, with one initial attempt and at most three retries during that day's cycle.
+Repository and PDF worker limits are configured independently with `BITBUCKET_MAX_REPO_WORKERS` and
+`PDF_MAX_EXTRACTION_WORKERS`.
+
+Keep `run_owl` running for automatic Bitbucket refreshes to start at their due time. OWL cannot run
+Git while the application is stopped, but its schedule and jobs are durable: after a restart,
+`run_owl` catches up the current local day's missing or due retry work without duplicating active
+repository jobs. On startup the supervisor also retires inherited PDF worker leases, applies bounded
+PDF retries, and queues active PDFs from an upgraded database that have not been indexed yet.
+
+The Bookmark Manager's global refresh button and every due Confluence schedule start a separate
+local worker process automatically. That worker retrieves saved Confluence pages with up to five
+concurrent read-only requests while the web app remains available. Progress and the exact
+last-completed timestamp appear beside the refresh icon and in the notification centre.
+
+If you deliberately use Django's plain `runserver` command instead, keep this scheduler running in
+a second terminal so weekly work can begin even when no OWL browser page is open:
+
+```bash
+python manage.py bookmark_refresh_scheduler
+```
+
+Opening any OWL page also performs a lightweight due-schedule check once per minute as a catch-up;
+it does not run the page downloads inside the browser request.
+
 For diagnostics or recovery, a queued run can also be processed directly with:
 
 ```bash
 python manage.py bookmark_refresh_worker --run-id RUN_ID
 ```
 
-The durable run record survives page navigation and app restarts. A stopped worker remains visible
-as interrupted and can be followed by a new global refresh.
+The durable run and schedule records survive page navigation and app restarts. A stopped worker
+remains visible as interrupted and is retried after two hours. Temporary page failures get up to
+three immediate attempts within a run. Deleted pages and rejected credentials fail fast; credential
+failures still enter the two-hour background retry schedule so a corrected connection recovers.
+
+Bitbucket repository clone and refresh requests use the same non-blocking idea with a dedicated
+durable queue. Selecting **Add Repository** or a repository's refresh icon launches a detached
+worker automatically; no second terminal is required. The worker stays alive while queued work is
+available, then exits after a short idle period. For diagnostics, process one queued job directly:
+
+```bash
+python manage.py bitbucket_sync_worker --once
+```
+
+Running `python manage.py bitbucket_sync_worker` without `--once` keeps a resident hybrid worker
+watching the repository queue and then the PDF queue until it is stopped. `run_owl` instead owns
+separate repository-only and PDF controllers so both configured concurrency limits remain explicit.
+Automatic daily refresh can be disabled with `BITBUCKET_DAILY_REFRESH_ENABLED=false`; its retry
+delay and cap are configured with `BITBUCKET_DAILY_REFRESH_RETRY_SECONDS` (default `7200`) and
+`BITBUCKET_DAILY_REFRESH_MAX_RETRIES` (default `3`).
 
 ## Connect Confluence and save a bookmark
 
@@ -193,7 +273,7 @@ as interrupted and can be followed by a new global refresh.
 7. OWL saves exactly that page as one bookmark. Its root-to-page ancestors become hierarchy-only
    tree nodes, and searchable body text is stored only for the selected page.
 
-The terminal running `python manage.py runserver` reports the save stages: extracted Page ID,
+The terminal running `python manage.py run_owl` reports the save stages: extracted Page ID,
 selected-page fetch, ancestor count, page-text character count, and final bookmark ID. OWL does not
 log the PAT or page body. Django's development-server request line can contain the search query, so
 never paste a URL containing credentials, tokens, or other secrets.

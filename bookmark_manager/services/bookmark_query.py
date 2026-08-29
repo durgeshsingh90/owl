@@ -24,6 +24,7 @@ from bookmark_manager.models import (
     BookmarkAvailability,
     BookmarkCategory,
     BookmarkRecency,
+    BookmarkSource,
     ConfluencePageNode,
     SavedBookmarkView,
     Tag,
@@ -384,7 +385,9 @@ def query_bookmarks(
     if not isinstance(observation_time, datetime) or timezone.is_naive(observation_time):
         raise InvalidBookmarkQuery("The query timestamp must include a timezone.")
 
-    queryset = Bookmark.objects.select_related("tree_node").prefetch_related("tags")
+    queryset = Bookmark.objects.select_related("tree_node", "manual_folder").prefetch_related(
+        "tags"
+    )
     queryset = _apply_database_filters(queryset, query, at=observation_time)
     if query.recency:
         requested = set(query.recency)
@@ -440,10 +443,10 @@ def visible_node_ids_with_ancestors(node_ids: Iterable[int]) -> frozenset[int]:
 
 
 def sort_requires_flat_mode(sort: BookmarkSort | str) -> bool:
-    """Only default Added-newest browsing is allowed to retain tree ordering."""
+    """Signal when a non-default rank is shaping the rendered hierarchy."""
 
-    choice = _enum_value(BookmarkSort, sort, "sort")
-    return choice != BookmarkSort.ADDED_NEWEST
+    parsed = _enum_value(BookmarkSort, sort, "sort")
+    return parsed != BookmarkSort.ADDED_NEWEST
 
 
 def active_filter_descriptors(query: BookmarkQuery) -> tuple[ActiveFilter, ...]:
@@ -531,7 +534,9 @@ def _apply_database_filters(
                 | Q(modified_by_id__iexact=person)
                 | Q(modified_by_name__iexact=person)
             )
-        queryset = queryset.filter(people_filter)
+        queryset = queryset.filter(
+            source_type=BookmarkSource.CONFLUENCE,
+        ).filter(people_filter)
     if query.spaces:
         space_filter = Q()
         for space in query.spaces:

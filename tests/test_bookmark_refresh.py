@@ -16,6 +16,7 @@ from bookmark_manager.models import (
     BookmarkRefreshFailure,
     BookmarkRefreshRun,
     BookmarkRefreshStatus,
+    Notification,
 )
 from bookmark_manager.services.bookmark_domain import ConfluencePageSnapshot, upsert_bookmark
 from bookmark_manager.services.bookmark_refresh import (
@@ -224,7 +225,7 @@ def test_failed_page_succeeds_on_retry_without_retaining_a_failure():
     assert bookmark.last_error_message == ""
 
 
-def test_failed_page_is_finalized_only_after_three_attempts():
+def test_deleted_page_is_finalized_without_repeating_a_permanent_failure():
     bookmark = _bookmark("930102", "Always unavailable")
     run = BookmarkRefreshRun.objects.create()
     attempts = 0
@@ -248,7 +249,7 @@ def test_failed_page_is_finalized_only_after_three_attempts():
     )
 
     assert completed is not None
-    assert attempts == 3
+    assert attempts == 1
     assert completed.status == BookmarkRefreshStatus.SUCCEEDED_WITH_ERRORS
     assert (
         completed.processed_bookmarks,
@@ -259,10 +260,45 @@ def test_failed_page_is_finalized_only_after_three_attempts():
     assert failure.page_id == bookmark.page_id
     assert failure.reason == "The Confluence page was not found."
     assert failure.error_code == "not_found"
-    assert failure.attempt_count == 3
+    assert failure.attempt_count == 1
     bookmark.refresh_from_db()
     assert bookmark.availability_status == BookmarkAvailability.NOT_FOUND
     assert bookmark.last_error_code == "not_found"
+
+
+def test_invalid_credential_is_not_repeated_immediately_and_is_scheduled_for_retry(settings):
+    settings.CONFLUENCE_REFRESH_RETRY_SECONDS = 2 * 60 * 60
+    bookmark = _bookmark("930103", "Credential failure")
+    run = BookmarkRefreshRun.objects.create()
+    attempts = 0
+
+    def fetcher(_profile, bookmark_id: int, page_id: str) -> RefreshFetchResult:
+        nonlocal attempts
+        attempts += 1
+        return RefreshFetchResult(
+            bookmark_id=bookmark_id,
+            page_id=page_id,
+            error_code="invalid_credential",
+            error_message="Confluence rejected the configured credential.",
+            availability_status=BookmarkAvailability.ACCESS_DENIED,
+        )
+
+    before = timezone.now()
+    completed = execute_refresh_run(
+        run.pk,
+        profile=_profile(),
+        fetcher=fetcher,
+        max_workers=1,
+    )
+    after = timezone.now()
+
+    assert completed is not None
+    assert attempts == 1
+    failure = BookmarkRefreshFailure.objects.get(refresh_run=run, bookmark=bookmark)
+    assert failure.attempt_count == 1
+    schedule = completed.schedule_updates.get()
+    assert schedule.last_success_at is None
+    assert before + timedelta(hours=2) <= schedule.next_run_at <= after + timedelta(hours=2)
 
 
 def test_refresh_retries_failed_pages_after_every_initial_page_finishes():
@@ -371,6 +407,12 @@ def test_refresh_status_reports_sanitized_final_failure_url_and_reason(client):
             "attempts": 3,
         }
     ]
+    notification = Notification.objects.get(event_key=f"confluence-refresh:{run.pk}")
+    assert notification.target_path == f"/bookmarks/?refresh_run={run.pk}#refresh-result"
+    history_response = client.get(notification.target_path)
+    assert history_response.status_code == 200
+    assert failure.url in history_response.content.decode()
+    assert failure.reason in history_response.content.decode()
 
 
 def test_refresh_start_returns_immediately_and_reuses_an_active_run(

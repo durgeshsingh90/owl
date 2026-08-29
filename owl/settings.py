@@ -54,8 +54,10 @@ def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
     return parsed
 
 
-def _env_csv(name: str) -> tuple[str, ...]:
-    value = os.getenv(name, "")
+def _env_csv(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    value = os.getenv(name)
+    if value is None:
+        return default
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
@@ -124,6 +126,9 @@ MEDIA_ROOT = OWL_DATA_ROOT / "media"
 STATIC_ROOT = OWL_DATA_ROOT / "staticfiles"
 SECRET_ROOT = OWL_DATA_ROOT / "secrets"
 REPOSITORIES_ROOT = OWL_DATA_ROOT / "repositories"
+BITBUCKET_MEDIA_ROOT = MEDIA_ROOT / "bitbucket"
+BITBUCKET_REPOSITORIES_ROOT = BITBUCKET_MEDIA_ROOT / "repositories"
+BITBUCKET_TEMP_ROOT = BITBUCKET_MEDIA_ROOT / "tmp"
 IMPORTS_ROOT = OWL_DATA_ROOT / "imports"
 BACKUPS_ROOT = OWL_DATA_ROOT / "backups"
 INDEXES_ROOT = OWL_DATA_ROOT / "indexes"
@@ -135,6 +140,9 @@ for runtime_directory in (
     MEDIA_ROOT,
     SECRET_ROOT,
     REPOSITORIES_ROOT,
+    BITBUCKET_MEDIA_ROOT,
+    BITBUCKET_REPOSITORIES_ROOT,
+    BITBUCKET_TEMP_ROOT,
     IMPORTS_ROOT,
     BACKUPS_ROOT,
     INDEXES_ROOT,
@@ -222,6 +230,21 @@ CONFLUENCE_REQUEST_TIMEOUT_SECONDS = _env_int("CONFLUENCE_REQUEST_TIMEOUT_SECOND
 CONFLUENCE_MAX_RESPONSE_BYTES = _env_int("CONFLUENCE_MAX_RESPONSE_BYTES", 1_048_576, minimum=1_024)
 CONFLUENCE_ACTION_COOLDOWN_SECONDS = _env_int("CONFLUENCE_ACTION_COOLDOWN_SECONDS", 2, minimum=0)
 CONFLUENCE_MAX_WORKERS = _env_int("CONFLUENCE_MAX_WORKERS", 5, minimum=1)
+CONFLUENCE_REFRESH_INTERVAL_SECONDS = _env_int(
+    "CONFLUENCE_REFRESH_INTERVAL_SECONDS",
+    604_800,
+    minimum=60,
+)
+CONFLUENCE_REFRESH_RETRY_SECONDS = _env_int(
+    "CONFLUENCE_REFRESH_RETRY_SECONDS",
+    7_200,
+    minimum=60,
+)
+CONFLUENCE_REFRESH_SCHEDULER_POLL_SECONDS = _env_int(
+    "CONFLUENCE_REFRESH_SCHEDULER_POLL_SECONDS",
+    60,
+    minimum=5,
+)
 
 # The memory backend is an injectable fake, never an automatic fallback when
 # the operating-system credential store is unavailable.
@@ -229,13 +252,72 @@ OWL_ALLOW_IN_MEMORY_SECRET_STORE = _env_bool("OWL_ALLOW_IN_MEMORY_SECRET_STORE",
 OWL_ALLOW_LIVE_EXTERNAL_TESTS = _env_bool("OWL_ALLOW_LIVE_EXTERNAL_TESTS", False)
 OWL_ALLOW_SYNTHETIC_CONFLUENCE_TARGETS = _env_bool("OWL_ALLOW_SYNTHETIC_CONFLUENCE_TARGETS", False)
 
-BITBUCKET_ALLOWED_HOSTS = _env_csv("BITBUCKET_ALLOWED_HOSTS")
+BITBUCKET_ALLOWED_HOSTS = _env_csv("BITBUCKET_ALLOWED_HOSTS", ("bitbucket.org",))
 BITBUCKET_HISTORY_YEARS = _env_int("BITBUCKET_HISTORY_YEARS", 3, minimum=1)
 BITBUCKET_MAX_REPO_WORKERS = _env_int("BITBUCKET_MAX_REPO_WORKERS", 5, minimum=1)
+BITBUCKET_GIT_TIMEOUT_SECONDS = _env_int("BITBUCKET_GIT_TIMEOUT_SECONDS", 3_600, minimum=60)
+BITBUCKET_WORKER_IDLE_SECONDS = _env_int("BITBUCKET_WORKER_IDLE_SECONDS", 15, minimum=1)
+BITBUCKET_DAILY_REFRESH_ENABLED = _env_bool("BITBUCKET_DAILY_REFRESH_ENABLED", True)
+BITBUCKET_DAILY_REFRESH_RETRY_SECONDS = _env_int(
+    "BITBUCKET_DAILY_REFRESH_RETRY_SECONDS",
+    7_200,
+    minimum=60,
+)
+BITBUCKET_DAILY_REFRESH_MAX_RETRIES = _env_int(
+    "BITBUCKET_DAILY_REFRESH_MAX_RETRIES",
+    3,
+    minimum=0,
+)
+BITBUCKET_PDF_PAGE_SIZE = _env_int("BITBUCKET_PDF_PAGE_SIZE", 100, minimum=10)
+BITBUCKET_SEARCH_PAGE_SIZE = min(
+    _env_int("BITBUCKET_SEARCH_PAGE_SIZE", 50, minimum=10),
+    50,
+)
 PDF_MAX_EXTRACTION_WORKERS = _env_int(
     "PDF_MAX_EXTRACTION_WORKERS",
     max(1, min((os.cpu_count() or 2) - 1, 4)),
     minimum=1,
+)
+PDF_EXTRACTION_TIMEOUT_SECONDS = _env_int(
+    "PDF_EXTRACTION_TIMEOUT_SECONDS",
+    600,
+    minimum=10,
+)
+PDF_EXTRACTION_WORKER_IDLE_SECONDS = _env_int(
+    "PDF_EXTRACTION_WORKER_IDLE_SECONDS",
+    15,
+    minimum=1,
+)
+PDF_EXTRACTION_MAX_AUTOMATIC_RETRIES = _env_int(
+    "PDF_EXTRACTION_MAX_AUTOMATIC_RETRIES",
+    2,
+    minimum=0,
+)
+BITBUCKET_SUPERVISOR_POLL_SECONDS = _env_int(
+    "BITBUCKET_SUPERVISOR_POLL_SECONDS",
+    5,
+    minimum=1,
+)
+PDF_MAX_FILE_BYTES = _env_int(
+    "PDF_MAX_FILE_BYTES",
+    2_147_483_648,
+    minimum=1_024,
+)
+PDF_MAX_PAGES = _env_int("PDF_MAX_PAGES", 10_000, minimum=1)
+PDF_MAX_PAGE_TEXT_CHARS = _env_int(
+    "PDF_MAX_PAGE_TEXT_CHARS",
+    2_000_000,
+    minimum=1_000,
+)
+PDF_MAX_TOTAL_TEXT_CHARS = _env_int(
+    "PDF_MAX_TOTAL_TEXT_CHARS",
+    100_000_000,
+    minimum=10_000,
+)
+PDF_MAX_PROCESS_MEMORY_BYTES = _env_int(
+    "PDF_MAX_PROCESS_MEMORY_BYTES",
+    1_073_741_824,
+    minimum=67_108_864,
 )
 NEW_DURATION_DAYS = _env_int("NEW_DURATION_DAYS", 30, minimum=1)
 UPDATED_DURATION_DAYS = _env_int("UPDATED_DURATION_DAYS", 30, minimum=1)

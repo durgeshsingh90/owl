@@ -1,0 +1,1007 @@
+"""Durable queue and worker orchestration for Bitbucket repository syncs."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from datetime import time as datetime_time
+from pathlib import Path
+
+from django.conf import settings
+from django.db import IntegrityError, transaction
+from django.db.models import Exists, OuterRef, Prefetch, Q
+from django.utils import timezone
+
+from bitbucket_search.models import (
+    BitbucketRepository,
+    RepositorySyncJob,
+    RepositorySyncJobStatus,
+    RepositorySyncOperation,
+    RepositorySyncPhase,
+    RepositorySyncState,
+    RepositorySyncTrigger,
+)
+from bitbucket_search.services.git_sync import (
+    RepositorySyncError,
+    managed_repository_path,
+    synchronize_repository,
+)
+from bitbucket_search.services.pdf_catalog import (
+    build_repository_pdf_catalog,
+    publish_repository_pdf_catalog,
+)
+from bitbucket_search.services.pdf_indexing import queue_repository_pdf_extractions
+from bitbucket_search.services.repository_urls import normalize_repository_url
+
+ACTIVE_JOB_STATUSES = (RepositorySyncJobStatus.QUEUED, RepositorySyncJobStatus.RUNNING)
+AUTOMATIC_JOB_TRIGGERS = (RepositorySyncTrigger.DAILY, RepositorySyncTrigger.RETRY)
+AUTOMATIC_RETRYABLE_STATUSES = (
+    RepositorySyncJobStatus.FAILED,
+    RepositorySyncJobStatus.INTERRUPTED,
+)
+STALE_JOB_AFTER = timedelta(minutes=10)
+
+
+@dataclass(frozen=True, slots=True)
+class QueueResult:
+    repository: BitbucketRepository
+    job: RepositorySyncJob
+    repository_created: bool
+    job_created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class QueueAllRepositoriesResult:
+    """One idempotent queue pass across all currently enabled repositories."""
+
+    eligible_total: int
+    results: tuple[QueueResult, ...]
+    fallback_worker_jobs: tuple[RepositorySyncJob, ...]
+
+    @property
+    def newly_queued(self) -> tuple[QueueResult, ...]:
+        return tuple(result for result in self.results if result.job_created)
+
+    @property
+    def already_active(self) -> tuple[QueueResult, ...]:
+        return tuple(result for result in self.results if not result.job_created)
+
+    @property
+    def already_queued(self) -> tuple[QueueResult, ...]:
+        return tuple(
+            result
+            for result in self.already_active
+            if result.job.status == RepositorySyncJobStatus.QUEUED
+        )
+
+    @property
+    def already_running(self) -> tuple[QueueResult, ...]:
+        return tuple(
+            result
+            for result in self.already_active
+            if result.job.status == RepositorySyncJobStatus.RUNNING
+        )
+
+    @property
+    def newly_queued_count(self) -> int:
+        return len(self.newly_queued)
+
+    @property
+    def already_active_count(self) -> int:
+        return len(self.already_active)
+
+    @property
+    def already_queued_count(self) -> int:
+        return len(self.already_queued)
+
+    @property
+    def already_running_count(self) -> int:
+        return len(self.already_running)
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryAutomationStatus:
+    """Compact daily-refresh state attached to a repository status snapshot."""
+
+    state: str
+    label: str
+    detail: str
+    next_action_at: datetime | None
+    retry_count: int
+    max_retries: int
+    retries_remaining: int
+    scheduled_day: date | None
+    trigger: str | None
+    last_attempt_at: datetime | None
+
+
+def _daily_refresh_retry_delay() -> timedelta:
+    return timedelta(seconds=settings.BITBUCKET_DAILY_REFRESH_RETRY_SECONDS)
+
+
+def _daily_refresh_max_retries() -> int:
+    return max(0, int(settings.BITBUCKET_DAILY_REFRESH_MAX_RETRIES))
+
+
+def _local_day_window(observed_at: datetime) -> tuple[date, datetime, datetime]:
+    local_zone = timezone.get_current_timezone()
+    local_day = timezone.localtime(observed_at, local_zone).date()
+    local_midnight = datetime.combine(local_day, datetime_time.min, tzinfo=local_zone)
+    next_local_midnight = datetime.combine(
+        local_day + timedelta(days=1),
+        datetime_time.min,
+        tzinfo=local_zone,
+    )
+    return local_day, local_midnight, next_local_midnight
+
+
+def _job_attempt_at(job: RepositorySyncJob) -> datetime:
+    return job.completed_at or job.started_at or job.requested_at
+
+
+def _repository_succeeded_since(
+    repository: BitbucketRepository,
+    *,
+    since: datetime,
+    until: datetime,
+    jobs: tuple[RepositorySyncJob, ...] | None = None,
+) -> RepositorySyncJob | None:
+    if jobs is None:
+        return (
+            repository.sync_jobs.filter(
+                status=RepositorySyncJobStatus.SUCCEEDED,
+                completed_at__gte=since,
+                completed_at__lte=until,
+            )
+            .order_by("-completed_at", "-id")
+            .first()
+        )
+    successes = tuple(
+        job
+        for job in jobs
+        if job.status == RepositorySyncJobStatus.SUCCEEDED
+        and job.completed_at is not None
+        and since <= job.completed_at <= until
+    )
+    return max(successes, key=lambda job: (job.completed_at, job.pk)) if successes else None
+
+
+def _status_value(
+    *,
+    state: str,
+    label: str,
+    detail: str,
+    next_action_at: datetime | None,
+    retry_count: int,
+    max_retries: int,
+    scheduled_day: date | None,
+    trigger: str | None,
+    last_attempt_at: datetime | None,
+) -> RepositoryAutomationStatus:
+    return RepositoryAutomationStatus(
+        state=state,
+        label=label,
+        detail=detail,
+        next_action_at=next_action_at,
+        retry_count=retry_count,
+        max_retries=max_retries,
+        retries_remaining=max(0, max_retries - retry_count),
+        scheduled_day=scheduled_day,
+        trigger=trigger,
+        last_attempt_at=last_attempt_at,
+    )
+
+
+def _repository_automation_status(
+    repository: BitbucketRepository,
+    *,
+    at: datetime,
+) -> RepositoryAutomationStatus:
+    local_day, local_midnight, next_local_midnight = _local_day_window(at)
+    max_retries = _daily_refresh_max_retries()
+    jobs = tuple(
+        getattr(
+            repository,
+            "_automatic_refresh_jobs",
+            repository.sync_jobs.all(),
+        )
+    )
+    active = next((job for job in jobs if job.status in ACTIVE_JOB_STATUSES), None)
+    automatic_jobs = tuple(job for job in jobs if job.trigger in AUTOMATIC_JOB_TRIGGERS)
+    latest_automatic = (
+        max(automatic_jobs, key=lambda job: (_job_attempt_at(job), job.pk))
+        if automatic_jobs
+        else None
+    )
+    latest_job = max(jobs, key=lambda job: (_job_attempt_at(job), job.pk)) if jobs else None
+    latest_attempt_at = (
+        max(
+            value
+            for value in (
+                _job_attempt_at(latest_job) if latest_job else None,
+                repository.last_sync_completed_at,
+            )
+            if value is not None
+        )
+        if latest_job is not None or repository.last_sync_completed_at is not None
+        else None
+    )
+
+    if not settings.BITBUCKET_DAILY_REFRESH_ENABLED or not repository.enabled:
+        detail = (
+            "Automatic daily repository refresh is disabled in OWL settings."
+            if not settings.BITBUCKET_DAILY_REFRESH_ENABLED
+            else "This repository is disabled and is excluded from automatic refresh."
+        )
+        return _status_value(
+            state="disabled",
+            label="Automatic refresh disabled",
+            detail=detail,
+            next_action_at=None,
+            retry_count=0,
+            max_retries=max_retries,
+            scheduled_day=None,
+            trigger=latest_job.trigger if latest_job else None,
+            last_attempt_at=latest_attempt_at,
+        )
+
+    if active is not None:
+        retry_count = (
+            active.automatic_retry_number
+            if active.trigger in AUTOMATIC_JOB_TRIGGERS
+            else (
+                latest_automatic.automatic_retry_number
+                if latest_automatic is not None and latest_automatic.scheduled_day == local_day
+                else 0
+            )
+        )
+        detail = {
+            RepositorySyncTrigger.DAILY: "Today's automatic repository refresh is in progress.",
+            RepositorySyncTrigger.RETRY: (
+                f"Automatic retry {active.automatic_retry_number} of {max_retries} is in progress."
+            ),
+        }.get(active.trigger, "A manual repository refresh is in progress.")
+        return _status_value(
+            state="active",
+            label="Repository refresh active",
+            detail=detail,
+            next_action_at=None,
+            retry_count=retry_count,
+            max_retries=max_retries,
+            scheduled_day=active.scheduled_day,
+            trigger=active.trigger,
+            last_attempt_at=_job_attempt_at(active),
+        )
+
+    success = _repository_succeeded_since(
+        repository,
+        since=local_midnight,
+        until=at,
+        jobs=jobs,
+    )
+    repository_success = repository.last_sync_successful_at
+    if success is not None or (
+        repository_success is not None and local_midnight <= repository_success <= at
+    ):
+        successful_job = success
+        retry_count = (
+            successful_job.automatic_retry_number
+            if successful_job is not None and successful_job.trigger in AUTOMATIC_JOB_TRIGGERS
+            else (
+                latest_automatic.automatic_retry_number
+                if latest_automatic is not None and latest_automatic.scheduled_day == local_day
+                else 0
+            )
+        )
+        return _status_value(
+            state="up_to_date",
+            label="Up to date today",
+            detail="A repository sync succeeded today. The next daily check is after local midnight.",
+            next_action_at=next_local_midnight,
+            retry_count=retry_count,
+            max_retries=max_retries,
+            scheduled_day=successful_job.scheduled_day if successful_job else local_day,
+            trigger=successful_job.trigger if successful_job else None,
+            last_attempt_at=(
+                _job_attempt_at(successful_job) if successful_job else repository_success
+            ),
+        )
+
+    today_jobs = tuple(job for job in automatic_jobs if job.scheduled_day == local_day)
+    latest_today = (
+        max(today_jobs, key=lambda job: (job.automatic_retry_number, job.pk))
+        if today_jobs
+        else None
+    )
+    if latest_today is not None:
+        retry_count = latest_today.automatic_retry_number
+        last_attempt_at = _job_attempt_at(latest_today)
+        if latest_today.status in AUTOMATIC_RETRYABLE_STATUSES:
+            if retry_count >= max_retries:
+                return _status_value(
+                    state="exhausted",
+                    label="Retries exhausted",
+                    detail=(
+                        "Today's automatic refresh used its retry allowance. "
+                        "OWL will try again after the next local midnight."
+                    ),
+                    next_action_at=next_local_midnight,
+                    retry_count=retry_count,
+                    max_retries=max_retries,
+                    scheduled_day=local_day,
+                    trigger=latest_today.trigger,
+                    last_attempt_at=last_attempt_at,
+                )
+            retry_at = last_attempt_at + _daily_refresh_retry_delay()
+            waiting = retry_at > at
+            return _status_value(
+                state="retry_wait" if waiting else "due",
+                label="Retry scheduled" if waiting else "Automatic retry due",
+                detail=(
+                    f"Automatic retry {retry_count + 1} of {max_retries} will run after its "
+                    "configured recovery delay."
+                    if waiting
+                    else f"Automatic retry {retry_count + 1} of {max_retries} is ready to queue."
+                ),
+                next_action_at=retry_at,
+                retry_count=retry_count,
+                max_retries=max_retries,
+                scheduled_day=local_day,
+                trigger=RepositorySyncTrigger.RETRY,
+                last_attempt_at=last_attempt_at,
+            )
+        return _status_value(
+            state="exhausted",
+            label="Automatic refresh stopped",
+            detail="Today's automatic refresh ended without an eligible recovery retry.",
+            next_action_at=next_local_midnight,
+            retry_count=retry_count,
+            max_retries=max_retries,
+            scheduled_day=local_day,
+            trigger=latest_today.trigger,
+            last_attempt_at=last_attempt_at,
+        )
+
+    if latest_automatic is not None and latest_automatic.status in AUTOMATIC_RETRYABLE_STATUSES:
+        retry_at = _job_attempt_at(latest_automatic) + _daily_refresh_retry_delay()
+        if retry_at > at:
+            return _status_value(
+                state="retry_wait",
+                label="Daily refresh waiting",
+                detail=(
+                    "The daily retry allowance has reset, but OWL is preserving the "
+                    "two-hour delay after the last failure."
+                ),
+                next_action_at=retry_at,
+                retry_count=0,
+                max_retries=max_retries,
+                scheduled_day=local_day,
+                trigger=RepositorySyncTrigger.DAILY,
+                last_attempt_at=_job_attempt_at(latest_automatic),
+            )
+
+    return _status_value(
+        state="due",
+        label="Daily refresh due",
+        detail="Today's automatic repository refresh is ready to queue.",
+        next_action_at=at,
+        retry_count=0,
+        max_retries=max_retries,
+        scheduled_day=local_day,
+        trigger=RepositorySyncTrigger.DAILY,
+        last_attempt_at=latest_attempt_at,
+    )
+
+
+def _stale_running_job_ids(cutoff) -> tuple[int, ...]:
+    return tuple(
+        RepositorySyncJob.objects.filter(
+            status=RepositorySyncJobStatus.RUNNING,
+            heartbeat_at__lt=cutoff,
+        ).values_list("id", flat=True)
+    )
+
+
+def _interrupt_stale_jobs(*, at=None) -> None:
+    observed_at = at or timezone.now()
+    cutoff = observed_at - STALE_JOB_AFTER
+    candidate_ids = _stale_running_job_ids(cutoff)
+    if not candidate_ids:
+        return
+
+    interrupted_ids: list[int] = []
+    with transaction.atomic():
+        for job_id in candidate_ids:
+            # The worker may have refreshed its heartbeat after the candidate
+            # query. Repeat every stale predicate in this compare-and-swap so a
+            # healthy long-running Git process is never interrupted by that race.
+            updated = RepositorySyncJob.objects.filter(
+                pk=job_id,
+                status=RepositorySyncJobStatus.RUNNING,
+                heartbeat_at__lt=cutoff,
+            ).update(
+                status=RepositorySyncJobStatus.INTERRUPTED,
+                completed_at=observed_at,
+                error_code="worker_interrupted",
+                error_summary=(
+                    "The background repository worker stopped before this sync completed."
+                ),
+            )
+            if updated == 1:
+                interrupted_ids.append(job_id)
+
+        if interrupted_ids:
+            # Do not overwrite repository progress for a candidate whose worker
+            # won the heartbeat race; only jobs transitioned above belong here.
+            BitbucketRepository.objects.filter(sync_jobs__id__in=interrupted_ids).update(
+                sync_state=RepositorySyncState.INTERRUPTED,
+                status_message="Background sync was interrupted. Select Refresh to retry.",
+                last_error_code="worker_interrupted",
+                last_error_summary=(
+                    "The background repository worker stopped before this sync completed."
+                ),
+                last_sync_completed_at=observed_at,
+            )
+
+
+def _operation_for(repository: BitbucketRepository) -> str:
+    target = managed_repository_path(repository)
+    return (
+        RepositorySyncOperation.REFRESH
+        if target.is_dir() and (target / ".git").is_dir()
+        else RepositorySyncOperation.CLONE
+    )
+
+
+def _queue_job(
+    repository: BitbucketRepository,
+    *,
+    trigger: str = RepositorySyncTrigger.MANUAL,
+    scheduled_day: date | None = None,
+    automatic_retry_number: int = 0,
+) -> tuple[RepositorySyncJob, bool]:
+    active = repository.sync_jobs.filter(status__in=ACTIVE_JOB_STATUSES).first()
+    if active is not None:
+        return active, False
+    operation = _operation_for(repository)
+    if trigger == RepositorySyncTrigger.RETRY:
+        waiting_message = (
+            f"Waiting for automatic retry {automatic_retry_number} of "
+            f"{_daily_refresh_max_retries()}…"
+        )
+    elif trigger == RepositorySyncTrigger.DAILY:
+        waiting_message = "Waiting for today's automatic repository refresh…"
+    else:
+        waiting_message = (
+            "Waiting for the background worker to start the first clone…"
+            if operation == RepositorySyncOperation.CLONE
+            else "Waiting for the background worker to refresh this repository…"
+        )
+    try:
+        with transaction.atomic():
+            job = RepositorySyncJob.objects.create(
+                repository=repository,
+                operation=operation,
+                trigger=trigger,
+                scheduled_day=scheduled_day,
+                automatic_retry_number=automatic_retry_number,
+                status_message=waiting_message,
+            )
+    except IntegrityError:
+        active = repository.sync_jobs.filter(status__in=ACTIVE_JOB_STATUSES).first()
+        if active is not None:
+            return active, False
+        if scheduled_day is not None:
+            scheduled = repository.sync_jobs.filter(
+                scheduled_day=scheduled_day,
+                automatic_retry_number=automatic_retry_number,
+            ).first()
+            if scheduled is not None:
+                return scheduled, False
+        raise
+    repository.sync_state = RepositorySyncState.QUEUED
+    repository.sync_progress = 0
+    repository.status_message = job.status_message
+    repository.last_error_code = ""
+    repository.last_error_summary = ""
+    repository.save(
+        update_fields=(
+            "sync_state",
+            "sync_progress",
+            "status_message",
+            "last_error_code",
+            "last_error_summary",
+            "updated_at",
+        )
+    )
+    return job, True
+
+
+def register_and_queue_repository(remote_url: object) -> QueueResult:
+    """Register a canonical repository once and queue clone/refresh idempotently."""
+
+    normalized = normalize_repository_url(remote_url)
+    _interrupt_stale_jobs()
+    with transaction.atomic():
+        repository, repository_created = BitbucketRepository.objects.get_or_create(
+            canonical_remote_key=normalized.canonical_remote_key,
+            defaults={
+                "display_name": normalized.display_name,
+                "remote_url": normalized.remote_url,
+            },
+        )
+        if repository_created:
+            repository.local_path = str(managed_repository_path(repository))
+            repository.save(update_fields=("local_path", "updated_at"))
+        job, job_created = _queue_job(repository)
+    return QueueResult(repository, job, repository_created, job_created)
+
+
+def _queue_repository_refresh(
+    repository_id: int,
+    *,
+    enabled_only: bool,
+) -> QueueResult:
+    _interrupt_stale_jobs()
+    with transaction.atomic():
+        repositories = BitbucketRepository.objects.select_for_update()
+        if enabled_only:
+            repositories = repositories.filter(enabled=True)
+        repository = repositories.get(pk=repository_id)
+        job, job_created = _queue_job(repository)
+    return QueueResult(repository, job, False, job_created)
+
+
+def queue_repository_refresh(repository_id: int) -> QueueResult:
+    """Queue the next safe clone/refresh for an existing repository."""
+
+    return _queue_repository_refresh(repository_id, enabled_only=False)
+
+
+def queue_all_repository_refreshes() -> QueueAllRepositoriesResult:
+    """Queue clone/refresh work once for every enabled managed repository.
+
+    Existing queued or running jobs are returned as active rather than
+    duplicated. A queued job, including one created by an earlier request, is
+    included in ``fallback_worker_jobs`` so an explicit web request can wake a
+    detached worker when OWL's resident supervisor is not running.
+    """
+
+    repository_ids = tuple(
+        BitbucketRepository.objects.filter(enabled=True).order_by("id").values_list("id", flat=True)
+    )
+    results: list[QueueResult] = []
+    fallback_worker_jobs: dict[int, RepositorySyncJob] = {}
+    for repository_id in repository_ids:
+        try:
+            queued = _queue_repository_refresh(repository_id, enabled_only=True)
+        except BitbucketRepository.DoesNotExist:
+            # Deletion or disabling between the eligible snapshot and this
+            # repository's row lock is harmless; no job should be queued.
+            continue
+        results.append(queued)
+        if queued.job.status == RepositorySyncJobStatus.QUEUED:
+            fallback_worker_jobs[queued.job.pk] = queued.job
+
+    return QueueAllRepositoriesResult(
+        # Repositories disabled or deleted after the initial ordered snapshot
+        # were never eligible at their row lock and must not inflate user-facing
+        # queue totals.
+        eligible_total=len(results),
+        results=tuple(results),
+        fallback_worker_jobs=tuple(fallback_worker_jobs.values()),
+    )
+
+
+def queue_due_daily_repository_refreshes(*, at=None) -> tuple[QueueResult, ...]:
+    """Queue due daily repository attempts and delayed retries idempotently."""
+
+    if not settings.BITBUCKET_DAILY_REFRESH_ENABLED:
+        return ()
+    observed_at = at or timezone.now()
+    local_day, local_midnight, _next_local_midnight = _local_day_window(observed_at)
+    retry_delay = _daily_refresh_retry_delay()
+    max_retries = _daily_refresh_max_retries()
+    _interrupt_stale_jobs(at=observed_at)
+    active_job = RepositorySyncJob.objects.filter(
+        repository_id=OuterRef("pk"),
+        status__in=ACTIVE_JOB_STATUSES,
+    )
+    repository_ids = tuple(
+        BitbucketRepository.objects.filter(
+            enabled=True,
+        )
+        .filter(
+            Q(last_sync_successful_at__isnull=True) | Q(last_sync_successful_at__lt=local_midnight)
+        )
+        .annotate(has_active_sync_job=Exists(active_job))
+        .filter(has_active_sync_job=False)
+        .order_by("id")
+        .values_list("id", flat=True)
+    )
+    queued: list[QueueResult] = []
+
+    for repository_id in repository_ids:
+        with transaction.atomic():
+            repository = (
+                BitbucketRepository.objects.select_for_update()
+                .filter(pk=repository_id, enabled=True)
+                .first()
+            )
+            if repository is None:
+                continue
+            if repository.sync_jobs.filter(status__in=ACTIVE_JOB_STATUSES).exists():
+                continue
+            repository_success = repository.last_sync_successful_at
+            if (
+                repository_success is not None
+                and local_midnight <= repository_success <= observed_at
+            ) or _repository_succeeded_since(
+                repository,
+                since=local_midnight,
+                until=observed_at,
+            ) is not None:
+                continue
+
+            latest_today = (
+                repository.sync_jobs.filter(
+                    trigger__in=AUTOMATIC_JOB_TRIGGERS,
+                    scheduled_day=local_day,
+                )
+                .order_by("-automatic_retry_number", "-id")
+                .first()
+            )
+            if latest_today is None:
+                latest_automatic = (
+                    repository.sync_jobs.filter(
+                        trigger__in=AUTOMATIC_JOB_TRIGGERS,
+                        completed_at__isnull=False,
+                    )
+                    .order_by("-completed_at", "-id")
+                    .first()
+                )
+                if (
+                    latest_automatic is not None
+                    and latest_automatic.status in AUTOMATIC_RETRYABLE_STATUSES
+                    and latest_automatic.completed_at + retry_delay > observed_at
+                ):
+                    continue
+                trigger = RepositorySyncTrigger.DAILY
+                retry_number = 0
+            else:
+                if latest_today.status not in AUTOMATIC_RETRYABLE_STATUSES:
+                    continue
+                retry_number = latest_today.automatic_retry_number + 1
+                if retry_number > max_retries:
+                    continue
+                attempt_at = latest_today.completed_at or _job_attempt_at(latest_today)
+                if attempt_at + retry_delay > observed_at:
+                    continue
+                trigger = RepositorySyncTrigger.RETRY
+
+            job, job_created = _queue_job(
+                repository,
+                trigger=trigger,
+                scheduled_day=local_day,
+                automatic_retry_number=retry_number,
+            )
+            if job_created:
+                queued.append(QueueResult(repository, job, False, True))
+
+    return tuple(queued)
+
+
+def launch_sync_worker() -> subprocess.Popen[bytes]:
+    """Start a detached queue worker that remains active while work arrives."""
+
+    command = [
+        sys.executable,
+        str(Path(settings.BASE_DIR) / "manage.py"),
+        "bitbucket_sync_worker",
+        "--idle-timeout",
+        str(settings.BITBUCKET_WORKER_IDLE_SECONDS),
+    ]
+    return subprocess.Popen(
+        command,
+        cwd=settings.BASE_DIR,
+        stdin=subprocess.DEVNULL,
+        close_fds=True,
+        start_new_session=os.name != "nt",
+    )
+
+
+def mark_worker_launch_failed(job_id: int) -> None:
+    now = timezone.now()
+    job = RepositorySyncJob.objects.filter(
+        pk=job_id,
+        status=RepositorySyncJobStatus.QUEUED,
+    ).first()
+    if job is None:
+        return
+    with transaction.atomic():
+        updated = RepositorySyncJob.objects.filter(
+            pk=job.pk,
+            status=RepositorySyncJobStatus.QUEUED,
+        ).update(
+            status=RepositorySyncJobStatus.FAILED,
+            completed_at=now,
+            error_code="worker_unavailable",
+            error_summary="OWL could not start the background repository worker.",
+        )
+        if updated != 1:
+            return
+        BitbucketRepository.objects.filter(pk=job.repository_id).update(
+            sync_state=RepositorySyncState.FAILED,
+            status_message="Background worker could not start.",
+            last_error_code="worker_unavailable",
+            last_error_summary="OWL could not start the background repository worker.",
+            last_sync_completed_at=now,
+        )
+
+
+def claim_next_job() -> RepositorySyncJob | None:
+    """Atomically claim one queued job while respecting the configured worker limit."""
+
+    _interrupt_stale_jobs()
+    with transaction.atomic():
+        if (
+            RepositorySyncJob.objects.filter(status=RepositorySyncJobStatus.RUNNING).count()
+            >= settings.BITBUCKET_MAX_REPO_WORKERS
+        ):
+            return None
+        candidate_id = (
+            RepositorySyncJob.objects.filter(status=RepositorySyncJobStatus.QUEUED)
+            .order_by("requested_at", "id")
+            .values_list("id", flat=True)
+            .first()
+        )
+        if candidate_id is None:
+            return None
+        now = timezone.now()
+        claimed = RepositorySyncJob.objects.filter(
+            pk=candidate_id,
+            status=RepositorySyncJobStatus.QUEUED,
+        ).update(
+            status=RepositorySyncJobStatus.RUNNING,
+            phase=RepositorySyncPhase.VALIDATING,
+            started_at=now,
+            heartbeat_at=now,
+            worker_pid=os.getpid(),
+            progress=1,
+            status_message="Background worker is validating the repository…",
+        )
+        if claimed != 1:
+            return None
+    job = RepositorySyncJob.objects.select_related("repository").get(pk=candidate_id)
+    initial_state = (
+        RepositorySyncState.CLONING
+        if job.operation == RepositorySyncOperation.CLONE
+        else RepositorySyncState.FETCHING
+    )
+    BitbucketRepository.objects.filter(pk=job.repository_id).update(
+        sync_state=initial_state,
+        sync_progress=1,
+        status_message=job.status_message,
+        last_sync_started_at=job.started_at,
+    )
+    return job
+
+
+def _repository_state_for_phase(job: RepositorySyncJob, phase: str) -> str:
+    if phase == RepositorySyncPhase.CLONING:
+        return RepositorySyncState.CLONING
+    if phase == RepositorySyncPhase.FETCHING:
+        return RepositorySyncState.FETCHING
+    if phase in {RepositorySyncPhase.UPDATING, RepositorySyncPhase.DISCOVERING}:
+        return RepositorySyncState.UPDATING
+    return (
+        RepositorySyncState.CLONING
+        if job.operation == RepositorySyncOperation.CLONE
+        else RepositorySyncState.FETCHING
+    )
+
+
+def execute_claimed_job(job_id: int) -> RepositorySyncJob:
+    """Execute one already-claimed job and publish only sanitized durable state."""
+
+    job = RepositorySyncJob.objects.select_related("repository").get(pk=job_id)
+    if job.status != RepositorySyncJobStatus.RUNNING:
+        return job
+
+    last_saved_at = 0.0
+    last_phase = job.phase
+    last_progress = job.progress
+
+    def save_progress(phase: str, progress: int, message: str) -> None:
+        nonlocal last_saved_at, last_phase, last_progress
+        now_monotonic = time.monotonic()
+        progress = max(last_progress, min(int(progress), 99))
+        changed = phase != last_phase or progress != last_progress
+        if not changed and now_monotonic - last_saved_at < 1.5:
+            return
+        heartbeat = timezone.now()
+        safe_message = " ".join(message.split())[:500]
+        with transaction.atomic():
+            updated = RepositorySyncJob.objects.filter(
+                pk=job.pk,
+                status=RepositorySyncJobStatus.RUNNING,
+            ).update(
+                phase=phase,
+                progress=progress,
+                status_message=safe_message,
+                heartbeat_at=heartbeat,
+            )
+            if updated != 1:
+                raise RepositorySyncError(
+                    "worker_lease_lost",
+                    "This repository sync was interrupted. Select Refresh to retry.",
+                )
+            BitbucketRepository.objects.filter(pk=job.repository_id).update(
+                sync_state=_repository_state_for_phase(job, phase),
+                sync_progress=progress,
+                status_message=safe_message,
+            )
+        last_saved_at = now_monotonic
+        last_phase = phase
+        last_progress = progress
+
+    try:
+        result = synchronize_repository(
+            job.repository,
+            operation=job.operation,
+            progress_callback=save_progress,
+        )
+        catalog = build_repository_pdf_catalog(
+            job.repository,
+            result_commit=result.result_commit,
+            progress_callback=save_progress,
+        )
+        if len(catalog.documents) != result.documents.pdf_count:
+            raise RepositorySyncError(
+                "pdf_catalog_mismatch",
+                "OWL could not reconcile the synchronized PDF inventory safely.",
+            )
+
+        now = timezone.now()
+        local_path = str(managed_repository_path(job.repository))
+        with transaction.atomic():
+            # A stale worker must never publish a catalog after another process
+            # has interrupted its lease. The job transition, inventory switch,
+            # and repository summary therefore commit as one guarded unit.
+            updated = RepositorySyncJob.objects.filter(
+                pk=job.pk,
+                status=RepositorySyncJobStatus.RUNNING,
+            ).update(
+                status=RepositorySyncJobStatus.SUCCEEDED,
+                phase=RepositorySyncPhase.COMPLETED,
+                progress=100,
+                status_message="Repository is ready.",
+                source_commit=result.source_commit,
+                result_commit=result.result_commit,
+                heartbeat_at=now,
+                completed_at=now,
+                error_code="",
+                error_summary="",
+            )
+            if updated == 1:
+                publish_repository_pdf_catalog(
+                    job.repository,
+                    catalog,
+                    result_commit=result.result_commit,
+                    observed_at=now,
+                )
+                # Extraction has its own durable queue and never runs inside the
+                # repository transaction. Publishing both the catalog and these
+                # target revisions together prevents a changed PDF being missed
+                # after a worker restart.
+                queue_repository_pdf_extractions(
+                    job.repository_id,
+                    repository_sync_job=job.pk,
+                )
+                BitbucketRepository.objects.filter(pk=job.repository_id).update(
+                    local_path=local_path,
+                    default_branch=result.branch,
+                    sync_state=RepositorySyncState.READY,
+                    sync_progress=100,
+                    status_message="Repository is ready.",
+                    last_error_code="",
+                    last_error_summary="",
+                    pdf_count=len(catalog.documents),
+                    vsdx_count=result.documents.vsdx_count,
+                    document_bytes=result.documents.document_bytes,
+                    last_synced_commit=result.result_commit,
+                    history_is_shallow=catalog.history_is_shallow,
+                    metadata_indexed_commit=result.result_commit,
+                    last_sync_completed_at=now,
+                    last_sync_successful_at=now,
+                )
+    except RepositorySyncError as exc:
+        now = timezone.now()
+        state = (
+            RepositorySyncState.BLOCKED_DIRTY if exc.blocked_dirty else RepositorySyncState.FAILED
+        )
+        with transaction.atomic():
+            updated = RepositorySyncJob.objects.filter(
+                pk=job.pk,
+                status=RepositorySyncJobStatus.RUNNING,
+            ).update(
+                status=RepositorySyncJobStatus.FAILED,
+                heartbeat_at=now,
+                completed_at=now,
+                error_code=exc.code,
+                error_summary=exc.summary,
+                status_message=exc.summary,
+            )
+            if updated == 1:
+                BitbucketRepository.objects.filter(pk=job.repository_id).update(
+                    sync_state=state,
+                    status_message=exc.summary,
+                    last_error_code=exc.code,
+                    last_error_summary=exc.summary,
+                    last_sync_completed_at=now,
+                )
+    except Exception:
+        now = timezone.now()
+        summary = "The background repository worker stopped unexpectedly. Select Refresh to retry."
+        with transaction.atomic():
+            updated = RepositorySyncJob.objects.filter(
+                pk=job.pk,
+                status=RepositorySyncJobStatus.RUNNING,
+            ).update(
+                status=RepositorySyncJobStatus.INTERRUPTED,
+                heartbeat_at=now,
+                completed_at=now,
+                error_code="worker_error",
+                error_summary=summary,
+                status_message=summary,
+            )
+            if updated == 1:
+                BitbucketRepository.objects.filter(pk=job.repository_id).update(
+                    sync_state=RepositorySyncState.INTERRUPTED,
+                    status_message=summary,
+                    last_error_code="worker_error",
+                    last_error_summary=summary,
+                    last_sync_completed_at=now,
+                )
+    return RepositorySyncJob.objects.select_related("repository").get(pk=job.pk)
+
+
+def work_one_job() -> RepositorySyncJob | None:
+    job = claim_next_job()
+    return execute_claimed_job(job.pk) if job is not None else None
+
+
+def repository_status_snapshot(*, at=None) -> tuple[BitbucketRepository, ...]:
+    observed_at = at or timezone.now()
+    _interrupt_stale_jobs(at=observed_at)
+    local_day, _local_midnight, _next_local_midnight = _local_day_window(observed_at)
+    recent_retry_cutoff = observed_at - _daily_refresh_retry_delay()
+    relevant_jobs = RepositorySyncJob.objects.filter(
+        Q(status__in=ACTIVE_JOB_STATUSES)
+        | Q(trigger__in=AUTOMATIC_JOB_TRIGGERS, scheduled_day=local_day)
+        | Q(
+            trigger__in=AUTOMATIC_JOB_TRIGGERS,
+            status__in=AUTOMATIC_RETRYABLE_STATUSES,
+            completed_at__gte=recent_retry_cutoff,
+            completed_at__lte=observed_at,
+        )
+    ).order_by("-requested_at", "-id")
+    repositories = tuple(
+        BitbucketRepository.objects.prefetch_related(
+            Prefetch(
+                "sync_jobs",
+                queryset=relevant_jobs,
+                to_attr="_automatic_refresh_jobs",
+            )
+        ).order_by("display_name", "id")
+    )
+    for repository in repositories:
+        repository.automatic_refresh = _repository_automation_status(
+            repository,
+            at=observed_at,
+        )
+    return repositories

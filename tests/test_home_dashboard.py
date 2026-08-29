@@ -252,6 +252,16 @@ def test_home_renders_accessible_activity_and_tracked_top_page_actions(loopback_
     assert 'aria-label="Activity type"' in html
     assert 'aria-label="Activity year"' in html
     assert 'aria-label="Top 10 most viewed pages"' in html
+    assert response.context["database_stats"].available is True
+    assert "Your database" in html
+    assert "Approx. database size" in html
+    assert "Database tables" in html
+    assert "Stored table entries" in html
+    assert 'class="knowledge-metric-grid knowledge-metric-grid--database"' in html
+    measured_at = response.context["database_stats"].measured_at
+    local_measured_at = timezone.localtime(measured_at)
+    assert f'<time datetime="{local_measured_at.isoformat()}">' in html
+    assert local_measured_at.strftime("%d %b %Y, %H:%M:%S") in html
     assert "Most viewed" in html
     assert "Most useful architecture" in html
     assert f'action="{reverse("bookmark_manager:open", args=(bookmark.pk,))}"' in html

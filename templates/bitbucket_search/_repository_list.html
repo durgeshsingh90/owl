@@ -1,0 +1,56 @@
+{% if repositories %}
+<ul class="bb-repository-list" data-repository-list>
+    {% for repository in repositories %}
+    <li class="bb-repository-card" data-repository-id="{{ repository.pk }}" data-repository-state="{{ repository.sync_state }}">
+        <div class="bb-repository-card__main">
+            <span class="bb-repository-state bb-repository-state--{{ repository.sync_state }}" data-repository-state-icon aria-hidden="true">
+                <svg class="bb-state-icon bb-state-icon--ready" viewBox="0 0 24 24" focusable="false"><circle cx="12" cy="12" r="8"/><path d="m8.5 12 2.2 2.2 4.8-5"/></svg>
+                <svg class="bb-state-icon bb-state-icon--active" viewBox="0 0 24 24" focusable="false"><path d="M12 3v11M8 10l4 4 4-4M5 19h14"/></svg>
+                <svg class="bb-state-icon bb-state-icon--attention" viewBox="0 0 24 24" focusable="false"><circle cx="12" cy="12" r="8"/><path d="M12 8v5M12 16.5v.5"/></svg>
+                <svg class="bb-state-icon bb-state-icon--idle" viewBox="0 0 24 24" focusable="false"><path d="M3.5 7.5h6l1.7 2h9.3v9.5h-17V7.5Z"/></svg>
+            </span>
+            <span class="bb-repository-card__copy">
+                <strong data-repository-name>{{ repository.display_name }}</strong>
+                <small data-repository-meta>
+                    {{ repository.canonical_remote_key|truncatechars:36 }}
+                    {% if repository.default_branch %} · {{ repository.default_branch }}{% endif %}
+                </small>
+            </span>
+            <form method="post" action="{% url 'bitbucket_search:repository_refresh' repository.pk %}" data-repository-refresh-form>
+                {% csrf_token %}
+                <button type="submit" aria-label="Refresh {{ repository.display_name }} in the background"{% if repository.has_active_sync %} disabled{% endif %}>
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19 8a8 8 0 1 0 1 6M19 4v4h-4"/></svg>
+                </button>
+            </form>
+        </div>
+        <div class="bb-repository-card__status">
+            <span data-repository-state-label>{{ repository.get_sync_state_display }}</span>
+            <b data-repository-progress-label>{% if repository.has_active_sync %}{{ repository.sync_progress }}%{% endif %}</b>
+        </div>
+        <div class="bb-repository-progress" role="progressbar" aria-label="{{ repository.display_name }} sync progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ repository.sync_progress }}"{% if not repository.has_active_sync %} hidden{% endif %} data-repository-progress>
+            <span style="width: {{ repository.sync_progress }}%" data-repository-progress-bar></span>
+        </div>
+        <p data-repository-message>{{ repository.status_message|default:"Waiting for first synchronization." }}</p>
+        {% with automatic=repository.automatic_refresh_ui %}
+        <p class="bb-repository-card__automatic bb-repository-card__automatic--{{ automatic.state|default:'due' }}" data-repository-automatic data-automatic-state="{{ automatic.state|default:'due' }}">
+            <span class="bb-repository-card__automatic-dot" aria-hidden="true"></span>
+            <span>
+                <strong data-repository-automatic-label>{{ automatic.label|default:"Daily refresh" }}</strong>
+                <small data-repository-automatic-detail>{{ automatic.detail|default:"Waiting for the daily refresh scheduler." }}{% if automatic.nextActionAt %} Next: <time datetime="{{ automatic.nextActionAt }}">{{ automatic.nextActionDisplay }}</time>.{% endif %}</small>
+            </span>
+        </p>
+        {% endwith %}
+        <small class="bb-repository-card__documents">
+            <span data-repository-documents>{{ repository.pdf_count }} PDF · {{ repository.vsdx_count }} VSDX</span>
+            <span data-repository-catalog-status>
+                {% if repository.last_sync_successful_at %}
+                    {% if repository.catalog_is_stale %}Catalogue retained from{% else %}Catalogue updated{% endif %} {{ repository.last_sync_successful_at|date:"j M Y, H:i" }}
+                {% else %}
+                    No PDF catalogue published yet
+                {% endif %}
+            </span>
+        </small>
+    </li>
+    {% endfor %}
+</ul>
+{% endif %}

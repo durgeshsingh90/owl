@@ -987,9 +987,15 @@ Full History:
 
 Index only regular files with a case-insensitive .pdf extension.
 
-Ignore VSDX, images, Office files, text/source files, .git internals, and symlinks escaping the configured repository root.
+Repository synchronization may materialize and inventory regular case-insensitive PDF and VSDX
+files so the local checkout does not need the rest of a very large source tree. VSDX extraction
+and indexing remain out of scope. Ignore VSDX when building the PDF index, and ignore images,
+other Office files, text/source files, .git internals, and symlinks escaping the configured
+repository root.
 
-Partial clone or sparse checkout may be used when reliably supported, but the application must never promise that Git can always clone only PDFs. Application discovery remains PDF-only regardless of other files in the checkout.
+Partial clone or sparse checkout may be used when reliably supported, but the application must
+never promise that Git can always transfer only PDF/VSDX blobs. PDF index discovery remains
+PDF-only regardless of other files in the checkout.
 
 ### 20.5 Git LFS
 

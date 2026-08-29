@@ -1,0 +1,81 @@
+<div
+    class="notification-center"
+    data-notification-center
+    data-notifications-url="{% url 'bookmark_manager:notifications' %}"
+    data-read-url="{% url 'bookmark_manager:notifications_read' %}"
+    data-read-all-url="{% url 'bookmark_manager:notifications_read_all' %}"
+    data-schedule-tick-url="{% url 'bookmark_manager:refresh_schedule_tick' %}"
+>
+    <form class="notification-center__csrf" hidden aria-hidden="true">
+        {% csrf_token %}
+    </form>
+    <button
+        class="notification-center__toggle"
+        type="button"
+        aria-label="Open notifications"
+        aria-haspopup="dialog"
+        aria-expanded="false"
+        aria-controls="owl-notification-panel"
+        data-notification-toggle
+    >
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M6.5 9.8a5.5 5.5 0 0 1 11 0c0 6.1 2.5 6.7 2.5 6.7H4s2.5-.6 2.5-6.7Z"/>
+            <path d="M9.5 19a2.8 2.8 0 0 0 5 0"/>
+        </svg>
+        <span class="notification-center__activity" aria-hidden="true" data-notification-activity hidden></span>
+        <span class="notification-center__badge" data-notification-badge hidden>0</span>
+    </button>
+
+    <section
+        class="notification-center__panel"
+        id="owl-notification-panel"
+        role="dialog"
+        aria-modal="false"
+        aria-labelledby="owl-notification-heading"
+        tabindex="-1"
+        data-notification-panel
+        hidden
+    >
+        <header class="notification-center__header">
+            <div>
+                <p>OWL activity</p>
+                <h2 id="owl-notification-heading">Notifications</h2>
+            </div>
+            <button class="notification-center__mark-all" type="button" data-notification-read-all hidden>Mark all read</button>
+        </header>
+
+        <div class="notification-center__live visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-notification-live></div>
+
+        <section class="notification-center__background" aria-labelledby="owl-background-work-heading" data-notification-background>
+            <div class="notification-center__section-heading">
+                <h3 id="owl-background-work-heading">Background work</h3>
+                <span data-notification-background-state>Checking…</span>
+            </div>
+            <div class="notification-center__progress-card" data-notification-progress-card hidden>
+                <span class="notification-center__spinner" aria-hidden="true"></span>
+                <div>
+                    <strong data-notification-progress-label>Refreshing Confluence</strong>
+                    <small data-notification-progress-detail>Starting…</small>
+                    <span class="notification-center__progress" aria-hidden="true"><span data-notification-progress></span></span>
+                </div>
+            </div>
+            <dl class="notification-center__schedule" data-notification-schedule hidden>
+                <div><dt>Next weekly refresh</dt><dd data-notification-next-run>Not scheduled</dd></div>
+                <div><dt>Last attempted</dt><dd data-notification-last-attempt>Not yet</dd></div>
+                <div><dt>Last successful</dt><dd data-notification-last-success>Not yet</dd></div>
+                <div data-notification-retry-row hidden><dt>Automatic retry</dt><dd data-notification-retry>Waiting</dd></div>
+            </dl>
+        </section>
+
+        <div class="notification-center__section-heading notification-center__section-heading--updates">
+            <h3>Recent updates</h3>
+            <span data-notification-unread-label>No unread</span>
+        </div>
+        <div class="notification-center__list" data-notification-list aria-busy="true"></div>
+        <div class="notification-center__empty" data-notification-empty hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6.5 9.8a5.5 5.5 0 0 1 11 0c0 6.1 2.5 6.7 2.5 6.7H4s2.5-.6 2.5-6.7Z"/><path d="M9.5 19a2.8 2.8 0 0 0 5 0"/></svg>
+            <strong>No notifications yet</strong>
+            <small>Import, export, and Confluence refresh updates will appear here.</small>
+        </div>
+    </section>
+</div>

@@ -8,7 +8,7 @@
         {% if item.children %}aria-expanded="true"{% endif %}
         tabindex="{% if item.selected or item.located %}0{% else %}-1{% endif %}"
         data-tree-row
-        {% if item.bookmark %}data-details-url="?selected={{ item.bookmark.pk }}{% if current_query_string %}&amp;{{ current_query_string }}{% endif %}" data-bookmark-id="{{ item.bookmark.pk }}"{% endif %}
+        {% if item.bookmark %}data-details-url="?selected={{ item.bookmark.pk }}{% if current_query_string %}&amp;{{ current_query_string }}{% endif %}" data-bookmark-id="{{ item.bookmark.pk }}" data-manual-folder-id="{% if manual_folder %}{{ manual_folder.pk }}{% endif %}"{% endif %}
         {% if item.located %}data-located-bookmark{% endif %}
     >
         <span class="tree-node-disclosure">
@@ -37,6 +37,18 @@
             >
         </label>
         {% if item.bookmark %}
+        <button
+            class="tree-drag-handle"
+            type="button"
+            draggable="true"
+            aria-label="Move bookmark {{ item.outline_number }}, {{ item.node.title }}, to a personal folder"
+            title="Drag to a personal folder"
+            data-bookmark-drag
+            data-bookmark-id="{{ item.bookmark.pk }}"
+            data-bookmark-title="{{ item.node.title }}"
+        >
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="8" cy="7" r="1"/><circle cx="16" cy="7" r="1"/><circle cx="8" cy="12" r="1"/><circle cx="16" cy="12" r="1"/><circle cx="8" cy="17" r="1"/><circle cx="16" cy="17" r="1"/></svg>
+        </button>
         <span class="tree-node-icon tree-node-icon--page" aria-hidden="true">
             <svg viewBox="0 0 24 24" focusable="false"><path d="M6.5 3.5h7l4 4V20.5h-11z"/><path d="M13.5 3.5v4h4M9 12h6M9 15.5h6"/></svg>
         </span>

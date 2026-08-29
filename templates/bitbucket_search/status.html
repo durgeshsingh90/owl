@@ -1,0 +1,70 @@
+{% extends "owl/base.html" %}
+{% load static %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=daily-sync-v1">
+{% endblock %}
+
+{% block app_sidebar %}
+    {% include "bitbucket_search/_app_sidebar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="page-stack page-stack--centered bb-status-page">
+    <header class="page-heading page-heading--status">
+        <div>
+            <p class="eyebrow">{{ eyebrow }}</p>
+            <h1>{{ heading }}</h1>
+            <p class="lede">Daily Git refreshes and PDF catalogue publication run outside the web request. A failed refresh leaves the last successful catalogue available while OWL waits two hours before the next retry.</p>
+        </div>
+        <div class="overall-status overall-status--{{ sync_summary.state }}" role="status" aria-live="polite" aria-atomic="true">
+            <span class="overall-status__dot" aria-hidden="true"></span>
+            <span><small>Repository status</small><strong>{{ sync_summary.label }}</strong></span>
+        </div>
+    </header>
+
+    <section class="status-grid" aria-label="Repository refresh overview">
+        <article class="status-card{% if automation_payload.state == 'retry_wait' or automation_payload.state == 'due' %} status-card--attention{% elif automation_payload.state == 'exhausted' %} status-card--error{% endif %}">
+            <div class="status-card__heading"><span class="status-symbol" aria-hidden="true">↻</span><div><h2>Daily automation</h2><strong>{{ automation_payload.label }}</strong></div></div>
+            <p>{{ automation_payload.detail }}{% if automation_payload.nextActionAt %} Next action: <time datetime="{{ automation_payload.nextActionAt }}">{{ automation_payload.nextActionDisplay }}</time>.{% endif %}</p>
+        </article>
+        <article class="status-card{% if unresolved_repository_count %} status-card--error{% endif %}">
+            <div class="status-card__heading"><span class="status-symbol" aria-hidden="true">{{ active_jobs }}</span><div><h2>Repository workers</h2><strong>{{ active_jobs }} active of {{ repo_worker_limit }} allowed</strong></div></div>
+            <p>{{ enabled_repository_count }} of {{ repository_count }} repositories participate in daily refreshes. {{ unresolved_repository_count }} currently have an unresolved failed, interrupted, or locally blocked state.</p>
+        </article>
+        <article class="status-card{% if extraction_status.failed_jobs or extraction_status.interrupted_jobs or extraction_status.stale_documents %} status-card--attention{% endif %}">
+            <div class="status-card__heading"><span class="status-symbol" aria-hidden="true">PDF</span><div><h2>PDF catalogue</h2><strong>{{ pdf_count }} active PDFs</strong></div></div>
+            <p>{{ extraction_status.indexed_documents }} indexed · {{ extraction_status.pending_documents }} pending · {{ extraction_status.queued_jobs|add:extraction_status.running_jobs }} extraction jobs active.</p>
+        </article>
+    </section>
+
+    <section class="bb-status-repositories" aria-labelledby="bb-status-repositories-heading">
+        <div class="bb-status-repositories__heading">
+            <div><p class="eyebrow">Current state</p><h2 id="bb-status-repositories-heading">Repositories</h2></div>
+            <a href="{% url 'bitbucket_search:index' %}">Return to PDF catalogue</a>
+        </div>
+        {% if repositories %}
+        <div class="bb-status-table-wrap">
+            <table class="bb-status-table">
+                <caption class="visually-hidden">Current repository refresh, retry, and PDF catalogue status</caption>
+                <thead><tr><th scope="col">Repository</th><th scope="col">Git refresh</th><th scope="col">Automatic schedule</th><th scope="col">Published catalogue</th></tr></thead>
+                <tbody>
+                    {% for repository in repositories %}
+                    {% with automatic=repository.automatic_refresh_ui %}
+                    <tr>
+                        <th scope="row"><strong>{{ repository.display_name }}</strong>{% if repository.default_branch %}<small>{{ repository.default_branch }}</small>{% endif %}</th>
+                        <td><strong class="bb-status-state bb-status-state--{{ repository.sync_state }}">{{ repository.get_sync_state_display }}</strong><small>{{ repository.status_message|default:"Waiting for first synchronization." }}</small></td>
+                        <td><strong class="bb-status-automatic bb-status-automatic--{{ automatic.state }}">{{ automatic.label }}</strong><small>{{ automatic.detail }}</small></td>
+                        <td><strong>{{ repository.pdf_count }} PDF{{ repository.pdf_count|pluralize }}</strong><small>{% if repository.last_sync_successful_at %}{% if repository.catalog_is_stale %}Retained from{% else %}Updated{% endif %} {{ repository.last_sync_successful_at|date:"j M Y, H:i T" }}{% else %}Not published yet{% endif %}</small></td>
+                    </tr>
+                    {% endwith %}
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="bb-status-empty"><strong>No repositories connected</strong><p>Add a repository before the daily scheduler can refresh Git or publish PDFs.</p><a href="{% url 'bitbucket_search:repositories' %}#bb-add-repository">Add Repository</a></div>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}

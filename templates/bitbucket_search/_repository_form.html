@@ -1,0 +1,28 @@
+<form class="bb-repository-form" method="post" action="{% url 'bitbucket_search:repository_add' %}" data-repository-add-form>
+    {% csrf_token %}
+    <label for="{{ form_id|default:'bb-repository-url' }}">SSH or HTTPS Git URL</label>
+    <input
+        id="{{ form_id|default:'bb-repository-url' }}"
+        name="repository_url"
+        type="text"
+        inputmode="url"
+        maxlength="2048"
+        autocomplete="off"
+        autocapitalize="none"
+        spellcheck="false"
+        placeholder="git@host:workspace/repository.git"
+        required
+    >
+    <p>
+        Allowed host{% if allowed_hosts|length != 1 %}s{% endif %}:
+        <strong>{{ allowed_hosts_label }}</strong>
+    </p>
+    {% if not allowed_hosts %}
+        <p class="bb-repository-form__warning">Set <code>BITBUCKET_ALLOWED_HOSTS</code> in <code>.env</code>, then restart OWL.</p>
+    {% endif %}
+    <button type="submit"{% if not allowed_hosts %} disabled{% endif %}>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4v12M7 9l5-5 5 5M5 19h14"/></svg>
+        Add &amp; clone in background
+    </button>
+    <small>OWL clones once, then uses a safe fetch and fast-forward refresh.</small>
+</form>
