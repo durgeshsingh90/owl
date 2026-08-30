@@ -23,7 +23,7 @@ from django.utils import timezone
 from django.utils.formats import date_format
 from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_protect
-from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from bitbucket_search.models import (
     BitbucketPeopleGroup,
@@ -33,6 +33,7 @@ from bitbucket_search.models import (
     PDFDocumentLifecycle,
     PDFDocumentTimelineBasis,
     PDFIndexState,
+    PDFLocalPolicyState,
     RepositorySyncJob,
     RepositorySyncJobStatus,
     RepositorySyncState,
@@ -49,6 +50,12 @@ from bitbucket_search.services.path_safety import has_disallowed_path_characters
 from bitbucket_search.services.pdf_indexing import (
     ExtractionStatusSnapshot,
     extraction_status_snapshot,
+)
+from bitbucket_search.services.pdf_local_policy import (
+    delete_registered_pdf,
+    exclude_registered_pdf,
+    frozen_pdf_path,
+    resume_registered_pdf,
 )
 from bitbucket_search.services.pdf_search import (
     PDFSearchHit,
@@ -72,6 +79,7 @@ from bitbucket_search.services.people import (
     git_people_summaries,
 )
 from bitbucket_search.services.repository_sync import (
+    RepositoryRefreshInProgress,
     launch_sync_worker,
     mark_worker_launch_failed,
     queue_all_repository_refreshes,
@@ -92,11 +100,14 @@ class PDFTimelineRow:
 
     document: PDFDocument
     full_path: str
+    display_path: str
+    path_copy_available: bool
     project_label: str
     added_by_label: str
     added_date_label: str
     added_date_detail: str
     history_label: str
+    local_policy_state: str = ""
     search_hit: PDFSearchHit | None = None
 
 
@@ -217,13 +228,23 @@ def _timeline_bucket(value: date, *, today: date) -> tuple[str, str, str]:
 
 
 def _project_label(repository: BitbucketRepository) -> str:
-    """Do not invent a Bitbucket Project from the Git clone URL."""
+    """Read the project key from Bitbucket Server's HTTP clone route."""
 
-    path_parts = repository.canonical_remote_key.split("/")[1:]
-    namespace = "/".join(path_parts[:-1])
-    if namespace:
-        return f"Unavailable from Git · namespace {namespace}"
-    return "Unavailable from Git"
+    try:
+        remote = urlsplit(repository.remote_url)
+    except ValueError:
+        return ""
+    path_parts = remote.path.strip("/").split("/")
+    if (
+        remote.scheme in {"https", "http"}
+        and len(path_parts) >= 3
+        and path_parts[-3].casefold() == "scm"
+        and path_parts[-2]
+        and path_parts[-1]
+    ):
+        return path_parts[-2]
+    # A GitHub owner or Bitbucket Cloud workspace is not a Bitbucket project.
+    return ""
 
 
 def _display_full_path(document: PDFDocument) -> str:
@@ -239,9 +260,12 @@ def _display_full_path(document: PDFDocument) -> str:
     ):
         return "Unavailable: invalid registered path"
     try:
+        saved_path = frozen_pdf_path(document)
+        if saved_path is not None:
+            return str(saved_path)
         repository_root = managed_repository_path(document.repository)
         candidate = repository_root.joinpath(*relative.parts).resolve(strict=False)
-    except (OSError, RepositorySyncError, RuntimeError, TypeError, ValueError):
+    except (DocumentActionError, OSError, RepositorySyncError, RuntimeError, TypeError, ValueError):
         return "Unavailable: invalid managed checkout"
     if not candidate.is_relative_to(repository_root):
         return "Unavailable: invalid registered path"
@@ -272,14 +296,24 @@ def _timeline_row(
     if document.timeline_basis == PDFDocumentTimelineBasis.OWL_DISCOVERED:
         history_label = f"{history_label} · Git-added date unavailable"
 
+    full_path = _display_full_path(document)
+    path_copy_available = not full_path.startswith("Unavailable:")
+    local_policy = getattr(document, "local_policy", None)
     return PDFTimelineRow(
         document=document,
-        full_path=_display_full_path(document),
+        full_path=full_path,
+        display_path=(
+            f"{document.repository.display_name}/{document.relative_path}"
+            if path_copy_available
+            else "Unavailable"
+        ),
+        path_copy_available=path_copy_available,
         project_label=_project_label(document.repository),
         added_by_label=added_by,
         added_date_label=_display_date(timezone.localtime(added_at).date()),
         added_date_detail=added_detail,
         history_label=history_label,
+        local_policy_state=local_policy.state if local_policy is not None else "",
         search_hit=search_hit,
     )
 
@@ -290,7 +324,7 @@ def _pdf_timeline_page(page_number: object) -> tuple[Page, tuple[PDFTimelineGrou
             lifecycle_state=PDFDocumentLifecycle.ACTIVE,
             repository__enabled=True,
         )
-        .select_related("repository", "added_commit", "last_commit")
+        .select_related("repository", "added_commit", "last_commit", "local_policy")
         .order_by("-timeline_at", "-id")
     )
     paginator = Paginator(queryset, settings.BITBUCKET_PDF_PAGE_SIZE)
@@ -1203,6 +1237,12 @@ def _document_action_failure(
         "invalid_repository_checkout": 409,
         "document_unavailable": 409,
         "repository_refresh_in_progress": 409,
+        "repository_not_ready": 409,
+        "repository_busy": 409,
+        "pdf_extraction_busy": 409,
+        "pdf_delete_confirmation_required": 409,
+        "pdf_policy_cleanup_failed": 500,
+        "pdf_policy_rollback_failed": 500,
         "confirmation_required": 409,
         "native_action_unavailable": 503,
         "unsupported_platform": 503,
@@ -1223,7 +1263,8 @@ def _document_action_return_url(
     *,
     document_id: int | None = None,
 ) -> str:
-    raw_return_to = request.POST.get("return_to", "")
+    navigation = request.POST if request.method == "POST" else request.GET
+    raw_return_to = navigation.get("return_to", "")
     if raw_return_to and len(raw_return_to) <= 8192:
         parsed = urlsplit(raw_return_to)
         if (
@@ -1238,7 +1279,7 @@ def _document_action_return_url(
                 return f"{destination}#pdf-document-{document_id}"
             return destination
 
-    raw_page = request.POST.get("return_page", "")
+    raw_page = navigation.get("return_page", "")
     try:
         page_number = int(raw_page)
     except (TypeError, ValueError, OverflowError):
@@ -1451,6 +1492,133 @@ def reveal_document(request: HttpRequest, document_id: int) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+def exclude_document(request: HttpRequest, document_id: int) -> HttpResponse:
+    """Keep a saved PDF and its indexed text unchanged by future Git refreshes."""
+
+    local_error = _require_strict_loopback_action(request)
+    if local_error:
+        return local_error
+    get_object_or_404(PDFDocument, pk=document_id)
+    try:
+        document = exclude_registered_pdf(document_id)
+    except DocumentActionError as exc:
+        return _document_action_failure(request, exc, document_id=document_id)
+    detail = (
+        f"Excluded {document.filename} from refresh. "
+        "Its saved local copy and indexed text are kept."
+    )
+    if _is_async_request(request):
+        return JsonResponse(
+            {"state": PDFLocalPolicyState.EXCLUDED, "documentId": document.pk, "detail": detail}
+        )
+    messages.success(request, detail)
+    return redirect(_document_action_return_url(request, document_id=document.pk))
+
+
+@require_POST
+@csrf_protect
+@never_cache
+def resume_document(request: HttpRequest, document_id: int) -> HttpResponse:
+    """Reinclude a saved PDF, then queue the next background repository refresh."""
+
+    local_error = _require_strict_loopback_action(request)
+    if local_error:
+        return local_error
+    get_object_or_404(PDFDocument, pk=document_id)
+    try:
+        document = resume_registered_pdf(document_id)
+    except DocumentActionError as exc:
+        return _document_action_failure(request, exc, document_id=document_id)
+
+    worker_unavailable = False
+    try:
+        queued = queue_repository_refresh(document.repository_id)
+        if queued.job.status == RepositorySyncJobStatus.QUEUED:
+            _workers_started, launch_failed = _wake_queued_repository_workers(
+                job_ids=(queued.job.pk,),
+            )
+            if launch_failed:
+                mark_worker_launch_failed(queued.job.pk)
+                worker_unavailable = True
+    except OperationalError:
+        worker_unavailable = True
+
+    if worker_unavailable:
+        detail = (
+            f"{document.filename} is awaiting refresh, but OWL could not start its "
+            "background refresh. Retry the repository refresh to finish including it."
+        )
+    else:
+        detail = (
+            f"{document.filename} is included for the next refresh. "
+            "A background repository refresh is queued; the saved copy remains available until then."
+        )
+    if _is_async_request(request):
+        return JsonResponse(
+            {
+                "state": "worker_unavailable"
+                if worker_unavailable
+                else PDFLocalPolicyState.RESUMING,
+                "documentId": document.pk,
+                "detail": detail,
+            },
+            status=503 if worker_unavailable else 202,
+        )
+    if worker_unavailable:
+        messages.warning(request, detail)
+    else:
+        messages.success(request, detail)
+    return redirect(_document_action_return_url(request, document_id=document.pk))
+
+
+@require_http_methods(["GET", "POST"])
+@csrf_protect
+@never_cache
+def delete_document(request: HttpRequest, document_id: int) -> HttpResponse:
+    """Show local-deletion scope before accepting an explicit, CSRF-protected POST."""
+
+    local_error = _require_strict_loopback_action(request)
+    if local_error:
+        return local_error
+    document = get_object_or_404(
+        PDFDocument.objects.select_related("repository", "local_policy"),
+        pk=document_id,
+    )
+    if request.method == "GET" or request.POST.get("confirmed") != "yes":
+        navigation = request.GET if request.method == "GET" else request.POST
+        return render(
+            request,
+            "bitbucket_search/document_delete.html",
+            {
+                "active_app": "bitbucket",
+                "page_title": "Delete local PDF",
+                "document": document,
+                "full_path": _display_full_path(document),
+                "cancel_url": _document_action_return_url(request, document_id=document.pk),
+                "return_to": navigation.get("return_to", ""),
+                "return_page": navigation.get("return_page", ""),
+                "confirmation_required": request.method == "POST",
+            },
+            status=400 if request.method == "POST" else 200,
+        )
+
+    try:
+        delete_registered_pdf(document_id, confirmed=True)
+    except DocumentActionError as exc:
+        return _document_action_failure(request, exc, document_id=document_id)
+    detail = (
+        f"Deleted {document.filename} from local storage and the PDF index. "
+        "It will stay excluded from future refreshes. The remote repository was not changed."
+    )
+    if _is_async_request(request):
+        return JsonResponse({"state": "deleted", "documentId": document_id, "detail": detail})
+    messages.success(request, detail)
+    return redirect(_document_action_return_url(request))
+
+
+@require_POST
+@csrf_protect
+@never_cache
 def add_repository(request: HttpRequest) -> HttpResponse:
     """Validate one URL, enqueue clone/refresh, and return before Git starts."""
 
@@ -1570,7 +1738,17 @@ def refresh_all_repositories(request: HttpRequest) -> HttpResponse:
     if local_error:
         return local_error
 
-    queued = queue_all_repository_refreshes()
+    try:
+        queued = queue_all_repository_refreshes(require_idle=True)
+    except RepositoryRefreshInProgress:
+        detail = "Wait for repository additions and refreshes to finish before refreshing all."
+        if _is_async_request(request):
+            return JsonResponse(
+                {"state": "busy", "detail": detail, "queued": 0, "workersStarted": 0},
+                status=409,
+            )
+        messages.warning(request, detail)
+        return redirect(reverse("bitbucket_search:index"))
     if queued.eligible_total == 0:
         detail = "No enabled repositories are available to refresh."
         if _is_async_request(request):

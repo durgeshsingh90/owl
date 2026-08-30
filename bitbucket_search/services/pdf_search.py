@@ -175,6 +175,7 @@ def search_documents(query: PDFSearchQuery) -> PDFSearchPage:
             "added_commit",
             "last_commit",
             "indexed_revision",
+            "local_policy",
         )
     }
     selected = tuple(
@@ -239,6 +240,7 @@ def _filter_documents_without_text_query(query: PDFSearchQuery) -> PDFSearchPage
             "added_commit",
             "last_commit",
             "indexed_revision",
+            "local_policy",
         ).order_by(*_filtered_order_by(query.sort))[start : start + query.page_size]
     )
     return PDFSearchPage(

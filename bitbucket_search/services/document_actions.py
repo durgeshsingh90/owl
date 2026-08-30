@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from django.conf import settings
 from django.db import models, transaction
 from django.db.models.functions import Coalesce
 from django.utils import timezone
@@ -108,6 +109,20 @@ def _validated_relative_pdf_path(value: str) -> PurePosixPath:
 
 
 def validated_pdf_path(document: PDFDocument) -> Path:
+    """Resolve a registered PDF, including a validated private frozen copy."""
+
+    from bitbucket_search.services.pdf_local_policy import frozen_pdf_path
+
+    if document.lifecycle_state != PDFDocumentLifecycle.ACTIVE:
+        raise DocumentActionError(
+            "document_unavailable",
+            "This PDF is no longer available in the managed repository.",
+        )
+    frozen = frozen_pdf_path(document)
+    return frozen if frozen is not None else validated_checkout_pdf_path(document)
+
+
+def validated_checkout_pdf_path(document: PDFDocument, *, allow_missing: bool = False) -> Path:
     """Return a strictly validated, non-symlink PDF path in its managed checkout."""
 
     if document.lifecycle_state != PDFDocumentLifecycle.ACTIVE:
@@ -118,6 +133,7 @@ def validated_pdf_path(document: PDFDocument) -> Path:
 
     repository = document.repository
     try:
+        configured_parent = Path(settings.BITBUCKET_REPOSITORIES_ROOT)
         expected_root = managed_repository_path(repository)
         configured_root = Path(repository.local_path)
         resolved_configured_root = configured_root.resolve(strict=False)
@@ -129,9 +145,13 @@ def validated_pdf_path(document: PDFDocument) -> Path:
 
     if (
         not repository.local_path
+        or configured_parent.is_symlink()
+        or configured_parent.absolute() != configured_parent.resolve(strict=False)
         or configured_root.is_symlink()
+        or configured_root.absolute() != expected_root
         or resolved_configured_root != expected_root
         or not expected_root.is_dir()
+        or (expected_root / ".git").is_symlink()
         or not (expected_root / ".git").is_dir()
     ):
         raise DocumentActionError(
@@ -152,7 +172,7 @@ def validated_pdf_path(document: PDFDocument) -> Path:
                     "The registered PDF path contains a symbolic link.",
                 )
 
-        resolved_candidate = candidate.resolve(strict=True)
+        resolved_candidate = candidate.resolve(strict=not allow_missing)
     except DocumentActionError:
         raise
     except (OSError, RuntimeError) as exc:
@@ -174,6 +194,13 @@ def validated_pdf_path(document: PDFDocument) -> Path:
 
     try:
         mode = resolved_candidate.stat(follow_symlinks=False).st_mode
+    except FileNotFoundError as exc:
+        if allow_missing:
+            return resolved_candidate
+        raise DocumentActionError(
+            "document_unavailable",
+            "This PDF is missing from the managed repository.",
+        ) from exc
     except OSError as exc:
         raise DocumentActionError(
             "document_unavailable",

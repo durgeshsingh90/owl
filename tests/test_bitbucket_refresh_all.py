@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from django.utils import timezone
 
 from bitbucket_search.models import (
@@ -7,10 +8,14 @@ from bitbucket_search.models import (
     RepositorySyncJob,
     RepositorySyncJobStatus,
     RepositorySyncOperation,
+    RepositorySyncState,
 )
 from bitbucket_search.services import repository_sync
 from bitbucket_search.services.git_sync import managed_repository_path
-from bitbucket_search.services.repository_sync import queue_all_repository_refreshes
+from bitbucket_search.services.repository_sync import (
+    RepositoryRefreshInProgress,
+    queue_all_repository_refreshes,
+)
 
 
 def _repository(name: str, *, enabled: bool = True) -> BitbucketRepository:
@@ -109,6 +114,82 @@ def test_queue_all_is_idempotent_across_repeated_requests(db, tmp_path, settings
     assert {job.pk for job in repeated.fallback_worker_jobs} == {
         result.job.pk for result in initial.results
     }
+    assert RepositorySyncJob.objects.count() == 2
+
+
+@pytest.mark.parametrize(
+    ("sync_state", "job_status", "enabled"),
+    [
+        (RepositorySyncState.QUEUED, None, True),
+        (RepositorySyncState.CLONING, None, True),
+        (RepositorySyncState.FETCHING, None, True),
+        (RepositorySyncState.UPDATING, None, True),
+        (RepositorySyncState.READY, RepositorySyncJobStatus.QUEUED, True),
+        (RepositorySyncState.READY, RepositorySyncJobStatus.RUNNING, True),
+        (RepositorySyncState.CLONING, None, False),
+        (RepositorySyncState.READY, RepositorySyncJobStatus.QUEUED, False),
+    ],
+)
+def test_require_idle_rejects_any_busy_repository_before_queueing_work(
+    db,
+    sync_state,
+    job_status,
+    enabled,
+):
+    idle = _repository("idle")
+    busy = _repository("busy", enabled=enabled)
+    busy.sync_state = sync_state
+    busy.save(update_fields={"sync_state"})
+    if job_status:
+        RepositorySyncJob.objects.create(
+            repository=busy,
+            operation=RepositorySyncOperation.CLONE,
+            status=job_status,
+            started_at=timezone.now() if job_status == RepositorySyncJobStatus.RUNNING else None,
+            heartbeat_at=timezone.now() if job_status == RepositorySyncJobStatus.RUNNING else None,
+        )
+    original_job_count = RepositorySyncJob.objects.count()
+
+    with pytest.raises(RepositoryRefreshInProgress):
+        queue_all_repository_refreshes(require_idle=True)
+
+    assert RepositorySyncJob.objects.count() == original_job_count
+    assert not RepositorySyncJob.objects.filter(repository=idle).exists()
+    idle.refresh_from_db()
+    assert idle.sync_state == RepositorySyncState.NOT_CLONED
+
+
+@pytest.mark.parametrize(
+    ("sync_state", "job_status"),
+    [
+        (RepositorySyncState.READY, RepositorySyncJobStatus.SUCCEEDED),
+        (RepositorySyncState.FAILED, RepositorySyncJobStatus.FAILED),
+        (RepositorySyncState.INTERRUPTED, RepositorySyncJobStatus.INTERRUPTED),
+    ],
+)
+def test_require_idle_allows_refresh_after_previous_jobs_finish(db, sync_state, job_status):
+    repository = _repository("finished")
+    repository.sync_state = sync_state
+    repository.save(update_fields={"sync_state"})
+    completed_job = RepositorySyncJob.objects.create(
+        repository=repository,
+        operation=RepositorySyncOperation.REFRESH,
+        status=job_status,
+        started_at=timezone.now(),
+        completed_at=timezone.now(),
+    )
+
+    queued = queue_all_repository_refreshes(require_idle=True)
+
+    assert queued.eligible_total == 1
+    assert queued.newly_queued_count == 1
+    assert queued.already_active_count == 0
+    assert queued.newly_queued[0].job.pk != completed_job.pk
+    assert queued.newly_queued[0].job.status == RepositorySyncJobStatus.QUEUED
+
+    with pytest.raises(RepositoryRefreshInProgress):
+        queue_all_repository_refreshes(require_idle=True)
+
     assert RepositorySyncJob.objects.count() == 2
 
 

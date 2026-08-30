@@ -45,9 +45,14 @@ from bitbucket_search.models import (
     PDFTextRevisionState,
     RepositorySyncJob,
     RepositorySyncJobStatus,
+    RepositorySyncState,
 )
 from bitbucket_search.services.document_actions import DocumentActionError, validated_pdf_path
 from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
+from bitbucket_search.services.repository_lock import (
+    RepositoryCheckoutBusy,
+    repository_checkout_lock,
+)
 
 PDF_INDEX_VERSION = 1
 STALE_EXTRACTION_AFTER = timedelta(minutes=10)
@@ -110,6 +115,14 @@ class PDFIndexingError(RuntimeError):
 
 class PDFExtractionTargetChanged(PDFIndexingError):
     """The durable job no longer describes the document's published source revision."""
+
+
+class PDFExtractionDeferred(RuntimeError):
+    """Repository synchronization takes priority over a claimed extraction."""
+
+
+class PDFExtractionExcluded(RuntimeError):
+    """A local PDF policy supersedes extraction without changing saved text."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +221,7 @@ def queue_repository_pdf_extractions(
         .exclude(
             document__lifecycle_state=PDFDocumentLifecycle.ACTIVE,
             document__repository__enabled=True,
+            document__local_policy__isnull=True,
         )
         .values_list("id", flat=True)
     )
@@ -258,6 +272,7 @@ def queue_repository_pdf_extractions(
         .filter(
             repository=locked_repository,
             lifecycle_state=PDFDocumentLifecycle.ACTIVE,
+            local_policy__isnull=True,
         )
         .filter(
             Q(indexed_revision__isnull=True)
@@ -508,6 +523,7 @@ def extraction_status_snapshot() -> ExtractionStatusSnapshot:
         target_extractor_version=PDF_EXTRACTOR_VERSION,
         document__lifecycle_state=PDFDocumentLifecycle.ACTIVE,
         document__repository__enabled=True,
+        document__local_policy__isnull=True,
     )
     active_job_counts = {
         row["status"]: row["total"]
@@ -542,7 +558,9 @@ def extraction_status_snapshot() -> ExtractionStatusSnapshot:
         interrupted_jobs=unresolved.filter(
             latest_current_job_status=PDFExtractionJobStatus.INTERRUPTED
         ).count(),
-        pending_documents=active_documents.filter(index_state=PDFIndexState.PENDING).count(),
+        pending_documents=active_documents.filter(
+            index_state=PDFIndexState.PENDING, local_policy__isnull=True
+        ).count(),
         indexed_documents=active_documents.filter(
             index_state__in=(
                 PDFIndexState.READY,
@@ -616,6 +634,7 @@ def sweep_pdf_extraction_queue(
         .exclude(
             document__lifecycle_state=PDFDocumentLifecycle.ACTIVE,
             document__repository__enabled=True,
+            document__local_policy__isnull=True,
         )
         .values_list("id", flat=True)
     )
@@ -656,6 +675,7 @@ def sweep_pdf_extraction_queue(
         PDFDocument.objects.filter(
             lifecycle_state=PDFDocumentLifecycle.ACTIVE,
             repository__enabled=True,
+            local_policy__isnull=True,
         )
         .filter(
             Q(indexed_revision__isnull=True)
@@ -717,6 +737,8 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
                 status=PDFExtractionJobStatus.QUEUED,
                 document__lifecycle_state=PDFDocumentLifecycle.ACTIVE,
                 document__repository__enabled=True,
+                document__repository__sync_state=RepositorySyncState.READY,
+                document__local_policy__isnull=True,
             )
             .order_by("requested_at", "id")
             .values_list("id", flat=True)
@@ -744,6 +766,7 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
 
 
 def _update_job_progress(job_id: int, phase: str, progress: int) -> None:
+    _raise_if_repository_sync_active()
     updated = PDFExtractionJob.objects.filter(
         pk=job_id,
         status=PDFExtractionJobStatus.RUNNING,
@@ -759,8 +782,22 @@ def _update_job_progress(job_id: int, phase: str, progress: int) -> None:
         )
 
 
+def _raise_if_repository_sync_active() -> None:
+    if RepositorySyncJob.objects.filter(status__in=_ACTIVE_REPOSITORY_JOB_STATUSES).exists():
+        raise PDFExtractionDeferred
+
+
 def _validated_job_path(job: PDFExtractionJob) -> Path:
-    document = PDFDocument.objects.select_related("repository").get(pk=job.document_id)
+    document = PDFDocument.objects.select_related("repository", "local_policy").get(
+        pk=job.document_id
+    )
+    if getattr(document, "local_policy", None) is not None:
+        raise PDFExtractionExcluded
+    if document.repository.sync_state != RepositorySyncState.READY:
+        # A Git update can succeed before catalogue publication fails. Until a
+        # successful refresh publishes that checkout, its bytes need not match
+        # even a same-sized PDF in the last known catalogue.
+        raise PDFExtractionDeferred
     if not document.repository.enabled or not _job_matches_document(job, document):
         raise PDFExtractionTargetChanged(
             "extraction_target_changed",
@@ -1113,12 +1150,17 @@ def _attach_revision(
     with transaction.atomic():
         job = (
             PDFExtractionJob.objects.select_for_update()
-            .select_related("document__repository")
+            .select_related("document__repository", "document__local_policy")
             .get(pk=job_id)
         )
         document = job.document
         if job.status != PDFExtractionJobStatus.RUNNING:
             return False
+        if getattr(document, "local_policy", None) is not None:
+            raise PDFExtractionExcluded
+        _raise_if_repository_sync_active()
+        if document.repository.sync_state != RepositorySyncState.READY:
+            raise PDFExtractionDeferred
         if not document.repository.enabled or not _job_matches_document(job, document):
             raise PDFExtractionTargetChanged(
                 "extraction_target_changed",
@@ -1304,7 +1346,7 @@ def _queue_current_target_after_obsolete_job(job_id: int) -> None:
         queue_repository_pdf_extractions(job.document.repository_id)
 
 
-def execute_claimed_extraction_job(
+def _execute_claimed_extraction_job(
     job_id: int,
     *,
     extraction_runner: ExtractionRunner = run_isolated_pdf_extractor,
@@ -1384,6 +1426,15 @@ def execute_claimed_extraction_job(
                 content_sha256=content_sha256,
                 staged=staged,
             )
+    except PDFExtractionExcluded:
+        PDFExtractionJob.objects.filter(pk=job.pk, status=PDFExtractionJobStatus.RUNNING).update(
+            status=PDFExtractionJobStatus.CANCELLED,
+            completed_at=timezone.now(),
+            error_code="pdf_refresh_excluded",
+            error_summary="This PDF is excluded from refresh and text extraction.",
+        )
+    except PDFExtractionDeferred:
+        raise
     except PDFExtractionTargetChanged as exc:
         _fail_job(job.pk, exc, content_sha256=content_sha256)
         _queue_current_target_after_obsolete_job(job.pk)
@@ -1403,9 +1454,64 @@ def execute_claimed_extraction_job(
     return PDFExtractionJob.objects.select_related("document__repository").get(pk=job.pk)
 
 
+def execute_claimed_extraction_job(
+    job_id: int,
+    *,
+    extraction_runner: ExtractionRunner = run_isolated_pdf_extractor,
+) -> PDFExtractionJob:
+    """Keep a checkout stable and defer if synchronization overtakes the claim."""
+
+    job = PDFExtractionJob.objects.select_related("document__repository").get(pk=job_id)
+    if job.status != PDFExtractionJobStatus.RUNNING:
+        return job
+    try:
+        # Git uses this same cross-process gate. A sync queued after a PDF was
+        # claimed is detected before reads, on parser heartbeats, and before
+        # publication. An in-flight parser is stopped by its heartbeat handler
+        # before this lock is released for a waiting repository worker.
+        with repository_checkout_lock(job.document.repository_id, blocking=False):
+            _raise_if_repository_sync_active()
+            return _execute_claimed_extraction_job(
+                job.pk,
+                extraction_runner=extraction_runner,
+            )
+    except (PDFExtractionDeferred, RepositoryCheckoutBusy):
+        PDFExtractionJob.objects.filter(
+            pk=job.pk,
+            status=PDFExtractionJobStatus.RUNNING,
+        ).update(
+            status=PDFExtractionJobStatus.QUEUED,
+            phase=PDFExtractionJobPhase.QUEUED,
+            progress=0,
+            pages_processed=0,
+            characters_extracted=0,
+            started_at=None,
+            heartbeat_at=None,
+            completed_at=None,
+            worker_pid=None,
+            error_code="",
+            error_summary="",
+        )
+        return PDFExtractionJob.objects.select_related("document__repository").get(pk=job.pk)
+    except OSError:
+        _fail_job(
+            job.pk,
+            PDFIndexingError(
+                "pdf_checkout_lock_unavailable",
+                "OWL could not safely lock the repository folder for PDF extraction. Retry this PDF.",
+            ),
+        )
+        return PDFExtractionJob.objects.select_related("document__repository").get(pk=job.pk)
+
+
 def work_one_extraction_job() -> PDFExtractionJob | None:
     job = claim_next_extraction_job()
-    return execute_claimed_extraction_job(job.pk) if job is not None else None
+    if job is None:
+        return None
+    completed = execute_claimed_extraction_job(job.pk)
+    # A deferred lease is idle work, not a completion. Let worker commands use
+    # their normal polling delay rather than repeatedly reclaiming a busy PDF.
+    return None if completed.status == PDFExtractionJobStatus.QUEUED else completed
 
 
 def launch_index_worker() -> subprocess.Popen[bytes]:

@@ -92,6 +92,14 @@ class PDFDocumentLifecycle(models.TextChoices):
     REMOVED = "removed", "Removed"
 
 
+class PDFLocalPolicyState(models.TextChoices):
+    """A local per-path override that remains independent of Git history."""
+
+    EXCLUDED = "excluded", "Excluded from refresh"
+    DELETED = "deleted", "Deleted locally"
+    RESUMING = "resuming", "Waiting to resume refresh"
+
+
 class PDFDocumentAddedEvidence(models.TextChoices):
     """Coverage behind the recorded Git addition attribution."""
 
@@ -208,7 +216,7 @@ class BitbucketRepository(models.Model):
 
     @property
     def has_active_sync(self) -> bool:
-        return self.sync_state in {
+        return bool(getattr(self, "_has_active_sync_job", False)) or self.sync_state in {
             RepositorySyncState.QUEUED,
             RepositorySyncState.CLONING,
             RepositorySyncState.FETCHING,
@@ -446,6 +454,39 @@ class PDFDocument(models.Model):
 
     def __str__(self) -> str:
         return f"{self.repository.display_name} — {self.relative_path}"
+
+
+class PDFLocalPolicy(models.Model):
+    """A minimal exclusion rule, retained as a tombstone after local deletion."""
+
+    repository = models.ForeignKey(
+        BitbucketRepository,
+        on_delete=models.CASCADE,
+        related_name="pdf_local_policies",
+    )
+    relative_path = models.CharField(max_length=2048)
+    document = models.OneToOneField(
+        PDFDocument,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="local_policy",
+    )
+    state = models.CharField(max_length=16, choices=PDFLocalPolicyState)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["repository_id", "relative_path", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("repository", "relative_path"),
+                name="bitbucket_unique_pdf_local_policy_path",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.repository_id} — {self.relative_path} — {self.get_state_display()}"
 
 
 class PDFTextRevision(models.Model):

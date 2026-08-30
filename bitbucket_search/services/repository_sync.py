@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -14,12 +15,15 @@ from datetime import time as datetime_time
 from pathlib import Path
 
 from django.conf import settings
-from django.db import IntegrityError, transaction
-from django.db.models import Exists, OuterRef, Prefetch, Q
+from django.db import IntegrityError, OperationalError, transaction
+from django.db.models import Count, Exists, OuterRef, Prefetch, Q, Sum
 from django.utils import timezone
 
 from bitbucket_search.models import (
     BitbucketRepository,
+    PDFDocument,
+    PDFDocumentLifecycle,
+    PDFLocalPolicyState,
     RepositorySyncJob,
     RepositorySyncJobStatus,
     RepositorySyncOperation,
@@ -53,6 +57,10 @@ AUTOMATIC_RETRYABLE_STATUSES = (
 STALE_JOB_AFTER = timedelta(minutes=10)
 WORKER_WAKE_RESERVATION_AFTER = timedelta(seconds=30)
 _RESIDENT_REPOSITORY_WORKERS_ACTIVE = threading.Event()
+
+
+class RepositoryRefreshInProgress(RuntimeError):
+    """A bulk refresh must wait for existing repository work to finish."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -734,14 +742,34 @@ def queue_repository_refresh(repository_id: int) -> QueueResult:
     return _queue_repository_refresh(repository_id, enabled_only=False)
 
 
-def queue_all_repository_refreshes() -> QueueAllRepositoriesResult:
+@transaction.atomic
+def queue_all_repository_refreshes(*, require_idle: bool = False) -> QueueAllRepositoriesResult:
     """Queue clone/refresh work once for every enabled managed repository.
 
     Existing queued or running jobs are returned as active rather than
     duplicated. A queued job, including one created by an earlier request, is
     included in ``fallback_worker_jobs`` so an explicit web request can wake a
     detached worker when OWL's resident supervisor is not running.
+
+    Interactive Refresh all requests require an idle workspace. Check that in
+    the same transaction as queue creation so a failed queue pass cannot leave
+    a partially scheduled bulk refresh behind.
     """
+
+    if require_idle:
+        _interrupt_stale_jobs()
+        if BitbucketRepository.objects.filter(
+            Q(
+                sync_state__in=(
+                    RepositorySyncState.QUEUED,
+                    RepositorySyncState.CLONING,
+                    RepositorySyncState.FETCHING,
+                    RepositorySyncState.UPDATING,
+                )
+            )
+            | Q(sync_jobs__status__in=ACTIVE_JOB_STATUSES)
+        ).exists():
+            raise RepositoryRefreshInProgress
 
     repository_ids = tuple(
         BitbucketRepository.objects.filter(enabled=True).order_by("id").values_list("id", flat=True)
@@ -1066,13 +1094,66 @@ def _repository_state_for_phase(job: RepositorySyncJob, phase: str) -> str:
         return RepositorySyncState.CLONING
     if phase == RepositorySyncPhase.FETCHING:
         return RepositorySyncState.FETCHING
-    if phase in {RepositorySyncPhase.UPDATING, RepositorySyncPhase.DISCOVERING}:
+    if phase in {
+        RepositorySyncPhase.UPDATING,
+        RepositorySyncPhase.DISCOVERING,
+        RepositorySyncPhase.FINALIZING,
+    }:
         return RepositorySyncState.UPDATING
     return (
         RepositorySyncState.CLONING
         if job.operation == RepositorySyncOperation.CLONE
         else RepositorySyncState.FETCHING
     )
+
+
+def _unexpected_worker_diagnostic(error: Exception, *, stage: str) -> tuple[str, str, str]:
+    """Describe a failure without persisting exception text, paths, or credentials."""
+
+    error_type = next(
+        (
+            kind.__name__
+            for kind in (
+                OperationalError,
+                IntegrityError,
+                OSError,
+                TypeError,
+                ValueError,
+                LookupError,
+                ArithmeticError,
+                RuntimeError,
+            )
+            if isinstance(error, kind)
+        ),
+        "Exception",
+    )
+    stage_label = {
+        "git_sync": "Git synchronization",
+        "pdf_catalog_build": "PDF catalogue discovery",
+        "pdf_catalog_publish": "PDF catalogue publication",
+        "pdf_extraction_queue": "PDF extraction queueing",
+        "repository_state_publish": "repository status publication",
+    }[stage]
+    cause = error.__cause__
+    sqlite_code = getattr(cause, "sqlite_errorcode", None)
+    if (
+        isinstance(error, OperationalError)
+        and isinstance(cause, sqlite3.Error)
+        and isinstance(sqlite_code, int)
+        and sqlite_code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+    ):
+        code = "database_busy"
+        summary = (
+            f"Repository sync paused during {stage_label}: the local database was busy "
+            f"({error_type}; SQLite code {sqlite_code}). Select Refresh to retry."
+        )
+    else:
+        code = "worker_error"
+        summary = (
+            f"Repository sync stopped during {stage_label} "
+            f"({error_type}; code {code}). Select Refresh to retry."
+        )
+    return code, summary, error_type
 
 
 def execute_claimed_job(job_id: int) -> RepositorySyncJob:
@@ -1085,6 +1166,7 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
     last_saved_at = 0.0
     last_phase = job.phase
     last_progress = job.progress
+    stage = "git_sync"
 
     def save_progress(phase: str, progress: int, message: str) -> None:
         nonlocal last_saved_at, last_phase, last_progress
@@ -1125,6 +1207,7 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
             operation=job.operation,
             progress_callback=save_progress,
         )
+        stage = "pdf_catalog_build"
         catalog = build_repository_pdf_catalog(
             job.repository,
             result_commit=result.result_commit,
@@ -1138,6 +1221,12 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
 
         now = timezone.now()
         local_path = str(managed_repository_path(job.repository))
+        stage = "pdf_catalog_publish"
+        save_progress(
+            RepositorySyncPhase.FINALIZING,
+            99,
+            "Publishing the PDF catalogue and queueing text extraction…",
+        )
         with transaction.atomic():
             # A stale worker must never publish a catalog after another process
             # has interrupted its lease. The job transition, inventory switch,
@@ -1168,9 +1257,26 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
                 # repository transaction. Publishing both the catalog and these
                 # target revisions together prevents a changed PDF being missed
                 # after a worker restart.
+                stage = "pdf_extraction_queue"
                 queue_repository_pdf_extractions(
                     job.repository_id,
                     repository_sync_job=job.pk,
+                )
+                stage = "repository_state_publish"
+                inventory_totals = (
+                    PDFDocument.objects.filter(
+                        repository_id=job.repository_id,
+                        lifecycle_state=PDFDocumentLifecycle.ACTIVE,
+                    )
+                    .exclude(local_policy__state=PDFLocalPolicyState.DELETED)
+                    .aggregate(
+                        pdf_count=Count("pk"),
+                        frozen_bytes=Sum(
+                            "file_size",
+                            filter=Q(local_policy__state=PDFLocalPolicyState.EXCLUDED),
+                            default=0,
+                        ),
+                    )
                 )
                 BitbucketRepository.objects.filter(pk=job.repository_id).update(
                     local_path=local_path,
@@ -1180,9 +1286,11 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
                     status_message="Repository is ready.",
                     last_error_code="",
                     last_error_summary="",
-                    pdf_count=len(catalog.documents),
+                    pdf_count=inventory_totals["pdf_count"],
                     vsdx_count=result.documents.vsdx_count,
-                    document_bytes=result.documents.document_bytes,
+                    document_bytes=(
+                        result.documents.document_bytes + inventory_totals["frozen_bytes"]
+                    ),
                     last_synced_commit=result.result_commit,
                     history_is_shallow=catalog.history_is_shallow,
                     metadata_indexed_commit=result.result_commit,
@@ -1222,9 +1330,20 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
                 summary=exc.summary,
                 occurred_at=now,
             )
-    except Exception:
+    except Exception as exc:
         now = timezone.now()
-        summary = "The background repository worker stopped unexpectedly. Select Refresh to retry."
+        code, summary, error_type = _unexpected_worker_diagnostic(exc, stage=stage)
+        # Database persistence itself can be unavailable. Keep a content-free
+        # diagnostic in the log too, without raw exception text or a traceback.
+        logger.error(
+            "Repository sync failed: repository_id=%s job_id=%s stage=%s "
+            "error_type=%s error_code=%s",
+            job.repository_id,
+            job.pk,
+            stage,
+            error_type,
+            code,
+        )
         with transaction.atomic():
             updated = RepositorySyncJob.objects.filter(
                 pk=job.pk,
@@ -1233,7 +1352,7 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
                 status=RepositorySyncJobStatus.INTERRUPTED,
                 heartbeat_at=now,
                 completed_at=now,
-                error_code="worker_error",
+                error_code=code,
                 error_summary=summary,
                 status_message=summary,
             )
@@ -1241,7 +1360,7 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
                 BitbucketRepository.objects.filter(pk=job.repository_id).update(
                     sync_state=RepositorySyncState.INTERRUPTED,
                     status_message=summary,
-                    last_error_code="worker_error",
+                    last_error_code=code,
                     last_error_summary=summary,
                     last_sync_completed_at=now,
                 )
@@ -1275,13 +1394,22 @@ def repository_status_snapshot(*, at=None) -> tuple[BitbucketRepository, ...]:
         )
     ).order_by("-requested_at", "-id")
     repositories = tuple(
-        BitbucketRepository.objects.prefetch_related(
+        BitbucketRepository.objects.annotate(
+            _has_active_sync_job=Exists(
+                RepositorySyncJob.objects.filter(
+                    repository_id=OuterRef("pk"),
+                    status__in=ACTIVE_JOB_STATUSES,
+                )
+            )
+        )
+        .prefetch_related(
             Prefetch(
                 "sync_jobs",
                 queryset=relevant_jobs,
                 to_attr="_automatic_refresh_jobs",
             )
-        ).order_by("display_name", "id")
+        )
+        .order_by("display_name", "id")
     )
     for repository in repositories:
         repository.automatic_refresh = _repository_automation_status(

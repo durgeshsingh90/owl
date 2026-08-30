@@ -13,12 +13,18 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from django.conf import settings
 from django.utils import timezone
 
-from bitbucket_search.models import BitbucketRepository, RepositorySyncPhase
+from bitbucket_search.models import (
+    BitbucketRepository,
+    PDFLocalPolicy,
+    PDFLocalPolicyState,
+    RepositorySyncPhase,
+)
+from bitbucket_search.services.path_safety import has_disallowed_path_characters
 from bitbucket_search.services.repository_lock import repository_checkout_lock
 
 ProgressCallback = Callable[[str, int, str], None]
@@ -114,11 +120,12 @@ def _run_capture(
     failure_code: str,
     failure_summary: str,
     heartbeat_callback: HeartbeatCallback | None = None,
+    input_text: str | None = None,
 ) -> str:
     try:
         process = subprocess.Popen(
             list(arguments),
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -132,6 +139,7 @@ def _run_capture(
 
     deadline = time.monotonic() + settings.BITBUCKET_GIT_TIMEOUT_SECONDS
     stdout = ""
+    pending_input = input_text
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -141,10 +149,13 @@ def _run_capture(
                     settings.BITBUCKET_GIT_TIMEOUT_SECONDS,
                 )
             try:
+                input_arguments = {"input": pending_input} if pending_input is not None else {}
                 stdout, _stderr = process.communicate(
-                    timeout=min(_HEARTBEAT_INTERVAL_SECONDS, remaining)
+                    timeout=min(_HEARTBEAT_INTERVAL_SECONDS, remaining),
+                    **input_arguments,
                 )
             except subprocess.TimeoutExpired:
+                pending_input = None
                 if heartbeat_callback is not None:
                     heartbeat_callback()
                 continue
@@ -255,6 +266,89 @@ def _git_value(
         failure_code=code,
         failure_summary=summary,
         heartbeat_callback=heartbeat_callback,
+    )
+
+
+def require_clean_document_checkout(
+    repository: BitbucketRepository,
+    *,
+    repository_path: Path | None = None,
+    heartbeat_callback: HeartbeatCallback | None = None,
+) -> Path:
+    """Protect local changes before a document policy changes the sparse tree."""
+
+    target = repository_path or _validated_existing_path(repository)
+    dirty = _git_value(
+        target,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        code="status_failed",
+        summary="OWL could not verify that the repository working tree is clean.",
+        heartbeat_callback=heartbeat_callback,
+    )
+    if dirty:
+        raise RepositorySyncError(
+            "dirty_working_tree",
+            "Local changes were found. OWL did not overwrite them; repair the checkout and retry.",
+            blocked_dirty=True,
+        )
+    return target
+
+
+def _literal_document_policy_patterns(relative_path: str) -> tuple[str, str]:
+    relative = PurePosixPath(relative_path)
+    if (
+        not relative_path
+        or "\\" in relative_path
+        or has_disallowed_path_characters(relative_path)
+        or relative.is_absolute()
+        or PureWindowsPath(relative_path).drive
+        or relative.suffix.casefold() != ".pdf"
+        or any(part in {"", ".", ".."} for part in relative_path.split("/"))
+    ):
+        raise RepositorySyncError(
+            "invalid_document_policy_path",
+            "A local PDF policy has an unsafe path. OWL left the checkout unchanged.",
+        )
+    escaped = "".join(
+        f"\\{character}" if character in "\\*?[]!#" else character for character in relative_path
+    )
+    # A slash anchors this exact path. A directory-only inclusion prevents a
+    # future directory at the same PDF filename from suppressing its children.
+    return f"!/{escaped}", f"/{escaped}/"
+
+
+def apply_document_checkout_policy(
+    repository: BitbucketRepository,
+    *,
+    repository_path: Path | None = None,
+    heartbeat_callback: HeartbeatCallback | None = None,
+) -> None:
+    """Materialize selected documents while leaving frozen/deleted files out of Git's tree."""
+
+    target = repository_path or _validated_existing_path(repository)
+    excluded_paths = (
+        PDFLocalPolicy.objects.filter(
+            repository=repository,
+            state__in=(PDFLocalPolicyState.EXCLUDED, PDFLocalPolicyState.DELETED),
+        )
+        .order_by("relative_path")
+        .values_list("relative_path", flat=True)
+    )
+    patterns = list(_DOCUMENT_PATTERNS)
+    for relative_path in excluded_paths:
+        patterns.extend(_literal_document_policy_patterns(relative_path))
+    _run_capture(
+        ("git", "-C", str(target), "sparse-checkout", "set", "--no-cone", "--stdin"),
+        failure_code="sparse_checkout_failed",
+        failure_summary=(
+            "Git could not restore the PDF and VSDX working tree safely. "
+            "Check checkout permissions and local file conflicts, then retry."
+        ),
+        heartbeat_callback=heartbeat_callback,
+        input_text="\n".join(patterns) + "\n",
     )
 
 
@@ -614,19 +708,9 @@ def _clone(
             failure_summary="Git could not prepare the document-only working tree.",
             heartbeat_callback=sparse_checkout_heartbeat,
         )
-        _run_capture(
-            (
-                "git",
-                "-C",
-                str(staging),
-                "sparse-checkout",
-                "set",
-                "--no-cone",
-                "--",
-                *_DOCUMENT_PATTERNS,
-            ),
-            failure_code="sparse_checkout_failed",
-            failure_summary="Git could not select PDF and VSDX files for the working tree.",
+        apply_document_checkout_policy(
+            repository,
+            repository_path=staging,
             heartbeat_callback=sparse_checkout_heartbeat,
         )
         _run_streaming(
@@ -787,12 +871,25 @@ def _refresh(
             "The repository could not be fast-forwarded safely. OWL left the checkout unchanged."
         ),
     )
+    # An earlier/interrupted sparse checkout can exclude tracked documents while
+    # Git still reports a clean tree. A no-op merge does not materialize those
+    # files, so restore OWL's selection without forcing or resetting local work.
+    apply_document_checkout_policy(
+        repository,
+        repository_path=target,
+        heartbeat_callback=_progress_heartbeat(
+            progress_callback,
+            phase=RepositorySyncPhase.UPDATING,
+            progress=91,
+            status_message="Restoring the PDF and VSDX working tree selection…",
+        ),
+    )
     result_commit = _commit(
         target,
         heartbeat_callback=_progress_heartbeat(
             progress_callback,
             phase=RepositorySyncPhase.UPDATING,
-            progress=90,
+            progress=92,
             status_message="Validating the updated working tree…",
         ),
     )

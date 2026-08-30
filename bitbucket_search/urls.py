@@ -25,6 +25,21 @@ urlpatterns = [
         views.reveal_document,
         name="document_reveal",
     ),
+    path(
+        "documents/<int:document_id>/exclude/",
+        views.exclude_document,
+        name="document_exclude",
+    ),
+    path(
+        "documents/<int:document_id>/include/",
+        views.resume_document,
+        name="document_resume",
+    ),
+    path(
+        "documents/<int:document_id>/delete/",
+        views.delete_document,
+        name="document_delete",
+    ),
     path("repositories/", views.repositories, name="repositories"),
     path("repositories/add/", views.add_repository, name="repository_add"),
     path(

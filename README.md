@@ -278,6 +278,22 @@ delay and cap are configured with `BITBUCKET_DAILY_REFRESH_RETRY_SECONDS` (defau
 `BITBUCKET_DAILY_REFRESH_LOCAL_HOUR` to choose the local hour (`11` by default); OWL interprets it in
 `OWL_TIME_ZONE` (`Europe/Dublin` by default).
 
+### Exclude or delete a Bitbucket PDF locally
+
+Each PDF row has **Exclude from refresh** and **Delete PDF** actions. Exclusion keeps a
+private snapshot and its existing searchable text unchanged while other repository files
+continue refreshing. Use **Include in refresh** to queue a repository refresh and replace
+that snapshot with the current repository version. Excluded snapshots live beneath
+`var/media/bitbucket/excluded/<repository-id>/` by default; Open, Open folder, and Copy path
+use that retained copy.
+
+Deletion requires confirmation. It removes the local working file, retained snapshot (if any),
+PDF database record, extraction jobs, and unshared indexed text. A minimal repository/path
+exclusion rule remains so later pulls do not recreate the deleted PDF. No remote commits or
+files are changed. This is not a secure erase of Git's historical object cache, database
+backups, or text still shared by another PDF. Exclusion and deletion wait until repository
+synchronization and PDF extraction are idle; local modifications are never overwritten.
+
 ## Connect Confluence and save a bookmark
 
 1. Open **Bookmark Manager**.

@@ -83,10 +83,12 @@ def test_timeline_row_labels_git_author_without_claiming_push_or_project_evidenc
 
     assert row.added_by_label == "A. Architect · Git author"
     assert "Git commit date" in row.added_date_detail
-    assert row.project_label == "Unavailable from Git · namespace cloud-team"
+    assert row.project_label == ""
     assert row.history_label == "Full reachable history"
     assert "Pushed by" not in repr(row)
     assert row.full_path.endswith(f"/{repository.pk}-networking/docs/Architecture.pdf")
+    assert row.display_path == "networking/docs/Architecture.pdf"
+    assert row.path_copy_available is True
 
 
 def test_unknown_addition_uses_owl_discovery_and_available_history_labels(tmp_path, settings):

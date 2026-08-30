@@ -2295,7 +2295,7 @@
 }
 
 .bb-document-name strong,
-.bb-document-path,
+.bb-document-path__text,
 .bb-document-cell--project > span:last-child,
 .bb-document-cell--author > span:last-child {
     overflow: hidden;
@@ -2312,6 +2312,16 @@
 .bb-document-date small {
     margin-top: 0.14rem;
     color: var(--bb-muted-low);
+    font-size: 0.58rem;
+}
+
+.bb-pdf-policy-badge {
+    display: inline-flex;
+    margin-top: 0.2rem;
+    padding: 0.08rem 0.35rem;
+    border-radius: 4px;
+    color: var(--bb-amber);
+    background: var(--bb-amber-soft);
     font-size: 0.58rem;
 }
 
@@ -2381,10 +2391,46 @@
 }
 
 .bb-document-path {
-    display: block;
+    display: grid;
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0;
+    border: 0;
+    border-radius: 2px;
     color: var(--bb-muted);
+    background: transparent;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 0.61rem;
+    text-align: left;
+    cursor: copy;
+}
+
+.bb-document-path__text {
+    min-width: 0;
+}
+
+.bb-document-path:hover:not(:disabled) .bb-document-path__text,
+.bb-document-path:focus-visible .bb-document-path__text {
+    color: var(--bb-amber);
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+}
+
+.bb-document-path__feedback {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.18rem;
+    color: var(--bb-success);
+    font-family: system-ui, sans-serif;
+    font-size: 0.58rem;
+    white-space: nowrap;
+}
+
+.bb-document-path.is-copy-error .bb-document-path__feedback {
+    color: var(--bb-amber);
 }
 
 .bb-metadata-unavailable {
@@ -2420,7 +2466,8 @@
 }
 
 .bb-document-actions {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(2, max-content);
     align-items: center;
     justify-content: center;
     gap: 0.3rem;
@@ -2448,6 +2495,45 @@
     color: var(--bb-amber);
     border-color: var(--bb-amber);
     background: var(--bb-amber-soft);
+}
+
+.bb-document-actions .bb-document-delete:hover:not(:disabled) {
+    border-color: var(--bb-danger);
+    color: var(--bb-danger);
+    background: var(--bb-danger-soft);
+}
+
+.bb-delete-confirmation {
+    width: 100%;
+    max-width: 720px;
+    margin-inline: auto;
+    padding: 1.5rem;
+}
+
+.bb-delete-confirmation__path {
+    overflow-wrap: anywhere;
+}
+
+.bb-delete-confirmation__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 1.25rem;
+}
+
+.bb-delete-confirmation__actions .button--danger {
+    min-height: 40px;
+    padding: 0.65rem 1rem;
+    border: 1px solid #9b2727;
+    border-radius: 6px;
+    background: #b83232;
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.bb-delete-confirmation__actions .button--danger:hover {
+    background: #942626;
 }
 
 .bb-document-actions button:disabled {
@@ -3310,7 +3396,7 @@
         overflow-wrap: anywhere;
     }
 
-    .bb-document-path {
+    .bb-document-path__text {
         white-space: normal;
         overflow-wrap: anywhere;
     }

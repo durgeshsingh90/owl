@@ -6,6 +6,135 @@
         return;
     }
 
+    const refreshAllForms = Array.from(
+        workspace.querySelectorAll("[data-repositories-refresh-all]"),
+    );
+    const initialRefreshAllState = refreshAllForms[0]?.dataset;
+    let repositoryCount = Number(initialRefreshAllState?.repositoryCount || 0);
+    let enabledRepositoryCount = Number(
+        initialRefreshAllState?.enabledRepositoryCount || 0,
+    );
+    let activeRepositoryCount = Number(
+        initialRefreshAllState?.activeRepositoryCount || 0,
+    );
+    let repositorySubmissionPending = false;
+    let repositoryStatusPending = false;
+    const repositoryNoun = (count) => (count === 1 ? "repository" : "repositories");
+
+    const updateRefreshAllButtons = (repositories) => {
+        if (repositories) {
+            repositoryCount = repositories.length;
+            enabledRepositoryCount = repositories.filter(
+                (repository) => repository.enabled,
+            ).length;
+            activeRepositoryCount = repositories.filter(
+                (repository) => repository.active,
+            ).length;
+        }
+        refreshAllForms.forEach((form) => {
+            const button = form.querySelector("[data-refresh-all-button]");
+            if (!button) {
+                return;
+            }
+            const unavailable =
+                !repositorySubmissionPending &&
+                !repositoryStatusPending &&
+                (!repositoryCount ||
+                    !enabledRepositoryCount ||
+                    !form.getAttribute("action"));
+            const busy =
+                repositorySubmissionPending ||
+                repositoryStatusPending ||
+                activeRepositoryCount > 0;
+            let label = "Refresh all repositories";
+            let detail = `Queue ${enabledRepositoryCount} enabled ${repositoryNoun(enabledRepositoryCount)} in the background`;
+            let ariaLabel = `Queue a background refresh for all ${enabledRepositoryCount} enabled ${repositoryNoun(enabledRepositoryCount)}`;
+            let title =
+                "Queue Git refresh jobs for every enabled repository; workers run them in the background";
+
+            if (repositorySubmissionPending) {
+                label = "Repository sync in progress";
+                detail = "Starting repository work in the background";
+                ariaLabel = "Refresh all repositories unavailable: repository request in progress";
+                title = "Wait for the repository request to finish before refreshing all";
+            } else if (repositoryStatusPending) {
+                label = "Checking repository status";
+                detail = "Waiting for the latest repository activity";
+                ariaLabel = "Refresh all repositories unavailable: checking repository status";
+                title = "Wait for the latest repository status before refreshing all";
+            } else if (unavailable) {
+                label = "Refresh all unavailable";
+                if (!repositoryCount) {
+                    detail = "Add a repository to enable workspace refresh";
+                    ariaLabel = "Refresh all repositories unavailable: no repositories are connected";
+                    title = "Add a repository before queuing a workspace refresh";
+                } else if (!enabledRepositoryCount) {
+                    detail = "No enabled repositories to queue";
+                    ariaLabel = "Refresh all repositories unavailable: no repositories are enabled";
+                    title = "Enable at least one repository before queuing a workspace refresh";
+                } else {
+                    detail = "Workspace refresh endpoint unavailable";
+                    ariaLabel = "Refresh all repositories unavailable";
+                    title = "The workspace refresh endpoint is unavailable";
+                }
+            } else if (busy) {
+                label = "Repository sync in progress";
+                detail = `${activeRepositoryCount} ${repositoryNoun(activeRepositoryCount)} adding or refreshing in the background`;
+                ariaLabel = `Refresh all repositories unavailable: ${activeRepositoryCount} ${repositoryNoun(activeRepositoryCount)} adding or refreshing`;
+                title = "Wait for all repositories to finish adding or refreshing before refreshing all";
+            }
+
+            form.dataset.repositoryCount = String(repositoryCount);
+            form.dataset.enabledRepositoryCount = String(enabledRepositoryCount);
+            form.dataset.activeRepositoryCount = String(activeRepositoryCount);
+            const classPrefix = form.hasAttribute("data-repositories-refresh-all-mobile")
+                ? "bb-mobile-refresh-all"
+                : "bb-refresh-all";
+            form.classList.toggle(`${classPrefix}--disabled`, unavailable);
+            form.classList.toggle(`${classPrefix}--active`, busy && !unavailable);
+            button.disabled = unavailable || busy;
+            button.setAttribute("aria-label", ariaLabel);
+            button.title = title;
+            if (busy && !unavailable) {
+                button.setAttribute("aria-busy", "true");
+            } else {
+                button.removeAttribute("aria-busy");
+            }
+            const labelElement = form.querySelector("[data-refresh-all-label]");
+            const detailElement = form.querySelector("[data-refresh-all-detail]");
+            const spinner = form.querySelector("[data-refresh-all-spinner]");
+            if (labelElement) labelElement.textContent = label;
+            if (detailElement) detailElement.textContent = detail;
+            if (spinner) spinner.hidden = !busy || unavailable;
+        });
+    };
+
+    updateRefreshAllButtons();
+    workspace.addEventListener("submit", (event) => {
+        const form = event.target;
+        if (
+            event.defaultPrevented ||
+            !form.matches(
+                "[data-repositories-refresh-all], [data-repository-add-form], [data-repository-refresh-form], [data-pdf-resume-form]",
+            )
+        ) {
+            return;
+        }
+        const refreshAll = form.matches("[data-repositories-refresh-all]");
+        if (
+            repositorySubmissionPending ||
+            (refreshAll &&
+                (activeRepositoryCount > 0 ||
+                    form.querySelector("[data-refresh-all-button]")?.disabled))
+        ) {
+            event.preventDefault();
+            return;
+        }
+        // Keep the native POST and CSRF handling, but lock both buttons before navigation.
+        repositorySubmissionPending = true;
+        updateRefreshAllButtons();
+    });
+
     const cardsFor = (repositoryId) =>
         document.querySelectorAll(`[data-repository-id="${repositoryId}"]`);
 
@@ -75,12 +204,23 @@
 
     const activePollDelay = 1500;
     const idlePollDelay = 30000;
+    let pollTimer;
 
     const shouldPoll = () =>
-        activeRepositoryIds.size > 0 || extractionActive || dailyRefreshEnabled;
+        repositoryCount > 0 ||
+        activeRepositoryCount > 0 ||
+        activeRepositoryIds.size > 0 ||
+        repositoryStatusPending ||
+        extractionActive ||
+        dailyRefreshEnabled;
 
     const nextPollDelay = () =>
-        activeRepositoryIds.size > 0 || extractionActive ? activePollDelay : idlePollDelay;
+        activeRepositoryCount > 0 ||
+        activeRepositoryIds.size > 0 ||
+        repositoryStatusPending ||
+        extractionActive
+            ? activePollDelay
+            : idlePollDelay;
 
     const updateExtraction = (extraction) => {
         document.querySelectorAll("[data-extraction-summary]").forEach((element) => {
@@ -103,6 +243,8 @@
             }
             const payload = await response.json();
             payload.repositories.forEach(updateRepository);
+            repositoryStatusPending = false;
+            updateRefreshAllButtons(payload.repositories);
             updateTotals(payload.totals, payload.repositories, payload.automation);
             const repositoryCompleted = payload.repositories.some(
                 (repository) =>
@@ -155,9 +297,21 @@
             // bounded cadence so a temporary status failure never creates a tight loop.
         }
         if (shouldPoll()) {
-            window.setTimeout(poll, nextPollDelay());
+            pollTimer = window.setTimeout(poll, nextPollDelay());
         }
     };
+
+    window.addEventListener("pageshow", (event) => {
+        if (!event.persisted) {
+            return;
+        }
+        // A restored page may predate a submitted job. Recheck before unlocking it.
+        repositorySubmissionPending = false;
+        repositoryStatusPending = true;
+        updateRefreshAllButtons();
+        window.clearTimeout(pollTimer);
+        void poll();
+    });
 
     document.querySelectorAll("[data-repository-filter]").forEach((input) => {
         input.addEventListener("input", () => {
@@ -467,6 +621,89 @@
         });
     }
 
+    const copyWithTextarea = (text) => {
+        const textarea = document.createElement("textarea");
+        const previouslyFocused = document.activeElement;
+        textarea.value = text;
+        textarea.readOnly = true;
+        textarea.className = "bb-clipboard-fallback";
+        textarea.setAttribute("aria-hidden", "true");
+        document.body.append(textarea);
+        textarea.select();
+        textarea.setSelectionRange(0, text.length);
+        let copied = false;
+        try {
+            copied = document.execCommand("copy");
+        } finally {
+            textarea.remove();
+            if (previouslyFocused instanceof HTMLElement) {
+                previouslyFocused.focus();
+            }
+        }
+        if (!copied) {
+            throw new Error("Clipboard copy was rejected");
+        }
+    };
+
+    const copyText = async (text) => {
+        if (navigator.clipboard?.writeText) {
+            try {
+                await navigator.clipboard.writeText(text);
+                return;
+            } catch (_error) {
+                // Some local browser contexts need the legacy clipboard fallback.
+            }
+        }
+        copyWithTextarea(text);
+    };
+
+    const pathCopyTimers = new WeakMap();
+    const pendingPathCopies = new WeakSet();
+    workspace.addEventListener("click", async (event) => {
+        const button = event.target.closest?.("[data-copy-pdf-path]");
+        if (!button || button.disabled || pendingPathCopies.has(button)) {
+            return;
+        }
+        const path = button.dataset.pdfLocalPath;
+        const status = button.querySelector("[data-pdf-path-copy-status]");
+        const icon = button.querySelector("[data-pdf-path-copy-icon]");
+        const initialTitle = path ? `Copy full path: ${path}` : "Local file path unavailable";
+        window.clearTimeout(pathCopyTimers.get(button));
+        pendingPathCopies.add(button);
+        button.setAttribute("aria-busy", "true");
+        button.classList.remove("is-copy-error");
+        button.title = initialTitle;
+        if (status) status.textContent = "";
+        if (icon) icon.hidden = true;
+        let copied = false;
+        try {
+            if (!path) {
+                throw new Error("Local file path unavailable");
+            }
+            await copyText(path);
+            copied = true;
+            if (status) status.textContent = "Copied";
+            if (icon) icon.hidden = false;
+        } catch (_error) {
+            if (status) status.textContent = "Copy failed";
+            button.classList.add("is-copy-error");
+            button.title = "Could not copy the path. Check this browser's clipboard permission.";
+        } finally {
+            pendingPathCopies.delete(button);
+            button.removeAttribute("aria-busy");
+            pathCopyTimers.set(
+                button,
+                window.setTimeout(() => {
+                    if (status) status.textContent = "";
+                    if (icon) icon.hidden = true;
+                    button.classList.remove("is-copy-error");
+                    button.title = initialTitle;
+                    pathCopyTimers.delete(button);
+                }, copied ? 2000 : 4000),
+            );
+        }
+    });
+
     const bulkResultActions = workspace.querySelector(".bb-result-actions");
     const copyResultPathsButton = bulkResultActions?.querySelector(
         "[data-copy-search-result-paths]",
@@ -531,7 +768,7 @@
                 workspace.querySelectorAll(
                     "[data-search-result-row]:not([hidden]) [data-pdf-local-path]",
                 ),
-                (element) => element.textContent,
+                (element) => element.dataset.pdfLocalPath || "",
             ).filter((path) => path.length > 0);
 
         const announceBulkResult = (message) => {
@@ -541,44 +778,6 @@
                     bulkResultStatus.textContent = message;
                 });
             }
-        };
-
-        const copyWithTextarea = (text) => {
-            const textarea = document.createElement("textarea");
-            const previouslyFocused = document.activeElement;
-            textarea.value = text;
-            textarea.readOnly = true;
-            textarea.className = "bb-clipboard-fallback";
-            textarea.setAttribute("aria-hidden", "true");
-            document.body.append(textarea);
-            textarea.select();
-            textarea.setSelectionRange(0, text.length);
-            let copied = false;
-            try {
-                copied = document.execCommand("copy");
-            } finally {
-                textarea.remove();
-                if (previouslyFocused instanceof HTMLElement) {
-                    previouslyFocused.focus();
-                }
-            }
-            if (!copied) {
-                throw new Error("Clipboard copy was rejected");
-            }
-        };
-
-        const copyText = async (text) => {
-            if (navigator.clipboard?.writeText) {
-                try {
-                    await navigator.clipboard.writeText(text);
-                    return;
-                } catch (_error) {
-                    // Browsers can expose Clipboard API while denying it for
-                    // the current context. The user gesture still permits the
-                    // legacy textarea fallback in supported local browsers.
-                }
-            }
-            copyWithTextarea(text);
         };
 
         copyResultPathsButton.addEventListener("click", async () => {
@@ -842,6 +1041,6 @@
     }
 
     if (shouldPoll()) {
-        window.setTimeout(poll, 500);
+        pollTimer = window.setTimeout(poll, 500);
     }
 })();

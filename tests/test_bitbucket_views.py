@@ -57,8 +57,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=people-search-bar-v3" in html
-    assert "bitbucket_search/bitbucket_search.js?v=people-search-bar-v2" in html
+    assert "bitbucket_search/bitbucket_search.css?v=pdf-local-policy-v1" in html
+    assert "bitbucket_search/bitbucket_search.js?v=pdf-local-policy-v1" in html
 
 
 def test_topbar_and_desktop_rail_omit_verbose_sync_status_navigation(loopback_client):
@@ -183,11 +183,13 @@ def test_refresh_all_controls_are_accessible_and_truthful_when_unavailable(loopb
 
     assert mixed_response.context["active_repository_count"] == 1
     assert mixed_response.context["active_enabled_repository_count"] == 0
-    assert 'data-active-repository-count="0"' in mixed_html
-    assert "bb-refresh-all--active" not in _workspace_refresh_form(mixed_html)
+    assert 'data-active-repository-count="1"' in mixed_html
+    assert "bb-refresh-all--active" in _workspace_refresh_form(mixed_html)
+    assert 'disabled aria-busy="true"' in _workspace_refresh_form(mixed_html)
+    assert 'disabled aria-busy="true"' in _workspace_refresh_form(mixed_html, mobile=True)
 
 
-def test_refresh_all_controls_queue_idle_repositories_and_report_active_work(loopback_client):
+def test_refresh_all_controls_enable_only_when_all_repositories_are_idle(loopback_client):
     idle = BitbucketRepository.objects.create(
         display_name="architecture",
         canonical_remote_key="bitbucket.org/workspace/architecture",
@@ -221,12 +223,13 @@ def test_refresh_all_controls_queue_idle_repositories_and_report_active_work(loo
 
     assert partial_response.context["enabled_repository_count"] == 2
     assert partial_response.context["active_repository_count"] == 1
-    assert "bb-refresh-all--partial" in partial_desktop
-    assert "bb-mobile-refresh-all--partial" in partial_mobile
-    assert partial_html.count("Refresh remaining repositories") == 2
-    assert "1 already queued or syncing" in partial_desktop
-    assert "disabled" not in partial_desktop
-    assert "disabled" not in partial_mobile
+    assert "bb-refresh-all--active" in partial_desktop
+    assert "bb-mobile-refresh-all--active" in partial_mobile
+    assert partial_html.count("Repository sync in progress") == 2
+    assert "1 repository adding or refreshing" in partial_desktop
+    assert "Refresh remaining repositories" not in partial_html
+    assert 'disabled aria-busy="true"' in partial_desktop
+    assert 'disabled aria-busy="true"' in partial_mobile
 
     idle.sync_state = RepositorySyncState.QUEUED
     idle.save(update_fields={"sync_state"})
@@ -242,9 +245,97 @@ def test_refresh_all_controls_queue_idle_repositories_and_report_active_work(loo
     assert active_response.context["active_repository_count"] == 2
     assert "bb-refresh-all--active" in active_desktop
     assert "bb-mobile-refresh-all--active" in active_mobile
-    assert active_html.count("All repositories queued or syncing") == 2
+    assert active_html.count("Repository sync in progress") == 2
     assert 'disabled aria-busy="true"' in active_desktop
     assert 'disabled aria-busy="true"' in active_mobile
+
+
+@pytest.mark.parametrize(
+    ("sync_state", "job_status"),
+    [
+        (RepositorySyncState.QUEUED, None),
+        (RepositorySyncState.CLONING, None),
+        (RepositorySyncState.FETCHING, None),
+        (RepositorySyncState.UPDATING, None),
+        (RepositorySyncState.READY, RepositorySyncJobStatus.QUEUED),
+        (RepositorySyncState.READY, RepositorySyncJobStatus.RUNNING),
+    ],
+)
+def test_refresh_all_controls_stay_disabled_through_add_and_refresh_phases(
+    loopback_client,
+    sync_state,
+    job_status,
+):
+    repository = BitbucketRepository.objects.create(
+        display_name="active",
+        canonical_remote_key="bitbucket.org/workspace/active",
+        remote_url="ssh://git@bitbucket.org/workspace/active.git",
+        sync_state=sync_state,
+    )
+    if job_status:
+        RepositorySyncJob.objects.create(
+            repository=repository,
+            operation=RepositorySyncOperation.CLONE,
+            status=job_status,
+            started_at=timezone.now() if job_status == RepositorySyncJobStatus.RUNNING else None,
+            heartbeat_at=timezone.now() if job_status == RepositorySyncJobStatus.RUNNING else None,
+        )
+
+    response = loopback_client.get(reverse("bitbucket_search:index"))
+    html = response.content.decode()
+    status = loopback_client.get(reverse("bitbucket_search:repository_status"))
+
+    assert response.context["active_repository_count"] == 1
+    assert status.json()["repositories"][0]["active"] is True
+    for mobile in (False, True):
+        form = _workspace_refresh_form(html, mobile=mobile)
+        assert 'disabled aria-busy="true"' in form
+        assert 'data-active-repository-count="1"' in form
+        assert "Repository sync in progress" in form
+
+
+@pytest.mark.parametrize(
+    ("sync_state", "job_status"),
+    [
+        (RepositorySyncState.READY, RepositorySyncJobStatus.SUCCEEDED),
+        (RepositorySyncState.FAILED, RepositorySyncJobStatus.FAILED),
+        (RepositorySyncState.INTERRUPTED, RepositorySyncJobStatus.INTERRUPTED),
+    ],
+)
+def test_refresh_all_controls_reenable_after_jobs_finish(loopback_client, sync_state, job_status):
+    repository = BitbucketRepository.objects.create(
+        display_name="finished",
+        canonical_remote_key="bitbucket.org/workspace/finished",
+        remote_url="ssh://git@bitbucket.org/workspace/finished.git",
+        sync_state=RepositorySyncState.FETCHING,
+    )
+    job = RepositorySyncJob.objects.create(
+        repository=repository,
+        operation=RepositorySyncOperation.REFRESH,
+        status=RepositorySyncJobStatus.RUNNING,
+        started_at=timezone.now(),
+        heartbeat_at=timezone.now(),
+    )
+    busy_response = loopback_client.get(reverse("bitbucket_search:index"))
+    assert 'disabled aria-busy="true"' in _workspace_refresh_form(busy_response.content.decode())
+
+    repository.sync_state = sync_state
+    repository.save(update_fields={"sync_state"})
+    job.status = job_status
+    job.completed_at = timezone.now()
+    job.save(update_fields={"status", "completed_at"})
+
+    response = loopback_client.get(reverse("bitbucket_search:index"))
+    html = response.content.decode()
+    status = loopback_client.get(reverse("bitbucket_search:repository_status"))
+
+    assert response.context["active_repository_count"] == 0
+    assert status.json()["repositories"][0]["active"] is False
+    for mobile in (False, True):
+        form = _workspace_refresh_form(html, mobile=mobile)
+        assert "disabled" not in form
+        assert 'data-active-repository-count="0"' in form
+        assert "Repository sync in progress" not in form
 
 
 def test_empty_pdf_timeline_keeps_search_available_and_explains_the_zero_state(
@@ -340,6 +431,8 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_load_older_fallback(
                         {
                             "document": network_plan,
                             "full_path": "/managed/networking/docs/Network <Plan>.pdf",
+                            "display_path": "networking/docs/Network <Plan>.pdf",
+                            "path_copy_available": True,
                             "project_label": "Architecture & Design",
                             "added_by_label": "A. Author",
                             "added_date_label": "Today",
@@ -356,6 +449,8 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_load_older_fallback(
                         {
                             "document": archived_plan,
                             "full_path": "/managed/networking/archive/Archive.pdf",
+                            "display_path": "networking/archive/Archive.pdf",
+                            "path_copy_available": True,
                             "project_label": "",
                             "added_by_label": "",
                             "added_date_label": "14 Dec 2025",
@@ -384,8 +479,8 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_load_older_fallback(
     assert "Architecture &amp; Design" in html
     assert "A. Author" in html
     assert "Added by (Git author)" in html
-    assert "Git addition" in html
-    assert "Discovered by OWL" in html
+    assert "Git addition" not in html
+    assert "Discovered by OWL" not in html
     assert f'id="pdf-document-{network_plan.pk}"' in html
     network_row_start = html.index(f'data-document-id="{network_plan.pk}"')
     network_row = html[network_row_start : html.index("</tr>", network_row_start)]
@@ -397,14 +492,14 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_load_older_fallback(
         f'action="{reverse("bitbucket_search:document_reveal", args=(network_plan.pk,))}"'
         in network_row
     )
-    assert network_row.count('name="csrfmiddlewaretoken"') == 2
-    assert network_row.count('name="return_page" value="1"') == 2
+    assert network_row.count('name="csrfmiddlewaretoken"') == 3
+    assert network_row.count('name="return_page" value="1"') == 4
     assert 'type="submit" disabled' not in network_row
     assert "bb-index-health" not in network_row
     archived_row_start = html.index(f'data-document-id="{archived_plan.pk}"')
     archived_row = html[archived_row_start : html.index("</tr>", archived_row_start)]
     assert archived_row.count("Unavailable") == 2
-    assert archived_row.count('method="post"') == 2
+    assert archived_row.count('method="post"') == 3
     assert "bb-index-health" not in archived_row
     assert html.count('data-tooltip="Open file"') == 2
     assert html.count('data-tooltip="Open folder"') == 2
@@ -460,7 +555,7 @@ def test_pdf_timeline_fragment_preserves_boundary_group_key(loopback_client):
     assert payload["nextPageUrl"] == ""
     assert f'data-document-id="{older_document.pk}"' in payload["html"]
     assert 'data-timeline-group-key="today"' in payload["html"]
-    assert payload["html"].count('name="return_page" value="2"') == 2
+    assert payload["html"].count('name="return_page" value="2"') == 4
     assert 'data-tooltip="Open file"' in payload["html"]
     assert 'data-tooltip="Open folder"' in payload["html"]
 
@@ -473,7 +568,7 @@ def test_pdf_timeline_fragment_preserves_boundary_group_key(loopback_client):
     assert "Page <strong data-pdf-current-page>2</strong> of 2" in fallback_html
     assert f'href="{previous_page_url}" rel="prev"' in fallback_html
     assert f'id="pdf-document-{older_document.pk}"' in fallback_html
-    assert fallback_html.count('name="return_page" value="2"') == 2
+    assert fallback_html.count('name="return_page" value="2"') == 4
 
 
 @override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
@@ -1184,28 +1279,17 @@ def test_refresh_all_queues_every_enabled_repository_and_starts_bounded_workers(
         remote_url="ssh://git@bitbucket.org/workspace/standards.git",
         sync_state=RepositorySyncState.READY,
     )
-    already_queued = BitbucketRepository.objects.create(
+    third_ready = BitbucketRepository.objects.create(
         display_name="networking",
         canonical_remote_key="bitbucket.org/workspace/networking",
         remote_url="ssh://git@bitbucket.org/workspace/networking.git",
-        sync_state=RepositorySyncState.QUEUED,
+        sync_state=RepositorySyncState.READY,
     )
-    RepositorySyncJob.objects.create(
-        repository=already_queued,
-        operation=RepositorySyncOperation.CLONE,
-    )
-    already_running = BitbucketRepository.objects.create(
+    fourth_ready = BitbucketRepository.objects.create(
         display_name="payments",
         canonical_remote_key="bitbucket.org/workspace/payments",
         remote_url="ssh://git@bitbucket.org/workspace/payments.git",
-        sync_state=RepositorySyncState.FETCHING,
-    )
-    RepositorySyncJob.objects.create(
-        repository=already_running,
-        operation=RepositorySyncOperation.REFRESH,
-        status=RepositorySyncJobStatus.RUNNING,
-        started_at=timezone.now(),
-        heartbeat_at=timezone.now(),
+        sync_state=RepositorySyncState.READY,
     )
     disabled = BitbucketRepository.objects.create(
         display_name="archived",
@@ -1227,15 +1311,13 @@ def test_refresh_all_queues_every_enabled_repository_and_starts_bounded_workers(
     assert response.status_code == 202
     assert response.json() == {
         "state": "queued",
-        "detail": (
-            "Queued 2 repositories for background Git refresh. 1 already queued; 1 already running."
-        ),
+        "detail": "Queued 4 repositories for background Git refresh.",
         "eligible": 4,
-        "queued": 2,
-        "alreadyActive": 2,
-        "alreadyQueued": 1,
-        "alreadyRunning": 1,
-        "workersStarted": 1,
+        "queued": 4,
+        "alreadyActive": 0,
+        "alreadyQueued": 0,
+        "alreadyRunning": 0,
+        "workersStarted": 2,
     }
     assert immediate_tick.status_code == 200
     assert immediate_tick.json() == {
@@ -1243,15 +1325,83 @@ def test_refresh_all_queues_every_enabled_repository_and_starts_bounded_workers(
         "queued": 0,
         "workersStarted": 0,
     }
-    assert launched.call_count == 1
+    assert launched.call_count == 2
     assert RepositorySyncJob.objects.filter(repository=ready).count() == 1
     assert RepositorySyncJob.objects.filter(repository=second_ready).count() == 1
-    assert RepositorySyncJob.objects.filter(repository=already_queued).count() == 1
-    assert RepositorySyncJob.objects.filter(repository=already_running).count() == 1
+    assert RepositorySyncJob.objects.filter(repository=third_ready).count() == 1
+    assert RepositorySyncJob.objects.filter(repository=fourth_ready).count() == 1
     assert not RepositorySyncJob.objects.filter(repository=disabled).exists()
 
     remote_client = Client(HTTP_HOST="127.0.0.1", REMOTE_ADDR="192.0.2.20")
     assert remote_client.post(path).status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("sync_state", "job_status", "enabled"),
+    [
+        (RepositorySyncState.QUEUED, None, True),
+        (RepositorySyncState.CLONING, None, True),
+        (RepositorySyncState.FETCHING, None, True),
+        (RepositorySyncState.UPDATING, None, True),
+        (RepositorySyncState.READY, RepositorySyncJobStatus.QUEUED, True),
+        (RepositorySyncState.READY, RepositorySyncJobStatus.RUNNING, True),
+        (RepositorySyncState.CLONING, RepositorySyncJobStatus.RUNNING, False),
+        (RepositorySyncState.READY, RepositorySyncJobStatus.QUEUED, False),
+    ],
+)
+def test_refresh_all_rejects_mixed_busy_repositories_without_queueing_or_waking_workers(
+    loopback_client,
+    monkeypatch,
+    sync_state,
+    job_status,
+    enabled,
+):
+    idle = BitbucketRepository.objects.create(
+        display_name="idle",
+        canonical_remote_key="bitbucket.org/workspace/idle",
+        remote_url="ssh://git@bitbucket.org/workspace/idle.git",
+        sync_state=RepositorySyncState.READY,
+    )
+    busy = BitbucketRepository.objects.create(
+        display_name="busy",
+        canonical_remote_key="bitbucket.org/workspace/busy",
+        remote_url="ssh://git@bitbucket.org/workspace/busy.git",
+        sync_state=sync_state,
+        enabled=enabled,
+    )
+    if job_status:
+        RepositorySyncJob.objects.create(
+            repository=busy,
+            operation=RepositorySyncOperation.CLONE,
+            status=job_status,
+            started_at=timezone.now() if job_status == RepositorySyncJobStatus.RUNNING else None,
+            heartbeat_at=timezone.now() if job_status == RepositorySyncJobStatus.RUNNING else None,
+        )
+    original_job_count = RepositorySyncJob.objects.count()
+    wake_workers = Mock()
+    monkeypatch.setattr("bitbucket_search.views._wake_queued_repository_workers", wake_workers)
+    path = reverse("bitbucket_search:repositories_refresh_all")
+
+    async_response = loopback_client.post(path, HTTP_X_REQUESTED_WITH="XMLHttpRequest")
+    form_response = loopback_client.post(path)
+
+    assert async_response.status_code == 409
+    assert async_response.json() == {
+        "state": "busy",
+        "detail": "Wait for repository additions and refreshes to finish before refreshing all.",
+        "queued": 0,
+        "workersStarted": 0,
+    }
+    assert form_response.status_code == 302
+    assert form_response.url == reverse("bitbucket_search:index")
+    assert [str(message) for message in form_response.wsgi_request._messages] == [
+        "Wait for repository additions and refreshes to finish before refreshing all."
+    ]
+    assert RepositorySyncJob.objects.count() == original_job_count
+    assert not RepositorySyncJob.objects.filter(repository=idle).exists()
+    idle.refresh_from_db()
+    assert idle.sync_state == RepositorySyncState.READY
+    wake_workers.assert_not_called()
 
 
 def test_refresh_all_keeps_durable_jobs_queued_when_no_helper_can_start(

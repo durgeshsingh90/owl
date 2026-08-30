@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import subprocess
@@ -25,6 +26,8 @@ from bitbucket_search.models import (
     PDFDocumentAddedEvidence,
     PDFDocumentLifecycle,
     PDFDocumentTimelineBasis,
+    PDFLocalPolicy,
+    PDFLocalPolicyState,
     RepositorySyncPhase,
 )
 from bitbucket_search.services.git_sync import (
@@ -70,6 +73,7 @@ class CatalogPDF:
 class CatalogBuild:
     documents: tuple[CatalogPDF, ...]
     history_is_shallow: bool
+    policy_signature: tuple[tuple[str, str, int | None], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,9 +253,57 @@ def _validated_relative_path(raw_path: str) -> PurePosixPath:
     return relative
 
 
+def _pdf_file_access_error(relative_path: str, error: OSError) -> RepositorySyncError:
+    """Expose a validated relative filename and OS category, never raw error text."""
+
+    filename = relative_path
+    if len(filename) > 220:
+        filename = f"{filename[:100]}…{filename[-100:]}"
+    os_error = error.errno
+    windows_error = getattr(error, "winerror", None)
+    codes = []
+    if isinstance(os_error, int):
+        codes.append(f"errno {os_error}")
+    if isinstance(windows_error, int):
+        codes.append(f"Windows error {windows_error}")
+    detail = f" ({', '.join(codes)})" if codes else ""
+    if os_error == errno.ENAMETOOLONG or windows_error == 206:
+        return RepositorySyncError(
+            "pdf_path_too_long",
+            f'The local path for tracked PDF "{filename}" is too long{detail}. '
+            "Use a shorter OWL media path or check operating-system and Git long-path support.",
+        )
+    if (
+        isinstance(error, PermissionError)
+        or os_error in {errno.EACCES, errno.EPERM}
+        or (windows_error in {5, 32, 33})
+    ):
+        return RepositorySyncError(
+            "pdf_file_access_denied",
+            f'OWL cannot access tracked PDF "{filename}"{detail}. '
+            "Check file permissions or another program locking the file, then retry.",
+        )
+    if (
+        isinstance(error, FileNotFoundError)
+        or os_error in {errno.ENOENT, errno.ENOTDIR}
+        or (windows_error in {2, 3})
+    ):
+        return RepositorySyncError(
+            "missing_pdf_file",
+            f'Tracked PDF "{filename}" is missing from the managed checkout{detail}. '
+            "Refresh to restore the document checkout.",
+        )
+    return RepositorySyncError(
+        "pdf_file_read_failed",
+        f'OWL could not read tracked PDF "{filename}"{detail}. Check storage access and retry.',
+    )
+
+
 def _parse_tree_pdfs(
     repository_path: Path,
     records: Iterator[bytes],
+    *,
+    ignored_paths: frozenset[str] = frozenset(),
 ) -> tuple[_TreePDF, ...]:
     repository_root = repository_path.resolve()
     documents: list[_TreePDF] = []
@@ -272,6 +324,8 @@ def _parse_tree_pdfs(
         relative_text = os.fsdecode(raw_path)
         relative = _validated_relative_path(relative_text)
         normalized = relative.as_posix()
+        if normalized in ignored_paths:
+            continue
         if normalized in seen_paths:
             raise RepositorySyncError(
                 "duplicate_pdf_path",
@@ -290,10 +344,7 @@ def _parse_tree_pdfs(
             resolved = candidate.resolve(strict=True)
             stat = resolved.stat(follow_symlinks=False)
         except OSError as exc:
-            raise RepositorySyncError(
-                "missing_pdf_file",
-                "A tracked PDF is missing from the managed checkout. Refresh and try again.",
-            ) from exc
+            raise _pdf_file_access_error(normalized, exc) from exc
         if not resolved.is_relative_to(repository_root) or not resolved.is_file():
             raise RepositorySyncError(
                 "unsafe_pdf_path",
@@ -321,6 +372,7 @@ def _read_current_pdfs(
     repository_path: Path,
     *,
     heartbeat_callback: HeartbeatCallback,
+    ignored_paths: frozenset[str] = frozenset(),
 ) -> tuple[_TreePDF, ...]:
     with _run_binary_spooled(
         (
@@ -344,6 +396,7 @@ def _read_current_pdfs(
                 b"\0",
                 maximum_record_bytes=_MAX_TREE_RECORD_BYTES,
             ),
+            ignored_paths=ignored_paths,
         )
 
 
@@ -556,6 +609,16 @@ def _read_history_evidence(
     return added, last_changed, evidence
 
 
+def _repository_policy_signature(
+    repository: BitbucketRepository,
+) -> tuple[tuple[str, str, int | None], ...]:
+    return tuple(
+        PDFLocalPolicy.objects.filter(repository=repository)
+        .order_by("relative_path")
+        .values_list("relative_path", "state", "document_id")
+    )
+
+
 def build_repository_pdf_catalog(
     repository: BitbucketRepository,
     *,
@@ -578,9 +641,16 @@ def build_repository_pdf_catalog(
         98,
         "Cataloguing synchronized PDFs…",
     )
+    policy_signature = _repository_policy_signature(repository)
+    ignored_paths = frozenset(
+        path
+        for path, state, _document_id in policy_signature
+        if state in {PDFLocalPolicyState.EXCLUDED, PDFLocalPolicyState.DELETED}
+    )
     tree_documents = _read_current_pdfs(
         repository_path,
         heartbeat_callback=heartbeat,
+        ignored_paths=ignored_paths,
     )
     shallow_boundaries = _shallow_boundary_hashes(
         repository_path,
@@ -589,6 +659,7 @@ def build_repository_pdf_catalog(
 
     can_reuse_history = (
         repository.metadata_indexed_commit == result_commit
+        and not any(state == PDFLocalPolicyState.RESUMING for _, state, _ in policy_signature)
         and repository.pdf_documents.filter(lifecycle_state=PDFDocumentLifecycle.ACTIVE).exists()
     )
     if can_reuse_history:
@@ -629,7 +700,11 @@ def build_repository_pdf_catalog(
         )
         for item in tree_documents
     )
-    return CatalogBuild(documents=documents, history_is_shallow=bool(shallow_boundaries))
+    return CatalogBuild(
+        documents=documents,
+        history_is_shallow=bool(shallow_boundaries),
+        policy_signature=policy_signature,
+    )
 
 
 def _commit_map(
@@ -687,6 +762,22 @@ def publish_repository_pdf_catalog(
 ) -> None:
     """Switch one repository's active PDF inventory while preserving OWL usage."""
 
+    policy_signature = _repository_policy_signature(repository)
+    if policy_signature != catalog.policy_signature:
+        raise RepositorySyncError(
+            "document_policy_changed",
+            "A local PDF policy changed while the catalogue was being built. Refresh to retry.",
+        )
+    frozen_paths = {
+        path
+        for path, state, _document_id in policy_signature
+        if state == PDFLocalPolicyState.EXCLUDED
+    }
+    blocked_paths = frozen_paths | {
+        path
+        for path, state, _document_id in policy_signature
+        if state == PDFLocalPolicyState.DELETED
+    }
     commits = _commit_map(repository, catalog)
     existing = {
         document.relative_path: document
@@ -698,6 +789,8 @@ def publish_repository_pdf_catalog(
     future_limit = observed_at + timedelta(days=1)
 
     for item in catalog.documents:
+        if item.relative_path in blocked_paths:
+            continue
         seen_paths.add(item.relative_path)
         document = existing.get(item.relative_path)
         added_commit = (
@@ -757,7 +850,9 @@ def publish_repository_pdf_catalog(
     removed = [
         document
         for path, document in existing.items()
-        if path not in seen_paths and document.lifecycle_state == PDFDocumentLifecycle.ACTIVE
+        if path not in seen_paths
+        and path not in frozen_paths
+        and document.lifecycle_state == PDFDocumentLifecycle.ACTIVE
     ]
     for document in removed:
         document.lifecycle_state = PDFDocumentLifecycle.REMOVED
@@ -789,3 +884,12 @@ def publish_repository_pdf_catalog(
             fields=("lifecycle_state", "removed_at"),
             batch_size=500,
         )
+    resumed_paths = tuple(
+        path
+        for path, state, _document_id in policy_signature
+        if state == PDFLocalPolicyState.RESUMING
+    )
+    if resumed_paths:
+        from bitbucket_search.services.pdf_local_policy import complete_resumed_policies
+
+        complete_resumed_policies(repository.pk, resumed_paths)

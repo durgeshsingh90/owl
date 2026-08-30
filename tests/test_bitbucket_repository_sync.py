@@ -15,6 +15,7 @@ from django.utils import timezone
 from bitbucket_search.models import (
     BitbucketRepository,
     PDFDocumentAddedEvidence,
+    PDFDocumentLifecycle,
     PDFExtractionJobStatus,
     PDFIndexState,
     RepositorySyncJob,
@@ -152,6 +153,93 @@ def test_background_clone_then_refresh_materializes_only_pdf_and_vsdx(tmp_path, 
     assert second_document.index_state == PDFIndexState.PENDING
     assert second_document.extraction_jobs.get().status == PDFExtractionJobStatus.QUEUED
     assert first_document.extraction_jobs.count() == 1
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="Git is required")
+@pytest.mark.parametrize("remote_changed", (False, True))
+def test_refresh_restores_sparse_excluded_documents_without_losing_catalogue_usage(
+    tmp_path,
+    settings,
+    remote_changed,
+):
+    remote, source = _create_remote(tmp_path)
+    settings.BITBUCKET_REPOSITORIES_ROOT = tmp_path / "media" / "bitbucket" / "repositories"
+    settings.BITBUCKET_TEMP_ROOT = tmp_path / "media" / "bitbucket" / "tmp"
+    settings.BITBUCKET_GIT_TIMEOUT_SECONDS = 30
+    repository, _job = _queued_repository(remote)
+    claimed = claim_next_job()
+    assert claimed is not None
+    assert execute_claimed_job(claimed.pk).status == RepositorySyncJobStatus.SUCCEEDED
+    repository.refresh_from_db()
+    checkout = Path(repository.local_path)
+    document = repository.pdf_documents.get(relative_path="docs/Architecture.PDF")
+    document.open_count = 7
+    document.save(update_fields={"open_count"})
+    original_document_id = document.pk
+    _git("sparse-checkout", "set", "--no-cone", "--", "README.md", cwd=checkout)
+    assert not (checkout / "docs" / "Architecture.PDF").exists()
+    assert _git("status", "--porcelain=v1", cwd=checkout) == ""
+    assert _git("ls-files", "-t", "--", "docs/Architecture.PDF", cwd=checkout).startswith("S ")
+
+    if remote_changed:
+        (source / "docs" / "Second.pdf").write_bytes(b"another PDF")
+        _git("add", ".", cwd=source)
+        _git("commit", "-m", "Add a remote PDF", cwd=source)
+        _git("push", "origin", "main", cwd=source)
+    queued = queue_repository_refresh(repository.pk)
+    claimed = claim_next_job()
+    assert claimed is not None and claimed.pk == queued.job.pk
+    completed = execute_claimed_job(claimed.pk)
+
+    repository.refresh_from_db()
+    document.refresh_from_db()
+    assert completed.status == RepositorySyncJobStatus.SUCCEEDED
+    assert repository.sync_state == RepositorySyncState.READY
+    assert repository.pdf_count == (2 if remote_changed else 1)
+    assert repository.vsdx_count == 1
+    assert document.pk == original_document_id
+    assert document.open_count == 7
+    assert document.lifecycle_state == PDFDocumentLifecycle.ACTIVE
+    assert document.removed_at is None
+    assert (checkout / "docs" / "Architecture.PDF").read_bytes() == b"synthetic pdf"
+    assert (checkout / "diagrams" / "Network.VsDx").read_bytes() == b"synthetic vsdx"
+    assert not (checkout / "README.md").exists()
+    assert not (checkout / "src" / "large-source.bin").exists()
+    assert _git("sparse-checkout", "list", cwd=checkout).splitlines() == list(
+        git_sync._DOCUMENT_PATTERNS
+    )
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="Git is required")
+def test_sparse_checkout_repair_does_not_run_over_local_changes(tmp_path, settings):
+    remote, _source = _create_remote(tmp_path)
+    settings.BITBUCKET_REPOSITORIES_ROOT = tmp_path / "media" / "bitbucket" / "repositories"
+    settings.BITBUCKET_TEMP_ROOT = tmp_path / "media" / "bitbucket" / "tmp"
+    settings.BITBUCKET_GIT_TIMEOUT_SECONDS = 30
+    repository, _job = _queued_repository(remote)
+    claimed = claim_next_job()
+    assert claimed is not None
+    assert execute_claimed_job(claimed.pk).status == RepositorySyncJobStatus.SUCCEEDED
+    repository.refresh_from_db()
+    checkout = Path(repository.local_path)
+    _git("sparse-checkout", "set", "--no-cone", "--", "README.md", cwd=checkout)
+    (checkout / "README.md").write_text("preserve this local change", encoding="utf-8")
+    original_head = _git("rev-parse", "HEAD", cwd=checkout)
+
+    queued = queue_repository_refresh(repository.pk)
+    claimed = claim_next_job()
+    assert claimed is not None and claimed.pk == queued.job.pk
+    completed = execute_claimed_job(claimed.pk)
+
+    repository.refresh_from_db()
+    assert completed.status == RepositorySyncJobStatus.FAILED
+    assert completed.error_code == "dirty_working_tree"
+    assert repository.sync_state == RepositorySyncState.BLOCKED_DIRTY
+    assert (checkout / "README.md").read_text(encoding="utf-8") == "preserve this local change"
+    assert not (checkout / "docs" / "Architecture.PDF").exists()
+    assert _git("sparse-checkout", "list", cwd=checkout) == "README.md"
+    assert _git("rev-parse", "HEAD", cwd=checkout) == original_head
+    assert repository.pdf_documents.get().lifecycle_state == PDFDocumentLifecycle.ACTIVE
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="Git is required")

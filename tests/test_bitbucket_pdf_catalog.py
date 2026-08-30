@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import subprocess
@@ -18,6 +19,7 @@ from bitbucket_search.models import (
 )
 from bitbucket_search.services.git_sync import RepositorySyncError, managed_repository_path
 from bitbucket_search.services.pdf_catalog import (
+    _parse_tree_pdfs,
     _validated_relative_path,
     build_repository_pdf_catalog,
     publish_repository_pdf_catalog,
@@ -47,6 +49,57 @@ def test_catalog_rejects_control_characters_in_pdf_paths(relative_path):
         _validated_relative_path(relative_path)
 
     assert captured.value.code == "invalid_pdf_path"
+
+
+@pytest.mark.parametrize("failure_point", ("resolve", "stat"))
+@pytest.mark.parametrize(
+    ("os_error", "windows_error", "error_code"),
+    [
+        (errno.ENOENT, None, "missing_pdf_file"),
+        (errno.EACCES, None, "pdf_file_access_denied"),
+        (errno.ENAMETOOLONG, None, "pdf_path_too_long"),
+        (errno.EIO, None, "pdf_file_read_failed"),
+        (errno.EINVAL, 206, "pdf_path_too_long"),
+        (errno.EACCES, 5, "pdf_file_access_denied"),
+        (errno.EACCES, 32, "pdf_file_access_denied"),
+    ],
+)
+def test_catalog_identifies_the_pdf_and_safe_filesystem_error_without_raw_details(
+    tmp_path,
+    monkeypatch,
+    failure_point,
+    os_error,
+    windows_error,
+    error_code,
+):
+    repository_path = tmp_path.resolve()
+    candidate = repository_path / "docs" / "Architecture.PDF"
+    candidate.parent.mkdir()
+    candidate.write_bytes(b"PDF placeholder")
+    original = getattr(Path, failure_point)
+    failure = OSError(os_error, "secret credential from underlying OS", "/private/secret/location")
+    if windows_error is not None:
+        failure.winerror = windows_error
+
+    def fail_candidate(path, *args, **kwargs):
+        if path == candidate:
+            raise failure
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, failure_point, fail_candidate)
+    record = b"100644 " + b"a" * 40 + b" 0\tdocs/Architecture.PDF"
+
+    with pytest.raises(RepositorySyncError) as captured:
+        _parse_tree_pdfs(repository_path, iter((record,)))
+
+    assert captured.value.code == error_code
+    assert "docs/Architecture.PDF" in captured.value.summary
+    assert f"errno {os_error}" in captured.value.summary
+    if windows_error is not None:
+        assert f"Windows error {windows_error}" in captured.value.summary
+    assert "secret" not in captured.value.summary
+    assert str(repository_path) not in captured.value.summary
+    assert captured.value.__cause__ is failure
 
 
 def _git(

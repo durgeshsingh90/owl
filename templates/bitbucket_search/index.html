@@ -5,7 +5,7 @@
 {% block theme_default %}dark{% endblock %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=people-search-bar-v3">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=pdf-local-policy-v1">
 {% endblock %}
 
 {% block app_header %}{% endblock %}
@@ -14,7 +14,7 @@
 
 {% block main_wrapper %}
 {% url 'bitbucket_search:repositories_refresh_all' as repositories_refresh_all_url %}
-{% with refresh_all_enabled_count=enabled_repository_count|default:0 refresh_all_active_count=active_enabled_repository_count|default:0 %}
+{% with refresh_all_enabled_count=enabled_repository_count|default:0 refresh_all_active_count=active_repository_count|default:0 %}
 <div
     class="bitbucket-workspace"
     data-bitbucket-workspace
@@ -106,7 +106,7 @@
 
             <div class="bb-topbar__actions">
                 <form
-                    class="bb-refresh-all bb-refresh-all--desktop{% if not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %} bb-refresh-all--disabled{% elif refresh_all_active_count and refresh_all_active_count >= refresh_all_enabled_count %} bb-refresh-all--active{% elif refresh_all_active_count %} bb-refresh-all--partial{% endif %}"
+                    class="bb-refresh-all bb-refresh-all--desktop{% if not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %} bb-refresh-all--disabled{% elif refresh_all_active_count %} bb-refresh-all--active{% endif %}"
                     method="post"
                     action="{{ repositories_refresh_all_url }}"
                     data-repositories-refresh-all
@@ -130,13 +130,10 @@
                         aria-label="Refresh all repositories unavailable"
                         title="The workspace refresh endpoint is unavailable"
                         disabled
-                        {% elif refresh_all_active_count and refresh_all_active_count >= refresh_all_enabled_count %}
-                        aria-label="{{ refresh_all_active_count }} repositor{{ refresh_all_active_count|pluralize:'y,ies' }} already queued or syncing in the background"
-                        title="All enabled repositories already have a queued or syncing background job"
-                        disabled aria-busy="true"
                         {% elif refresh_all_active_count %}
-                        aria-label="Queue a background refresh for enabled repositories not already queued or syncing; {{ refresh_all_active_count }} already queued or syncing"
-                        title="Queue Git refresh jobs for enabled repositories not already queued or syncing; workers process them in the background"
+                        aria-label="Refresh all repositories unavailable: {{ refresh_all_active_count }} repositor{{ refresh_all_active_count|pluralize:'y,ies' }} adding or refreshing"
+                        title="Wait for all repositories to finish adding or refreshing before refreshing all"
+                        disabled aria-busy="true"
                         {% else %}
                         aria-label="Queue a background refresh for all {{ refresh_all_enabled_count }} enabled repositor{{ refresh_all_enabled_count|pluralize:'y,ies' }}"
                         title="Queue Git refresh jobs for every enabled repository; workers run them in the background"
@@ -144,23 +141,21 @@
                         data-refresh-all-button
                     >
                         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19 8a7.5 7.5 0 1 0 1 7"/><path d="M19 3v5h-5"/></svg>
-                        {% if refresh_all_active_count and refresh_all_enabled_count %}<span class="bb-refresh-all__spinner" aria-hidden="true"></span>{% endif %}
+                        <span class="bb-refresh-all__spinner" aria-hidden="true" data-refresh-all-spinner{% if not refresh_all_active_count or not refresh_all_enabled_count %} hidden{% endif %}></span>
                     </button>
                     <span class="bb-refresh-all__meta" role="status" aria-live="polite" aria-atomic="true">
-                        <strong>
-                            {% if not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %}Refresh all unavailable{% elif refresh_all_active_count and refresh_all_active_count >= refresh_all_enabled_count %}All repositories queued or syncing{% elif refresh_all_active_count %}Refresh remaining repositories{% else %}Refresh all repositories{% endif %}
+                        <strong data-refresh-all-label>
+                            {% if not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %}Refresh all unavailable{% elif refresh_all_active_count %}Repository sync in progress{% else %}Refresh all repositories{% endif %}
                         </strong>
-                        <small>
+                        <small data-refresh-all-detail>
                             {% if not repository_count %}
                             Add a repository to enable workspace refresh
                             {% elif not refresh_all_enabled_count %}
                             No enabled repositories to queue
                             {% elif not repositories_refresh_all_url %}
                             Workspace refresh endpoint unavailable
-                            {% elif refresh_all_active_count and refresh_all_active_count >= refresh_all_enabled_count %}
-                            {{ refresh_all_active_count }} repository sync job{{ refresh_all_active_count|pluralize }} active in the background
                             {% elif refresh_all_active_count %}
-                            Queue enabled repositories not already queued or syncing · {{ refresh_all_active_count }} already queued or syncing
+                            {{ refresh_all_active_count }} repositor{{ refresh_all_active_count|pluralize:'y,ies' }} adding or refreshing in the background
                             {% else %}
                             Queue {{ refresh_all_enabled_count }} enabled repositor{{ refresh_all_enabled_count|pluralize:'y,ies' }} in the background
                             {% endif %}
@@ -195,10 +190,14 @@
     <section class="bb-stage" aria-label="Bitbucket Search workspace">
 
         <form
-            class="bb-mobile-refresh-all{% if not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %} bb-mobile-refresh-all--disabled{% elif refresh_all_active_count and refresh_all_active_count >= refresh_all_enabled_count %} bb-mobile-refresh-all--active{% elif refresh_all_active_count %} bb-mobile-refresh-all--partial{% endif %}"
+            class="bb-mobile-refresh-all{% if not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %} bb-mobile-refresh-all--disabled{% elif refresh_all_active_count %} bb-mobile-refresh-all--active{% endif %}"
             method="post"
             action="{{ repositories_refresh_all_url }}"
+            data-repositories-refresh-all
             data-repositories-refresh-all-mobile
+            data-repository-count="{{ repository_count|default:0 }}"
+            data-enabled-repository-count="{{ refresh_all_enabled_count }}"
+            data-active-repository-count="{{ refresh_all_active_count }}"
         >
             {% csrf_token %}
             <button
@@ -215,35 +214,31 @@
                 aria-label="Refresh all repositories unavailable"
                 title="The workspace refresh endpoint is unavailable"
                 disabled
-                {% elif refresh_all_active_count and refresh_all_active_count >= refresh_all_enabled_count %}
-                aria-label="{{ refresh_all_active_count }} repositor{{ refresh_all_active_count|pluralize:'y,ies' }} already queued or syncing in the background"
-                title="All enabled repositories already have a queued or syncing background job"
-                disabled aria-busy="true"
                 {% elif refresh_all_active_count %}
-                aria-label="Queue a background refresh for enabled repositories not already queued or syncing; {{ refresh_all_active_count }} already queued or syncing"
-                title="Queue Git refresh jobs for enabled repositories not already queued or syncing; workers process them in the background"
+                aria-label="Refresh all repositories unavailable: {{ refresh_all_active_count }} repositor{{ refresh_all_active_count|pluralize:'y,ies' }} adding or refreshing"
+                title="Wait for all repositories to finish adding or refreshing before refreshing all"
+                disabled aria-busy="true"
                 {% else %}
                 aria-label="Queue a background refresh for all {{ refresh_all_enabled_count }} enabled repositor{{ refresh_all_enabled_count|pluralize:'y,ies' }}"
                 title="Queue Git refresh jobs for every enabled repository; workers run them in the background"
                 {% endif %}
+                data-refresh-all-button
             >
                 <span class="bb-mobile-refresh-all__icon" aria-hidden="true">
                     <svg viewBox="0 0 24 24" focusable="false"><path d="M19 8a7.5 7.5 0 1 0 1 7"/><path d="M19 3v5h-5"/></svg>
-                    {% if refresh_all_active_count and refresh_all_enabled_count %}<span class="bb-refresh-all__spinner"></span>{% endif %}
+                    <span class="bb-refresh-all__spinner" data-refresh-all-spinner{% if not refresh_all_active_count or not refresh_all_enabled_count %} hidden{% endif %}></span>
                 </span>
                 <span>
-                    <strong>{% if not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %}Refresh all unavailable{% elif refresh_all_active_count and refresh_all_active_count >= refresh_all_enabled_count %}All repositories queued or syncing{% elif refresh_all_active_count %}Refresh remaining repositories{% else %}Refresh all repositories{% endif %}</strong>
-                    <small>
+                    <strong data-refresh-all-label>{% if not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %}Refresh all unavailable{% elif refresh_all_active_count %}Repository sync in progress{% else %}Refresh all repositories{% endif %}</strong>
+                    <small data-refresh-all-detail>
                         {% if not repository_count %}
                         No repositories connected yet
                         {% elif not refresh_all_enabled_count %}
                         No enabled repositories to queue
                         {% elif not repositories_refresh_all_url %}
                         Workspace refresh endpoint unavailable
-                        {% elif refresh_all_active_count and refresh_all_active_count >= refresh_all_enabled_count %}
-                        {{ refresh_all_active_count }} repository sync job{{ refresh_all_active_count|pluralize }} active in background
                         {% elif refresh_all_active_count %}
-                        Queue enabled repositories not already queued or syncing · {{ refresh_all_active_count }} already queued or syncing
+                        {{ refresh_all_active_count }} repositor{{ refresh_all_active_count|pluralize:'y,ies' }} adding or refreshing in the background
                         {% else %}
                         Queue {{ refresh_all_enabled_count }} enabled repositor{{ refresh_all_enabled_count|pluralize:'y,ies' }} for background workers
                         {% endif %}
@@ -477,8 +472,8 @@
                         <thead>
                             <tr>
                                 <th scope="col" id="bb-pdf-column-name">PDF name</th>
-                                <th scope="col" id="bb-pdf-column-path">Full path</th>
-                                <th scope="col" id="bb-pdf-column-project">Project / workspace</th>
+                                <th scope="col" id="bb-pdf-column-path">Path</th>
+                                <th scope="col" id="bb-pdf-column-project">Project</th>
                                 <th scope="col" id="bb-pdf-column-repository">Repository</th>
                                 <th scope="col" id="bb-pdf-column-added">Date added</th>
                                 <th scope="col" id="bb-pdf-column-author">Added by (Git author)</th>
@@ -618,5 +613,5 @@
 {% block global_status %}{% endblock %}
 
 {% block scripts %}
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=people-search-bar-v2" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=pdf-local-policy-v1" defer></script>
 {% endblock %}
