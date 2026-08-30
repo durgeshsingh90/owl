@@ -415,6 +415,35 @@ def test_repository_urls_normalize_scheme_variants_to_one_safe_identity():
     assert ssh.display_name == "Architecture"
 
 
+@override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org", "scm.example.invalid"))
+def test_repository_urls_preserve_allowed_internal_bitbucket_https_context_path():
+    normalized = normalize_repository_url(
+        "https://scm.example.invalid/stash/scm/adr/example-repo.git"
+    )
+
+    assert normalized.remote_url == "https://scm.example.invalid/stash/scm/adr/example-repo.git"
+    assert normalized.canonical_remote_key == "scm.example.invalid/stash/scm/adr/example-repo"
+    assert normalized.display_name == "example-repo"
+    assert normalized.hostname == "scm.example.invalid"
+
+
+@pytest.mark.parametrize(
+    "hostname",
+    (
+        "unapproved.example.invalid",
+        "scm.example.invalid.evil.invalid",
+        "other.scm.example.invalid",
+        "scm-example.invalid",
+    ),
+)
+@override_settings(BITBUCKET_ALLOWED_HOSTS=("scm.example.invalid",))
+def test_internal_bitbucket_allowlist_requires_the_exact_hostname(hostname):
+    with pytest.raises(RepositoryURLValidationError) as captured:
+        normalize_repository_url(f"https://{hostname}/stash/scm/adr/example-repo.git")
+
+    assert captured.value.code == "host_not_allowed"
+
+
 @pytest.mark.parametrize(
     ("value", "code"),
     [

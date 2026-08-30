@@ -528,6 +528,35 @@ def test_add_repository_returns_immediately_and_deduplicates_active_job_and_page
     launched.assert_called_once_with()
 
 
+@override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org", "scm.example.invalid"))
+def test_add_internal_bitbucket_repository_preserves_context_path_and_queues_clone(
+    loopback_client,
+    monkeypatch,
+):
+    launched = Mock()
+    monkeypatch.setattr("bitbucket_search.views.launch_sync_worker", launched)
+    url = "https://scm.example.invalid/stash/scm/adr/example-repo.git"
+
+    response = loopback_client.post(
+        reverse("bitbucket_search:repository_add"),
+        {"repository_url": url},
+        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+    )
+
+    assert response.status_code == 202
+    assert response.json()["state"] == "queued"
+    repository = BitbucketRepository.objects.get()
+    assert repository.remote_url == url
+    assert repository.canonical_remote_key == "scm.example.invalid/stash/scm/adr/example-repo"
+    assert repository.display_name == "example-repo"
+    assert repository.sync_state == RepositorySyncState.QUEUED
+    job = RepositorySyncJob.objects.get()
+    assert job.repository_id == repository.pk
+    assert job.operation == RepositorySyncOperation.CLONE
+    assert job.status == RepositorySyncJobStatus.QUEUED
+    launched.assert_called_once_with()
+
+
 @override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
 def test_manual_repository_wakeup_is_left_to_the_run_owl_resident_pool(
     loopback_client,

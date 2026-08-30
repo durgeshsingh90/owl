@@ -127,7 +127,7 @@ def test_bookmark_manager_topbar_matches_the_app_workspace_contract(loopback_cli
     assert 'class="bookmark-app-title"' in html
     assert 'class="bookmark-topbar__actions"' in html
     assert "bookmark-connection-summary" not in html
-    assert "bookmarks.css?v=workspace-ui-v23" in html
+    assert "bookmarks.css?v=workspace-ui-v24" in html
     assert 'aria-label="Applications"' in html
     assert 'aria-label="Confluence settings"' in html
     assert "data-theme-toggle" in html
@@ -151,6 +151,99 @@ def test_bookmark_manager_workspace_uses_minimal_edges_and_fills_page_height():
     assert "flex: 1 0 500px;" in css
     assert "padding: 0.4rem 0.25rem 0 !important;" in css
     assert "padding: 0.4rem 0.15rem 0 0.35rem;" in css
+
+
+def test_bookmark_search_feedback_reserves_layout_space_on_laptops_and_mobile():
+    asset_path = finders.find("bookmark_manager/bookmarks.css")
+
+    assert asset_path is not None
+    with open(asset_path, encoding="utf-8") as stylesheet:
+        css = stylesheet.read()
+
+    form_rules = re.findall(r"\.bookmark-manager-shell \.bookmark-unified-form\s*\{([^}]*)\}", css)
+    assert "display: grid;" in form_rules[0]
+    assert "grid-template-columns: minmax(0, 1fr) auto;" in form_rules[0]
+    mobile_css = css.rsplit("@media (max-width: 620px)", 1)[1]
+    mobile_form = re.search(
+        r"\.bookmark-manager-shell \.bookmark-unified-form\s*\{([^}]*)\}",
+        mobile_css,
+    )
+    assert mobile_form is not None
+    assert "grid-template-columns: minmax(0, 1fr);" in mobile_form.group(1)
+
+    css_without_comments = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    css_rules = re.findall(r"([^{}]+)\{([^{}]*)\}", css_without_comments)
+    for suffix in (".field-help", ".field-error", ".inline-message", "> .text-link"):
+        selector = f".bookmark-manager-shell .bookmark-unified-form {suffix}"
+        feedback_rules = [
+            declarations
+            for selectors, declarations in css_rules
+            if selector in [item.strip() for item in selectors.split(",")]
+        ]
+        assert feedback_rules, selector
+        assert not any("position: absolute;" in rule for rule in feedback_rules), selector
+        assert any(
+            all(
+                declaration in rule
+                for declaration in (
+                    "position: static;",
+                    "grid-column: 1 / -1;",
+                    "min-width: 0;",
+                    "max-width: none;",
+                    "overflow-wrap: anywhere;",
+                )
+            )
+            for rule in feedback_rules
+        ), selector
+
+    workspace_rule = re.search(r"\.bookmark-manager-shell \.bookmark-workspace\s*\{([^}]*)\}", css)
+    assert workspace_rule is not None
+    assert "margin-top: 0;" in workspace_rule.group(1)
+
+
+@pytest.mark.parametrize(
+    ("query", "has_url_feedback"),
+    [
+        ({"pinned": "on", "sort": "added_newest"}, False),
+        ({"q": "https://docs.example.com/runbooks/new-private-dns"}, True),
+    ],
+)
+def test_bookmark_search_feedback_precedes_active_filters_without_revealing_hidden_status(
+    loopback_client, query, has_url_feedback
+):
+    response = loopback_client.get("/bookmarks/", query)
+    html = response.content.decode()
+    controls = re.search(
+        r'<section class="bookmark-controls"[^>]*>(.*?)</section>', html, re.DOTALL
+    )
+    filters = re.search(r'<div class="active-filter-row"[^>]*>(.*?)</div>', html, re.DOTALL)
+
+    assert response.status_code == 200
+    assert controls is not None
+    assert filters is not None
+    assert controls.end() < filters.start()
+    assert 'class="field-help"' in controls.group(1)
+    assert ">Clear all</a>" in controls.group(1)
+    save_status = re.search(r"<p\b(?=[^>]*\bdata-bookmark-save-result)[^>]*>", controls.group(1))
+    assert save_status is not None
+    assert " hidden" in save_status.group(0)
+    for field in ("category", "sort"):
+        assert re.search(
+            rf'<input\b(?=[^>]*\bname="{field}")(?=[^>]*\btype="hidden")[^>]*>',
+            controls.group(1),
+        )
+    if has_url_feedback:
+        assert "data-url-search-result" in controls.group(1)
+        assert (
+            "No saved bookmark matches this Page ID or URL. Press Enter to add it."
+            in controls.group(1)
+        )
+        assert controls.group(1).index('class="field-help"') < controls.group(1).index(
+            "data-url-search-result"
+        )
+    else:
+        assert "data-url-search-result" not in controls.group(1)
+        assert "Pinned" in filters.group(1)
 
 
 @pytest.mark.parametrize(

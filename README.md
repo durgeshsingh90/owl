@@ -103,8 +103,22 @@ Bitbucket Search now provides repository registration and durable background syn
 
 Repository URLs are canonicalized and deduplicated. Credentials embedded in URLs are rejected;
 Git uses the existing SSH agent or external credential manager. `bitbucket.org` is approved by
-default. Set `BITBUCKET_ALLOWED_HOSTS` to a comma-separated host list for internal Bitbucket
-servers, or set it explicitly blank to disable repository additions.
+default. Set `BITBUCKET_ALLOWED_HOSTS` in your local `.env` to a comma-separated list of exact
+hostnames for internal Bitbucket servers or GitHub, or set it explicitly blank to disable
+repository additions. Keep all hosts you want to use in the list, for example:
+
+```dotenv
+BITBUCKET_ALLOWED_HOSTS=bitbucket.org,github.com,scm.example.invalid
+```
+
+Replace `scm.example.invalid` with your internal server's hostname; do not include `https://`,
+ports, or repository paths in this setting. Restart OWL and its workers after changing it.
+An explicitly configured process environment takes precedence over `.env`.
+Bitbucket Server/Data Center clone URLs with context paths are supported, such as
+`https://scm.example.invalid/stash/scm/adr/engineering-sign-off.git`; OWL preserves the full
+clone path. Internal servers still require network/VPN access and working Git credentials
+on the computer running OWL. Keep real internal addresses in the ignored `.env`, not in
+tracked source files.
 
 VSDX extraction and OCR remain out of scope. Image-only PDFs are catalogued and reported as having
 no machine-readable text; OWL does not invent text that the parser cannot read.
