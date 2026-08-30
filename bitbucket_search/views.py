@@ -7,7 +7,7 @@ import hashlib
 import ipaddress
 import logging
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from functools import wraps
 from pathlib import PurePosixPath, PureWindowsPath
@@ -17,6 +17,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.core.paginator import EmptyPage, Page, PageNotAnInteger, Paginator
 from django.db import OperationalError
+from django.db.models import Case, DateTimeField, F, Value, When
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
@@ -33,7 +34,6 @@ from bitbucket_search.models import (
     PDFDocument,
     PDFDocumentAddedEvidence,
     PDFDocumentLifecycle,
-    PDFDocumentTimelineBasis,
     PDFIndexState,
     PDFLocalPolicyState,
     RepositorySyncJob,
@@ -47,6 +47,7 @@ from bitbucket_search.services.document_actions import (
     open_registered_pdfs,
     reveal_registered_pdf,
 )
+from bitbucket_search.services.git_output import bounded_git_output
 from bitbucket_search.services.git_sync import RepositorySyncError, managed_repository_path
 from bitbucket_search.services.logging_events import get_logger, log_event
 from bitbucket_search.services.path_safety import has_disallowed_path_characters
@@ -239,7 +240,9 @@ def _display_datetime(value: datetime) -> str:
 def _timeline_bucket(value: date, *, today: date) -> tuple[str, str, str]:
     """Assign one date to exactly one WhatsApp-style chronological group."""
 
-    if value >= today:
+    if value > today:
+        return "future", "Future Git date", "Timestamp recorded in Git"
+    if value == today:
         return "today", "Today", _display_date(today)
 
     yesterday = today - timedelta(days=1)
@@ -344,28 +347,34 @@ def _display_full_path(document: PDFDocument) -> str:
     return str(candidate)
 
 
+def _repository_added_at(document: PDFDocument) -> datetime | None:
+    """Use original Git addition evidence, never the OWL discovery timestamp."""
+
+    if (
+        document.added_evidence == PDFDocumentAddedEvidence.CONFIRMED
+        and document.added_commit is not None
+    ):
+        return document.added_commit.committed_at
+    return None
+
+
 def _timeline_row(
     document: PDFDocument,
     *,
     search_hit: PDFSearchHit | None = None,
 ) -> PDFTimelineRow:
-    confirmed_add = (
-        document.added_evidence == PDFDocumentAddedEvidence.CONFIRMED
-        and document.added_commit is not None
-    )
-    if confirmed_add:
-        added_at = document.added_commit.committed_at
+    added_at = _repository_added_at(document)
+    if added_at is not None:
         added_by = f"{document.added_commit.author_name} · Git author"
-        added_detail = f"Git commit date · {_display_datetime(added_at)}"
+        added_detail = f"Original Git addition · {_display_datetime(added_at)}"
     else:
-        added_at = document.discovered_at
         added_by = "Unavailable in available Git history"
-        added_detail = f"OWL discovery date · {_display_datetime(added_at)}"
+        added_detail = "Original addition not found in available Git history."
 
     history_label = (
         "Available history" if document.repository.history_is_shallow else "Full reachable history"
     )
-    if document.timeline_basis == PDFDocumentTimelineBasis.OWL_DISCOVERED:
+    if added_at is None:
         history_label = f"{history_label} · Git-added date unavailable"
 
     full_path = _display_full_path(document)
@@ -382,7 +391,11 @@ def _timeline_row(
         path_copy_available=path_copy_available,
         project_label=_project_label(document.repository),
         added_by_label=added_by,
-        added_date_label=_display_date(timezone.localtime(added_at).date()),
+        added_date_label=(
+            _display_date(timezone.localtime(added_at).date())
+            if added_at is not None
+            else "Unavailable"
+        ),
         added_date_detail=added_detail,
         history_label=history_label,
         local_policy_state=local_policy.state if local_policy is not None else "",
@@ -397,7 +410,18 @@ def _pdf_timeline_page(page_number: object) -> tuple[Page, tuple[PDFTimelineGrou
             repository__enabled=True,
         )
         .select_related("repository", "added_commit", "last_commit", "local_policy")
-        .order_by("-timeline_at", "-id")
+        .annotate(
+            repository_added_at=Case(
+                When(
+                    added_evidence=PDFDocumentAddedEvidence.CONFIRMED,
+                    added_commit__isnull=False,
+                    then=F("added_commit__committed_at"),
+                ),
+                default=Value(None),
+                output_field=DateTimeField(),
+            )
+        )
+        .order_by(F("repository_added_at").desc(nulls_last=True), "-id")
     )
     paginator = Paginator(queryset, settings.BITBUCKET_PDF_PAGE_SIZE)
     try:
@@ -411,8 +435,11 @@ def _pdf_timeline_page(page_number: object) -> tuple[Page, tuple[PDFTimelineGrou
     today = timezone.localdate()
     grouped: OrderedDict[str, tuple[str, str, list[PDFTimelineRow]]] = OrderedDict()
     for document in page.object_list:
-        timeline_date = timezone.localtime(document.timeline_at).date()
-        key, label, detail = _timeline_bucket(timeline_date, today=today)
+        if document.repository_added_at is None:
+            key, label, detail = "repo-date-unavailable", "Repo date unavailable", ""
+        else:
+            timeline_date = timezone.localtime(document.repository_added_at).date()
+            key, label, detail = _timeline_bucket(timeline_date, today=today)
         if key not in grouped:
             grouped[key] = (label, detail, [])
         grouped[key][2].append(_timeline_row(document))
@@ -955,7 +982,7 @@ def _index_context(
         BitbucketPeopleGroup.objects.prefetch_related("members").order_by("normalized_name", "id")
     )
     people_groups_by_id = {group.pk: group for group in stored_people_groups}
-    requested_search_query = PDFSearchQuery()
+    requested_search_query = PDFSearchQuery(page_size=settings.BITBUCKET_SEARCH_PAGE_SIZE)
     search_query = requested_search_query
     selected_people_group_ids: tuple[int, ...] = ()
     search_error = ""
@@ -964,6 +991,12 @@ def _index_context(
         raw_search_input = request.GET.get("q", "")[:4096]
         try:
             requested_search_query = parse_pdf_search_query(request.GET)
+            requested_search_query = replace(
+                requested_search_query,
+                page_size=min(
+                    requested_search_query.page_size, settings.BITBUCKET_SEARCH_PAGE_SIZE
+                ),
+            )
             requested_group_ids = _people_group_ids(request)
             selected_people_group_ids = tuple(
                 group_id for group_id in requested_group_ids if group_id in people_groups_by_id
@@ -977,6 +1010,7 @@ def _index_context(
                 for member in people_groups_by_id[group_id].members.all()
             )
             effective_values = request.GET.copy()
+            effective_values["page_size"] = str(requested_search_query.page_size)
             effective_values.setlist(
                 "committer",
                 [*requested_search_query.committer_names, *selected_group_member_names],
@@ -2092,6 +2126,47 @@ def repository_status(request: HttpRequest) -> JsonResponse:
                     sum(repository.document_bytes for repository in repositories)
                 ),
             },
+        }
+    )
+
+
+@require_GET
+@never_cache
+@_logged_web_action("repository_logs", quiet=True)
+def repository_logs(request: HttpRequest, repository_id: int) -> JsonResponse:
+    """Read only one repository's latest bounded, redacted Git transport log."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    get_object_or_404(BitbucketRepository.objects.only("id"), pk=repository_id)
+    job = (
+        RepositorySyncJob.objects.filter(repository_id=repository_id)
+        .only(
+            "id",
+            "status",
+            "operation",
+            "phase",
+            "output_log",
+            "output_log_truncated",
+            "output_log_updated_at",
+        )
+        .order_by("-requested_at", "-id")
+        .first()
+    )
+    safe_log, clipped = bounded_git_output(job.output_log if job else "")
+    return JsonResponse(
+        {
+            "repositoryId": repository_id,
+            "jobId": job.pk if job else None,
+            "status": job.status if job else "not_started",
+            "operation": job.operation if job else "",
+            "phase": job.phase if job else "",
+            "log": safe_log,
+            "truncated": bool(clipped or (job and job.output_log_truncated)),
+            "updatedAt": job.output_log_updated_at.isoformat()
+            if job and job.output_log_updated_at
+            else None,
         }
     )
 

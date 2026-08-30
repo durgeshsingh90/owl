@@ -13,13 +13,13 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from functools import wraps
 from pathlib import Path
 
 from django.conf import settings
-from django.db import IntegrityError, OperationalError, transaction
+from django.db import IntegrityError, OperationalError, connection, transaction
 from django.db.models import (
     Case,
     Count,
@@ -53,9 +53,15 @@ from bitbucket_search.models import (
 from bitbucket_search.services.document_actions import DocumentActionError, validated_pdf_path
 from bitbucket_search.services.filesystem_paths import filesystem_path
 from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
-from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
+from bitbucket_search.services.pdf_extractor import (
+    DIAGNOSTIC_REASONS,
+    DIAGNOSTIC_STAGES,
+    PDF_EXTRACTOR_VERSION,
+    PDFExtractionDiagnostic,
+)
 from bitbucket_search.services.repository_lock import (
     RepositoryCheckoutBusy,
+    pdf_extraction_claim_lock,
     repository_checkout_lock,
 )
 
@@ -110,6 +116,12 @@ _FAILURE_DIAGNOSTICS: Mapping[str, tuple[str, str]] = {
         "The PDF changed during extraction. Refresh its repository and retry.",
     ),
     "unknown_error": ("pdf_unknown_error", "OWL could not extract this PDF safely."),
+    "dependency_unavailable": (
+        "pdf_dependency_unavailable",
+        "The PDF parser or a required dependency could not load. "
+        "Install the project requirements in the Python environment running OWL, restart workers, "
+        "then Refresh to retry.",
+    ),
 }
 _LOGGABLE_PDF_ERROR_CODES = frozenset(code for code, _summary in _FAILURE_DIAGNOSTICS.values()) | {
     "document_unavailable",
@@ -173,6 +185,7 @@ class StagedPDFExtraction:
     extractor_version: str
     error_code: str = ""
     error_summary: str = ""
+    diagnostic: PDFExtractionDiagnostic = field(default_factory=PDFExtractionDiagnostic)
 
     @property
     def publishable(self) -> bool:
@@ -252,6 +265,11 @@ def queue_repository_pdf_extractions(
     """Reconcile one repository's current PDFs without per-document queries."""
 
     started = time.monotonic()
+    # Standalone sweep/reindex calls start a deferred transaction here too.
+    # Reserve before the first read so publication cannot steal the writer
+    # slot between that read and this queue's later insert/update. Do not take
+    # the PDF file gate: catalogue publication may already own a DB write lock.
+    _reserve_sqlite_write()
     repository_id = repository.pk if isinstance(repository, BitbucketRepository) else repository
     locked_repository = BitbucketRepository.objects.select_for_update().get(pk=repository_id)
     observed_at = timezone.now()
@@ -829,16 +847,36 @@ def sweep_pdf_extraction_queue(
 
 @_logged_indexing_errors("extraction_claim")
 def claim_next_extraction_job() -> PDFExtractionJob | None:
-    """Claim one PDF job while honoring the global sync and extraction barriers."""
+    """Claim one PDF after its own checkout is published, within a global cap."""
 
-    with transaction.atomic():
-        if RepositorySyncJob.objects.filter(status__in=_ACTIVE_REPOSITORY_JOB_STATUSES).exists():
-            return None
+    with pdf_extraction_claim_lock(), transaction.atomic():
+        _reserve_sqlite_write()
+        running_by_repository = tuple(
+            PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING)
+            .order_by()
+            .values("document__repository_id")
+            .annotate(total=Count("id"))
+        )
         if (
-            PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING).count()
+            sum(row["total"] for row in running_by_repository)
             >= settings.PDF_MAX_EXTRACTION_WORKERS
         ):
             return None
+        active_sync = RepositorySyncJob.objects.filter(
+            repository_id=OuterRef("document__repository_id"),
+            status__in=_ACTIVE_REPOSITORY_JOB_STATUSES,
+        )
+        # At most the configured number of running workers contributes a CASE
+        # arm. Do not rescan all extraction history once for every queued PDF.
+        repository_running = Case(
+            *(
+                When(
+                    document__repository_id=row["document__repository_id"], then=Value(row["total"])
+                )
+                for row in running_by_repository
+            ),
+            default=Value(0),
+        )
         candidate_id = (
             PDFExtractionJob.objects.filter(
                 status=PDFExtractionJobStatus.QUEUED,
@@ -847,7 +885,12 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
                 document__repository__sync_state=RepositorySyncState.READY,
                 document__local_policy__isnull=True,
             )
-            .order_by("requested_at", "id")
+            .annotate(
+                repository_sync_active=Exists(active_sync),
+                repository_running=repository_running,
+            )
+            .filter(repository_sync_active=False)
+            .order_by("repository_running", "requested_at", "id")
             .values_list("id", flat=True)
             .first()
         )
@@ -884,8 +927,31 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
     return job
 
 
+def _reserve_sqlite_write() -> None:
+    """Avoid a deferred read-to-write upgrade when PDF controllers publish together."""
+
+    if connection.vendor == "sqlite":
+        # A no-op write reserves SQLite's single writer before any SELECT in
+        # this short transaction. Other writers can wait for the busy timeout
+        # instead of racing an un-retryable snapshot/lock upgrade. No PDF
+        # parsing, hashing, file access or subprocess wait occurs in this gate.
+        PDFExtractionJob.objects.filter(pk=-1).update(status=F("status"))
+
+
+def _serialized_index_write(function):
+    """Keep brief PDF controller writes serialized while parsers run in parallel."""
+
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        with pdf_extraction_claim_lock():
+            return function(*args, **kwargs)
+
+    return guarded
+
+
+@_serialized_index_write
 def _update_job_progress(job_id: int, phase: str, progress: int) -> None:
-    _raise_if_repository_sync_active()
+    _raise_if_repository_sync_active(job_id=job_id)
     updated = PDFExtractionJob.objects.filter(
         pk=job_id,
         status=PDFExtractionJobStatus.RUNNING,
@@ -914,8 +980,11 @@ def _update_job_progress(job_id: int, phase: str, progress: int) -> None:
             progress_state[job_id] = current
 
 
-def _raise_if_repository_sync_active() -> None:
-    if RepositorySyncJob.objects.filter(status__in=_ACTIVE_REPOSITORY_JOB_STATUSES).exists():
+def _raise_if_repository_sync_active(*, job_id: int) -> None:
+    repository_id = PDFExtractionJob.objects.filter(pk=job_id).values("document__repository_id")[:1]
+    if RepositorySyncJob.objects.filter(
+        repository_id=Subquery(repository_id), status__in=_ACTIVE_REPOSITORY_JOB_STATUSES
+    ).exists():
         raise PDFExtractionDeferred
 
 
@@ -1073,11 +1142,15 @@ def _parse_extractor_payload(payload: object) -> StagedPDFExtraction:
         "extractor_version",
         "publishable",
     }
-    if not isinstance(payload, dict) or set(payload) != expected_keys:
+    if not isinstance(payload, dict) or set(payload) not in (
+        expected_keys,
+        expected_keys | {"diagnostic"},
+    ):
         raise PDFIndexingError(
             "invalid_extractor_response",
             "The isolated PDF extractor returned an invalid response.",
         )
+    diagnostic = _parse_extractor_diagnostic(payload.get("diagnostic"))
     raw_pages = payload["pages"]
     page_count = payload["page_count"]
     character_count = payload["extracted_character_count"]
@@ -1101,6 +1174,7 @@ def _parse_extractor_payload(payload: object) -> StagedPDFExtraction:
         or source_size < 0
         or source_size > settings.PDF_MAX_FILE_BYTES
         or not isinstance(state, str)
+        or state not in _PUBLISHABLE_STATES | _FAILURE_DIAGNOSTICS.keys()
         or not isinstance(before, str)
         or not isinstance(after, str)
         or not isinstance(extractor_version, str)
@@ -1153,7 +1227,55 @@ def _parse_extractor_payload(payload: object) -> StagedPDFExtraction:
         extractor_version=extractor_version,
         error_code=error_code,
         error_summary=error_summary,
+        diagnostic=diagnostic,
     )
+
+
+def _parse_extractor_diagnostic(payload: object) -> PDFExtractionDiagnostic:
+    """Accept a small fixed vocabulary, never child-supplied error text or names."""
+
+    if payload is None:
+        return PDFExtractionDiagnostic()
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"stage", "reason", "errno", "winerror"}
+        or not isinstance(payload["stage"], str)
+        or payload["stage"] not in DIAGNOSTIC_STAGES
+        or not isinstance(payload["reason"], str)
+        or payload["reason"] not in DIAGNOSTIC_REASONS
+        or any(
+            value is not None and (type(value) is not int or not 0 <= value <= 2**31 - 1)
+            for value in (payload["errno"], payload["winerror"])
+        )
+    ):
+        raise PDFIndexingError(
+            "invalid_extractor_response",
+            "The isolated PDF extractor returned invalid diagnostic metadata.",
+        )
+    return PDFExtractionDiagnostic(**payload)
+
+
+def _log_extractor_diagnostic(staged: StagedPDFExtraction, *, job: PDFExtractionJob) -> None:
+    diagnostic = _parse_extractor_diagnostic(staged.diagnostic.to_payload())
+    if not diagnostic.reason:
+        return
+    # No raw child exception is re-raised: even its class name could come from
+    # PDF content. The reason and stage came from a fixed vocabulary above.
+    context = {
+        "repository_id": job.document.repository_id,
+        "document_id": job.document_id,
+        "job_id": job.pk,
+        "stage": diagnostic.stage,
+        "reason": diagnostic.reason,
+        "error_code": staged.error_code
+        if staged.error_code in _LOGGABLE_PDF_ERROR_CODES
+        else "pdf_page_extraction_failed"
+        if staged.publishable
+        else "pdf_unknown_error",
+        "errno": diagnostic.errno,
+        "winerror": diagnostic.winerror,
+    }
+    log_event(logger, logging.ERROR, "pdf_parser_diagnostic", **context)
 
 
 def run_isolated_pdf_extractor(
@@ -1314,6 +1436,7 @@ def _existing_revision_is_valid(revision: PDFTextRevision) -> bool:
     )
 
 
+@_serialized_index_write
 def _attach_revision(
     job_id: int,
     *,
@@ -1334,6 +1457,7 @@ def _attach_revision(
             stage="text_publication",
         )
     with transaction.atomic():
+        _reserve_sqlite_write()
         job = (
             PDFExtractionJob.objects.select_for_update()
             .select_related("document__repository", "document__local_policy")
@@ -1351,7 +1475,7 @@ def _attach_revision(
             return False
         if getattr(document, "local_policy", None) is not None:
             raise PDFExtractionExcluded
-        _raise_if_repository_sync_active()
+        _raise_if_repository_sync_active(job_id=job_id)
         if document.repository.sync_state != RepositorySyncState.READY:
             raise PDFExtractionDeferred
         if not document.repository.enabled or not _job_matches_document(job, document):
@@ -1487,6 +1611,7 @@ def _attach_revision(
     return True
 
 
+@_serialized_index_write
 def _fail_job(
     job_id: int,
     error: PDFIndexingError,
@@ -1505,6 +1630,7 @@ def _fail_job(
     )
     now = timezone.now()
     with transaction.atomic():
+        _reserve_sqlite_write()
         job = (
             PDFExtractionJob.objects.select_for_update()
             .select_related("document__repository")
@@ -1637,6 +1763,7 @@ def _execute_claimed_extraction_job(
                     "invalid_extractor_response",
                     "The isolated PDF extractor returned an invalid response.",
                 )
+            _log_extractor_diagnostic(staged, job=job)
             failed_pages = sum(page.state == PDFPageExtractionState.FAILED for page in staged.pages)
             if failed_pages:
                 log_event(
@@ -1764,8 +1891,8 @@ def _execute_claimed_extraction_with_checkout(
         # claimed is detected before reads, on parser heartbeats, and before
         # publication. An in-flight parser is stopped by its heartbeat handler
         # before this lock is released for a waiting repository worker.
-        with repository_checkout_lock(job.document.repository_id, blocking=False):
-            _raise_if_repository_sync_active()
+        with repository_checkout_lock(job.document.repository_id, blocking=False, shared=True):
+            _raise_if_repository_sync_active(job_id=job.pk)
             return _execute_claimed_extraction_job(
                 job.pk,
                 extraction_runner=extraction_runner,

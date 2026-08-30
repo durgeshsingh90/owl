@@ -40,6 +40,11 @@ html {
     scroll-behavior: smooth;
 }
 
+html[data-theme="dark"] {
+    color-scheme: dark;
+    background: #06111c;
+}
+
 body {
     min-height: 100vh;
     margin: 0;
@@ -3390,6 +3395,13 @@ body[data-theme="dark"] .repository-status-center {
     line-height: 1.5;
 }
 
+.notification-center__repository-hint {
+    margin: 0 0.25rem 0.3rem;
+    color: var(--notification-muted);
+    font-size: 10px;
+    line-height: 1.4;
+}
+
 .notification-center__repository-list {
     max-height: min(240px, 35vh);
     margin: 0;
@@ -3520,6 +3532,29 @@ body[data-theme="dark"] .repository-status-center {
     display: none;
 }
 
+.notification-repository__log-preview {
+    display: block;
+    grid-column: 2 / -1;
+    min-width: 0;
+    color: var(--notification-muted);
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: 10px;
+    font-weight: 400;
+    line-height: 1.4;
+}
+
+.notification-repository__log-line {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.notification-repository__log-preview[hidden],
+.notification-repository__log-line[hidden] {
+    display: none;
+}
+
 .notification-repository__body {
     padding: 0.2rem 0.4rem 0.65rem 27px;
     overflow-wrap: anywhere;
@@ -3547,6 +3582,101 @@ body[data-theme="dark"] .repository-status-center {
     margin: 0.35rem 0.85rem 0 0;
     color: var(--notification-accent);
     text-underline-offset: 3px;
+}
+
+.notification-repository__git-log {
+    min-width: 0;
+    margin: 0.65rem 0 0.2rem;
+    border: 1px solid var(--notification-line);
+    border-radius: 7px;
+    background: var(--notification-surface);
+}
+
+.notification-repository__git-log-toggle {
+    display: flex;
+    min-height: 32px;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 0.6rem;
+    color: var(--notification-ink);
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 750;
+    list-style: none;
+}
+
+.notification-repository__git-log-toggle::-webkit-details-marker {
+    display: none;
+}
+
+.notification-repository__git-log-toggle::after {
+    width: 6px;
+    height: 6px;
+    flex: 0 0 6px;
+    border-right: 1px solid currentColor;
+    border-bottom: 1px solid currentColor;
+    color: var(--notification-muted);
+    content: "";
+    transform: rotate(45deg) translateY(-2px);
+}
+
+.notification-repository__git-log[open] > summary::after {
+    transform: rotate(225deg) translate(-1px, -1px);
+}
+
+.notification-repository__git-log-status {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    color: var(--notification-muted);
+    font-size: 9px;
+    font-weight: 650;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.notification-repository__git-log-message,
+.notification-repository__git-log-note {
+    margin: 0;
+    padding: 0.3rem 0.6rem 0.6rem;
+    color: var(--notification-muted);
+    font-size: 10px;
+    line-height: 1.5;
+}
+
+.notification-repository__git-log-output {
+    display: block;
+    min-width: 0;
+    max-width: 100%;
+    max-height: 160px;
+    margin: 0 0.4rem 0.4rem;
+    padding: 0.55rem;
+    overflow: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--notification-line);
+    border-radius: 4px;
+    color: var(--notification-ink);
+    background: var(--notification-bg);
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: 10px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    tab-size: 4;
+    white-space: pre-wrap;
+    scrollbar-width: thin;
+}
+
+.notification-repository__git-log-output[hidden],
+.notification-repository__git-log-message[hidden],
+.notification-repository__git-log-note[hidden] {
+    display: none;
+}
+
+.notification-repository__git-log-toggle:focus-visible,
+.notification-repository__git-log-output:focus-visible {
+    outline: 2px solid var(--notification-accent);
+    outline-offset: -2px;
 }
 
 .notification-center__section-heading {
@@ -3868,6 +3998,10 @@ a.notification-card__title:hover {
 
     .notification-repository__status {
         max-width: 70px;
+    }
+
+    .notification-repository__git-log-toggle {
+        min-height: 40px;
     }
 }
 

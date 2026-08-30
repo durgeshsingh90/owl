@@ -119,7 +119,10 @@ def test_repository_and_index_filters_are_search_mode_without_phrase_chips(clien
     assert "data-pdf-timeline" not in html
 
 
-def test_search_html_paginates_at_two_hundred_and_preserves_canonical_query(client):
+@pytest.mark.parametrize("legacy_page_size", [None, 200])
+def test_search_html_paginates_at_one_hundred_and_preserves_canonical_query(
+    client, legacy_page_size
+):
     repository = _repository("Guides")
     PDFDocument.objects.bulk_create(
         [
@@ -128,23 +131,26 @@ def test_search_html_paginates_at_two_hundred_and_preserves_canonical_query(clie
                 filename=f"Guide {number:02d}.pdf",
                 relative_path=f"docs/Guide {number:02d}.pdf",
             )
-            for number in range(201)
+            for number in range(101)
         ]
     )
 
-    response = client.get(reverse("bitbucket_search:index"), {"q": "Guide"})
+    query = {"q": "Guide"}
+    if legacy_page_size is not None:
+        query["page_size"] = legacy_page_size
+    response = client.get(reverse("bitbucket_search:index"), query)
     html = response.content.decode()
 
     assert response.status_code == 200
-    assert html.count("data-pdf-row") == 200
-    assert "1–200 of 201 matching PDFs" in html
-    assert "up to 200 results per page" in html
+    assert html.count("data-pdf-row") == 100
+    assert "1–100 of 101 matching PDFs" in html
+    assert "up to 100 results per page" in html
     assert "chip=Guide" in html
     assert "page=2" in html
-    assert "page_size=200" in html
-    assert "Copy page paths (200)" in html
-    assert "Open page PDFs (200)" in html
-    assert "Open 200 PDFs?" in html
+    assert "page_size=100" in html
+    assert "Copy page paths (100)" in html
+    assert "Open page PDFs (100)" in html
+    assert "Open 100 PDFs?" in html
     assert 'data-confirm-threshold="10"' in html
 
     second_page = client.get(
@@ -158,6 +164,29 @@ def test_search_html_paginates_at_two_hundred_and_preserves_canonical_query(clie
     assert "Copy page paths (1)" in second_page_html
     assert "Open page PDFs (1)" in second_page_html
     assert "data-open-all-confirmation" not in second_page_html
+
+
+def test_repository_filtered_search_honors_configured_page_size(client, settings):
+    settings.BITBUCKET_SEARCH_PAGE_SIZE = 50
+    repository = _repository("Filtered")
+    PDFDocument.objects.bulk_create(
+        [
+            PDFDocument(
+                repository=repository,
+                filename=f"Guide {number}.pdf",
+                relative_path=f"docs/Guide {number}.pdf",
+            )
+            for number in range(51)
+        ]
+    )
+    response = client.get(
+        reverse("bitbucket_search:index"), {"repository": repository.pk, "page_size": 200}
+    )
+    html = response.content.decode()
+    assert html.count("data-pdf-row") == 50
+    assert "1–50 of 51 matching PDFs" in html
+    assert 'name="page_size" value="50"' in html
+    assert "page_size=50" in html
 
 
 def test_search_bulk_actions_include_only_the_rendered_result_page(client):
@@ -254,7 +283,7 @@ def test_search_input_is_full_width_enter_first_and_submits_scope_sentinel(clien
     assert 'for="bb-pdf-search-input"' in html
     assert 'id="bb-pdf-search-input"' in html
     assert 'name="scope_present" value="1"' in html
-    assert 'name="page_size" value="200"' in html
+    assert 'name="page_size" value="100"' in html
     assert "bb-search-submit" not in html
 
     stylesheet = (

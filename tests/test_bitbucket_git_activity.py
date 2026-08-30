@@ -396,6 +396,7 @@ def test_activity_migration_preserves_pdf_fts_data_and_triggers_in_both_directio
     before = [("bitbucket_search", "0007_pdflocalpolicy")]
     after = [("bitbucket_search", "0008_git_activity_history")]
     executor = MigrationExecutor(connection)
+    latest_targets = executor.loader.graph.leaf_nodes()
     try:
         executor.migrate(before)
         apps = executor.loader.project_state(before).apps
@@ -408,8 +409,12 @@ def test_activity_migration_preserves_pdf_fts_data_and_triggers_in_both_directio
             relative_path="docs/one.pdf",
             timeline_at=timezone.now(),
         )
-        MigrationExecutor(connection).migrate(after)
-        repository = BitbucketRepository.objects.get(pk=repository.pk)
+        after_executor = MigrationExecutor(connection)
+        after_executor.migrate(after)
+        after_apps = after_executor.loader.project_state(after).apps
+        repository = after_apps.get_model("bitbucket_search", "BitbucketRepository").objects.get(
+            pk=repository.pk
+        )
         repository.display_name = "After migration"
         repository.save(update_fields=("display_name",))
         with connection.cursor() as cursor:
@@ -429,4 +434,6 @@ def test_activity_migration_preserves_pdf_fts_data_and_triggers_in_both_directio
             )
             assert cursor.fetchone() == ("Reversed migration",)
     finally:
-        MigrationExecutor(connection).migrate(after)
+        # Restore the live model schema, not this test's historical target.
+        # Later migrations may add fields queried by the next transaction test.
+        MigrationExecutor(connection).migrate(latest_targets)

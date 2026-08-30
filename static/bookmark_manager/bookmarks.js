@@ -540,7 +540,21 @@
             window.clearTimeout(globalRefreshPollTimer);
             globalRefreshPollTimer = null;
         }
-        window.setTimeout(() => window.location.reload(), 250);
+        const reloadWhenPanelsClose = () => {
+            const panelOpen = Array.from(
+                document.querySelectorAll(
+                    "[data-repository-status-panel], [data-notification-panel]",
+                ),
+            ).some((panel) => !panel.hidden);
+            if (panelOpen) {
+                // Preserve open worker logs and alert history without another
+                // server request; keep the completed refresh pending locally.
+                window.setTimeout(reloadWhenPanelsClose, 1000);
+                return;
+            }
+            window.location.reload();
+        };
+        window.setTimeout(reloadWhenPanelsClose, 250);
     };
 
     const formatRefreshTimestamp = (value) => {

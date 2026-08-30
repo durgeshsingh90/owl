@@ -362,7 +362,7 @@
                                         {% endfor %}
                                     </select>
                                 </label>
-                                <input type="hidden" name="page_size" value="200">
+                                <input type="hidden" name="page_size" value="{{ search_query.page_size }}">
                                 <button class="bb-control-button" type="submit">Apply filters</button>
                             </div>
                         </details>
@@ -456,7 +456,7 @@
 
                 <div class="bb-results-table-wrap"{% if not search_active %} data-pdf-timeline data-next-page-url="{{ next_pdf_page_url|default:'' }}"{% endif %}>
                     <table class="bb-results-table">
-                        <caption class="visually-hidden">{% if search_active %}Bitbucket PDF phrase-search results{% else %}Downloaded Bitbucket PDFs grouped by date added{% endif %}</caption>
+                        <caption class="visually-hidden">{% if search_active %}Bitbucket PDF phrase-search results{% else %}Downloaded Bitbucket PDFs grouped by date added to repo{% endif %}</caption>
                         <colgroup>
                             <col class="bb-column-name">
                             <col class="bb-column-path">
@@ -473,7 +473,7 @@
                                 <th scope="col" id="bb-pdf-column-path">Path</th>
                                 <th scope="col" id="bb-pdf-column-project">Project</th>
                                 <th scope="col" id="bb-pdf-column-repository">Repository</th>
-                                <th scope="col" id="bb-pdf-column-added">Date added</th>
+                                <th scope="col" id="bb-pdf-column-added">Date added to repo</th>
                                 <th scope="col" id="bb-pdf-column-author">Added by (Git author)</th>
                                 <th scope="col" id="bb-pdf-column-opens">Opens</th>
                                 <th scope="col" id="bb-pdf-column-actions">Actions</th>
@@ -564,15 +564,6 @@
                         {% endif %}
                     </table>
 
-                    {% if not search_active %}
-                    <div class="bb-load-older"{% if not next_pdf_page_url %} hidden{% endif %} data-load-older-container>
-                        {% if next_pdf_page_url %}
-                        <a href="{{ next_pdf_page_url }}" data-load-older>Load older PDFs</a>
-                        {% endif %}
-                        <span class="bb-load-older__complete" data-load-older-complete tabindex="-1" hidden>{% if pdf_page.has_previous %}All older PDFs from this page loaded.{% else %}All PDFs loaded.{% endif %}</span>
-                        <span class="visually-hidden" role="status" aria-live="polite" data-load-older-status></span>
-                    </div>
-                    {% endif %}
                 </div>
 
                 {% if search_active and search_page.page_count %}
@@ -585,7 +576,7 @@
                 </footer>
                 {% elif pdf_timeline_groups and not search_active %}
                 <footer class="bb-pagination" aria-label="PDF result pages">
-                    <p>Page <strong data-pdf-current-page>{{ pdf_page.number }}</strong> of {{ pdf_page.paginator.num_pages }}</p>
+                    <p>Page <strong data-pdf-current-page>{{ pdf_page.number }}</strong> of {{ pdf_page.paginator.num_pages }} · {{ pdf_page.paginator.per_page }} PDFs per page</p>
                     <nav aria-label="Newer and older PDF pages">
                         {% if previous_pdf_page_url %}
                         <a href="{{ previous_pdf_page_url }}" rel="prev">← Newer PDFs</a>
@@ -611,5 +602,5 @@
 {% block global_status %}{% endblock %}
 
 {% block scripts %}
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-worker-timers-v1" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=stable-background-indexing-v1" defer></script>
 {% endblock %}

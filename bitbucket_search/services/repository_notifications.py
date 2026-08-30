@@ -19,6 +19,7 @@ from bitbucket_search.models import (
     RepositorySyncPhase,
     RepositorySyncState,
 )
+from bitbucket_search.services.git_output import bounded_git_output
 from bitbucket_search.services.repository_worker_timing import (
     current_pdf_extraction_jobs,
     running_pdf_start_filter,
@@ -46,6 +47,11 @@ _BUSY_REPOSITORY = (
     RepositorySyncState.UPDATING,
 )
 _FAILURE_DETAILS = {
+    "connection_timeout": "Connection check timed out. Connect to VPN if required, then Refresh.",
+    "connection_unreachable": "The repository is unreachable. Check VPN/network access, then Refresh.",
+    "connection_auth_failed": "Git authentication or repository permission failed. Check Git access.",
+    "connection_tls_failed": "Git could not verify the server certificate. Check corporate TLS setup.",
+    "connection_check_failed": "Git connection check failed. Check VPN, network and repository access.",
     "dirty_working_tree": "Local changes prevented refresh. Resolve them before trying again.",
     "local_commits_detected": "Local commits prevented a safe refresh. Review the managed checkout.",
     "history_diverged": "Local and remote history diverged. Review the managed checkout.",
@@ -124,6 +130,8 @@ def _repository_rows():
             "started_at",
             "heartbeat_at",
             "completed_at",
+            "output_log",
+            "output_log_updated_at",
         )
     }
     annotations.update(
@@ -131,7 +139,8 @@ def _repository_rows():
         terminal_at=Subquery(terminal.values("outcome_at")[:1]),
         successful_at=Subquery(successful.values("completed_at")[:1]),
     )
-    # Do not read free-form job messages, errors, repository URLs, or local paths.
+    # Only the selected job's output is read, and it is sanitized before exposing
+    # its two-line preview. Do not read message/error or repository URL/path fields.
     return tuple(
         BitbucketRepository.objects.annotate(**annotations)
         .order_by("display_name", "id")
@@ -197,6 +206,12 @@ def _extraction_states(*, observed_at):
 def _busy_status(repository):
     phase = repository["job_phase"]
     state = repository["sync_state"]
+    if phase == RepositorySyncPhase.CHECKING_CONNECTION:
+        return (
+            "checking_connection",
+            "Checking connection",
+            "Testing Git access before downloading.",
+        )
     if repository["job_status"] == RepositorySyncJobStatus.QUEUED or (
         repository["job_status"] is None and state == RepositorySyncState.QUEUED
     ):
@@ -330,6 +345,7 @@ def repository_notification_statuses(*, at=None) -> dict[str, object]:
         updated_at = (
             _latest_time(
                 repository["job_completed_at"],
+                repository["job_output_log_updated_at"],
                 repository["job_heartbeat_at"],
                 repository["job_started_at"],
                 repository["job_requested_at"],
@@ -347,6 +363,7 @@ def repository_notification_statuses(*, at=None) -> dict[str, object]:
                 character for character in repository["display_name"] if character.isprintable()
             ).split()
         )
+        log_output, _ = bounded_git_output(repository["job_output_log"] or "")
         items.append(
             {
                 "id": repository["id"],
@@ -371,8 +388,10 @@ def repository_notification_statuses(*, at=None) -> dict[str, object]:
                 else None,
                 "lastOutcomeAt": _iso(repository["terminal_at"]),
                 "detail": detail,
+                "logPreview": log_output.splitlines()[-2:],
                 "targetPath": f"{target}?repository={repository['id']}",
                 "statusTargetPath": status_target,
+                "logsUrl": reverse("bitbucket_search:repository_logs", args=(repository["id"],)),
                 "active": tone == "progress" or bool(extraction.get("active_count", 0)),
             }
         )

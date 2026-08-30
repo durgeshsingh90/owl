@@ -77,6 +77,7 @@ class RepositorySyncPhase(models.TextChoices):
 
     QUEUED = "queued", "Queued"
     VALIDATING = "validating", "Validating"
+    CHECKING_CONNECTION = "checking_connection", "Checking connection"
     CLONING = "cloning", "Cloning"
     FETCHING = "fetching", "Fetching"
     UPDATING = "updating", "Updating working tree"
@@ -673,6 +674,9 @@ class RepositorySyncJob(models.Model):
     status_message = models.CharField(max_length=500, blank=True)
     error_code = models.CharField(max_length=64, blank=True)
     error_summary = models.CharField(max_length=500, blank=True)
+    output_log = models.TextField(blank=True, default="")
+    output_log_truncated = models.BooleanField(default=False)
+    output_log_updated_at = models.DateTimeField(null=True, blank=True)
     source_commit = models.CharField(max_length=64, blank=True)
     result_commit = models.CharField(max_length=64, blank=True)
     requested_at = models.DateTimeField(auto_now_add=True, db_index=True)

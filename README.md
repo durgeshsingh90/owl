@@ -12,6 +12,20 @@ OWL runs on your own computer and listens only on `127.0.0.1`. The repository is
 your credentials, databases, repository checkouts, PDF contents, indexes, and logs must remain
 local.
 
+Before each Bitbucket clone or refresh, OWL tests access using Git with your configured
+authentication. The check times out after 20 seconds by default
+(`BITBUCKET_CONNECTION_TIMEOUT_SECONDS`, capped at 120). A failed check stops the download and
+shows a notification: network failures suggest checking VPN/connectivity; authentication and
+certificate failures have separate guidance. After connecting to VPN, select **Refresh** again.
+Existing daily retry limits remain unchanged.
+
+Open **Background status** to see the latest two Git output lines directly below each repository,
+updating automatically during clone/refresh. Expand a repository and **Git log** for more output.
+This shows operations run by OWL; pushes or pulls run separately in a terminal are not captured.
+The local database retains a credential-redacted tail of up to 200 lines / 32K
+characters per job. Logs update while that view is open; old jobs from before this feature have
+no captured output. Run `python manage.py migrate` and restart OWL/workers after this upgrade.
+
 ## What the OWL apps do
 
 ### Home
@@ -128,8 +142,9 @@ Bitbucket Search now provides repository registration and durable background syn
   refuse to report unresolved pointer files as downloaded documents;
 - block refresh instead of resetting, cleaning, or overwriting a dirty, locally-ahead, or diverged
   checkout;
-- queue new or changed PDFs for a separate durable background extraction worker only after
-  repository synchronization is idle;
+- queue new or changed PDFs for a separate durable background extraction pool only after
+  that repository's synchronization is idle. Multiple PDFs from one repository can be read
+  concurrently; Git updates and local deletion take an exclusive checkout lock;
 - run the permissively licensed `pypdf` parser in bounded child processes, store normalized text
   by one-based page, and isolate encrypted, corrupt, pointer, timeout, and resource-limit failures
   to the affected PDF;
@@ -139,7 +154,15 @@ Bitbucket Search now provides repository registration and durable background syn
   filename, and separate PDF pages, plus repository/index-state filters, relevance sorts, matched
   page explanations, and bounded highlighted snippets;
 - keep the existing newest-first Today, Yesterday, week, month, six-month, current-year, last-year,
-  and older-year timeline when no search is active.
+  and older-year timeline when no search is active, using the original Git addition's commit
+  date, not the date OWL discovered the PDF. The column is labelled "Date added to repo";
+  PDFs whose original addition is outside available history show "Unavailable" and appear
+  after dated PDFs in "Repo date unavailable";
+- display 100 PDFs per page by default (also capped at 100 for legacy larger page-size links).
+  Use the page-navigation links to browse older results; scrolling does not append more rows;
+- keep the current page and saved theme stable during background work. Status updates live,
+  and one reload shows the final changes after all repository/PDF jobs settle. An open status
+  or notification panel defers that reload until it is closed.
 
 Repository URLs are canonicalized and deduplicated. Credentials embedded in URLs are rejected;
 Git uses the existing SSH agent or external credential manager. Django's `owl/settings.py`
@@ -264,6 +287,11 @@ queues every enabled repository at 11:00 in `OWL_TIME_ZONE` (Europe/Dublin by de
 daily attempt waits two hours before retrying, with one initial attempt and at most three retries
 during that day's cycle. Repository and PDF worker limits are configured independently with
 `BITBUCKET_MAX_REPO_WORKERS` and `PDF_MAX_EXTRACTION_WORKERS`.
+The PDF limit is global, auto-sized up to four by default, and permits concurrent PDFs
+from the same repository. A different repository can index while another downloads.
+Only short queue/publication writes are serialized; PDF parsing stays parallel.
+Restart OWL and all background workers after upgrading so every process uses the new
+shared-reader/exclusive-writer checkout locking.
 
 Keep `run_owl` running for automatic Bitbucket refreshes to start at their due time. OWL cannot run
 Git while the application is stopped, but its schedule and jobs are durable: after a restart,
@@ -359,6 +387,13 @@ Normal empty-queue polling is not logged. Rotation uses `OWL_LOG_MAX_BYTES` and
 Restart OWL and its workers after changing log levels. Keep the files private: IDs and
 operational timing still describe your local workspace. If log storage is unavailable,
 OWL reports a content-free message to stderr rather than exposing the failed record.
+
+PDF extraction errors include a safe stage/reason and available numeric OS/Windows codes.
+`pdf_dependency_unavailable` means the worker could not load its PDF parser; install the
+project dependencies in the Python environment that starts OWL, restart OWL/workers, then
+Refresh the affected repository. Automatic retries are disabled for this installation failure.
+Other parser failures are not assumed to mean the PDF is corrupt: their safe diagnostics
+distinguish parser startup, file access, and page extraction without logging document content.
 
 ### Bookmark Manager backend logs
 

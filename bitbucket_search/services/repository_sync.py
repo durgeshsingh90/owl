@@ -31,6 +31,7 @@ from bitbucket_search.models import (
     RepositorySyncState,
     RepositorySyncTrigger,
 )
+from bitbucket_search.services.git_output import RepositoryGitLog, emit_git_output, flush_git_output
 from bitbucket_search.services.git_sync import (
     RepositorySyncError,
     managed_repository_path,
@@ -243,6 +244,45 @@ def _publish_automatic_refresh_failure(
             logger,
             logging.ERROR,
             "repository_failure_notification_failed",
+            error=exc,
+            repository_id=job.repository_id,
+            job_id=job.pk,
+        )
+
+
+def _publish_manual_connection_status(
+    job: RepositorySyncJob, *, occurred_at: datetime, failure_summary: str = ""
+) -> None:
+    """Manual connection failures need an alert too; update one card per repo."""
+
+    if job.trigger != RepositorySyncTrigger.MANUAL:
+        return
+    event_key = f"bitbucket-connection:{job.repository_id}"
+    try:
+        if not failure_summary and not Notification.objects.filter(event_key=event_key).exists():
+            return
+        publish_notification(
+            event_key=event_key,
+            kind=NotificationKind.BITBUCKET_REFRESH,
+            state=NotificationState.ERROR if failure_summary else NotificationState.SUCCESS,
+            title=_notification_text(
+                "Connection check failed:" if failure_summary else "Connection restored:",
+                job.repository.display_name,
+            )[:200],
+            message=_notification_text(
+                failure_summary, "Select Refresh after fixing the connection."
+            )
+            if failure_summary
+            else "The repository connection and refresh completed successfully.",
+            target_path="/pdfs/status/",
+            occurred_at=occurred_at,
+            mark_unread=True,
+        )
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "repository_connection_notification_failed",
             error=exc,
             repository_id=job.repository_id,
             job_id=job.pk,
@@ -1310,7 +1350,8 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
     if job.status != RepositorySyncJobStatus.RUNNING:
         return job
 
-    with logging_context(repository_id=job.repository_id, job_id=job.pk):
+    with logging_context(repository_id=job.repository_id, job_id=job.pk), RepositoryGitLog(job):
+        emit_git_output("Starting repository background worker.", operation=job.operation)
         return _execute_claimed_job(job)
 
 
@@ -1333,6 +1374,7 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
 
     def save_progress(phase: str, progress: int, message: str) -> None:
         nonlocal last_saved_at, last_phase, last_progress
+        flush_git_output()
         now_monotonic = time.monotonic()
         progress = max(last_progress, min(int(progress), 99))
         changed = phase != last_phase or progress != last_progress
@@ -1340,6 +1382,8 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
             return
         heartbeat = timezone.now()
         safe_message = " ".join(message.split())[:500]
+        if phase != last_phase:
+            emit_git_output(safe_message)
         with transaction.atomic():
             updated = RepositorySyncJob.objects.filter(
                 pk=job.pk,
@@ -1519,7 +1563,12 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
                 )
             )
             _publish_automatic_refresh_recovery(job, occurred_at=now)
+            _publish_manual_connection_status(job, occurred_at=now)
+            emit_git_output(
+                "Git update and PDF discovery complete. PDF text extraction is queued as needed."
+            )
     except RepositorySyncError as exc:
+        emit_git_output(exc.summary, level="error")
         log_event(
             logger,
             logging.ERROR,
@@ -1557,6 +1606,8 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
                     last_sync_completed_at=now,
                 )
         if updated == 1:
+            if exc.code.startswith("connection_"):
+                _publish_manual_connection_status(job, occurred_at=now, failure_summary=exc.summary)
             _publish_automatic_refresh_failure(
                 job,
                 summary=exc.summary,
@@ -1565,6 +1616,7 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
     except Exception as exc:
         now = timezone.now()
         code, summary, error_type = _unexpected_worker_diagnostic(exc, stage=stage)
+        emit_git_output(summary, level="error")
         # Database persistence itself can be unavailable. Keep a content-free
         # diagnostic in the log too, without raw exception text or a traceback.
         log_event(
@@ -1617,16 +1669,20 @@ def repository_status_snapshot(*, at=None) -> tuple[BitbucketRepository, ...]:
     _interrupt_stale_jobs(at=observed_at)
     scheduled_day, _success_boundary, _next_slot = _daily_refresh_window(observed_at)
     recent_retry_cutoff = observed_at - _daily_refresh_retry_delay()
-    relevant_jobs = RepositorySyncJob.objects.filter(
-        Q(status__in=ACTIVE_JOB_STATUSES)
-        | Q(trigger__in=AUTOMATIC_JOB_TRIGGERS, scheduled_day=scheduled_day)
-        | Q(
-            trigger__in=AUTOMATIC_JOB_TRIGGERS,
-            status__in=AUTOMATIC_RETRYABLE_STATUSES,
-            completed_at__gte=recent_retry_cutoff,
-            completed_at__lte=observed_at,
+    relevant_jobs = (
+        RepositorySyncJob.objects.filter(
+            Q(status__in=ACTIVE_JOB_STATUSES)
+            | Q(trigger__in=AUTOMATIC_JOB_TRIGGERS, scheduled_day=scheduled_day)
+            | Q(
+                trigger__in=AUTOMATIC_JOB_TRIGGERS,
+                status__in=AUTOMATIC_RETRYABLE_STATUSES,
+                completed_at__gte=recent_retry_cutoff,
+                completed_at__lte=observed_at,
+            )
         )
-    ).order_by("-requested_at", "-id")
+        .defer("output_log")
+        .order_by("-requested_at", "-id")
+    )
     repositories = tuple(
         BitbucketRepository.objects.annotate(
             _has_active_sync_job=Exists(

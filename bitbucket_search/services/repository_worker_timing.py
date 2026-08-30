@@ -63,7 +63,9 @@ def worker_timing(
     if sync_status == RepositorySyncJobStatus.RUNNING:
         started_at = sync_started_at
         kind = "sync"
-        if sync_phase in (RepositorySyncPhase.DISCOVERING, RepositorySyncPhase.FINALIZING):
+        if sync_phase == RepositorySyncPhase.CHECKING_CONNECTION:
+            label = "Checking connection"
+        elif sync_phase in (RepositorySyncPhase.DISCOVERING, RepositorySyncPhase.FINALIZING):
             label = "Updating catalogue"
         elif sync_operation == RepositorySyncOperation.CLONE:
             label = "Downloading"

@@ -48,6 +48,7 @@ class PDFExtractionState(StrEnum):
     PERMISSION_DENIED = "permission_denied"
     RESOURCE_LIMIT = "resource_limit"
     CHANGED = "changed_during_extraction"
+    DEPENDENCY_UNAVAILABLE = "dependency_unavailable"
     UNKNOWN_ERROR = "unknown_error"
 
 
@@ -57,6 +58,87 @@ class PDFPageState(StrEnum):
     READY = "ready"
     NO_TEXT = "no_text"
     FAILED = "failed"
+
+
+DIAGNOSTIC_STAGES = frozenset(
+    {"", "fingerprint_before", "fingerprint_after", "load_parser", "read_pdf", "extract_page"}
+)
+DIAGNOSTIC_REASONS = frozenset(
+    {
+        "",
+        "module_not_found",
+        "import_error",
+        "permission_error",
+        "file_not_found",
+        "os_error",
+        "memory_error",
+        "recursion_error",
+        "overflow_error",
+        "value_error",
+        "type_error",
+        "lookup_error",
+        "attribute_error",
+        "runtime_error",
+        "parser_error",
+        "dependency_error",
+        "unexpected_error",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PDFExtractionDiagnostic:
+    """Fixed vocabulary only; never carry parser messages, paths or class names."""
+
+    stage: str = ""
+    reason: str = ""
+    errno: int | None = None
+    winerror: int | None = None
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "stage": self.stage,
+            "reason": self.reason,
+            "errno": self.errno,
+            "winerror": self.winerror,
+        }
+
+
+def _diagnostic_for_exception(exc: Exception, stage: str) -> PDFExtractionDiagnostic:
+    categories = (
+        (ModuleNotFoundError, "module_not_found"),
+        (ImportError, "import_error"),
+        (PermissionError, "permission_error"),
+        (FileNotFoundError, "file_not_found"),
+        (OSError, "os_error"),
+        (MemoryError, "memory_error"),
+        (RecursionError, "recursion_error"),
+        (OverflowError, "overflow_error"),
+        (ValueError, "value_error"),
+        (TypeError, "type_error"),
+        (LookupError, "lookup_error"),
+        (AttributeError, "attribute_error"),
+        (RuntimeError, "runtime_error"),
+    )
+    reason = next(
+        (label for kind, label in categories if isinstance(exc, kind)), "unexpected_error"
+    )
+    hierarchy_names = {kind.__name__ for kind in type(exc).__mro__}
+    if "DependencyError" in hierarchy_names:
+        reason = "dependency_error"
+    elif hierarchy_names & {"PdfReadError", "PdfStreamError", "EmptyFileError"}:
+        reason = "parser_error"
+
+    def numeric_code(name: str) -> int | None:
+        value = getattr(exc, name, None) if isinstance(exc, OSError) else None
+        return value if type(value) is int and 0 <= value <= 2**31 - 1 else None
+
+    return PDFExtractionDiagnostic(
+        stage=stage if stage in DIAGNOSTIC_STAGES else "",
+        reason=reason,
+        errno=numeric_code("errno"),
+        winerror=numeric_code("winerror"),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +171,7 @@ class PDFExtractionResult:
     error_code: str = ""
     error_summary: str = ""
     extractor_version: str = PDF_EXTRACTOR_VERSION
+    diagnostic: PDFExtractionDiagnostic = field(default_factory=PDFExtractionDiagnostic)
 
     @property
     def publishable(self) -> bool:
@@ -113,6 +196,7 @@ class PDFExtractionResult:
             "error_summary": self.error_summary,
             "extractor_version": self.extractor_version,
             "publishable": self.publishable,
+            "diagnostic": self.diagnostic.to_payload(),
         }
 
 
@@ -138,6 +222,7 @@ class _Fingerprint:
 @dataclass(frozen=True, slots=True)
 class _ExtractionAbort(Exception):
     state: PDFExtractionState
+    diagnostic: PDFExtractionDiagnostic = field(default_factory=PDFExtractionDiagnostic)
 
 
 _FIXED_DIAGNOSTICS: Mapping[PDFExtractionState, tuple[str, str]] = {
@@ -181,6 +266,12 @@ _FIXED_DIAGNOSTICS: Mapping[PDFExtractionState, tuple[str, str]] = {
         "pdf_unknown_error",
         "OWL could not extract this PDF safely.",
     ),
+    PDFExtractionState.DEPENDENCY_UNAVAILABLE: (
+        "pdf_dependency_unavailable",
+        "The PDF parser or a required dependency could not load. "
+        "Install the project requirements in the Python environment running OWL, restart workers, "
+        "then Refresh to retry.",
+    ),
 }
 
 
@@ -197,6 +288,7 @@ def _result(
     source_size_bytes: int = 0,
     content_sha256_before: str = "",
     content_sha256_after: str = "",
+    diagnostic: PDFExtractionDiagnostic | None = None,
 ) -> PDFExtractionResult:
     error_code, error_summary = _fixed_diagnostic(state)
     return PDFExtractionResult(
@@ -209,6 +301,7 @@ def _result(
         content_sha256_after=content_sha256_after,
         error_code=error_code,
         error_summary=error_summary,
+        diagnostic=diagnostic or PDFExtractionDiagnostic(),
     )
 
 
@@ -219,6 +312,8 @@ def _positive_limit(value: object, name: str) -> int:
 
 
 def _state_for_exception(exc: Exception) -> PDFExtractionState:
+    if isinstance(exc, ImportError):
+        return PDFExtractionState.DEPENDENCY_UNAVAILABLE
     if isinstance(exc, (MemoryError, RecursionError, OverflowError)):
         return PDFExtractionState.RESOURCE_LIMIT
     if isinstance(exc, OSError):
@@ -232,6 +327,8 @@ def _state_for_exception(exc: Exception) -> PDFExtractionState:
     # pypdf's exception surface has changed names across supported releases.  Use
     # the exception hierarchy names without importing pypdf into the web process.
     hierarchy_names = {item.__name__ for item in type(exc).__mro__}
+    if "DependencyError" in hierarchy_names:
+        return PDFExtractionState.DEPENDENCY_UNAVAILABLE
     if hierarchy_names & {
         "FileNotDecryptedError",
         "WrongPasswordError",
@@ -302,7 +399,17 @@ def normalize_pdf_text(value: str) -> str:
 def _default_reader_factory(source: BinaryIO) -> _PDFReader:
     # Lazy import is deliberate: callers can inspect/queue extraction work without
     # loading pypdf, and the supervising process is the parser isolation boundary.
-    from pypdf import PdfReader
+    try:
+        from pypdf import PdfReader
+    except Exception as exc:
+        # An import/startup failure affects the installation, not the PDF bytes.
+        # Distinguish it even if a binary dependency raises OSError/RuntimeError.
+        raise _ExtractionAbort(
+            PDFExtractionState.RESOURCE_LIMIT
+            if isinstance(exc, (MemoryError, RecursionError, OverflowError))
+            else PDFExtractionState.DEPENDENCY_UNAVAILABLE,
+            _diagnostic_for_exception(exc, "load_parser"),
+        ) from None
 
     return PdfReader(source, strict=False)
 
@@ -314,11 +421,12 @@ def _extract_pages(
     max_page_characters: int,
     max_characters: int,
     reader_factory: PDFReaderFactory,
-) -> tuple[tuple[ExtractedPDFPage, ...], int, int, bool]:
+) -> tuple[tuple[ExtractedPDFPage, ...], int, int, bool, PDFExtractionDiagnostic | None]:
     pages: list[ExtractedPDFPage] = []
     normalized_character_count = 0
     raw_character_count = 0
     had_page_failure = False
+    first_page_diagnostic = None
 
     with path.open("rb") as source:
         reader = reader_factory(source)
@@ -355,9 +463,15 @@ def _extract_pages(
                     PDFExtractionState.DISAPPEARED,
                     PDFExtractionState.PERMISSION_DENIED,
                     PDFExtractionState.RESOURCE_LIMIT,
+                    PDFExtractionState.DEPENDENCY_UNAVAILABLE,
                 }:
-                    raise _ExtractionAbort(failure_state) from None
+                    raise _ExtractionAbort(
+                        failure_state, _diagnostic_for_exception(exc, "extract_page")
+                    ) from None
                 had_page_failure = True
+                first_page_diagnostic = first_page_diagnostic or _diagnostic_for_exception(
+                    exc, "extract_page"
+                )
                 pages.append(
                     ExtractedPDFPage(
                         page_number=page_number,
@@ -383,7 +497,13 @@ def _extract_pages(
                 )
             )
 
-    return tuple(pages), page_count, normalized_character_count, had_page_failure
+    return (
+        tuple(pages),
+        page_count,
+        normalized_character_count,
+        had_page_failure,
+        first_page_diagnostic,
+    )
 
 
 def extract_pdf(
@@ -415,9 +535,12 @@ def extract_pdf(
     try:
         before = _fingerprint_file(candidate, max_file_bytes=file_limit)
     except _ExtractionAbort as exc:
-        return _result(exc.state)
+        return _result(exc.state, diagnostic=exc.diagnostic)
     except Exception as exc:
-        return _result(_state_for_exception(exc))
+        return _result(
+            _state_for_exception(exc),
+            diagnostic=_diagnostic_for_exception(exc, "fingerprint_before"),
+        )
 
     if _is_git_lfs_pointer(before):
         try:
@@ -427,12 +550,14 @@ def extract_pdf(
                 exc.state,
                 source_size_bytes=before.size,
                 content_sha256_before=before.sha256,
+                diagnostic=exc.diagnostic,
             )
         except Exception as exc:
             return _result(
                 _state_for_exception(exc),
                 source_size_bytes=before.size,
                 content_sha256_before=before.sha256,
+                diagnostic=_diagnostic_for_exception(exc, "fingerprint_after"),
             )
         if before.sha256 != after.sha256 or before.size != after.size:
             return _result(
@@ -453,8 +578,9 @@ def extract_pdf(
     character_count = 0
     had_page_failure = False
     terminal_state: PDFExtractionState | None = None
+    diagnostic = None
     try:
-        extracted_pages, page_count, character_count, had_page_failure = _extract_pages(
+        extracted_pages, page_count, character_count, had_page_failure, diagnostic = _extract_pages(
             candidate,
             max_pages=page_limit,
             max_page_characters=page_character_limit,
@@ -463,8 +589,10 @@ def extract_pdf(
         )
     except _ExtractionAbort as exc:
         terminal_state = exc.state
+        diagnostic = exc.diagnostic
     except Exception as exc:
         terminal_state = _state_for_exception(exc)
+        diagnostic = _diagnostic_for_exception(exc, "read_pdf")
 
     try:
         after = _fingerprint_file(candidate, max_file_bytes=file_limit)
@@ -473,12 +601,14 @@ def extract_pdf(
             exc.state,
             source_size_bytes=before.size,
             content_sha256_before=before.sha256,
+            diagnostic=exc.diagnostic,
         )
     except Exception as exc:
         return _result(
             _state_for_exception(exc),
             source_size_bytes=before.size,
             content_sha256_before=before.sha256,
+            diagnostic=_diagnostic_for_exception(exc, "fingerprint_after"),
         )
 
     if before.sha256 != after.sha256 or before.size != after.size:
@@ -487,6 +617,7 @@ def extract_pdf(
             source_size_bytes=before.size,
             content_sha256_before=before.sha256,
             content_sha256_after=after.sha256,
+            diagnostic=diagnostic,
         )
     if terminal_state is not None:
         return _result(
@@ -494,6 +625,7 @@ def extract_pdf(
             source_size_bytes=before.size,
             content_sha256_before=before.sha256,
             content_sha256_after=after.sha256,
+            diagnostic=diagnostic,
         )
 
     state = (
@@ -511,6 +643,7 @@ def extract_pdf(
         source_size_bytes=before.size,
         content_sha256_before=before.sha256,
         content_sha256_after=after.sha256,
+        diagnostic=diagnostic,
     )
 
 

@@ -204,6 +204,15 @@
         workspace.dataset.extractionPublicationSignature || "";
     let catalogPublicationSignature = workspace.dataset.catalogPublicationSignature || "";
     let dailyRefreshEnabled = workspace.dataset.dailyRefreshEnabled === "true";
+    let catalogReloadPending = false;
+    let settledPolls = 0;
+
+    const backgroundPanelOpen = () =>
+        Array.from(
+            document.querySelectorAll(
+                "[data-repository-status-panel], [data-notification-panel]",
+            ),
+        ).some((panel) => !panel.hidden);
 
     const activePollDelay = 1500;
     const idlePollDelay = 30000;
@@ -215,13 +224,15 @@
         activeRepositoryIds.size > 0 ||
         repositoryStatusPending ||
         extractionActive ||
-        dailyRefreshEnabled;
+        dailyRefreshEnabled ||
+        catalogReloadPending;
 
     const nextPollDelay = () =>
         activeRepositoryCount > 0 ||
         activeRepositoryIds.size > 0 ||
         repositoryStatusPending ||
-        extractionActive
+        extractionActive ||
+        (catalogReloadPending && settledPolls < 2)
             ? activePollDelay
             : idlePollDelay;
 
@@ -267,7 +278,11 @@
                 publicationSignature: extractionPublicationSignature,
             };
             updateExtraction(extraction);
-            extractionActive = Boolean(extraction.active);
+            const wasExtracting = extractionActive;
+            extractionActive = Boolean(
+                extraction.active || extraction.queuedJobs > 0 || extraction.runningJobs > 0,
+            );
+            const extractionCompleted = wasExtracting && !extractionActive;
             const extractionPublicationChanged = Boolean(
                 extractionPublicationSignature &&
                     extraction.publicationSignature &&
@@ -284,18 +299,31 @@
                     nextCatalogPublicationSignature !== catalogPublicationSignature,
             );
             catalogPublicationSignature = nextCatalogPublicationSignature;
-            if (
+            catalogReloadPending = catalogReloadPending ||
                 repositoryCompleted ||
+                extractionCompleted ||
                 extractionPublicationChanged ||
-                catalogPublicationChanged
-            ) {
-                // The durable catalog is published in the same transaction as
-                // the worker's terminal state. The extraction signature is
-                // rendered back into the page, preventing a reload loop.
+                catalogPublicationChanged;
+            const backgroundWorkActive = activeRepositoryIds.size > 0 ||
+                extractionActive || repositorySubmissionPending || repositoryStatusPending;
+            if (backgroundWorkActive || extractionPublicationChanged || catalogPublicationChanged) {
+                settledPolls = 0;
+            }
+            if (catalogReloadPending && !backgroundWorkActive) {
+                settledPolls = Math.min(2, settledPolls + 1);
+            }
+            if (catalogReloadPending && settledPolls >= 2 && !backgroundPanelOpen()) {
+                // Intermediate catalogue/PDF publications update the small status
+                // controls only. Wait for every repository and extraction worker,
+                // then confirm an unchanged idle snapshot before reloading once.
+                // Failed/interrupted jobs are terminal too; pending documents do
+                // not hold the page indefinitely. Keep open logs readable.
                 window.location.reload();
                 return;
             }
         } catch (_error) {
+            // A failed status request cannot confirm that all workers are idle.
+            settledPolls = 0;
             document.querySelectorAll("[data-repository-id] [data-repository-worker-timer]").forEach((timer) => {
                 window.OWLRepositoryTimers?.stale(timer);
             });
@@ -808,242 +836,6 @@
                 copyResultPathsButton.focus();
             }
         });
-    }
-
-    const timeline = workspace.querySelector("[data-pdf-timeline]");
-    const loadOlderContainer = timeline?.querySelector("[data-load-older-container]");
-    const loadOlderLink = timeline?.querySelector("[data-load-older]");
-
-    if (timeline && loadOlderContainer && loadOlderLink) {
-        const table = timeline.querySelector(".bb-results-table");
-        const loadStatus = timeline.querySelector("[data-load-older-status]");
-        const completeStatus = timeline.querySelector("[data-load-older-complete]");
-        const visibleStart = document.querySelector("[data-pdf-visible-start]");
-        const visibleEnd = document.querySelector("[data-pdf-visible-end]");
-        const currentPage = document.querySelector("[data-pdf-current-page]");
-        const footerNextPage = document.querySelector("[data-pdf-next-page]");
-        const footerNextPageEnd = document.querySelector("[data-pdf-next-page-end]");
-        const idleLabel = loadOlderLink.textContent.trim();
-        let loadingOlder = false;
-        let htmlFallbackRequired = false;
-        let observer = null;
-
-        const sameOriginUrl = (candidate) => {
-            const url = new URL(candidate, window.location.href);
-            if (url.origin !== window.location.origin) {
-                throw new Error("Cross-origin PDF pagination URL rejected");
-            }
-            return url;
-        };
-
-        const announce = (message) => {
-            if (loadStatus) {
-                loadStatus.textContent = message;
-            }
-        };
-
-        const setLoadingOlder = (loading) => {
-            loadingOlder = loading;
-            timeline.setAttribute("aria-busy", String(loading));
-            loadOlderLink.setAttribute("aria-disabled", String(loading));
-            loadOlderLink.textContent = loading ? "Loading older PDFs…" : idleLabel;
-        };
-
-        const setNextPage = (candidate, { manual = false } = {}) => {
-            timeline.dataset.nextPageUrl = candidate;
-            htmlFallbackRequired = false;
-            if (candidate) {
-                const nextUrl = sameOriginUrl(candidate).href;
-                loadOlderLink.href = nextUrl;
-                loadOlderLink.hidden = false;
-                if (footerNextPage) {
-                    footerNextPage.href = nextUrl;
-                    footerNextPage.hidden = false;
-                }
-                if (footerNextPageEnd) {
-                    footerNextPageEnd.hidden = true;
-                }
-                if (completeStatus) {
-                    completeStatus.hidden = true;
-                }
-                return;
-            }
-
-            loadOlderLink.hidden = true;
-            if (footerNextPage) {
-                footerNextPage.hidden = true;
-            }
-            if (footerNextPageEnd) {
-                footerNextPageEnd.hidden = false;
-            }
-            if (completeStatus) {
-                completeStatus.hidden = false;
-                if (manual) {
-                    completeStatus.focus({ preventScroll: true });
-                }
-            } else {
-                loadOlderContainer.hidden = true;
-            }
-            observer?.disconnect();
-        };
-
-        const appendTimelineGroups = (incomingTable) => {
-            if (!table || !incomingTable) {
-                throw new Error("PDF timeline was missing from the next page");
-            }
-
-            const existingIds = new Set(
-                Array.from(table.querySelectorAll("[data-pdf-row]"), (row) => row.dataset.documentId),
-            );
-            const incomingRows = Array.from(incomingTable.querySelectorAll("[data-pdf-row]"));
-            const acceptedRows = incomingRows.filter((row) => {
-                const documentId = row.dataset.documentId;
-                if (documentId && existingIds.has(documentId)) {
-                    row.remove();
-                    return false;
-                }
-                if (documentId) {
-                    existingIds.add(documentId);
-                }
-                return true;
-            });
-
-            const incomingGroups = Array.from(incomingTable.tBodies).filter((group) =>
-                group.matches("[data-pdf-group]"),
-            );
-            incomingGroups.forEach((group) => {
-                if (!group.querySelector("[data-pdf-row]")) {
-                    group.remove();
-                }
-            });
-
-            const currentGroups = Array.from(table.tBodies).filter((group) =>
-                group.matches("[data-pdf-group]"),
-            );
-            const firstIncomingGroup = incomingGroups.find((group) => group.isConnected);
-            const lastCurrentGroup = currentGroups[currentGroups.length - 1];
-            if (
-                firstIncomingGroup &&
-                lastCurrentGroup &&
-                firstIncomingGroup.dataset.timelineGroupKey &&
-                firstIncomingGroup.dataset.timelineGroupKey ===
-                    lastCurrentGroup.dataset.timelineGroupKey
-            ) {
-                firstIncomingGroup.querySelectorAll("[data-pdf-row]").forEach((row) => {
-                    lastCurrentGroup.append(row);
-                });
-                firstIncomingGroup.remove();
-            }
-
-            incomingGroups.forEach((group) => {
-                if (group.isConnected) {
-                    table.append(group);
-                }
-            });
-            return acceptedRows.length;
-        };
-
-        const updateVisibleRange = (pageNumber) => {
-            if (currentPage && Number.isInteger(pageNumber)) {
-                currentPage.textContent = String(pageNumber);
-            }
-            const start = Number.parseInt(visibleStart?.textContent || "", 10);
-            const rowCount = table?.querySelectorAll("[data-pdf-row]").length || 0;
-            if (visibleEnd && Number.isInteger(start) && rowCount) {
-                visibleEnd.textContent = String(start + rowCount - 1);
-            }
-        };
-
-        const loadOlder = async ({ manual = false } = {}) => {
-            const candidate = timeline.dataset.nextPageUrl;
-            if (loadingOlder || htmlFallbackRequired || !candidate) {
-                return;
-            }
-
-            let requestedUrl;
-            try {
-                requestedUrl = sameOriginUrl(candidate);
-            } catch (_error) {
-                announce("Older PDFs could not be loaded because the page URL was invalid.");
-                return;
-            }
-
-            setLoadingOlder(true);
-            announce("Loading older PDFs…");
-            try {
-                const response = await fetch(requestedUrl.href, {
-                    credentials: "same-origin",
-                    headers: {
-                        Accept: "application/json",
-                        "X-Requested-With": "XMLHttpRequest",
-                    },
-                });
-                if (!response.ok) {
-                    throw new Error("Older PDF request failed");
-                }
-                const payload = await response.json();
-                if (!payload || typeof payload.html !== "string") {
-                    throw new Error("Older PDF timeline response was invalid");
-                }
-                const responseDocument = new DOMParser().parseFromString(
-                    `<table class="bb-results-table">${payload.html}</table>`,
-                    "text/html",
-                );
-                const incomingTable = responseDocument.querySelector(".bb-results-table");
-
-                const nextCandidate =
-                    typeof payload.nextPageUrl === "string" ? payload.nextPageUrl : "";
-                if (nextCandidate && sameOriginUrl(nextCandidate).href === requestedUrl.href) {
-                    throw new Error("PDF pagination did not advance");
-                }
-                if (nextCandidate) {
-                    sameOriginUrl(nextCandidate);
-                }
-                const addedCount = appendTimelineGroups(incomingTable);
-                setNextPage(nextCandidate, { manual });
-                updateVisibleRange(payload.page);
-                announce(
-                    addedCount
-                        ? `${addedCount} older PDF${addedCount === 1 ? "" : "s"} loaded.`
-                        : "No additional PDFs were returned.",
-                );
-            } catch (_error) {
-                htmlFallbackRequired = true;
-                observer?.disconnect();
-                announce(
-                    "Automatic loading failed. Activate Load older PDFs to open the HTML page.",
-                );
-            } finally {
-                setLoadingOlder(false);
-            }
-        };
-
-        loadOlderLink.addEventListener("click", (event) => {
-            if (
-                htmlFallbackRequired ||
-                event.button !== 0 ||
-                event.metaKey ||
-                event.ctrlKey ||
-                event.shiftKey ||
-                event.altKey
-            ) {
-                return;
-            }
-            event.preventDefault();
-            void loadOlder({ manual: true });
-        });
-
-        if ("IntersectionObserver" in window) {
-            observer = new IntersectionObserver(
-                (entries) => {
-                    if (entries.some((entry) => entry.isIntersecting)) {
-                        void loadOlder();
-                    }
-                },
-                { rootMargin: "240px 0px" },
-            );
-            observer.observe(loadOlderLink);
-        }
     }
 
     if (shouldPoll()) {

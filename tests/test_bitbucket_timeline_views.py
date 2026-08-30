@@ -31,9 +31,41 @@ def _repository(name: str = "networking") -> BitbucketRepository:
     )
 
 
+def test_inventory_pages_contain_at_most_one_hundred_pdfs_without_auto_loading(client):
+    repository = _repository()
+    PDFDocument.objects.bulk_create(
+        [
+            PDFDocument(
+                repository=repository,
+                filename=f"Plan {number}.pdf",
+                relative_path=f"docs/Plan {number}.pdf",
+            )
+            for number in range(101)
+        ]
+    )
+    first = client.get(reverse("bitbucket_search:index"))
+    first_html = first.content.decode()
+    assert first_html.count("data-pdf-row") == 100
+    assert "100 PDFs per page" in first_html
+    assert "data-load-older" not in first_html
+    assert "data-pdf-visible-end>100</b> of 101 PDFs" in first_html
+    next_url = reverse("bitbucket_search:document_page") + "?page=2"
+    assert f'href="{next_url}" rel="next"' in first_html
+    second = client.get(next_url)
+    second_html = second.content.decode()
+    assert second_html.count("data-pdf-row") == 1
+    assert "data-pdf-visible-start>101</b>" in second_html
+    assert 'rel="prev"' in second_html
+    first_ids = {document.pk for document in first.context["pdf_page"]}
+    second_ids = {document.pk for document in second.context["pdf_page"]}
+    assert not first_ids.intersection(second_ids)
+    assert len(first_ids | second_ids) == 101
+
+
 @pytest.mark.parametrize(
     ("value", "expected_key", "expected_label"),
     (
+        (date(2026, 8, 30), "future", "Future Git date"),
         (date(2026, 8, 29), "today", "Today"),
         (date(2026, 8, 28), "yesterday", "Yesterday"),
         (date(2026, 8, 24), "week", "This Week"),
@@ -82,7 +114,8 @@ def test_timeline_row_labels_git_author_without_claiming_push_or_project_evidenc
     row = views._timeline_row(document)
 
     assert row.added_by_label == "A. Architect · Git author"
-    assert "Git commit date" in row.added_date_detail
+    assert row.added_date_label == "20 Aug 2026"
+    assert "Original Git addition" in row.added_date_detail
     assert row.project_label == ""
     assert row.history_label == "Full reachable history"
     assert "Pushed by" not in repr(row)
@@ -91,7 +124,7 @@ def test_timeline_row_labels_git_author_without_claiming_push_or_project_evidenc
     assert row.path_copy_available is True
 
 
-def test_unknown_addition_uses_owl_discovery_and_available_history_labels(tmp_path, settings):
+def test_unknown_addition_never_uses_owl_discovery_date(tmp_path, settings):
     settings.BITBUCKET_REPOSITORIES_ROOT = tmp_path / "managed-repositories"
     repository = _repository()
     discovered_at = timezone.now() - timedelta(days=7)
@@ -108,12 +141,147 @@ def test_unknown_addition_uses_owl_discovery_and_available_history_labels(tmp_pa
     row = views._timeline_row(document)
 
     assert row.added_by_label == "Unavailable in available Git history"
-    assert "OWL discovery date" in row.added_date_detail
+    assert row.added_date_label == "Unavailable"
+    assert row.added_date_detail == "Original addition not found in available Git history."
+    assert "OWL discovery date" not in row.added_date_detail
     assert row.history_label == "Available history · Git-added date unavailable"
 
 
+@pytest.mark.parametrize("search", [False, True])
+@override_settings(TIME_ZONE="Europe/Dublin")
+def test_list_and_search_show_original_repo_addition_not_discovery_or_latest_change(client, search):
+    repository = _repository()
+    addition = GitCommit.objects.create(
+        repository=repository,
+        commit_hash="b" * 40,
+        author_name="Original Author",
+        committer_name="Original Committer",
+        authored_at=datetime(2023, 1, 1, 12, tzinfo=UTC),
+        committed_at=datetime(2024, 7, 2, 23, 30, tzinfo=UTC),
+    )
+    latest = GitCommit.objects.create(
+        repository=repository,
+        commit_hash="c" * 40,
+        author_name="Later Editor",
+        committer_name="Later Committer",
+        authored_at=datetime(2026, 8, 29, 12, tzinfo=UTC),
+        committed_at=datetime(2026, 8, 29, 12, tzinfo=UTC),
+    )
+    document = PDFDocument.objects.create(
+        repository=repository,
+        filename="Original Guide.pdf",
+        relative_path="docs/Original Guide.pdf",
+        added_evidence=PDFDocumentAddedEvidence.CONFIRMED,
+        added_commit=addition,
+        last_commit=latest,
+        discovered_at=datetime(2026, 8, 30, 12, tzinfo=UTC),
+        # Legacy cached timeline values must not override real Git evidence.
+        timeline_at=datetime(2026, 8, 30, 12, tzinfo=UTC),
+        timeline_basis=PDFDocumentTimelineBasis.OWL_DISCOVERED,
+    )
+
+    response = client.get(reverse("bitbucket_search:index"), {"q": "Original"} if search else {})
+    html = response.content.decode()
+    row_start = html.index(f'data-document-id="{document.pk}"')
+    row_html = html[row_start : html.index("</tr>", row_start)]
+
+    assert response.status_code == 200
+    assert 'id="bb-pdf-column-added">Date added to repo</th>' in html
+    assert ">Date added to repo</span>" in row_html
+    assert "3 Jul 2024" in row_html  # Git commit timestamp, converted to local time.
+    assert "00:30" in row_html
+    assert "Original Author" in row_html
+    assert "2023" not in row_html
+    assert "2026" not in row_html
+    assert "OWL discovery" not in html
+    assert ">Date added</" not in html
+
+
+@pytest.mark.parametrize("search", [False, True])
+@pytest.mark.parametrize(
+    ("evidence", "with_commit"),
+    [
+        (PDFDocumentAddedEvidence.NOT_FOUND, False),
+        (PDFDocumentAddedEvidence.BEFORE_AVAILABLE_HISTORY, False),
+        (PDFDocumentAddedEvidence.CONFIRMED, False),
+        (PDFDocumentAddedEvidence.NOT_FOUND, True),
+    ],
+)
+def test_unknown_repo_dates_are_unavailable_in_every_list(client, search, evidence, with_commit):
+    repository = _repository()
+    commit = None
+    if with_commit:
+        commit = GitCommit.objects.create(
+            repository=repository,
+            commit_hash="d" * 40,
+            authored_at=datetime(2024, 1, 1, tzinfo=UTC),
+            committed_at=datetime(2024, 1, 2, tzinfo=UTC),
+        )
+    document = PDFDocument.objects.create(
+        repository=repository,
+        filename="Legacy Guide.pdf",
+        relative_path="Legacy Guide.pdf",
+        added_evidence=evidence,
+        added_commit=commit,
+        discovered_at=datetime(2026, 8, 30, tzinfo=UTC),
+        timeline_at=datetime(2026, 8, 30, tzinfo=UTC),
+    )
+    response = client.get(reverse("bitbucket_search:index"), {"q": "Legacy"} if search else {})
+    html = response.content.decode()
+    row_start = html.index(f'data-document-id="{document.pk}"')
+    row_html = html[row_start : html.index("</tr>", row_start)]
+    assert (
+        'title="Original addition not found in available Git history.">Unavailable</strong>'
+        in row_html
+    )
+    assert "2026" not in row_html
+    assert "2024" not in row_html
+    assert "OWL discovery" not in html
+    if not search:
+        assert 'data-timeline-group-key="repo-date-unavailable"' in html
+        assert 'data-timeline-group-key="today"' not in html
+
+
 @override_settings(BITBUCKET_PDF_PAGE_SIZE=10)
-def test_document_page_returns_json_for_progressive_loading_and_html_without_javascript(client):
+def test_timeline_orders_by_repo_addition_with_unknown_dates_last_across_pages(monkeypatch):
+    repository = _repository()
+    monkeypatch.setattr(views.timezone, "localdate", lambda: date(2026, 8, 30))
+    dated_ids = []
+    for number in range(10):
+        added_at = datetime(2024, 7, number + 1, 12, tzinfo=UTC)
+        commit = GitCommit.objects.create(
+            repository=repository,
+            commit_hash=f"{number + 1:040x}",
+            authored_at=added_at,
+            committed_at=added_at,
+        )
+        document = PDFDocument.objects.create(
+            repository=repository,
+            filename=f"Dated-{number}.pdf",
+            relative_path=f"Dated-{number}.pdf",
+            added_commit=commit,
+            added_evidence=PDFDocumentAddedEvidence.CONFIRMED,
+            # Deliberately opposite ordering in the obsolete cache.
+            timeline_at=datetime(2026, 8, 30 - number, 12, tzinfo=UTC),
+        )
+        dated_ids.append(document.pk)
+    unknown = PDFDocument.objects.create(
+        repository=repository,
+        filename="Unknown.pdf",
+        relative_path="Unknown.pdf",
+        timeline_at=datetime(2026, 8, 30, 23, tzinfo=UTC),
+    )
+
+    page, groups = views._pdf_timeline_page(1)
+    assert [document.pk for document in page] == list(reversed(dated_ids))
+    assert [group.key for group in groups] == ["year-2024"]
+    page, groups = views._pdf_timeline_page(2)
+    assert [document.pk for document in page] == [unknown.pk]
+    assert [group.key for group in groups] == ["repo-date-unavailable"]
+
+
+@override_settings(BITBUCKET_PDF_PAGE_SIZE=10)
+def test_document_page_returns_legacy_json_and_html_with_stable_undated_pagination(client):
     repository = _repository()
     observed_at = timezone.now()
     for index in range(11):
@@ -136,12 +304,13 @@ def test_document_page_returns_json_for_progressive_loading_and_html_without_jav
     assert payload["page"] == 2
     assert payload["nextPageUrl"] == ""
     assert payload["html"].count("data-pdf-row") == 1
-    assert "Document-10.pdf" in payload["html"]
+    assert "Document-00.pdf" in payload["html"]
+    assert 'data-timeline-group-key="repo-date-unavailable"' in payload["html"]
     assert 'name="return_page" value="2"' in payload["html"]
 
     fallback = client.get(url, REMOTE_ADDR="127.0.0.1")
     assert fallback.status_code == 200
-    assert "Document-10.pdf" in fallback.content.decode()
+    assert "Document-00.pdf" in fallback.content.decode()
 
 
 @override_settings(OWL_ALLOW_NON_LOOPBACK=True)

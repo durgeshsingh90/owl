@@ -275,6 +275,7 @@ def test_filtered_clone_fallback_is_warning_but_final_failure_is_error(
     repository = _repository()
     settings.BITBUCKET_REPOSITORIES_ROOT = tmp_path / "repositories"
     settings.BITBUCKET_TEMP_ROOT = tmp_path / "staging"
+    monkeypatch.setattr(git_sync, "_check_connection", Mock())
     monkeypatch.setattr(
         git_sync,
         "_run_streaming",

@@ -44,6 +44,8 @@ _FIELDS = frozenset(
         "retries_remaining",
         "delay_seconds",
         "return_code",
+        "errno",
+        "winerror",
         "indexed_count",
         "removed_count",
         "skipped_count",

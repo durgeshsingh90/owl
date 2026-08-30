@@ -19,9 +19,9 @@ def test_default_daily_repository_refresh_uses_eleven_in_owl_timezone():
     assert settings.TIME_ZONE == "Europe/Dublin"
 
 
-def test_default_bitbucket_inventory_and_search_pages_hold_two_hundred_results():
-    assert settings.BITBUCKET_PDF_PAGE_SIZE == 200
-    assert settings.BITBUCKET_SEARCH_PAGE_SIZE == 200
+def test_default_bitbucket_inventory_and_search_pages_hold_one_hundred_results():
+    assert settings.BITBUCKET_PDF_PAGE_SIZE == 100
+    assert settings.BITBUCKET_SEARCH_PAGE_SIZE == 100
 
 
 def test_test_database_and_runtime_data_are_isolated_outside_repository():

@@ -40,6 +40,7 @@ def test_repository_status_panel_owns_current_status_and_background_schedule():
     assert indicator["aria-hidden"] == "true"
     assert "Repository status" in html
     assert "Current status of all repositories" in html
+    assert "Latest Git output · updates live while running." in html
     assert "Loading repository status…" in html
     for hook in ("repositories", "repository-count", "repository-message", "repository-list"):
         assert len(elements.with_hook(f"data-notification-{hook}")) == 1
@@ -82,6 +83,7 @@ def test_notification_bell_contains_history_and_keeps_its_existing_hidden_forms_
         assert not elements.with_hook(f"data-notification-{hook}")
     assert "Repository status" not in html
     assert "Confluence schedule" not in html
+    assert "Git log" not in html
     assert "data-repository-status-center" not in html
     forms = [(tag, attrs) for tag, attrs in elements.elements if tag == "form"]
     assert len(forms) == 2
@@ -210,3 +212,34 @@ def test_notification_repository_javascript_behaviors():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_git_log_console_is_bounded_keyboard_accessible_and_keeps_hidden_states():
+    css = (PROJECT_ROOT / "static/owl/owl.css").read_text()
+    console_css = css.split(".notification-repository__git-log-output {", 1)[1].split("}", 1)[0]
+    assert "max-height: 160px" in console_css
+    assert "overflow: auto" in console_css
+    assert "white-space: pre-wrap" in console_css
+    assert "overflow-wrap: anywhere" in console_css
+    assert "overscroll-behavior: contain" in console_css
+    assert ".notification-repository__git-log-output:focus-visible" in css
+    assert ".notification-repository__git-log-toggle:focus-visible" in css
+    hidden_css = css.split(".notification-repository__git-log-output[hidden],", 1)[1].split("}", 1)[
+        0
+    ]
+    assert ".notification-repository__git-log-message[hidden]" in hidden_css
+    assert ".notification-repository__git-log-note[hidden]" in hidden_css
+    assert "display: none" in hidden_css
+
+
+def test_git_log_preview_is_compact_and_never_wraps_into_more_than_two_rows():
+    css = (PROJECT_ROOT / "static/owl/owl.css").read_text()
+    preview_css = css.split(".notification-repository__log-preview {", 1)[1].split("}", 1)[0]
+    line_css = css.split(".notification-repository__log-line {", 1)[1].split("}", 1)[0]
+    assert "min-width: 0" in preview_css
+    assert "grid-column: 2 / -1" in preview_css
+    assert "white-space: nowrap" in line_css
+    assert "text-overflow: ellipsis" in line_css
+    assert "overflow: hidden" in line_css
+    assert ".notification-repository__log-preview[hidden]" in css
+    assert ".notification-repository__log-line[hidden]" in css

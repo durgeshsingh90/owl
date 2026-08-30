@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import subprocess
@@ -174,6 +175,113 @@ def test_module_json_boundary_runs_in_a_separate_process(tmp_path):
     assert str(path) not in completed.stderr.decode()
 
 
+def test_isolated_missing_installation_is_actionable_not_a_corrupt_or_unknown_pdf(tmp_path):
+    path = _source(tmp_path)
+    completed = subprocess.run(
+        [sys.executable, "-S", "-m", "bitbucket_search.services.pdf_extractor"],
+        input=json.dumps(
+            {
+                "path": str(path),
+                "max_file_bytes": 100_000,
+                "max_pages": 10,
+                "max_characters": 10_000,
+            }
+        ).encode(),
+        capture_output=True,
+        check=True,
+        timeout=5,
+    )
+    payload = json.loads(completed.stdout)
+
+    assert payload["state"] == "dependency_unavailable"
+    assert payload["error_code"] == "pdf_dependency_unavailable"
+    assert "Install the project requirements" in payload["error_summary"]
+    assert payload["diagnostic"] == {
+        "stage": "load_parser",
+        "reason": "module_not_found",
+        "errno": None,
+        "winerror": None,
+    }
+    assert payload["publishable"] is False
+    assert payload["pages"] == []
+    assert completed.stderr == b""
+    assert str(path) not in completed.stdout.decode()
+
+
+@pytest.mark.parametrize("error", [ImportError("private dll"), OSError(126, "private dll")])
+def test_parser_binary_startup_failure_has_safe_dependency_diagnostics(
+    tmp_path, monkeypatch, error
+):
+    original_import = builtins.__import__
+
+    def broken_import(name, *args, **kwargs):
+        if name == "pypdf":
+            raise error
+        return original_import(name, *args, **kwargs)
+
+    path = _source(tmp_path)
+    monkeypatch.setattr(builtins, "__import__", broken_import)
+    result = extract_pdf(path, max_file_bytes=10_000, max_pages=100, max_characters=10_000)
+
+    assert result.state == PDFExtractionState.DEPENDENCY_UNAVAILABLE
+    assert result.diagnostic.stage == "load_parser"
+    assert result.diagnostic.reason in {"import_error", "os_error"}
+    assert "private" not in str(result.to_payload())
+
+
+def test_parser_startup_memory_error_keeps_resource_limit_classification(tmp_path, monkeypatch):
+    original_import = builtins.__import__
+
+    def memory_limited_import(name, *args, **kwargs):
+        if name == "pypdf":
+            raise MemoryError("private detail")
+        return original_import(name, *args, **kwargs)
+
+    path = _source(tmp_path)
+    monkeypatch.setattr(builtins, "__import__", memory_limited_import)
+    result = extract_pdf(path, max_file_bytes=10_000, max_pages=100, max_characters=10_000)
+    assert result.state == PDFExtractionState.RESOURCE_LIMIT
+    assert result.diagnostic.reason == "memory_error"
+    assert result.diagnostic.stage == "load_parser"
+
+
+def test_parser_unknown_error_preserves_only_safe_category_and_stage(tmp_path):
+    private_exception = type("SensitiveDocumentName", (RuntimeError,), {})
+    error = private_exception("credential-shaped private parser contents")
+    path = _source(tmp_path)
+    result = extract_pdf(
+        path,
+        max_file_bytes=10_000,
+        max_pages=100,
+        max_characters=10_000,
+        reader_factory=lambda _source: (_ for _ in ()).throw(error),
+    )
+    assert result.state == PDFExtractionState.UNKNOWN_ERROR
+    assert result.diagnostic.stage == "read_pdf"
+    assert result.diagnostic.reason == "runtime_error"
+    assert "SensitiveDocumentName" not in str(result.to_payload())
+    assert "credential-shaped" not in str(result.to_payload())
+
+
+def test_windows_style_file_error_preserves_only_numeric_os_codes(tmp_path, monkeypatch):
+    error = OSError(22, "private Windows file name")
+    error.winerror = 123
+    path = _source(tmp_path)
+    monkeypatch.setattr(
+        pdf_extractor, "_fingerprint_file", lambda *_args, **_kwargs: (_ for _ in ()).throw(error)
+    )
+
+    result = _extract(path, FakeReader())
+
+    assert result.diagnostic.to_payload() == {
+        "stage": "fingerprint_before",
+        "reason": "os_error",
+        "errno": 22,
+        "winerror": 123,
+    }
+    assert "private" not in str(result.to_payload())
+
+
 def test_normalize_pdf_text_applies_nfkc_and_collapses_whitespace_and_controls():
     assert normalize_pdf_text("  ℌｅｌｌｏ\r\n\tworld\x00\ud800  ") == "Hello world"
 
@@ -214,6 +322,8 @@ def test_one_failed_page_produces_publishable_partial_staging_rows(tmp_path):
     assert result.pages[1].state == PDFPageState.FAILED
     assert result.pages[1].error_code == "page_extraction_failed"
     assert "private parser detail" not in result.error_summary
+    assert result.diagnostic.stage == "extract_page"
+    assert result.diagnostic.reason == "runtime_error"
 
 
 def test_encrypted_reader_is_distinct_and_returns_no_staged_text(tmp_path):

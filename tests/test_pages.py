@@ -362,7 +362,7 @@ def test_bitbucket_search_uses_the_repository_workspace_shell(loopback_client):
     assert "Up to date" not in html
     assert "networking" not in html
     assert "bb-search-submit" not in html
-    assert 'name="page_size" value="200"' in html
+    assert 'name="page_size" value="100"' in html
     assert '<details class="bb-search-filter-menu">' in html
     assert re.search(
         r'<button type="button" data-tooltip="Copy paths".*?Copy all \(0\)', html, re.DOTALL

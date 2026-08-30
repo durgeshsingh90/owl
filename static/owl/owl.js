@@ -106,6 +106,7 @@
 
     const applyTheme = (theme) => {
         document.body.dataset.theme = theme;
+        document.documentElement.dataset.theme = theme;
         document.querySelectorAll("[data-theme-toggle]").forEach((toggle) => {
             const isDark = theme === "dark";
             toggle.setAttribute("aria-pressed", String(isDark));
@@ -245,7 +246,7 @@
     };
 
     const headerPanels = [];
-    const createHeaderPanel = (container, toggle, panel, label, onOpen) => {
+    const createHeaderPanel = (container, toggle, panel, label, onOpen, onClose = () => {}) => {
         if (!container || !toggle || !panel) {
             return null;
         }
@@ -262,6 +263,7 @@
             isOpen = false;
             panel.hidden = true;
             updateLabel();
+            onClose();
             if (restoreFocus) {
                 toggle.focus();
             }
@@ -361,10 +363,178 @@
         let repositoriesActive = false;
         let notificationSignature = null;
         const repositoryRows = new Map();
+        let gitLogPollTimer = null;
+        let gitLogsSuspended = false;
+        const gitLogPollDelay = 2000;
+        const gitLogStatuses = new Set([
+            "not_started", "queued", "running", "succeeded", "failed", "interrupted", "cancelled",
+        ]);
+        const gitLogVisible = (elements) => {
+            if (gitLogsSuspended || document.hidden || !statusPanel || statusPanel.hidden
+                || !elements.details.open || !elements.gitLog.open || elements.row.isConnected === false) {
+                return false;
+            }
+            const bounds = elements.gitLog.getBoundingClientRect?.();
+            const listBounds = repositoryList?.getBoundingClientRect?.();
+            const panelBounds = statusPanel.getBoundingClientRect?.();
+            return !bounds || !listBounds
+                || Math.min(bounds.bottom, listBounds.bottom, panelBounds?.bottom ?? Infinity, window.innerHeight || Infinity)
+                    > Math.max(bounds.top, listBounds.top, panelBounds?.top ?? 0, 0);
+        };
+        const cancelGitLogRequest = (elements) => {
+            const state = elements.gitLogState;
+            if (state.inFlight) {
+                state.generation += 1;
+                state.controller?.abort();
+                state.controller = null;
+                state.inFlight = false;
+                state.needsRefresh = true;
+                elements.gitLogOutput.setAttribute("aria-busy", "false");
+            }
+        };
+        const synchronizeGitLogs = () => {
+            window.clearTimeout(gitLogPollTimer);
+            gitLogPollTimer = null;
+            let nextDelay = Infinity;
+            repositoryRows.forEach((elements) => {
+                const state = elements.gitLogState;
+                if (!gitLogVisible(elements) || !state.url) {
+                    cancelGitLogRequest(elements);
+                    return;
+                }
+                if (state.inFlight || (state.terminal && !state.needsRefresh)) {
+                    return;
+                }
+                const delay = state.needsRefresh ? 0 : Math.max(0, state.nextPollAt - workerNow());
+                if (delay === 0) {
+                    void loadGitLog(elements);
+                } else {
+                    nextDelay = Math.min(nextDelay, delay);
+                }
+            });
+            if (Number.isFinite(nextDelay)) {
+                gitLogPollTimer = window.setTimeout(synchronizeGitLogs, nextDelay);
+            }
+        };
+        const loadGitLog = async (elements) => {
+            const state = elements.gitLogState;
+            if (!gitLogVisible(elements) || !state.url || state.inFlight) {
+                return;
+            }
+            state.inFlight = true;
+            state.needsRefresh = false;
+            const generation = ++state.generation;
+            state.controller = window.AbortController ? new window.AbortController() : null;
+            const controller = state.controller;
+            const timeout = controller ? window.setTimeout(() => controller.abort(), 10000) : null;
+            elements.gitLogOutput.setAttribute("aria-busy", "true");
+            if (!state.loaded) {
+                elements.gitLogMessage.hidden = false;
+                elements.gitLogMessage.textContent = "Loading Git output…";
+                elements.gitLogStatus.textContent = "Loading…";
+            }
+            try {
+                const response = await window.fetch(state.url, {
+                    method: "GET",
+                    credentials: "same-origin",
+                    headers: { Accept: "application/json" },
+                    cache: "no-store",
+                    redirect: "error",
+                    ...(state.controller ? { signal: state.controller.signal } : {}),
+                });
+                if (!response.ok) {
+                    throw new Error("Git output is unavailable.");
+                }
+                const payload = await response.json();
+                if (generation !== state.generation || !gitLogVisible(elements)) {
+                    return;
+                }
+                if (String(payload.repositoryId) !== state.repositoryId || !gitLogStatuses.has(payload.status)
+                    || typeof payload.log !== "string"
+                    || (payload.jobId !== null && (!Number.isSafeInteger(payload.jobId) || payload.jobId < 1))) {
+                    throw new Error("Git output is unavailable.");
+                }
+                // Keep a second client-side bound even if an older endpoint returns too much output.
+                const received = payload.log.replace(/\r\n?/g, "\n");
+                const output = received.slice(-65536).split("\n").slice(-400).join("\n");
+                const clipped = Boolean(payload.truncated) || received !== output;
+                const previousTop = elements.gitLogOutput.scrollTop;
+                const atBottom = !state.loaded || elements.gitLogOutput.scrollHeight
+                    - previousTop - elements.gitLogOutput.clientHeight <= 12;
+                elements.gitLogOutput.hidden = !output;
+                if (elements.gitLogOutput.textContent !== output) {
+                    elements.gitLogOutput.textContent = output;
+                    // Updating text never replaces the focusable console or moves a reader off older lines.
+                    elements.gitLogOutput.scrollTop = atBottom ? elements.gitLogOutput.scrollHeight : previousTop;
+                }
+                const labels = {
+                    not_started: "Not started", queued: "Queued", running: "Live", succeeded: "Complete",
+                    failed: "Failed", interrupted: "Interrupted", cancelled: "Cancelled",
+                };
+                const operation = payload.operation === "clone" ? "Clone" : payload.operation === "refresh" ? "Refresh" : "";
+                elements.gitLogStatus.textContent = [operation, labels[payload.status]].filter(Boolean).join(" · ");
+                elements.gitLogStatus.title = payload.updatedAt
+                    ? `Last output update: ${formatNotificationDate(payload.updatedAt, "Time unavailable")}` : "";
+                elements.gitLogMessage.hidden = Boolean(output);
+                elements.gitLogMessage.textContent = payload.status === "not_started"
+                    ? "No Git run has started for this repository."
+                    : payload.status === "queued" ? "Waiting for the Git worker to start…"
+                        : payload.status === "running" ? "Waiting for Git output…"
+                            : "No Git output was recorded for this run.";
+                elements.gitLogTruncated.hidden = !clipped;
+                elements.gitLog.dataset.status = payload.status;
+                elements.gitLog.dataset.jobId = payload.jobId === null ? "" : String(payload.jobId);
+                state.loaded = true;
+                state.terminal = !["queued", "running"].includes(payload.status);
+            } catch (_error) {
+                if (generation !== state.generation || !gitLogVisible(elements)) {
+                    return;
+                }
+                elements.gitLogStatus.textContent = "Unavailable";
+                elements.gitLogMessage.hidden = false;
+                elements.gitLogMessage.textContent = state.loaded
+                    ? "Could not load Git output. Showing the last check."
+                    : "Could not load Git output. Retrying while this log is open…";
+                state.terminal = false;
+            } finally {
+                window.clearTimeout(timeout);
+                if (generation === state.generation) {
+                    state.inFlight = false;
+                    state.controller = null;
+                    state.nextPollAt = workerNow() + gitLogPollDelay;
+                    elements.gitLogOutput.setAttribute("aria-busy", "false");
+                    synchronizeGitLogs();
+                }
+            }
+        };
+        const refreshVisibleGitLogs = () => {
+            repositoryRows.forEach((elements) => {
+                if (gitLogVisible(elements)) {
+                    elements.gitLogState.needsRefresh = true;
+                }
+            });
+            synchronizeGitLogs();
+        };
+        document.addEventListener("visibilitychange", refreshVisibleGitLogs);
+        window.addEventListener("pagehide", () => {
+            gitLogsSuspended = true;
+            synchronizeGitLogs();
+        });
+        window.addEventListener("pageshow", () => {
+            gitLogsSuspended = false;
+            refreshVisibleGitLogs();
+        });
+        window.addEventListener("resize", synchronizeGitLogs);
+        window.addEventListener("scroll", synchronizeGitLogs, { passive: true });
+        statusPanel?.addEventListener("scroll", synchronizeGitLogs, { passive: true });
+        repositoryList?.addEventListener("scroll", synchronizeGitLogs, { passive: true });
         // One read-only snapshot feeds two independent panels; do not duplicate
         // polling requests or the hidden daily-scheduler submissions.
         const notificationPanel = createHeaderPanel(center, toggle, panel, "notifications", () => void load());
-        const backgroundPanel = createHeaderPanel(statusCenter, statusToggle, statusPanel, "background status", () => void load());
+        const backgroundPanel = createHeaderPanel(statusCenter, statusToggle, statusPanel, "background status", () => {
+            void load();
+            refreshVisibleGitLogs();
+        }, synchronizeGitLogs);
 
         const announce = (message) => {
             if (!live) {
@@ -499,7 +669,15 @@
             timer.setAttribute("data-repository-worker-timer", "");
             timer.id = `owl-repository-worker-timer-${++workerTimerId}`;
             timer.hidden = true;
-            summary.append(icon, name, status, time, timer);
+            const logPreview = createNotificationElement("span", "notification-repository__log-preview");
+            logPreview.id = `${timer.id}-log-preview`;
+            logPreview.setAttribute("data-repository-log-preview", "");
+            logPreview.setAttribute("aria-live", "off");
+            logPreview.hidden = true;
+            const previewLines = [0, 1].map(() =>
+                createNotificationElement("span", "notification-repository__log-line"));
+            logPreview.append(...previewLines);
+            summary.append(icon, name, status, time, timer, logPreview);
             const body = createNotificationElement("div", "notification-repository__body");
             const fullName = createNotificationElement("strong", "notification-repository__full-name");
             const detail = createNotificationElement("p", "notification-repository__detail");
@@ -508,10 +686,42 @@
             const lastOutcome = createNotificationElement("p", "notification-repository__date");
             const link = createNotificationElement("a", "notification-repository__link", "View repository");
             const statusLink = createNotificationElement("a", "notification-repository__link", "Full status");
-            body.append(fullName, detail, updated, lastOutcome, lastSuccess, link, statusLink);
+            const gitLog = createNotificationElement("details", "notification-repository__git-log");
+            gitLog.setAttribute("data-repository-git-log", "");
+            const gitLogSummary = createNotificationElement("summary", "notification-repository__git-log-toggle");
+            const gitLogLabel = createNotificationElement("span", "", "Git log");
+            const gitLogStatus = createNotificationElement("span", "notification-repository__git-log-status", "Not loaded");
+            gitLogSummary.append(gitLogLabel, gitLogStatus);
+            const gitLogMessage = createNotificationElement("p", "notification-repository__git-log-message", "Open to load Git output.");
+            gitLogMessage.setAttribute("role", "status");
+            const gitLogOutput = createNotificationElement("pre", "notification-repository__git-log-output");
+            gitLogOutput.tabIndex = 0;
+            gitLogOutput.setAttribute("aria-live", "off");
+            gitLogOutput.hidden = true;
+            const gitLogTruncated = createNotificationElement("p", "notification-repository__git-log-note", "Showing the most recent Git output.");
+            gitLogTruncated.hidden = true;
+            gitLog.append(gitLogSummary, gitLogMessage, gitLogOutput, gitLogTruncated);
+            body.append(fullName, detail, updated, lastOutcome, lastSuccess, gitLog, link, statusLink);
             details.append(summary, body);
             row.append(details);
-            return { row, details, summary, icon, name, status, time, timer, fullName, detail, updated, lastSuccess, lastOutcome, link, statusLink };
+            const elements = {
+                row, details, summary, icon, name, status, time, timer, logPreview, previewLines, fullName, detail, updated,
+                lastSuccess, lastOutcome, link, statusLink, gitLog, gitLogSummary, gitLogStatus,
+                gitLogMessage, gitLogOutput, gitLogTruncated,
+                gitLogState: {
+                    repositoryId: "", url: "", version: "", loaded: false, terminal: false,
+                    needsRefresh: true, nextPollAt: 0, inFlight: false, generation: 0, controller: null,
+                },
+            };
+            const logToggled = () => {
+                if (gitLogVisible(elements)) {
+                    elements.gitLogState.needsRefresh = true;
+                }
+                synchronizeGitLogs();
+            };
+            gitLog.addEventListener("toggle", logToggled);
+            details.addEventListener("toggle", logToggled);
+            return elements;
         };
 
         const renderRepositories = (snapshot) => {
@@ -562,19 +772,74 @@
                 const tone = ["success", "progress", "error", "neutral"].includes(item.statusTone)
                     ? item.statusTone
                     : item.status === "ready" ? "success" : item.status === "failed" ? "error"
-                        : ["queued", "cloning", "refreshing", "cataloging", "indexing"].includes(item.status) ? "progress" : "neutral";
+                        : ["queued", "checking_connection", "cloning", "refreshing", "cataloging", "indexing"].includes(item.status) ? "progress" : "neutral";
                 elements.row.dataset.tone = tone;
                 elements.icon.textContent = tone === "success" ? "✓" : tone === "error" ? "!" : tone === "progress" ? "" : "·";
                 elements.name.textContent = name;
                 elements.status.textContent = compactStatuses[item.status] || status;
+                const logState = elements.gitLogState;
+                const logsUrl = localTargetPath(item.logsUrl);
+                const gitActive = ["queued", "checking_connection", "cloning", "refreshing", "cataloging"].includes(item.status);
+                // The shared status poll already carries these two redacted lines;
+                // previews need neither a disclosure click nor per-repository requests.
+                const preview = Array.isArray(item.logPreview)
+                    ? item.logPreview.filter((line) => typeof line === "string" && line.trim())
+                        .slice(-2).map((line) => line.replace(/[\r\n]+/g, " ").slice(0, 1024))
+                    : [];
+                if (!preview.length && gitActive) {
+                    preview.push(item.status === "queued" ? "Waiting for Git worker…" : "Waiting for Git output…");
+                }
+                elements.logPreview.hidden = !preview.length;
+                elements.logPreview.setAttribute("aria-label", `Latest Git output for ${name}`);
+                elements.previewLines.forEach((lineElement, lineIndex) => {
+                    const line = preview[lineIndex] || "";
+                    lineElement.hidden = !line;
+                    // Reserve the compact row for the message, leaving timestamps
+                    // in the tooltip and full log. Keep error/warning severity visible.
+                    lineElement.textContent = line.replace(
+                        /^\d{2}:\d{2}:\d{2} UTC (INFO|DEBUG|WARNING|ERROR) \[[a-z_]+\] /,
+                        (_prefix, level) => ["WARNING", "ERROR"].includes(level) ? `${level}: ` : "",
+                    );
+                    lineElement.title = line;
+                });
+                const logVersion = JSON.stringify([
+                    logsUrl, gitActive, item.workerTiming?.kind === "sync" ? item.workerTiming.startedAt : "",
+                    item.lastOutcomeAt || "", item.lastOutcome || "",
+                ]);
+                if (logState.version !== logVersion) {
+                    cancelGitLogRequest(elements);
+                    logState.version = logVersion;
+                    logState.needsRefresh = true;
+                    if (logState.loaded) {
+                        elements.gitLogStatus.textContent = "Checking…";
+                        elements.gitLogMessage.textContent = "Checking for the latest Git output…";
+                        elements.gitLogMessage.hidden = false;
+                    }
+                }
+                logState.repositoryId = id;
+                logState.url = logsUrl;
+                elements.gitLogSummary.setAttribute("aria-label", `Git log for ${name}`);
+                elements.gitLogOutput.setAttribute("aria-label", `Git output for ${name}`);
+                if (!logsUrl) {
+                    elements.gitLogOutput.hidden = true;
+                    elements.gitLogOutput.textContent = "";
+                    elements.gitLogTruncated.hidden = true;
+                    elements.gitLogStatus.textContent = "Unavailable";
+                    elements.gitLogMessage.textContent = "Git output is not available for this repository.";
+                    elements.gitLogMessage.hidden = false;
+                }
                 elements.time.textContent = compactRepositoryDate(item.updatedAt);
                 elements.time.dateTime = item.updatedAt || "";
                 elements.time.title = formatNotificationDate(item.updatedAt, "Time unavailable");
                 repositoryTimers.update(elements.timer, item.workerTiming);
-                if (elements.timer.hidden) {
+                const descriptions = [
+                    elements.timer.hidden ? "" : elements.timer.id,
+                    elements.logPreview.hidden ? "" : elements.logPreview.id,
+                ].filter(Boolean);
+                if (!descriptions.length) {
                     elements.summary.removeAttribute("aria-describedby");
                 } else {
-                    elements.summary.setAttribute("aria-describedby", elements.timer.id);
+                    elements.summary.setAttribute("aria-describedby", descriptions.join(" "));
                 }
                 elements.fullName.textContent = name;
                 elements.detail.textContent = `${status}. ${item.detail || "No additional status details."}`;
@@ -610,11 +875,13 @@
             });
             repositoryRows.forEach((elements, id) => {
                 if (!currentIds.has(id)) {
+                    cancelGitLogRequest(elements);
                     repositoryTimers.remove(elements.timer);
                     elements.row.remove();
                     repositoryRows.delete(id);
                 }
             });
+            synchronizeGitLogs();
         };
 
         const renderRefresh = (refresh = {}, schedule = {}) => {

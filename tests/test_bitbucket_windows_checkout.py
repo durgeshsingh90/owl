@@ -312,6 +312,7 @@ def test_failed_cleanup_never_masks_primary_clone_failure(tmp_path, settings, mo
         remote_url="https://example.invalid/team/synthetic.git",
     )
     primary = git_sync.RepositorySyncError("checkout_failed", "Synthetic primary failure.")
+    monkeypatch.setattr(git_sync, "_check_connection", Mock())
     monkeypatch.setattr(git_sync, "_run_streaming", Mock(side_effect=primary))
     monkeypatch.setattr(git_sync.shutil, "rmtree", Mock(side_effect=_windows_error()))
     with pytest.raises(git_sync.RepositorySyncError) as captured:
@@ -333,6 +334,7 @@ def test_conservative_clone_uses_fresh_staging_when_failed_clone_cannot_be_clean
         remote_url="https://example.invalid/team/synthetic.git",
     )
     attempted = []
+    monkeypatch.setattr(git_sync, "_check_connection", Mock())
 
     def clone(arguments, **_kwargs):
         directory = Path(arguments[-1])

@@ -58,7 +58,7 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
     assert "bitbucket_search/bitbucket_search.css?v=repository-worker-timers-v1" in html
-    assert "bitbucket_search/bitbucket_search.js?v=repository-worker-timers-v1" in html
+    assert "bitbucket_search/bitbucket_search.js?v=stable-background-indexing-v1" in html
 
 
 def test_topbar_and_desktop_rail_omit_verbose_sync_status_navigation(loopback_client):
@@ -394,9 +394,9 @@ def test_empty_pdf_timeline_keeps_search_available_and_explains_the_zero_state(
     assert "data-pdf-search-form" in html
     assert "data-pdf-search-input" in html
     assert "bb-search-submit" not in html
-    assert 'name="page_size" value="200"' in html
+    assert 'name="page_size" value="100"' in html
     assert 'data-pdf-timeline data-next-page-url=""' in html
-    assert 'class="bb-load-older" hidden data-load-older-container' in html
+    assert "data-load-older-container" not in html
     assert "data-pdf-row" not in html
 
 
@@ -425,19 +425,16 @@ def test_responsive_pdf_rows_override_the_generic_block_row_rule():
     assert ".bb-results-table .bb-document-row {\n        grid-template-areas:" in mobile_css
 
 
-def test_load_older_failure_releases_the_html_fallback_link():
+def test_pdf_inventory_does_not_auto_append_more_pages_on_scroll():
     javascript_path = Path(__file__).parents[1] / "static/bitbucket_search/bitbucket_search.js"
     javascript = javascript_path.read_text(encoding="utf-8")
 
-    assert "loadingOlder || htmlFallbackRequired || !candidate" in javascript
-    assert "htmlFallbackRequired = true;" in javascript
-    assert "event.metaKey ||" in javascript
-    assert "event.ctrlKey ||" in javascript
-    assert "event.shiftKey ||" in javascript
-    assert "event.altKey" in javascript
+    assert "appendTimelineGroups" not in javascript
+    assert "IntersectionObserver" not in javascript
+    assert "data-load-older" not in javascript
 
 
-def test_pdf_timeline_renders_grouped_metadata_actions_and_load_older_fallback(
+def test_pdf_timeline_renders_grouped_metadata_actions_and_page_navigation(
     loopback_client,
     monkeypatch,
 ):
@@ -549,9 +546,8 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_load_older_fallback(
     assert 'aria-label="Open file: Archive.pdf"' in archived_row
     assert 'aria-label="Open folder containing Archive.pdf"' in archived_row
     assert f'data-next-page-url="{next_page_url}"' in html
-    assert f'href="{next_page_url}" data-load-older' in html
-    assert "Load older PDFs" in html
-    assert "All PDFs loaded." in html
+    assert "data-load-older" not in html
+    assert "100 PDFs per page" in html
     assert "Page <strong data-pdf-current-page>1</strong> of 1" in html
     assert f'href="{next_page_url}" rel="next" data-pdf-next-page' in html
 
@@ -584,8 +580,8 @@ def test_pdf_timeline_fragment_preserves_boundary_group_key(loopback_client):
 
     assert first_page.status_code == 200
     assert f'data-document-id="{newer_document.pk}"' in first_html
-    assert 'data-timeline-group-key="today"' in first_html
-    assert f'href="{next_page_url}" data-load-older' in first_html
+    assert 'data-timeline-group-key="repo-date-unavailable"' in first_html
+    assert f'href="{next_page_url}" rel="next" data-pdf-next-page' in first_html
 
     second_page = loopback_client.get(
         next_page_url,
@@ -597,7 +593,7 @@ def test_pdf_timeline_fragment_preserves_boundary_group_key(loopback_client):
     assert second_page.status_code == 200
     assert payload["nextPageUrl"] == ""
     assert f'data-document-id="{older_document.pk}"' in payload["html"]
-    assert 'data-timeline-group-key="today"' in payload["html"]
+    assert 'data-timeline-group-key="repo-date-unavailable"' in payload["html"]
     assert payload["html"].count('name="return_page" value="2"') == 4
     assert 'data-tooltip="Open file"' in payload["html"]
     assert 'data-tooltip="Open folder"' in payload["html"]

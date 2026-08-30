@@ -8,6 +8,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import threading
@@ -29,6 +30,7 @@ from bitbucket_search.models import (
     RepositorySyncPhase,
 )
 from bitbucket_search.services.filesystem_paths import display_path, filesystem_path
+from bitbucket_search.services.git_output import emit_git_output
 from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
 from bitbucket_search.services.path_safety import has_disallowed_path_characters
 from bitbucket_search.services.repository_lock import repository_checkout_lock
@@ -45,6 +47,7 @@ _GIT_LFS_POINTER_SIZE = re.compile(rb"^size [0-9]+$", re.MULTILINE)
 _GIT_LFS_POINTER_MAX_BYTES = 8_192
 _IS_WINDOWS = os.name == "nt"
 _WINDOWS_PUBLISH_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0, 2.0)
+_CONSOLE_LINE_LIMIT = 16_384
 logger = get_logger("git")
 _GIT_COMMAND_OPERATIONS = frozenset(
     {
@@ -61,10 +64,55 @@ _GIT_COMMAND_OPERATIONS = frozenset(
         "rev-list",
         "ls-files",
         "ls-tree",
+        "ls-remote",
         "log",
         "lfs",
     }
 )
+
+
+class _ConsoleLines:
+    """Send complete lines only; never expose a clipped secret-bearing tail."""
+
+    def __init__(self, operation: str, *, level: str = "info") -> None:
+        self.operation = "connection" if operation == "ls-remote" else operation
+        self.level = level
+        self.characters: list[str] = []
+        self.omitted = False
+
+    def feed(self, text: str) -> None:
+        for character in text:
+            if character in "\r\n":
+                self.finish()
+            elif not self.omitted:
+                if len(self.characters) == _CONSOLE_LINE_LIMIT:
+                    self.characters.clear()
+                    self.omitted = True
+                else:
+                    self.characters.append(character)
+
+    def finish(self) -> None:
+        if self.omitted:
+            emit_git_output(
+                "[Git output line omitted: too long]", operation=self.operation, level="warning"
+            )
+        elif self.characters:
+            line = "".join(self.characters)
+            prefix = line.lstrip().casefold()
+            level = self.level
+            if prefix.startswith(("fatal:", "error:")):
+                level = "error"
+            elif prefix.startswith("warning:"):
+                level = "warning"
+            emit_git_output(line, operation=self.operation, level=level)
+        self.characters.clear()
+        self.omitted = False
+
+
+def _emit_captured_stderr(text: str, *, operation: str, level: str = "info") -> None:
+    lines = _ConsoleLines(operation, level=level)
+    lines.feed(text)
+    lines.finish()
 
 
 def _git_command_operation(arguments: Sequence[str]) -> str:
@@ -146,10 +194,14 @@ def _validated_existing_path(repository: BitbucketRepository) -> Path:
 
 def _git_environment() -> dict[str, str]:
     environment = os.environ.copy()
+    for name in tuple(environment):
+        if name.startswith("GIT_TRACE") or name == "GIT_CURL_VERBOSE":
+            environment.pop(name)
     environment.update(
         {
             "GIT_TERMINAL_PROMPT": "0",
             "GCM_INTERACTIVE": "Never",
+            "SSH_ASKPASS_REQUIRE": "never",
             "LC_ALL": "C",
         }
     )
@@ -171,6 +223,185 @@ def _git_environment() -> dict[str, str]:
     return environment
 
 
+def _connection_timeout_error() -> RepositorySyncError:
+    return RepositorySyncError(
+        "connection_timeout",
+        "The Git repository connection timed out. Check the network and, if this host "
+        "requires it, your VPN connection, then retry.",
+    )
+
+
+def _connection_failure(stderr: str) -> RepositorySyncError:
+    """Classify Git's private diagnostics into fixed, actionable public text."""
+
+    detail = stderr.casefold()
+    if any(
+        phrase in detail
+        for phrase in (
+            "certificate verify failed",
+            "certificate verification failed",
+            "server certificate verification failed",
+            "ssl certificate problem",
+            "ssl peer certificate",
+            "ssl connect error",
+            "tls handshake",
+            "gnutls_handshake",
+            "host key verification failed",
+            "remote host identification has changed",
+        )
+    ):
+        return RepositorySyncError(
+            "connection_tls_failed",
+            "Git could not verify the server's TLS certificate or SSH host key. "
+            "Check the trusted certificates or known-host entry; do not disable verification.",
+        )
+    if any(
+        phrase in detail
+        for phrase in (
+            "authentication failed",
+            "permission denied",
+            "access denied",
+            "not authorized",
+            "repository not found",
+            "could not read username",
+            "could not read password",
+            "terminal prompts disabled",
+            "returned error: 401",
+            "returned error: 403",
+            "returned error: 404",
+        )
+    ):
+        return RepositorySyncError(
+            "connection_auth_failed",
+            "Git could not access this repository with the available credentials. "
+            "Check the repository URL, permissions, and Git credential manager or SSH agent.",
+        )
+    if "timed out" in detail or "timeout was reached" in detail:
+        return _connection_timeout_error()
+    if any(
+        phrase in detail
+        for phrase in (
+            "could not resolve host",
+            "could not resolve proxy",
+            "could not resolve hostname",
+            "failed to connect",
+            "couldn't connect",
+            "connection refused",
+            "connection reset",
+            "network is unreachable",
+            "no route to host",
+            "name or service not known",
+            "temporary failure in name resolution",
+        )
+    ):
+        return RepositorySyncError(
+            "connection_unreachable",
+            "Git could not reach the repository host. Check the network, DNS or proxy and, "
+            "if this host requires it, your VPN connection, then retry.",
+        )
+    return RepositorySyncError(
+        "connection_check_failed",
+        "Git could not verify repository access. Check the repository URL and the Git console "
+        "details, then retry.",
+    )
+
+
+def _check_connection(
+    repository: BitbucketRepository,
+    progress_callback: ProgressCallback,
+    *,
+    repository_path: Path | None = None,
+) -> None:
+    """Read remote HEAD using Git's real credentials before checkout writes."""
+
+    phase = RepositorySyncPhase.CHECKING_CONNECTION
+    status_message = "Checking repository connection…"
+    progress_callback(phase, 3, status_message)
+    emit_git_output("Checking repository connection with Git…", operation="connection")
+    arguments = ("git",)
+    if repository_path is not None:
+        arguments += ("-C", str(repository_path))
+    _run_capture(
+        (*arguments, "ls-remote", "--symref", "--", repository.remote_url, "HEAD"),
+        failure_code="connection_check_failed",
+        failure_summary="Git could not check repository access. Check Git installation and retry.",
+        heartbeat_callback=_progress_heartbeat(
+            progress_callback, phase=phase, progress=3, status_message=status_message
+        ),
+        timeout_seconds=settings.BITBUCKET_CONNECTION_TIMEOUT_SECONDS,
+        failure_classifier=_connection_failure,
+        timeout_error=_connection_timeout_error(),
+        isolate_process=True,
+    )
+    emit_git_output("Repository connection verified.", operation="connection")
+    progress_callback(phase, 4, "Repository connection verified.")
+
+
+def _abort_capture(process, *, isolate_process: bool) -> str:
+    """Stop owned Git/transport children and bound cleanup after timeout/cancellation."""
+
+    running = process.poll() is None
+    pid = getattr(process, "pid", None)
+    if (
+        isolate_process
+        and isinstance(pid, int)
+        and not isinstance(pid, bool)
+        and pid > 0
+        and (running or os.name != "nt")
+    ):
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ("taskkill", "/PID", str(pid), "/T", "/F"),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                )
+            else:
+                # Git can exit before a helper closes its inherited pipes.
+                # Its isolated process group still owns those live helpers.
+                os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log_event(logger, logging.ERROR, "git_transport_cleanup_failed", error=exc)
+    if running:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            log_event(logger, logging.ERROR, "git_transport_cleanup_failed", error=exc)
+    try:
+        _stdout, stderr = process.communicate(timeout=2)
+        return stderr
+    except subprocess.TimeoutExpired as exc:
+        # A helper that escaped the process group must not keep the worker
+        # blocked on inherited pipe handles after the preflight timeout.
+        log_event(logger, logging.ERROR, "git_transport_pipe_cleanup_failed", error=exc)
+        if os.name != "nt":
+            # Windows communicate() has reader threads; closing their TextIO
+            # handles here can itself wait forever on an escaped helper's pipe.
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError as close_error:
+                        log_event(
+                            logger, logging.ERROR, "git_transport_close_failed", error=close_error
+                        )
+        try:
+            process.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired) as wait_error:
+            log_event(logger, logging.ERROR, "git_transport_reap_failed", error=wait_error)
+        return ""
+    except OSError as exc:
+        log_event(logger, logging.ERROR, "git_transport_pipe_cleanup_failed", error=exc)
+        return ""
+
+
 def _run_capture(
     arguments: Sequence[str],
     *,
@@ -178,10 +409,21 @@ def _run_capture(
     failure_summary: str,
     heartbeat_callback: HeartbeatCallback | None = None,
     input_text: str | None = None,
+    timeout_seconds: float | None = None,
+    failure_classifier: Callable[[str], RepositorySyncError] | None = None,
+    timeout_error: RepositorySyncError | None = None,
+    isolate_process: bool = False,
 ) -> str:
     started_at = time.monotonic()
     operation = _git_command_operation(arguments)
     log_event(logger, logging.DEBUG, "git_command_started", stage="capture", operation=operation)
+    process_options = {}
+    if isolate_process:
+        process_options = (
+            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+            if os.name == "nt"
+            else {"start_new_session": True}
+        )
     try:
         process = subprocess.Popen(
             list(arguments),
@@ -193,6 +435,7 @@ def _run_capture(
             errors="replace",
             env=_git_environment(),
             close_fds=True,
+            **process_options,
         )
     except OSError as exc:
         log_event(
@@ -206,8 +449,12 @@ def _run_capture(
         )
         raise RepositorySyncError(failure_code, failure_summary) from exc
 
-    deadline = time.monotonic() + settings.BITBUCKET_GIT_TIMEOUT_SECONDS
+    timeout_seconds = (
+        settings.BITBUCKET_GIT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    )
+    deadline = time.monotonic() + timeout_seconds
     stdout = ""
+    stderr = ""
     pending_input = input_text
     try:
         while True:
@@ -215,11 +462,11 @@ def _run_capture(
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(
                     list(arguments),
-                    settings.BITBUCKET_GIT_TIMEOUT_SECONDS,
+                    timeout_seconds,
                 )
             try:
                 input_arguments = {"input": pending_input} if pending_input is not None else {}
-                stdout, _stderr = process.communicate(
+                stdout, stderr = process.communicate(
                     timeout=min(_HEARTBEAT_INTERVAL_SECONDS, remaining),
                     **input_arguments,
                 )
@@ -230,36 +477,42 @@ def _run_capture(
                 continue
             break
     except subprocess.TimeoutExpired as exc:
-        if process.poll() is None:
-            process.kill()
-        process.communicate()
+        stderr = _abort_capture(process, isolate_process=isolate_process)
+        _emit_captured_stderr(stderr, operation=operation, level="error")
+        failure = timeout_error or RepositorySyncError(failure_code, failure_summary)
         log_event(
             logger,
             logging.ERROR,
             "git_process_timeout",
             error=exc,
             operation=operation,
-            error_code=failure_code,
+            error_code=failure.code,
             elapsed_ms=round((time.monotonic() - started_at) * 1000),
         )
-        raise RepositorySyncError(failure_code, failure_summary) from exc
+        raise failure from exc
     except BaseException:
-        if process.poll() is None:
-            process.kill()
-        process.communicate()
+        _abort_capture(process, isolate_process=isolate_process)
         raise
 
+    _emit_captured_stderr(
+        stderr, operation=operation, level="error" if process.returncode else "info"
+    )
     if process.returncode != 0:
+        failure = (
+            failure_classifier(stderr[-32_768:])
+            if failure_classifier is not None
+            else RepositorySyncError(failure_code, failure_summary)
+        )
         log_event(
             logger,
             logging.ERROR,
             "git_process_failed",
-            error_code=failure_code,
+            error_code=failure.code,
             operation=operation,
             return_code=process.returncode,
             elapsed_ms=round((time.monotonic() - started_at) * 1000),
         )
-        raise RepositorySyncError(failure_code, failure_summary)
+        raise failure
     log_event(
         logger,
         logging.DEBUG,
@@ -298,8 +551,8 @@ def _run_streaming(
         process = subprocess.Popen(
             list(arguments),
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -318,13 +571,24 @@ def _run_streaming(
         )
         raise RepositorySyncError(failure_code, failure_summary) from exc
 
-    chunks: queue.Queue[str | None] = queue.Queue()
+    chunks: queue.Queue[str | None] = queue.Queue(maxsize=128)
+    stop_reader = threading.Event()
 
-    def read_stderr() -> None:
-        assert process.stderr is not None
+    def enqueue(chunk: str | None) -> None:
+        while not stop_reader.is_set():
+            try:
+                chunks.put(chunk, timeout=0.1)
+                return
+            except queue.Full:
+                continue
+
+    def read_output() -> None:
+        assert process.stdout is not None
         try:
-            while chunk := process.stderr.read(256):
-                chunks.put(chunk)
+            # Text-mode universal newlines also turn Git's carriage-return
+            # progress updates into complete lines without waiting for EOF.
+            while not stop_reader.is_set() and (chunk := process.stdout.readline(4096)):
+                enqueue(chunk)
         except Exception as exc:
             log_event(
                 logger,
@@ -335,19 +599,24 @@ def _run_streaming(
                 phase=phase,
             )
         finally:
-            chunks.put(None)
+            enqueue(None)
+            try:
+                process.stdout.close()
+            except OSError as exc:
+                log_event(logger, logging.ERROR, "git_progress_close_failed", error=exc)
 
     reader = None
     reader_started = False
     try:
         # A failed reader startup or first DB-backed heartbeat must still reap
         # Git before releasing the repository's checkout lock.
-        reader = threading.Thread(target=copy_context().run, args=(read_stderr,), daemon=True)
+        reader = threading.Thread(target=copy_context().run, args=(read_output,), daemon=True)
         reader.start()
         reader_started = True
         deadline = time.monotonic() + settings.BITBUCKET_GIT_TIMEOUT_SECONDS
         latest_progress = progress_start
         buffer = ""
+        console_lines = _ConsoleLines(operation)
         stream_finished = False
         progress_callback(phase, latest_progress, status_message)
         while process.poll() is None or not stream_finished:
@@ -371,7 +640,9 @@ def _run_streaming(
                 continue
             if chunk is None:
                 stream_finished = True
+                console_lines.finish()
                 continue
+            console_lines.feed(chunk)
             buffer = (buffer + chunk)[-4096:]
             percentages = [min(int(match.group(1)), 100) for match in _GIT_PERCENT.finditer(buffer)]
             if percentages:
@@ -380,11 +651,16 @@ def _run_streaming(
                 latest_progress = max(latest_progress, min(mapped, progress_end))
             progress_callback(phase, latest_progress, status_message)
     finally:
+        stop_reader.set()
         if process.poll() is None:
             process.kill()
         process.wait()
         if reader_started:
             reader.join(timeout=2)
+        # The reader owns its pipe. Closing it from here while a transport child
+        # still holds the write end could block on the reader's TextIO lock.
+        if not reader_started and process.stdout is not None:
+            process.stdout.close()
 
     if process.returncode != 0:
         log_event(
@@ -946,6 +1222,7 @@ def _clone(
             "destination_exists",
             "The managed destination already exists but is not a valid completed checkout.",
         )
+    _check_connection(repository, progress_callback)
     temp_root = Path(settings.BITBUCKET_TEMP_ROOT).resolve()
     filesystem_path(temp_root).mkdir(mode=0o700, parents=True, exist_ok=True)
     staging = temp_root / f"repository-{repository.pk}-{uuid.uuid4().hex}"
@@ -1003,6 +1280,7 @@ def _clone(
                 8,
                 "The server did not complete an optimized clone; retrying conservatively…",
             )
+            _check_connection(repository, progress_callback)
             _run_streaming(
                 ("git", "clone", *fallback_clone_arguments),
                 phase=RepositorySyncPhase.CLONING,
@@ -1138,6 +1416,7 @@ def _refresh(
             blocked_dirty=True,
         )
     source_commit = _commit(target, heartbeat_callback=validation_heartbeat)
+    _check_connection(repository, progress_callback, repository_path=target)
     _run_streaming(
         ("git", "-C", str(target), "fetch", "--prune", "--progress", "origin"),
         phase=RepositorySyncPhase.FETCHING,

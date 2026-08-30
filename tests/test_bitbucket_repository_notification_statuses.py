@@ -24,6 +24,7 @@ from bitbucket_search.models import (
     RepositorySyncPhase,
     RepositorySyncState,
 )
+from bitbucket_search.services.git_output import MAX_LINE_CHARACTERS
 from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 from bitbucket_search.services.repository_notifications import repository_notification_statuses
 from bookmark_manager.models import BookmarkRefreshSchedule, Notification
@@ -95,7 +96,12 @@ def test_every_repository_is_returned_without_a_limit_or_n_plus_one(django_asser
     for index in range(55):
         repository = _repository(f"Repo {index:02}")
         repositories.append(repository)
-        _job(repository, RepositorySyncJobStatus.SUCCEEDED, completed_at=now)
+        _job(
+            repository,
+            RepositorySyncJobStatus.SUCCEEDED,
+            completed_at=now,
+            output_log=f"Repository {index} completed.",
+        )
         _document(repository, index_state=PDFIndexState.READY)
     with django_assert_num_queries(3):
         payload = repository_notification_statuses()
@@ -103,6 +109,9 @@ def test_every_repository_is_returned_without_a_limit_or_n_plus_one(django_asser
     assert payload["activeCount"] == payload["failedCount"] == 0
     assert [item["id"] for item in payload["items"]] == [repo.pk for repo in repositories]
     assert all(item["status"] == "ready" for item in payload["items"])
+    assert [item["logPreview"] for item in payload["items"]] == [
+        [f"Repository {index} completed."] for index in range(55)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -128,6 +137,134 @@ def test_repositories_without_jobs_use_persisted_state(state, enabled, status, t
     assert item["lastOutcome"] is None
     assert item["lastOutcomeAt"] is None
     assert item["lastSuccessAt"] is None
+    assert item["logPreview"] == []
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        RepositorySyncJobStatus.RUNNING,
+        RepositorySyncJobStatus.SUCCEEDED,
+        RepositorySyncJobStatus.FAILED,
+        RepositorySyncJobStatus.INTERRUPTED,
+        RepositorySyncJobStatus.CANCELLED,
+    ],
+)
+def test_log_preview_shows_only_the_current_jobs_last_two_nonempty_lines(status):
+    repository = _repository()
+    requested_at = timezone.now()
+    _job(
+        repository,
+        RepositorySyncJobStatus.SUCCEEDED,
+        requested_at=requested_at,
+        output_log="Previous job must not appear.",
+    )
+    current = _job(
+        repository,
+        status,
+        requested_at=requested_at,
+        output_log="Connection passed.\n\nReceiving objects: 50%\nReceiving objects: 100%\n",
+    )
+    item = _item(repository)
+    assert item["logPreview"] == ["Receiving objects: 50%", "Receiving objects: 100%"]
+
+    updated_at = timezone.now() + timedelta(seconds=5)
+    RepositorySyncJob.objects.filter(pk=current.pk).update(
+        output_log="Receiving objects: 100%\nAlready up to date.\n",
+        output_log_updated_at=updated_at,
+    )
+    item = _item(repository)
+    assert item["logPreview"] == ["Receiving objects: 100%", "Already up to date."]
+    assert item["updatedAt"] == updated_at.isoformat()
+
+
+@pytest.mark.parametrize(
+    "status", [RepositorySyncJobStatus.QUEUED, RepositorySyncJobStatus.RUNNING]
+)
+def test_new_job_without_output_does_not_display_previous_jobs_log(status):
+    repository = _repository()
+    _job(
+        repository,
+        RepositorySyncJobStatus.FAILED,
+        requested_at=timezone.now() - timedelta(minutes=1),
+        output_log="fatal: Previous failure must not appear in a new run.",
+    )
+    _job(repository, status)
+    assert _item(repository)["logPreview"] == []
+
+
+def test_log_preview_uses_the_active_job_matching_the_displayed_status():
+    repository = _repository()
+    _job(
+        repository,
+        RepositorySyncJobStatus.RUNNING,
+        requested_at=timezone.now() - timedelta(minutes=1),
+        output_log="Receiving objects: 25%",
+    )
+    _job(
+        repository,
+        RepositorySyncJobStatus.SUCCEEDED,
+        output_log="Inconsistent newer terminal record.",
+    )
+    item = _item(repository)
+    assert item["active"] is True
+    assert item["logPreview"] == ["Receiving objects: 25%"]
+
+
+def test_log_preview_sanitizes_all_stored_lines_before_taking_the_tail():
+    repository = _repository()
+    key_label = "PRIVATE KEY"
+    secret_value = "synthetic-secret-body"
+    _job(
+        repository,
+        RepositorySyncJobStatus.FAILED,
+        output_log=(
+            "Connection started.\n"
+            f"-----BEGIN {key_label}-----\n"
+            f"{secret_value}\n"
+            f"-----END {key_label}-----\n"
+        ),
+    )
+    item = _item(repository)
+    assert len(item["logPreview"]) == 2
+    assert all("hidden" in line for line in item["logPreview"])
+    assert secret_value not in json.dumps(item)
+
+
+def test_log_preview_redacts_credentials_and_urls_from_legacy_saved_output():
+    repository = _repository()
+    userinfo = "preview-reader" + ":" + "placeholder"
+    credential_key = "Authorization"
+    _job(
+        repository,
+        RepositorySyncJobStatus.FAILED,
+        output_log=(
+            "Connection started.\n"
+            f"fatal: Could not access https://{userinfo}@private.invalid/repository.git\n"
+            f"{credential_key}: Bearer synthetic-credential\n"
+        ),
+    )
+    item = _item(repository)
+    assert len(item["logPreview"]) == 2
+    assert "[remote URL]" in item["logPreview"][0]
+    assert "hidden" in item["logPreview"][1]
+    serialized = json.dumps(item)
+    for private_value in (userinfo, "private.invalid", "synthetic-credential"):
+        assert private_value not in serialized
+
+
+def test_log_preview_remains_bounded_for_oversized_legacy_saved_output():
+    repository = _repository()
+    _job(
+        repository,
+        RepositorySyncJobStatus.RUNNING,
+        output_log="\n".join(f"Progress {index}: " + ("x " * 1_000) for index in range(500)),
+    )
+    preview = _item(repository)["logPreview"]
+    assert len(preview) == 2
+    assert preview[0].startswith("Progress 498:")
+    assert preview[1].startswith("Progress 499:")
+    assert all(len(line) <= MAX_LINE_CHARACTERS for line in preview)
 
 
 @pytest.mark.parametrize(

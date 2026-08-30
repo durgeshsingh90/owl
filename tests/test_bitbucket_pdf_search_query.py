@@ -223,7 +223,7 @@ def test_querydict_parser_uses_q_only_as_the_no_chip_fallback():
     assert [chip.display for chip in query.chips] == ["Private Link"]
     assert query.scopes == DEFAULT_PDF_SEARCH_SCOPES
     assert query.page == 1
-    assert query.page_size == 200
+    assert query.page_size == 100
 
 
 def test_querydict_parser_rejects_explicit_empty_scopes_and_malformed_numbers():

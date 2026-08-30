@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import time
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -27,25 +26,62 @@ def _worker_wakeup_lock_path() -> Path:
     return lock_root / "repository-worker-wakeup-reservations.lock"
 
 
-def _acquire(handle, *, blocking: bool) -> None:
+def _windows_lock(handle, *, blocking: bool, shared: bool, release: bool = False) -> None:
+    """Use real shared byte-range locks; CRT LK_RLCK is still exclusive."""
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class Overlapped(ctypes.Structure):
+        _fields_ = (
+            ("Internal", ctypes.c_size_t),
+            ("InternalHigh", ctypes.c_size_t),
+            ("Offset", wintypes.DWORD),
+            ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        )
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    overlapped = Overlapped()
+    native_handle = wintypes.HANDLE(msvcrt.get_osfhandle(handle.fileno()))
+    if release:
+        operation = kernel.UnlockFileEx
+        operation.argtypes = (
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(Overlapped),
+        )
+        arguments = (native_handle, 0, 1, 0, ctypes.byref(overlapped))
+    else:
+        operation = kernel.LockFileEx
+        operation.argtypes = (
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(Overlapped),
+        )
+        flags = (0 if shared else 0x02) | (0 if blocking else 0x01)
+        arguments = (native_handle, flags, 0, 1, 0, ctypes.byref(overlapped))
+    operation.restype = wintypes.BOOL
+    if not operation(*arguments):
+        code = ctypes.get_last_error()
+        if not release and not blocking and code in (32, 33):
+            raise RepositoryCheckoutBusy
+        raise ctypes.WinError(code)
+
+
+def _acquire(handle, *, blocking: bool, shared: bool = False) -> None:
     if os.name == "nt":
-        import msvcrt
-
-        handle.seek(0)
-        mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
-        while True:
-            try:
-                msvcrt.locking(handle.fileno(), mode, 1)
-                return
-            except OSError as exc:
-                if not blocking:
-                    raise RepositoryCheckoutBusy from exc
-                time.sleep(0.1)
-
+        _windows_lock(handle, blocking=blocking, shared=shared)
     else:
         import fcntl
 
-        flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+        flags = (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | (0 if blocking else fcntl.LOCK_NB)
         try:
             fcntl.flock(handle.fileno(), flags)
         except BlockingIOError as exc:
@@ -54,10 +90,7 @@ def _acquire(handle, *, blocking: bool) -> None:
 
 def _release(handle) -> None:
     if os.name == "nt":
-        import msvcrt
-
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        _windows_lock(handle, blocking=False, shared=False, release=True)
     else:
         import fcntl
 
@@ -65,11 +98,10 @@ def _release(handle) -> None:
 
 
 @contextmanager
-def _exclusive_file_lock(lock_path: Path, *, blocking: bool) -> Iterator[None]:
+def _file_lock(lock_path: Path, *, blocking: bool, shared: bool = False) -> Iterator[None]:
     with lock_path.open("a+b") as handle:
-        if handle.seek(0, os.SEEK_END) == 0:
-            handle.write(b"\0")
-            handle.flush()
+        # Both flock and LockFileEx support empty lock files. Avoid writing a
+        # placeholder byte: another shared reader may already own that byte.
         try:
             os.chmod(lock_path, 0o600)
         except OSError:
@@ -78,7 +110,7 @@ def _exclusive_file_lock(lock_path: Path, *, blocking: bool) -> Iterator[None]:
             if os.name != "nt":
                 raise
 
-        _acquire(handle, blocking=blocking)
+        _acquire(handle, blocking=blocking, shared=shared)
         try:
             yield
         finally:
@@ -90,13 +122,14 @@ def repository_checkout_lock(
     repository_id: int,
     *,
     blocking: bool,
+    shared: bool = False,
 ) -> Iterator[None]:
-    """Hold OWL's exclusive mutation/read gate for one managed checkout."""
+    """Allow concurrent PDF readers while excluding Git and local mutations."""
 
     if isinstance(repository_id, bool) or not isinstance(repository_id, int) or repository_id <= 0:
         raise ValueError("repository_id must be a positive integer")
 
-    with _exclusive_file_lock(_lock_path(repository_id), blocking=blocking):
+    with _file_lock(_lock_path(repository_id), blocking=blocking, shared=shared):
         yield
 
 
@@ -104,7 +137,16 @@ def repository_checkout_lock(
 def repository_worker_wakeup_lock() -> Iterator[None]:
     """Serialize queued-worker launch reservations across OWL web processes."""
 
-    with _exclusive_file_lock(_worker_wakeup_lock_path(), blocking=True):
+    with _file_lock(_worker_wakeup_lock_path(), blocking=True):
+        yield
+
+
+@contextmanager
+def pdf_extraction_claim_lock() -> Iterator[None]:
+    """Serialize short PDF claim/publication writes, not the parsing work."""
+
+    lock_path = _worker_wakeup_lock_path().with_name("pdf-extraction-claim.lock")
+    with _file_lock(lock_path, blocking=True):
         yield
 
 

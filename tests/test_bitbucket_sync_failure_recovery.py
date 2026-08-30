@@ -18,7 +18,7 @@ from bitbucket_search.services import git_sync, pdf_catalog, repository_sync
 
 @pytest.mark.parametrize("failure_point", ("progress", "reader_start"))
 def test_streaming_git_is_reaped_when_initial_worker_setup_fails(monkeypatch, failure_point):
-    process = Mock(stderr=io.StringIO(""), returncode=None)
+    process = Mock(stdout=io.StringIO(""), returncode=None)
     process.poll.return_value = None
     reader = Mock()
     failure = OperationalError("synthetic private worker failure")
