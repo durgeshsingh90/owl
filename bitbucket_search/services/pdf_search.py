@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
+from time import perf_counter
 
 from django.db import DatabaseError, connection, transaction
 from django.db.models import F, Func
 from django.db.models.functions import Lower
 
 from bitbucket_search.models import PDFDocument, PDFDocumentLifecycle
+from bitbucket_search.services.logging_events import get_logger, log_event
 from bitbucket_search.services.pdf_search_query import (
     MAX_SEARCH_PAGE_SIZE,
     PDFSearchMatchMode,
@@ -30,6 +33,7 @@ MAX_SNIPPET_SOURCE_CHARACTERS = MAX_SNIPPET_CHARACTERS * 2
 FTS_SNIPPET_TOKEN_LIMIT = 64
 MAX_EXPLAINED_PAGES = 8
 MAX_RESULT_PAGE_SIZE = MAX_SEARCH_PAGE_SIZE
+logger = get_logger("search")
 
 _METADATA_COLUMNS = {
     PDFSearchScope.FILENAME: "filename",
@@ -122,15 +126,47 @@ def search_index_available() -> bool:
                 (METADATA_FTS_TABLE, PAGE_FTS_TABLE),
             )
             row = cursor.fetchone()
-    except DatabaseError:
+    except DatabaseError as error:
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_search_index_check_failed",
+            error=error,
+            stage="index_validation",
+        )
         return False
-    return bool(row and row[0] == 2)
+    available = bool(row and row[0] == 2)
+    if not available:
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_search_index_missing",
+            stage="index_validation",
+            reason="missing_fts_tables",
+        )
+    return available
 
 
-@transaction.atomic
 def rebuild_search_index() -> None:
     """Rebuild both derived indexes from canonical Django-owned records."""
 
+    started = perf_counter()
+    log_event(logger, logging.INFO, "pdf_search_index_rebuild_requested")
+    try:
+        _rebuild_search_index()
+    except Exception as error:
+        log_event(logger, logging.ERROR, "pdf_search_index_rebuild_failed", error=error)
+        raise
+    log_event(
+        logger,
+        logging.INFO,
+        "pdf_search_index_rebuild_completed",
+        elapsed_ms=round((perf_counter() - started) * 1000),
+    )
+
+
+@transaction.atomic
+def _rebuild_search_index() -> None:
     with connection.cursor() as cursor:
         cursor.execute(f"DELETE FROM {METADATA_FTS_TABLE}")
         cursor.execute(
@@ -157,6 +193,39 @@ def rebuild_search_index() -> None:
 def search_documents(query: PDFSearchQuery) -> PDFSearchPage:
     """Search only published SQLite text; never open a repository or PDF file."""
 
+    started = perf_counter()
+    log_event(
+        logger,
+        logging.DEBUG,
+        "pdf_search_requested",
+        operation="phrases" if query.has_query else "filters",
+        count=len(query.chips),
+        limit=query.page_size,
+    )
+    try:
+        result = _search_documents(query)
+    except Exception as error:
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_search_failed",
+            error=error,
+            elapsed_ms=round((perf_counter() - started) * 1000),
+        )
+        raise
+    log_event(
+        logger,
+        logging.DEBUG,
+        "pdf_search_completed",
+        result_count=len(result.results),
+        count=result.total,
+        page_count=result.page_count,
+        elapsed_ms=round((perf_counter() - started) * 1000),
+    )
+    return result
+
+
+def _search_documents(query: PDFSearchQuery) -> PDFSearchPage:
     if not query.has_query:
         return _filter_documents_without_text_query(query)
     if not search_index_available():
@@ -571,7 +640,15 @@ def _query_candidate_page(
         with connection.cursor() as cursor:
             cursor.execute(sql, (*parameters, query.page_size, offset))
             rows = tuple(cursor.fetchmany(min(query.page_size, MAX_RESULT_PAGE_SIZE) + 1))
-    except DatabaseError:
+    except DatabaseError as error:
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_search_sql_failed",
+            error=error,
+            stage="candidate_page",
+            limit=query.page_size,
+        )
         # Punctuation-only literal phrases safely produce no matches rather than
         # exposing FTS syntax errors to the caller.
         return (), 0
@@ -594,7 +671,14 @@ def _query_candidate_page(
         with connection.cursor() as cursor:
             cursor.execute(f"{ctes} SELECT COUNT(*) FROM candidate_scores", parameters)
             row = cursor.fetchone()
-    except DatabaseError:
+    except DatabaseError as error:
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_search_sql_failed",
+            error=error,
+            stage="candidate_count",
+        )
         return (), 0
     return (), int(row[0]) if row else 0
 

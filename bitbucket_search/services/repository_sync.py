@@ -36,6 +36,7 @@ from bitbucket_search.services.git_sync import (
     managed_repository_path,
     synchronize_repository,
 )
+from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
 from bitbucket_search.services.pdf_catalog import (
     build_repository_pdf_catalog,
     publish_repository_pdf_catalog,
@@ -46,7 +47,7 @@ from bitbucket_search.services.repository_urls import normalize_repository_url
 from bookmark_manager.models import Notification, NotificationKind, NotificationState
 from bookmark_manager.services.notifications import publish_notification
 
-logger = logging.getLogger("owl.bitbucket.sync")
+logger = get_logger("sync")
 
 ACTIVE_JOB_STATUSES = (RepositorySyncJobStatus.QUEUED, RepositorySyncJobStatus.RUNNING)
 AUTOMATIC_JOB_TRIGGERS = (RepositorySyncTrigger.DAILY, RepositorySyncTrigger.RETRY)
@@ -221,9 +222,26 @@ def _publish_automatic_refresh_failure(
             # Make that new failure visible again without creating another card.
             mark_unread=True,
         )
-    except Exception:
-        logger.exception(
-            "The daily Bitbucket refresh failure notification could not be recorded",
+        log_event(
+            logger,
+            logging.WARNING if retries_remaining else logging.ERROR,
+            "repository_retry_scheduled"
+            if retries_remaining
+            else "repository_daily_retries_exhausted",
+            repository_id=job.repository_id,
+            job_id=job.pk,
+            retry_number=job.automatic_retry_number,
+            retries_remaining=retries_remaining,
+            delay_seconds=int(_daily_refresh_retry_delay().total_seconds()),
+        )
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "repository_failure_notification_failed",
+            error=exc,
+            repository_id=job.repository_id,
+            job_id=job.pk,
         )
 
 
@@ -253,9 +271,22 @@ def _publish_automatic_refresh_recovery(
             occurred_at=occurred_at,
             mark_unread=True,
         )
-    except Exception:
-        logger.exception(
-            "The daily Bitbucket refresh recovery notification could not be recorded",
+        log_event(
+            logger,
+            logging.WARNING,
+            "repository_automatic_refresh_recovered",
+            repository_id=job.repository_id,
+            job_id=job.pk,
+            retry_number=job.automatic_retry_number,
+        )
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "repository_recovery_notification_failed",
+            error=exc,
+            repository_id=job.repository_id,
+            job_id=job.pk,
         )
 
 
@@ -621,6 +652,16 @@ def _interrupt_stale_jobs(*, at=None) -> None:
             pk__in=interrupted_ids,
         )
         for interrupted_job in interrupted_jobs:
+            log_event(
+                logger,
+                logging.ERROR,
+                "repository_worker_lease_expired",
+                repository_id=interrupted_job.repository_id,
+                job_id=interrupted_job.pk,
+                status=RepositorySyncJobStatus.INTERRUPTED,
+                error_code="worker_interrupted",
+                worker_pid=interrupted_job.worker_pid,
+            )
             _publish_automatic_refresh_failure(
                 interrupted_job,
                 summary=interrupted_job.error_summary,
@@ -646,6 +687,14 @@ def _queue_job(
 ) -> tuple[RepositorySyncJob, bool]:
     active = repository.sync_jobs.filter(status__in=ACTIVE_JOB_STATUSES).first()
     if active is not None:
+        log_event(
+            logger,
+            logging.DEBUG,
+            "repository_queue_deduplicated",
+            repository_id=repository.pk,
+            job_id=active.pk,
+            status=active.status,
+        )
         return active, False
     operation = _operation_for(repository)
     if trigger == RepositorySyncTrigger.RETRY:
@@ -671,7 +720,7 @@ def _queue_job(
                 automatic_retry_number=automatic_retry_number,
                 status_message=waiting_message,
             )
-    except IntegrityError:
+    except IntegrityError as exc:
         active = repository.sync_jobs.filter(status__in=ACTIVE_JOB_STATUSES).first()
         if active is not None:
             return active, False
@@ -682,6 +731,15 @@ def _queue_job(
             ).first()
             if scheduled is not None:
                 return scheduled, False
+        log_event(
+            logger,
+            logging.ERROR,
+            "repository_queue_failed",
+            error=exc,
+            repository_id=repository.pk,
+            operation=operation,
+            trigger=trigger,
+        )
         raise
     repository.sync_state = RepositorySyncState.QUEUED
     repository.sync_progress = 0
@@ -696,6 +754,19 @@ def _queue_job(
             "last_error_code",
             "last_error_summary",
             "updated_at",
+        )
+    )
+    transaction.on_commit(
+        lambda: log_event(
+            logger,
+            logging.INFO,
+            "repository_sync_queued",
+            repository_id=repository.pk,
+            job_id=job.pk,
+            operation=operation,
+            trigger=trigger,
+            retry_number=automatic_retry_number,
+            queued_count=1,
         )
     )
     return job, True
@@ -769,6 +840,12 @@ def queue_all_repository_refreshes(*, require_idle: bool = False) -> QueueAllRep
             )
             | Q(sync_jobs__status__in=ACTIVE_JOB_STATUSES)
         ).exists():
+            log_event(
+                logger,
+                logging.WARNING,
+                "repository_bulk_refresh_deferred",
+                reason="active_repository_sync",
+            )
             raise RepositoryRefreshInProgress
 
     repository_ids = tuple(
@@ -787,6 +864,14 @@ def queue_all_repository_refreshes(*, require_idle: bool = False) -> QueueAllRep
         if queued.job.status == RepositorySyncJobStatus.QUEUED:
             fallback_worker_jobs[queued.job.pk] = queued.job
 
+    log_event(
+        logger,
+        logging.DEBUG,
+        "repository_bulk_queue_selected",
+        count=len(results),
+        queued_count=sum(result.job_created for result in results),
+        active_count=sum(not result.job_created for result in results),
+    )
     return QueueAllRepositoriesResult(
         # Repositories disabled or deleted after the initial ordered snapshot
         # were never eligible at their row lock and must not inflate user-facing
@@ -893,6 +978,12 @@ def queue_due_daily_repository_refreshes(*, at=None) -> tuple[QueueResult, ...]:
             if job_created:
                 queued.append(QueueResult(repository, job, False, True))
 
+    if queued:
+        transaction.on_commit(
+            lambda: log_event(
+                logger, logging.INFO, "repository_daily_refresh_queued", queued_count=len(queued)
+            )
+        )
     return tuple(queued)
 
 
@@ -967,6 +1058,16 @@ def reserve_queued_repository_worker_wakeups(
                 # reservation lock. Stop rather than use a stale capacity count.
                 break
             reserved_ids.append(job.pk)
+    if reserved_ids:
+        log_event(
+            logger,
+            logging.DEBUG,
+            "repository_worker_wakeups_reserved",
+            worker_pid=launcher_pid,
+            worker_count=len(reserved_ids),
+            active_count=running_jobs,
+            limit=settings.BITBUCKET_MAX_REPO_WORKERS,
+        )
     return WorkerWakeReservation(tuple(reserved_ids), observed_at, launcher_pid)
 
 
@@ -980,12 +1081,21 @@ def release_repository_worker_wakeups(
     selected_ids = reservation.job_ids if job_ids is None else job_ids
     if not selected_ids:
         return
-    RepositorySyncJob.objects.filter(
+    released = RepositorySyncJob.objects.filter(
         pk__in=selected_ids,
         status=RepositorySyncJobStatus.QUEUED,
         worker_pid=reservation.launcher_pid,
         heartbeat_at=reservation.reserved_at,
     ).update(worker_pid=None, heartbeat_at=None)
+    if released:
+        log_event(
+            logger,
+            logging.WARNING,
+            "repository_worker_wakeups_released",
+            count=released,
+            worker_pid=reservation.launcher_pid,
+            reason="spawn_failure",
+        )
 
 
 def launch_sync_worker() -> subprocess.Popen[bytes]:
@@ -998,13 +1108,25 @@ def launch_sync_worker() -> subprocess.Popen[bytes]:
         "--idle-timeout",
         str(settings.BITBUCKET_WORKER_IDLE_SECONDS),
     ]
-    return subprocess.Popen(
-        command,
-        cwd=settings.BASE_DIR,
-        stdin=subprocess.DEVNULL,
-        close_fds=True,
-        start_new_session=os.name != "nt",
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=settings.BASE_DIR,
+            stdin=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=os.name != "nt",
+        )
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "repository_worker_launch_failed",
+            error=exc,
+            error_code="worker_unavailable",
+        )
+        raise
+    log_event(logger, logging.INFO, "repository_worker_launched", worker_pid=process.pid)
+    return process
 
 
 def mark_worker_launch_failed(job_id: int) -> None:
@@ -1038,6 +1160,15 @@ def mark_worker_launch_failed(job_id: int) -> None:
         job,
         summary="OWL could not start the background repository worker.",
         occurred_at=now,
+    )
+    log_event(
+        logger,
+        logging.ERROR,
+        "repository_worker_launch_failure_recorded",
+        repository_id=job.repository_id,
+        job_id=job.pk,
+        error_code="worker_unavailable",
+        status=RepositorySyncJobStatus.FAILED,
     )
 
 
@@ -1085,6 +1216,18 @@ def claim_next_job() -> RepositorySyncJob | None:
         sync_progress=1,
         status_message=job.status_message,
         last_sync_started_at=job.started_at,
+    )
+    transaction.on_commit(
+        lambda: log_event(
+            logger,
+            logging.INFO,
+            "repository_sync_claimed",
+            repository_id=job.repository_id,
+            job_id=job.pk,
+            worker_pid=job.worker_pid,
+            operation=job.operation,
+            phase=job.phase,
+        )
     )
     return job
 
@@ -1163,6 +1306,22 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
     if job.status != RepositorySyncJobStatus.RUNNING:
         return job
 
+    with logging_context(repository_id=job.repository_id, job_id=job.pk):
+        return _execute_claimed_job(job)
+
+
+def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
+    started_at = time.monotonic()
+    log_event(
+        logger,
+        logging.INFO,
+        "repository_sync_started",
+        repository_id=job.repository_id,
+        job_id=job.pk,
+        worker_pid=job.worker_pid,
+        operation=job.operation,
+        trigger=job.trigger,
+    )
     last_saved_at = 0.0
     last_phase = job.phase
     last_progress = job.progress
@@ -1200,6 +1359,16 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
         last_saved_at = now_monotonic
         last_phase = phase
         last_progress = progress
+        if changed:
+            log_event(
+                logger,
+                logging.DEBUG,
+                "repository_sync_progress",
+                repository_id=job.repository_id,
+                job_id=job.pk,
+                phase=phase,
+                progress=progress,
+            )
 
     try:
         result = synchronize_repository(
@@ -1208,6 +1377,16 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
             progress_callback=save_progress,
         )
         stage = "pdf_catalog_build"
+        log_event(
+            logger,
+            logging.DEBUG,
+            "repository_sync_stage",
+            repository_id=job.repository_id,
+            job_id=job.pk,
+            stage=stage,
+            pdf_count=result.documents.pdf_count,
+            vsdx_count=result.documents.vsdx_count,
+        )
         catalog = build_repository_pdf_catalog(
             job.repository,
             result_commit=result.result_commit,
@@ -1222,6 +1401,15 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
         now = timezone.now()
         local_path = str(managed_repository_path(job.repository))
         stage = "pdf_catalog_publish"
+        log_event(
+            logger,
+            logging.DEBUG,
+            "repository_sync_stage",
+            repository_id=job.repository_id,
+            job_id=job.pk,
+            stage=stage,
+            pdf_count=len(catalog.documents),
+        )
         save_progress(
             RepositorySyncPhase.FINALIZING,
             99,
@@ -1258,6 +1446,14 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
                 # target revisions together prevents a changed PDF being missed
                 # after a worker restart.
                 stage = "pdf_extraction_queue"
+                log_event(
+                    logger,
+                    logging.DEBUG,
+                    "repository_sync_stage",
+                    repository_id=job.repository_id,
+                    job_id=job.pk,
+                    stage=stage,
+                )
                 queue_repository_pdf_extractions(
                     job.repository_id,
                     repository_sync_job=job.pk,
@@ -1298,8 +1494,36 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
                     last_sync_successful_at=now,
                 )
         if updated == 1:
+            elapsed_ms = round((time.monotonic() - started_at) * 1000)
+            transaction.on_commit(
+                lambda: log_event(
+                    logger,
+                    logging.INFO,
+                    "repository_sync_completed",
+                    repository_id=job.repository_id,
+                    job_id=job.pk,
+                    operation=job.operation,
+                    status=RepositorySyncJobStatus.SUCCEEDED,
+                    pdf_count=inventory_totals["pdf_count"],
+                    vsdx_count=result.documents.vsdx_count,
+                    byte_count=result.documents.document_bytes + inventory_totals["frozen_bytes"],
+                    elapsed_ms=elapsed_ms,
+                )
+            )
             _publish_automatic_refresh_recovery(job, occurred_at=now)
     except RepositorySyncError as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "repository_sync_failed",
+            error=exc,
+            repository_id=job.repository_id,
+            job_id=job.pk,
+            operation=job.operation,
+            stage=stage,
+            error_code=exc.code,
+            elapsed_ms=round((time.monotonic() - started_at) * 1000),
+        )
         now = timezone.now()
         state = (
             RepositorySyncState.BLOCKED_DIRTY if exc.blocked_dirty else RepositorySyncState.FAILED
@@ -1335,14 +1559,16 @@ def execute_claimed_job(job_id: int) -> RepositorySyncJob:
         code, summary, error_type = _unexpected_worker_diagnostic(exc, stage=stage)
         # Database persistence itself can be unavailable. Keep a content-free
         # diagnostic in the log too, without raw exception text or a traceback.
-        logger.error(
-            "Repository sync failed: repository_id=%s job_id=%s stage=%s "
-            "error_type=%s error_code=%s",
-            job.repository_id,
-            job.pk,
-            stage,
-            error_type,
-            code,
+        log_event(
+            logger,
+            logging.ERROR,
+            "repository_sync_unexpected_failure",
+            error=exc,
+            repository_id=job.repository_id,
+            job_id=job.pk,
+            stage=stage,
+            error_code=code,
+            elapsed_ms=round((time.monotonic() - started_at) * 1000),
         )
         with transaction.atomic():
             updated = RepositorySyncJob.objects.filter(

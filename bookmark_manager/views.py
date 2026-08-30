@@ -6,6 +6,7 @@ import ipaddress
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
+from functools import wraps
 from urllib.parse import urlencode, urlsplit
 
 from django.conf import settings
@@ -14,6 +15,7 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, OperationalError, ProgrammingError
 from django.db.models import Count, Q
 from django.http import (
+    Http404,
     HttpRequest,
     HttpResponse,
     HttpResponseBadRequest,
@@ -112,6 +114,7 @@ from bookmark_manager.services.import_export import (
     import_bookmarks_document,
     import_bookmarks_text,
 )
+from bookmark_manager.services.logging_events import get_logger, log_event, logging_context
 from bookmark_manager.services.notifications import (
     list_notification_payloads,
     mark_all_notifications_read,
@@ -125,7 +128,66 @@ from bookmark_manager.services.web_bookmarks import (
     rename_bookmark_category,
 )
 
-logger = logging.getLogger("owl.bookmarks.views")
+logger = get_logger("web")
+
+
+def _logged_view(function):
+    """Record safe action routing and every unexpected view failure, not poll traffic."""
+
+    @wraps(function)
+    def invoke(request, *args, **kwargs):
+        operation = function.__name__
+        quiet = request.method == "GET" or operation == "tick_refresh_schedule"
+        context = {"operation": operation}
+        if operation in {
+            "bookmark_link",
+            "open_bookmark",
+            "update_organisation",
+            "toggle_favorite",
+            "toggle_pin",
+            "delete_bookmark",
+            "open_parent",
+        }:
+            bookmark_id = kwargs.get("pk", args[0] if args else None)
+            if isinstance(bookmark_id, int) and not isinstance(bookmark_id, bool):
+                context["bookmark_id"] = bookmark_id
+        if not quiet:
+            log_event(logger, logging.DEBUG, "bookmark_web_requested", **context)
+        try:
+            with logging_context(**context):
+                response = function(request, *args, **kwargs)
+        except Http404 as error:
+            log_event(
+                logger,
+                logging.WARNING,
+                "bookmark_web_rejected",
+                error=error,
+                reason="not_found",
+                **context,
+            )
+            raise
+        except Exception as error:
+            log_event(logger, logging.ERROR, "bookmark_web_failed", error=error, **context)
+            raise
+        if response.status_code >= 500:
+            log_event(
+                logger,
+                logging.ERROR,
+                "bookmark_web_error_response",
+                http_status=response.status_code,
+                **context,
+            )
+        elif not quiet:
+            log_event(
+                logger,
+                logging.WARNING if response.status_code >= 400 else logging.DEBUG,
+                "bookmark_web_response",
+                http_status=response.status_code,
+                **context,
+            )
+        return response
+
+    return invoke
 
 
 @dataclass(slots=True)
@@ -338,6 +400,7 @@ def _is_loopback_request(request: HttpRequest) -> bool:
 def _require_local_action(request: HttpRequest) -> HttpResponse | None:
     if settings.OWL_ALLOW_NON_LOOPBACK or _is_loopback_request(request):
         return None
+    log_event(logger, logging.WARNING, "bookmark_web_rejected", reason="non_loopback")
     return HttpResponseForbidden("This action is available only from the local OWL application.")
 
 
@@ -347,7 +410,10 @@ def _action_is_rate_limited(request: HttpRequest, action: str) -> bool:
         return False
     remote_address = request.META.get("REMOTE_ADDR", "unknown")
     key = f"owl:local-action:{action}:{remote_address}"
-    return not cache.add(key, True, timeout=cooldown)
+    limited = not cache.add(key, True, timeout=cooldown)
+    if limited:
+        log_event(logger, logging.WARNING, "bookmark_web_rejected", reason="rate_limited")
+    return limited
 
 
 def _is_async_form(request: HttpRequest) -> bool:
@@ -370,7 +436,14 @@ def _action_json(
 def _configuration_record() -> ConfluenceConfiguration | None:
     try:
         return ConfluenceConfiguration.objects.filter(pk=1).first()
-    except (OperationalError, ProgrammingError):
+    except (OperationalError, ProgrammingError) as error:
+        log_event(
+            logger,
+            logging.ERROR,
+            "bookmark_configuration_read_failed",
+            error=error,
+            stage="configuration_record",
+        )
         return None
 
 
@@ -1286,6 +1359,7 @@ def _index_context(
 
 @require_GET
 @never_cache
+@_logged_view
 def index(request: HttpRequest) -> HttpResponse:
     """Render the searchable local bookmark tree and details pane."""
 
@@ -1295,6 +1369,7 @@ def index(request: HttpRequest) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def start_global_refresh(request: HttpRequest) -> HttpResponse:
     """Queue one global refresh and return before the worker contacts Confluence."""
 
@@ -1316,7 +1391,15 @@ def start_global_refresh(request: HttpRequest) -> HttpResponse:
         publish_refresh_notification(run)
         try:
             launch_refresh_worker(run.pk)
-        except OSError:
+        except OSError as error:
+            log_event(
+                logger,
+                logging.ERROR,
+                "bookmark_refresh_wakeup_failed",
+                error=error,
+                run_id=run.pk,
+                stage="worker_launch",
+            )
             mark_refresh_launch_failed(run.pk)
             run.refresh_from_db()
             latest, completed = refresh_status_snapshot()
@@ -1349,6 +1432,7 @@ def start_global_refresh(request: HttpRequest) -> HttpResponse:
 
 @require_GET
 @never_cache
+@_logged_view
 def global_refresh_status(request: HttpRequest) -> JsonResponse:
     """Expose compact, secret-free progress for the top-bar tracker."""
 
@@ -1361,8 +1445,11 @@ def global_refresh_status(request: HttpRequest) -> JsonResponse:
 
 @require_GET
 @never_cache
+@_logged_view
 def notifications_status(request: HttpRequest) -> JsonResponse:
     """Return read-only notification, refresh, and scheduler status for every app shell."""
+
+    from bitbucket_search.services.repository_notifications import repository_notification_statuses
 
     local_error = _require_local_action(request)
     if local_error:
@@ -1382,6 +1469,7 @@ def notifications_status(request: HttpRequest) -> JsonResponse:
             "unread_count": unread_notification_count(),
             "refresh": _refresh_run_payload(latest, completed),
             "schedule": refresh_schedule_snapshot(initialize=False),
+            "repositoryStatuses": repository_notification_statuses(),
         }
     )
 
@@ -1389,6 +1477,7 @@ def notifications_status(request: HttpRequest) -> JsonResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def read_notification(request: HttpRequest) -> JsonResponse:
     local_error = _require_local_action(request)
     if local_error:
@@ -1406,6 +1495,7 @@ def read_notification(request: HttpRequest) -> JsonResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def read_all_notifications(request: HttpRequest) -> JsonResponse:
     local_error = _require_local_action(request)
     if local_error:
@@ -1417,6 +1507,7 @@ def read_all_notifications(request: HttpRequest) -> JsonResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def tick_refresh_schedule(request: HttpRequest) -> JsonResponse:
     """Catch up a due schedule while the resident scheduler or browser is running."""
 
@@ -1438,6 +1529,7 @@ def tick_refresh_schedule(request: HttpRequest) -> JsonResponse:
 
 @require_GET
 @never_cache
+@_logged_view
 def settings_page(request: HttpRequest) -> HttpResponse:
     """Render a non-JavaScript fallback for the secure settings panel."""
 
@@ -1495,6 +1587,7 @@ def _first_form_error(form: ConfluenceSettingsForm) -> str:
 @csrf_protect
 @sensitive_post_parameters("personal_access_token")
 @never_cache
+@_logged_view
 def test_connection(request: HttpRequest) -> JsonResponse | HttpResponse:
     """Test one candidate profile without saving its URL or PAT."""
 
@@ -1592,6 +1685,7 @@ def _render_settings_failure(
 @csrf_protect
 @sensitive_post_parameters("personal_access_token")
 @never_cache
+@_logged_view
 def save_settings(request: HttpRequest) -> HttpResponse:
     """Persist one UI-managed profile without ever placing its PAT in Django storage."""
 
@@ -1633,6 +1727,7 @@ def save_settings(request: HttpRequest) -> HttpResponse:
 @csrf_protect
 @sensitive_post_parameters("personal_access_token")
 @never_cache
+@_logged_view
 def remove_settings(request: HttpRequest) -> HttpResponse:
     """Remove only the secure integration profile, retaining all local bookmarks."""
 
@@ -1673,6 +1768,7 @@ def remove_settings(request: HttpRequest) -> HttpResponse:
 @csrf_protect
 @sensitive_post_parameters("personal_access_token")
 @never_cache
+@_logged_view
 def save_bookmark(request: HttpRequest) -> HttpResponse:
     """Save one unique web URL or Confluence Page ID and reveal its outline number."""
 
@@ -1805,6 +1901,7 @@ def _folder_action_error(request: HttpRequest, detail: str) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def create_folder(request: HttpRequest) -> HttpResponse:
     """Create a personal folder without adding a node to Confluence hierarchy."""
 
@@ -1840,6 +1937,7 @@ def create_folder(request: HttpRequest) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def move_bookmarks_to_manual_folder(request: HttpRequest) -> HttpResponse:
     """Move selected bookmarks to a personal folder, or back to source hierarchy."""
 
@@ -1888,6 +1986,7 @@ def move_bookmarks_to_manual_folder(request: HttpRequest) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def rename_category(request: HttpRequest, pk: int) -> HttpResponse:
     """Rename a domain category without changing its stable domain identity."""
 
@@ -1933,6 +2032,7 @@ def rename_category(request: HttpRequest, pk: int) -> HttpResponse:
 
 @require_GET
 @never_cache
+@_logged_view
 def bookmark_link(request: HttpRequest, pk: int) -> HttpResponse:
     """Resolve one local search result to its verified Confluence URL."""
 
@@ -1952,6 +2052,7 @@ def bookmark_link(request: HttpRequest, pk: int) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def open_bookmark(request: HttpRequest, pk: int) -> HttpResponse:
     """Validate, initiate, then record one external Confluence page open."""
 
@@ -2019,6 +2120,7 @@ def _bookmark_action_response(
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def update_organisation(request: HttpRequest, pk: int) -> HttpResponse:
     """Save OWL-only plain-text notes and tags without contacting Confluence."""
 
@@ -2093,6 +2195,7 @@ def _toggle_flag(request: HttpRequest, pk: int, field_name: str) -> HttpResponse
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def toggle_favorite(request: HttpRequest, pk: int) -> HttpResponse:
     return _toggle_flag(request, pk, "favorite")
 
@@ -2100,6 +2203,7 @@ def toggle_favorite(request: HttpRequest, pk: int) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def toggle_pin(request: HttpRequest, pk: int) -> HttpResponse:
     return _toggle_flag(request, pk, "pinned")
 
@@ -2119,6 +2223,7 @@ def _query_from_encoded_state(raw_query: str) -> BookmarkQuery:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def save_view(request: HttpRequest) -> HttpResponse:
     """Persist validated search/filter/sort state without transient tree state."""
 
@@ -2169,6 +2274,7 @@ def save_view(request: HttpRequest) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def delete_view(request: HttpRequest, pk: int) -> HttpResponse:
     local_error = _require_local_action(request)
     if local_error:
@@ -2182,6 +2288,7 @@ def delete_view(request: HttpRequest, pk: int) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def export_bookmarks(request: HttpRequest) -> HttpResponse:
     """Download an explicit, sensitive local JSON backup with no credentials."""
 
@@ -2191,8 +2298,10 @@ def export_bookmarks(request: HttpRequest) -> HttpResponse:
     exported_at = timezone.now()
     try:
         payload = export_bookmarks_json(generated_at=exported_at)
-    except Exception:
-        logger.exception("Bookmark export failed")
+    except Exception as error:
+        log_event(
+            logger, logging.ERROR, "bookmark_export_response_failed", error=error, stage="export"
+        )
         publish_notification(
             event_key=f"bookmark-export-error:{exported_at.strftime('%Y%m%d%H%M%S%f')}",
             kind=NotificationKind.BOOKMARK_EXPORT,
@@ -2223,6 +2332,7 @@ def export_bookmarks(request: HttpRequest) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def import_bookmarks(request: HttpRequest) -> HttpResponse:
     """Merge an uploaded JSON collection or URLs extracted from UTF-8 text."""
 
@@ -2321,6 +2431,7 @@ def import_bookmarks(request: HttpRequest) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def delete_bookmark(request: HttpRequest, pk: int) -> HttpResponse:
     """Delete only local OWL data after explicit confirmation."""
 
@@ -2346,6 +2457,7 @@ def delete_bookmark(request: HttpRequest, pk: int) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def delete_selected_bookmarks(request: HttpRequest) -> HttpResponse:
     """Delete selected local bookmarks atomically after explicit confirmation."""
 
@@ -2389,6 +2501,7 @@ def delete_selected_bookmarks(request: HttpRequest) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_view
 def open_parent(request: HttpRequest, pk: int) -> HttpResponse:
     """Open a stored parent only after revalidating the configured origin."""
 

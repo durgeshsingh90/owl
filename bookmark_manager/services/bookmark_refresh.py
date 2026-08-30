@@ -7,10 +7,13 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from functools import wraps
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -47,10 +50,11 @@ from bookmark_manager.services.configuration import (
     get_active_profile,
 )
 from bookmark_manager.services.confluence_adapter import ConfluenceResultCode
+from bookmark_manager.services.logging_events import get_logger, log_event, logging_context
 from bookmark_manager.services.notifications import publish_notification
 from core.logging import redact_log_text
 
-logger = logging.getLogger("owl.bookmarks.refresh")
+logger = get_logger("refresh")
 
 ACTIVE_REFRESH_STATUSES = (
     BookmarkRefreshStatus.QUEUED,
@@ -97,6 +101,43 @@ RefreshFetcher = Callable[[ActiveConfluenceProfile, int, str], RefreshFetchResul
 
 _SAFE_ERROR_CODE = re.compile(r"[^a-z0-9_.-]+")
 _SAFE_FAILURE_QUERY_KEYS = {"pageid"}
+_LOGGED_ERROR_CODES = frozenset(code.value for code in ConfluenceResultCode) | {
+    "refresh_error",
+    "temporarily_unavailable",
+}
+
+
+def _logged_page_id(page_id: object) -> str | None:
+    # Stored identifiers may predate validation; never treat arbitrary user text
+    # as an ID merely because it fits the logger's scalar-token syntax.
+    return page_id if isinstance(page_id, str) and re.fullmatch(r"[0-9]{1,32}", page_id) else None
+
+
+def _logged_error_code(error_code: str) -> str:
+    return error_code if error_code in _LOGGED_ERROR_CODES else "refresh_error"
+
+
+def _log_refresh_errors(stage: str):
+    """Keep failed persistence/notification operations observable before re-raising."""
+
+    def decorate(function):
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            first = args[0] if args else kwargs.get("run_id")
+            run_id = first.pk if isinstance(first, BookmarkRefreshRun) else first
+            context = {"stage": stage}
+            if isinstance(run_id, int) and not isinstance(run_id, bool):
+                context["run_id"] = run_id
+            with logging_context(**context):
+                try:
+                    return function(*args, **kwargs)
+                except Exception as exc:
+                    log_event(logger, logging.ERROR, "refresh_operation_failed", error=exc)
+                    raise
+
+        return wrapped
+
+    return decorate
 
 
 def _safe_error_code(value: object) -> str:
@@ -155,6 +196,7 @@ def _availability_for_result(code: ConfluenceResultCode) -> str:
     return BookmarkAvailability.REFRESH_ERROR
 
 
+@_log_refresh_errors("fetch")
 def fetch_confluence_snapshot(
     profile: ActiveConfluenceProfile,
     bookmark_id: int,
@@ -164,14 +206,27 @@ def fetch_confluence_snapshot(
 ) -> RefreshFetchResult:
     """Fetch one page without touching SQLite, making it safe for a thread pool."""
 
+    started_at = time.monotonic()
+    log_event(
+        logger,
+        logging.DEBUG,
+        "refresh_fetch_started",
+        bookmark_id=bookmark_id,
+        page_id=_logged_page_id(page_id),
+    )
     try:
         client = (client_factory or build_confluence_client)(profile)
         result = client.get_page(page_id)
-    except Exception:
-        logger.error(
-            "Confluence refresh fetch raised bookmark_id=%s page_id=%s",
-            bookmark_id,
-            page_id,
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "refresh_fetch_failed",
+            error=exc,
+            bookmark_id=bookmark_id,
+            page_id=_logged_page_id(page_id),
+            error_code="refresh_error",
+            elapsed_ms=(time.monotonic() - started_at) * 1000,
         )
         return RefreshFetchResult(
             bookmark_id=bookmark_id,
@@ -181,11 +236,15 @@ def fetch_confluence_snapshot(
             availability_status=BookmarkAvailability.REFRESH_ERROR,
         )
     if not result.ok or result.page is None:
-        logger.warning(
-            "Confluence refresh fetch failed bookmark_id=%s page_id=%s result=%s",
-            bookmark_id,
-            page_id,
-            result.code.value,
+        log_event(
+            logger,
+            logging.ERROR,
+            "refresh_fetch_failed",
+            bookmark_id=bookmark_id,
+            page_id=_logged_page_id(page_id),
+            error_code=_logged_error_code(result.code.value),
+            http_status=result.http_status,
+            elapsed_ms=(time.monotonic() - started_at) * 1000,
         )
         return RefreshFetchResult(
             bookmark_id=bookmark_id,
@@ -195,12 +254,14 @@ def fetch_confluence_snapshot(
             availability_status=_availability_for_result(result.code),
         )
     snapshot = snapshot_from_confluence_page(result.page)
-    logger.info(
-        "Confluence refresh fetched bookmark_id=%s page_id=%s ancestors=%d page_text_characters=%d",
-        bookmark_id,
-        page_id,
-        len(snapshot.ancestors),
-        len(snapshot.page_text),
+    log_event(
+        logger,
+        logging.DEBUG,
+        "refresh_fetch_completed",
+        bookmark_id=bookmark_id,
+        page_id=_logged_page_id(page_id),
+        count=len(snapshot.ancestors),
+        elapsed_ms=(time.monotonic() - started_at) * 1000,
     )
     return RefreshFetchResult(
         bookmark_id=bookmark_id,
@@ -298,6 +359,7 @@ def _backfill_refresh_schedule_history(
     return schedule
 
 
+@_log_refresh_errors("schedule_load")
 def get_refresh_schedule(*, at=None) -> BookmarkRefreshSchedule:
     """Return the singleton schedule, initializing its first weekly due time."""
 
@@ -312,6 +374,7 @@ def get_refresh_schedule(*, at=None) -> BookmarkRefreshSchedule:
     return _backfill_refresh_schedule_history(schedule, at=observed_at)
 
 
+@_log_refresh_errors("schedule_update")
 def _update_refresh_schedule(
     run: BookmarkRefreshRun,
     *,
@@ -356,9 +419,26 @@ def _update_refresh_schedule(
                 "updated_at",
             )
         )
+        context = {
+            "run_id": run.pk,
+            "stage": "schedule_update",
+            "retry_count": schedule.consecutive_failures,
+            "delay_seconds": (
+                _refresh_retry_delay() if retry_required else _refresh_interval()
+            ).total_seconds(),
+        }
+        transaction.on_commit(
+            lambda: log_event(
+                logger,
+                logging.WARNING if retry_required else logging.INFO,
+                "refresh_retry_scheduled" if retry_required else "refresh_schedule_advanced",
+                **context,
+            )
+        )
         return schedule
 
 
+@_log_refresh_errors("stale_recovery")
 def _interrupt_stale_runs(*, at=None) -> None:
     observed_at = at or timezone.now()
     cutoff = observed_at - STALE_REFRESH_AFTER
@@ -369,6 +449,15 @@ def _interrupt_stale_runs(*, at=None) -> None:
     )
     running_ids = tuple(stale_running.values_list("pk", flat=True))
     if running_ids:
+        for run_id in running_ids:
+            log_event(
+                logger,
+                logging.ERROR,
+                "refresh_run_interrupted",
+                run_id=run_id,
+                reason="heartbeat_expired",
+                status=BookmarkRefreshStatus.RUNNING,
+            )
         stale_running.update(
             status=BookmarkRefreshStatus.INTERRUPTED,
             completed_at=observed_at,
@@ -382,6 +471,15 @@ def _interrupt_stale_runs(*, at=None) -> None:
     )
     queued_ids = tuple(stale_queued.values_list("pk", flat=True))
     if queued_ids:
+        for run_id in queued_ids:
+            log_event(
+                logger,
+                logging.ERROR,
+                "refresh_run_interrupted",
+                run_id=run_id,
+                reason="worker_start_expired",
+                status=BookmarkRefreshStatus.QUEUED,
+            )
         stale_queued.update(
             status=BookmarkRefreshStatus.INTERRUPTED,
             completed_at=observed_at,
@@ -394,6 +492,7 @@ def _interrupt_stale_runs(*, at=None) -> None:
         publish_refresh_notification(stale_run)
 
 
+@_log_refresh_errors("queue")
 def create_or_get_refresh_run(
     *,
     trigger: str = BookmarkRefreshTrigger.MANUAL,
@@ -410,16 +509,45 @@ def create_or_get_refresh_run(
             .first()
         )
         if active is not None:
+            log_event(
+                logger,
+                logging.DEBUG,
+                "refresh_active_run_reused",
+                run_id=active.pk,
+                status=active.status,
+            )
             return active, False
         try:
-            return BookmarkRefreshRun.objects.create(trigger=trigger), True
-        except IntegrityError:
+            run = BookmarkRefreshRun.objects.create(trigger=trigger)
+        except IntegrityError as exc:
+            log_event(logger, logging.ERROR, "refresh_queue_conflict", error=exc)
             active = BookmarkRefreshRun.objects.filter(status__in=ACTIVE_REFRESH_STATUSES).first()
             if active is None:
                 raise
+            log_event(
+                logger,
+                logging.WARNING,
+                "refresh_active_run_reused_after_conflict",
+                run_id=active.pk,
+                status=active.status,
+            )
             return active, False
+        run_id = run.pk
+        transaction.on_commit(
+            lambda: log_event(
+                logger,
+                logging.INFO,
+                "refresh_run_queued",
+                run_id=run_id,
+                stage="queue",
+                trigger=trigger,
+                status=BookmarkRefreshStatus.QUEUED,
+            )
+        )
+        return run, True
 
 
+@_log_refresh_errors("notification")
 def publish_refresh_notification(run: BookmarkRefreshRun) -> None:
     if run.status in ACTIVE_REFRESH_STATUSES:
         state = NotificationState.RUNNING
@@ -469,6 +597,7 @@ def publish_refresh_notification(run: BookmarkRefreshRun) -> None:
     )
 
 
+@_log_refresh_errors("schedule_tick")
 def queue_due_scheduled_refresh(
     *,
     at=None,
@@ -502,13 +631,21 @@ def queue_due_scheduled_refresh(
     publish_refresh_notification(run)
     try:
         launch_refresh_worker(run.pk)
-    except OSError:
+    except OSError as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "refresh_scheduled_launch_failed",
+            error=exc,
+            run_id=run.pk,
+        )
         mark_refresh_launch_failed(run.pk)
         run.refresh_from_db()
         return run, False
     return run, True
 
 
+@_log_refresh_errors("schedule_snapshot")
 def refresh_schedule_snapshot(
     *,
     at=None,
@@ -543,6 +680,7 @@ def refresh_schedule_snapshot(
     }
 
 
+@_log_refresh_errors("worker_launch")
 def launch_refresh_worker(run_id: int) -> subprocess.Popen[bytes]:
     """Detach one secret-free management-command process for the queued run."""
 
@@ -554,16 +692,26 @@ def launch_refresh_worker(run_id: int) -> subprocess.Popen[bytes]:
         "--run-id",
         str(run_id),
     ]
-    return subprocess.Popen(
+    process = subprocess.Popen(
         command,
         cwd=settings.BASE_DIR,
         stdin=subprocess.DEVNULL,
         close_fds=True,
         start_new_session=os.name != "nt",
     )
+    log_event(
+        logger,
+        logging.INFO,
+        "refresh_worker_spawned",
+        run_id=run_id,
+        worker_pid=process.pid,
+    )
+    return process
 
 
+@_log_refresh_errors("launch_failure_persistence")
 def mark_refresh_launch_failed(run_id: int) -> None:
+    log_event(logger, logging.ERROR, "refresh_worker_launch_failed", run_id=run_id)
     now = timezone.now()
     updated = BookmarkRefreshRun.objects.filter(
         pk=run_id,
@@ -581,7 +729,9 @@ def mark_refresh_launch_failed(run_id: int) -> None:
         publish_refresh_notification(run)
 
 
+@_log_refresh_errors("worker_failure_persistence")
 def mark_refresh_worker_failed(run_id: int) -> None:
+    log_event(logger, logging.ERROR, "refresh_worker_interrupted", run_id=run_id)
     now = timezone.now()
     updated = BookmarkRefreshRun.objects.filter(
         pk=run_id,
@@ -598,6 +748,7 @@ def mark_refresh_worker_failed(run_id: int) -> None:
         publish_refresh_notification(run)
 
 
+@_log_refresh_errors("claim")
 def _claim_run(run_id: int) -> tuple[BookmarkRefreshRun, tuple[tuple[int, str], ...]] | None:
     with transaction.atomic():
         run = BookmarkRefreshRun.objects.select_for_update().filter(pk=run_id).first()
@@ -624,9 +775,19 @@ def _claim_run(run_id: int) -> tuple[BookmarkRefreshRun, tuple[tuple[int, str], 
             )
         )
         publish_refresh_notification(run)
+        context = {
+            "run_id": run.pk,
+            "stage": "claim",
+            "count": len(bookmarks),
+            "worker_pid": run.worker_pid,
+        }
+        transaction.on_commit(
+            lambda: log_event(logger, logging.INFO, "refresh_run_claimed", **context)
+        )
         return run, bookmarks
 
 
+@_log_refresh_errors("completion")
 def _finish_run(run: BookmarkRefreshRun, *, fatal_message: str = "") -> BookmarkRefreshRun:
     now = timezone.now()
     run.completed_at = now
@@ -643,12 +804,26 @@ def _finish_run(run: BookmarkRefreshRun, *, fatal_message: str = "") -> Bookmark
     else:
         run.status = BookmarkRefreshStatus.SUCCEEDED
         run.last_error_message = ""
+    context = {
+        "run_id": run.pk,
+        "stage": "completion",
+        "status": run.status,
+        "succeeded_count": run.succeeded_bookmarks,
+        "failed_count": run.failed_bookmarks,
+        "elapsed_ms": max(0, (now - (run.started_at or run.requested_at)).total_seconds() * 1000),
+    }
+    if run.status != BookmarkRefreshStatus.SUCCEEDED:
+        log_event(logger, logging.ERROR, "refresh_run_failed_outcome", **context)
     run.save(update_fields=("status", "heartbeat_at", "completed_at", "last_error_message"))
     _update_refresh_schedule(run, at=now)
     publish_refresh_notification(run)
+    transaction.on_commit(
+        lambda: log_event(logger, logging.INFO, "refresh_run_completed", **context)
+    )
     return run
 
 
+@_log_refresh_errors("progress_persistence")
 def _save_run_progress(
     run: BookmarkRefreshRun,
     *,
@@ -671,8 +846,20 @@ def _save_run_progress(
             "heartbeat_at",
         )
     )
+    # Retry-only heartbeats carry no new progress; keep frequent writes quiet.
+    if outcome is not None:
+        log_event(
+            logger,
+            logging.DEBUG,
+            "refresh_progress_updated",
+            run_id=run.pk,
+            processed_count=run.processed_bookmarks,
+            succeeded_count=run.succeeded_bookmarks,
+            failed_count=run.failed_bookmarks,
+        )
 
 
+@_log_refresh_errors("page_failure_persistence")
 def _finalize_bookmark_failure(
     run: BookmarkRefreshRun,
     fetched: RefreshFetchResult,
@@ -683,6 +870,16 @@ def _finalize_bookmark_failure(
 ) -> None:
     """Publish diagnostics only after every retry has been exhausted."""
 
+    log_event(
+        logger,
+        logging.ERROR,
+        "refresh_page_failed_outcome",
+        run_id=run.pk,
+        bookmark_id=fetched.bookmark_id,
+        page_id=_logged_page_id(fetched.page_id),
+        error_code=_logged_error_code(fetched.error_code),
+        attempt=attempt_count,
+    )
     error_code = _safe_error_code(fetched.error_code)
     reason = _safe_failure_reason(fetched.error_message, profile_token=profile_token)
     availability_status = (
@@ -698,13 +895,15 @@ def _finalize_bookmark_failure(
             availability_status=availability_status,
             attempted_at=attempted_at,
         )
-    except Exception:
-        logger.error(
-            "Confluence refresh final failure state could not be recorded "
-            "run_id=%s bookmark_id=%s page_id=%s",
-            run.pk,
-            fetched.bookmark_id,
-            fetched.page_id,
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "refresh_page_failure_record_failed",
+            error=exc,
+            run_id=run.pk,
+            bookmark_id=fetched.bookmark_id,
+            page_id=_logged_page_id(fetched.page_id),
         )
         return
     BookmarkRefreshFailure.objects.update_or_create(
@@ -735,6 +934,7 @@ def _failed_fetch_result(
     )
 
 
+@_log_refresh_errors("execute")
 def execute_refresh_run(
     run_id: int,
     *,
@@ -749,19 +949,28 @@ def execute_refresh_run(
     if claimed is None:
         return None
     run, bookmarks = claimed
-    logger.info(
-        "Global Confluence refresh started run_id=%s bookmarks=%s workers=%s attempts=%s",
-        run.pk,
-        len(bookmarks),
-        min(max_workers or settings.CONFLUENCE_MAX_WORKERS, max(1, len(bookmarks))),
-        MAX_REFRESH_ATTEMPTS,
+    log_event(
+        logger,
+        logging.INFO,
+        "refresh_run_started",
+        run_id=run.pk,
+        count=len(bookmarks),
+        worker_count=min(max_workers or settings.CONFLUENCE_MAX_WORKERS, max(1, len(bookmarks))),
+        retries_remaining=MAX_REFRESH_ATTEMPTS - 1,
     )
     if not bookmarks:
         return _finish_run(run)
     try:
         active_profile = profile or get_active_profile()
     except ConfigurationUnavailable as exc:
-        logger.warning("Global Confluence refresh unavailable run_id=%s", run.pk)
+        log_event(
+            logger,
+            logging.ERROR,
+            "refresh_configuration_unavailable",
+            error=exc,
+            run_id=run.pk,
+            stage="configuration",
+        )
         return _finish_run(
             run,
             fatal_message=_safe_failure_reason(str(exc)),
@@ -783,6 +992,14 @@ def execute_refresh_run(
                 client_factory=client_factory,
             )
 
+    def fetch_with_context(bookmark_id: int, page_id: str, attempt: int) -> RefreshFetchResult:
+        with logging_context(
+            bookmark_id=bookmark_id,
+            page_id=_logged_page_id(page_id),
+            attempt=attempt,
+        ):
+            return selected_fetcher(active_profile, bookmark_id, page_id)
+
     pending = list(bookmarks)
     latest_failures: dict[int, RefreshFetchResult] = {}
     attempt_counts: dict[int, int] = {}
@@ -795,8 +1012,22 @@ def execute_refresh_run(
             for attempt_number in range(1, MAX_REFRESH_ATTEMPTS + 1):
                 if not pending:
                     break
+                log_event(
+                    logger,
+                    logging.DEBUG,
+                    "refresh_fetch_round_started",
+                    run_id=run.pk,
+                    attempt=attempt_number,
+                    count=len(pending),
+                )
                 futures = {
-                    pool.submit(selected_fetcher, active_profile, bookmark_id, page_id): (
+                    pool.submit(
+                        copy_context().run,
+                        fetch_with_context,
+                        bookmark_id,
+                        page_id,
+                        attempt_number,
+                    ): (
                         bookmark_id,
                         page_id,
                     )
@@ -815,14 +1046,17 @@ def execute_refresh_run(
                             bookmark_id=bookmark_id,
                             page_id=page_id,
                         )
-                    except Exception:
-                        logger.error(
-                            "Confluence refresh fetch raised run_id=%s bookmark_id=%s "
-                            "page_id=%s attempt=%s",
-                            run.pk,
-                            bookmark_id,
-                            page_id,
-                            attempt_number,
+                    except Exception as exc:
+                        log_event(
+                            logger,
+                            logging.ERROR,
+                            "refresh_fetch_future_failed",
+                            error=exc,
+                            run_id=run.pk,
+                            bookmark_id=bookmark_id,
+                            page_id=_logged_page_id(page_id),
+                            attempt=attempt_number,
+                            stage="fetch",
                         )
                         fetched = _failed_fetch_result(
                             bookmark_id,
@@ -839,14 +1073,17 @@ def execute_refresh_run(
                                     record_refresh=True,
                                 )
                             )
-                        except Exception:
-                            logger.error(
-                                "Confluence refresh publish failed run_id=%s "
-                                "bookmark_id=%s page_id=%s attempt=%s",
-                                run.pk,
-                                bookmark_id,
-                                page_id,
-                                attempt_number,
+                        except Exception as exc:
+                            log_event(
+                                logger,
+                                logging.ERROR,
+                                "refresh_page_publish_failed",
+                                error=exc,
+                                run_id=run.pk,
+                                bookmark_id=bookmark_id,
+                                page_id=_logged_page_id(page_id),
+                                attempt=attempt_number,
+                                stage="page_publication",
                             )
                             fetched = _failed_fetch_result(
                                 bookmark_id,
@@ -854,10 +1091,32 @@ def execute_refresh_run(
                                 message="OWL could not publish the refreshed page safely.",
                             )
                         else:
+                            context = {
+                                "run_id": run.pk,
+                                "bookmark_id": bookmark_id,
+                                "page_id": _logged_page_id(page_id),
+                                "attempt": attempt_number,
+                                "stage": "page_publication",
+                            }
+                            transaction.on_commit(
+                                lambda context=context: log_event(
+                                    logger, logging.INFO, "refresh_page_published", **context
+                                )
+                            )
                             latest_failures.pop(bookmark_id, None)
                             _save_run_progress(run, outcome="succeeded")
                             continue
 
+                    log_event(
+                        logger,
+                        logging.ERROR,
+                        "refresh_page_attempt_failed",
+                        run_id=run.pk,
+                        bookmark_id=bookmark_id,
+                        page_id=_logged_page_id(page_id),
+                        error_code=_logged_error_code(fetched.error_code),
+                        attempt=attempt_number,
+                    )
                     latest_failures[bookmark_id] = fetched
                     attempt_counts[bookmark_id] = attempt_number
                     if fetched.error_code not in NON_RETRYABLE_IMMEDIATE_ERROR_CODES:
@@ -867,6 +1126,16 @@ def execute_refresh_run(
                 # Preserve original bookmark order for each retry round. No retry is
                 # submitted until every page in the preceding round has completed.
                 pending = [item for item in pending if item[0] in failed_ids]
+                if pending and attempt_number < MAX_REFRESH_ATTEMPTS:
+                    log_event(
+                        logger,
+                        logging.WARNING,
+                        "refresh_page_retry_round_queued",
+                        run_id=run.pk,
+                        count=len(pending),
+                        retry_count=attempt_number,
+                        retries_remaining=MAX_REFRESH_ATTEMPTS - attempt_number,
+                    )
     finally:
         close_old_connections()
 
@@ -880,17 +1149,10 @@ def execute_refresh_run(
         )
         _save_run_progress(run, outcome="failed")
 
-    completed = _finish_run(run)
-    logger.info(
-        "Global Confluence refresh completed run_id=%s status=%s succeeded=%s failed=%s",
-        completed.pk,
-        completed.status,
-        completed.succeeded_bookmarks,
-        completed.failed_bookmarks,
-    )
-    return completed
+    return _finish_run(run)
 
 
+@_log_refresh_errors("status_snapshot")
 def refresh_status_snapshot() -> tuple[BookmarkRefreshRun | None, BookmarkRefreshRun | None]:
     """Return the active/latest run and the latest completed global refresh."""
 

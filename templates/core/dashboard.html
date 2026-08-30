@@ -31,9 +31,11 @@
                 <div class="knowledge-section-heading"><div><p class="knowledge-kicker">Workspace</p><h1 id="all-apps-heading">Your apps</h1></div><span>2 available</span></div>
                 <div class="knowledge-app-grid">
                     <a class="knowledge-app-card knowledge-app-card--bookmarks" href="{% url 'bookmark_manager:index' %}" aria-describedby="bookmark-card-summary"><span class="knowledge-app-card__top"><span class="knowledge-app-card__icon" aria-hidden="true">⌑</span><span class="knowledge-app-card__status">Ready</span></span><strong>Bookmark Manager</strong><small id="bookmark-card-summary">Save, organise, and revisit important Confluence pages in their real hierarchy.</small><span class="knowledge-app-card__meta">Confluence library</span><span class="knowledge-app-card__open">Open <span aria-hidden="true">→</span></span></a>
-                    <a class="knowledge-app-card knowledge-app-card--bitbucket" href="{% url 'bitbucket_search:index' %}" aria-describedby="bitbucket-card-summary"><span class="knowledge-app-card__top"><span class="knowledge-app-card__icon" aria-hidden="true">⌕</span><span class="knowledge-app-card__status">Foundation</span></span><strong>Bitbucket Search</strong><small id="bitbucket-card-summary">Prepare fast, local discovery across approved repositories and their PDFs.</small><span class="knowledge-app-card__meta">Repository PDFs</span><span class="knowledge-app-card__open">Open <span aria-hidden="true">→</span></span></a>
+                    <a class="knowledge-app-card knowledge-app-card--bitbucket" href="{% url 'bitbucket_search:index' %}" aria-describedby="bitbucket-card-summary"><span class="knowledge-app-card__top"><span class="knowledge-app-card__icon" aria-hidden="true">⌕</span><span class="knowledge-app-card__status">Ready</span></span><strong>Bitbucket Search</strong><small id="bitbucket-card-summary">Sync repositories and search their PDFs locally by filename, metadata, and page text.</small><span class="knowledge-app-card__meta">Repository PDFs &amp; Git activity</span><span class="knowledge-app-card__open">Open <span aria-hidden="true">→</span></span></a>
                 </div>
             </section>
+
+            {% include "core/_bitbucket_activity.html" %}
 
             <section class="knowledge-dashboard-section" aria-labelledby="library-pulse-heading">
                 <div class="knowledge-section-heading">
@@ -60,6 +62,8 @@
                 </dl>
                 <p class="knowledge-metric-note">Page-size figures describe locally stored searchable text. They exclude Confluence attachments, images, and database overhead.</p>
             </section>
+
+            {% include "core/_bookmark_people_activity.html" %}
 
             <section class="knowledge-dashboard-section" aria-labelledby="database-stats-heading">
                 <div class="knowledge-section-heading">

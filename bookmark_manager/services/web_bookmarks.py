@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+from functools import wraps
+from time import perf_counter
 from urllib.parse import SplitResult, unquote, urlsplit, urlunsplit
 
 from django.core.exceptions import ValidationError
@@ -22,6 +25,55 @@ from bookmark_manager.services.bookmark_outline import (
     ensure_outline_position,
     next_outline_position,
 )
+from bookmark_manager.services.logging_events import get_logger, log_event
+
+logger = get_logger("actions")
+
+
+def _logged_web_bookmark(operation: str):
+    def decorate(function):
+        @wraps(function)
+        def invoke(*args, **kwargs):
+            started = perf_counter()
+            log_event(logger, logging.INFO, "web_bookmark_requested", operation=operation)
+            try:
+                result = function(*args, **kwargs)
+            except WebBookmarkError as error:
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "web_bookmark_rejected",
+                    error=error,
+                    operation=operation,
+                    reason="invalid_input",
+                )
+                raise
+            except Exception as error:
+                log_event(
+                    logger, logging.ERROR, "web_bookmark_failed", error=error, operation=operation
+                )
+                raise
+            context = (
+                {
+                    "bookmark_id": result.bookmark.pk,
+                    "status": "created" if result.created else "existing",
+                }
+                if isinstance(result, BookmarkSaveResult)
+                else {"status": "updated"}
+            )
+            log_event(
+                logger,
+                logging.INFO,
+                "web_bookmark_completed",
+                operation=operation,
+                elapsed_ms=round((perf_counter() - started) * 1000),
+                **context,
+            )
+            return result
+
+        return invoke
+
+    return decorate
 
 
 class WebBookmarkError(ValueError):
@@ -79,6 +131,7 @@ def category_for_url(canonical_url: str, hostname: str | None = None) -> Bookmar
     return category
 
 
+@_logged_web_bookmark("save_web")
 @transaction.atomic
 def save_web_bookmark(value: str) -> BookmarkSaveResult:
     canonical_url, hostname = canonicalize_web_url(value)
@@ -132,6 +185,7 @@ def save_web_bookmark(value: str) -> BookmarkSaveResult:
     return BookmarkSaveResult(bookmark, created=True, source_requested=False)
 
 
+@_logged_web_bookmark("rename_category")
 @transaction.atomic
 def rename_bookmark_category(
     category: BookmarkCategory,

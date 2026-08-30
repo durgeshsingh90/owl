@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -11,8 +12,10 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import wraps
 from pathlib import Path
 
 from django.conf import settings
@@ -48,6 +51,7 @@ from bitbucket_search.models import (
     RepositorySyncState,
 )
 from bitbucket_search.services.document_actions import DocumentActionError, validated_pdf_path
+from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
 from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 from bitbucket_search.services.repository_lock import (
     RepositoryCheckoutBusy,
@@ -55,6 +59,10 @@ from bitbucket_search.services.repository_lock import (
 )
 
 PDF_INDEX_VERSION = 1
+logger = get_logger("indexing")
+_PROGRESS_LOG_STATE: ContextVar[dict[int, tuple[str, int]] | None] = ContextVar(
+    "pdf_progress_log_state", default=None
+)
 STALE_EXTRACTION_AFTER = timedelta(minutes=10)
 _HASH_CHUNK_BYTES = 1024 * 1024
 _HEARTBEAT_SECONDS = 1.0
@@ -101,6 +109,24 @@ _FAILURE_DIAGNOSTICS: Mapping[str, tuple[str, str]] = {
         "The PDF changed during extraction. Refresh its repository and retry.",
     ),
     "unknown_error": ("pdf_unknown_error", "OWL could not extract this PDF safely."),
+}
+_LOGGABLE_PDF_ERROR_CODES = frozenset(code for code, _summary in _FAILURE_DIAGNOSTICS.values()) | {
+    "document_unavailable",
+    "extraction_target_changed",
+    "extraction_worker_lease_lost",
+    "extractor_failed",
+    "extractor_output_too_large",
+    "extractor_staging_unavailable",
+    "extractor_unavailable",
+    "invalid_document_path",
+    "invalid_extractor_response",
+    "invalid_repository_checkout",
+    "pdf_checkout_lock_unavailable",
+    "pdf_extraction_timeout",
+    "pdf_hash_failed",
+    "pdf_indexing_worker_error",
+    "pdf_revision_conflict",
+    "unsupported_document_type",
 }
 
 
@@ -173,6 +199,25 @@ class ExtractionStatusSnapshot:
 ExtractionRunner = Callable[[Path, Callable[[], None]], StagedPDFExtraction]
 
 
+def _logged_indexing_errors(stage: str):
+    """Record controller failures even when their durable failure write cannot run."""
+
+    def decorate(function):
+        @wraps(function)
+        def run(*args, **kwargs):
+            try:
+                return function(*args, **kwargs)
+            except Exception as exc:
+                log_event(
+                    logger, logging.ERROR, "pdf_indexing_operation_failed", error=exc, stage=stage
+                )
+                raise
+
+        return run
+
+    return decorate
+
+
 def _safe_summary(value: object, fallback: str) -> str:
     return " ".join(str(value or fallback).split())[:500]
 
@@ -194,6 +239,7 @@ def _batches[T](
         yield values[start : start + size]
 
 
+@_logged_indexing_errors("extraction_queue")
 @transaction.atomic
 def queue_repository_pdf_extractions(
     repository: BitbucketRepository | int,
@@ -204,6 +250,7 @@ def queue_repository_pdf_extractions(
 ) -> ExtractionQueueResult:
     """Reconcile one repository's current PDFs without per-document queries."""
 
+    started = time.monotonic()
     repository_id = repository.pk if isinstance(repository, BitbucketRepository) else repository
     locked_repository = BitbucketRepository.objects.select_for_update().get(pk=repository_id)
     observed_at = timezone.now()
@@ -414,7 +461,15 @@ def queue_repository_pdf_extractions(
                     proposed_jobs,
                     batch_size=_QUEUE_WRITE_BATCH_SIZE,
                 )
-        except IntegrityError:
+        except IntegrityError as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "pdf_queue_bulk_write_failed",
+                error=exc,
+                repository_id=repository_id,
+                count=len(proposed_jobs),
+            )
             for proposed in proposed_jobs:
                 try:
                     with transaction.atomic():
@@ -432,7 +487,15 @@ def queue_repository_pdf_extractions(
                                 phase=PDFExtractionJobPhase.QUEUED,
                             )
                         )
-                except IntegrityError:
+                except IntegrityError as exc:
+                    log_event(
+                        logger,
+                        logging.ERROR,
+                        "pdf_queue_job_write_failed",
+                        error=exc,
+                        repository_id=repository_id,
+                        document_id=proposed.document_id,
+                    )
                     skipped_ids.append(proposed.document_id)
 
     pending_documents = [
@@ -451,6 +514,19 @@ def queue_repository_pdf_extractions(
             fields=("index_state", "extraction_error_code", "extraction_error_summary"),
             batch_size=500,
         )
+    if created_jobs or cancelled_ids or skipped_ids:
+        context = {
+            "repository_id": repository_id,
+            "queued_count": len(created_jobs),
+            "skipped_count": len(skipped_ids),
+            "count": len(set(cancelled_ids)),
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+        }
+        transaction.on_commit(
+            lambda context=context: log_event(
+                logger, logging.INFO, "pdf_extraction_queue_reconciled", **context
+            )
+        )
     return ExtractionQueueResult(
         tuple(job.pk for job in created_jobs if job.pk is not None),
         tuple(dict.fromkeys(cancelled_ids)),
@@ -458,6 +534,7 @@ def queue_repository_pdf_extractions(
     )
 
 
+@_logged_indexing_errors("worker_launch_failure_record")
 @transaction.atomic
 def mark_index_worker_launch_failed(job_ids: Sequence[int]) -> tuple[int, ...]:
     """Fail only the queued jobs whose detached worker could not be launched."""
@@ -471,6 +548,13 @@ def mark_index_worker_launch_failed(job_ids: Sequence[int]) -> tuple[int, ...]:
     )
     if not normalized_ids:
         return ()
+    log_event(
+        logger,
+        logging.ERROR,
+        "pdf_index_worker_launch_failed",
+        queued_count=len(normalized_ids),
+        error_code="index_worker_unavailable",
+    )
     now = timezone.now()
     failed_ids: list[int] = []
     jobs = PDFExtractionJob.objects.select_related("document__repository").filter(
@@ -572,6 +656,7 @@ def extraction_status_snapshot() -> ExtractionStatusSnapshot:
     )
 
 
+@_logged_indexing_errors("extraction_lease_recovery")
 def _interrupt_stale_extraction_jobs(*, observed_at=None, force: bool = False) -> None:
     now = observed_at or timezone.now()
     cutoff = now - STALE_EXTRACTION_AFTER
@@ -599,6 +684,14 @@ def _interrupt_stale_extraction_jobs(*, observed_at=None, force: bool = False) -
             )
             if interrupted != 1:
                 continue
+            log_event(
+                logger,
+                logging.ERROR,
+                "pdf_extraction_worker_interrupted",
+                job_id=job_id,
+                error_code="extraction_worker_interrupted",
+                reason="startup_recovery" if force else "heartbeat_expired",
+            )
             job = PDFExtractionJob.objects.select_related("document__repository").get(pk=job_id)
             document = job.document
             if _job_matches_document(job, document):
@@ -620,12 +713,14 @@ def _interrupt_stale_extraction_jobs(*, observed_at=None, force: bool = False) -
                 )
 
 
+@_logged_indexing_errors("extraction_queue_recovery")
 def sweep_pdf_extraction_queue(
     *,
     interrupt_running: bool = False,
 ) -> ExtractionQueueResult:
     """Recover stale leases and queue every stranded current PDF revision."""
 
+    started = time.monotonic()
     _interrupt_stale_extraction_jobs(force=interrupt_running)
 
     observed_at = timezone.now()
@@ -714,6 +809,16 @@ def sweep_pdf_extraction_queue(
         queued.extend(result.queued_job_ids)
         cancelled.extend(result.cancelled_job_ids)
         skipped.extend(result.skipped_document_ids)
+    if queued or cancelled or skipped:
+        log_event(
+            logger,
+            logging.INFO,
+            "pdf_extraction_queue_recovered",
+            queued_count=len(queued),
+            skipped_count=len(skipped),
+            count=len(set(cancelled)),
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
     return ExtractionQueueResult(
         tuple(queued),
         tuple(dict.fromkeys(cancelled)),
@@ -721,6 +826,7 @@ def sweep_pdf_extraction_queue(
     )
 
 
+@_logged_indexing_errors("extraction_claim")
 def claim_next_extraction_job() -> PDFExtractionJob | None:
     """Claim one PDF job while honoring the global sync and extraction barriers."""
 
@@ -746,6 +852,7 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
         )
         if candidate_id is None:
             return None
+        log_event(logger, logging.DEBUG, "pdf_extraction_candidate_selected", job_id=candidate_id)
         now = timezone.now()
         claimed = PDFExtractionJob.objects.filter(
             pk=candidate_id,
@@ -762,7 +869,18 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
         )
         if claimed != 1:
             return None
-    return PDFExtractionJob.objects.select_related("document__repository").get(pk=candidate_id)
+    job = PDFExtractionJob.objects.select_related("document__repository").get(pk=candidate_id)
+    log_event(
+        logger,
+        logging.INFO,
+        "pdf_extraction_claimed",
+        repository_id=job.document.repository_id,
+        document_id=job.document_id,
+        job_id=job.pk,
+        worker_pid=job.worker_pid,
+        retry_count=job.retry_count,
+    )
+    return job
 
 
 def _update_job_progress(job_id: int, phase: str, progress: int) -> None:
@@ -780,6 +898,19 @@ def _update_job_progress(job_id: int, phase: str, progress: int) -> None:
             "extraction_worker_lease_lost",
             "This PDF extraction was interrupted and will not be published.",
         )
+    progress_state = _PROGRESS_LOG_STATE.get()
+    current = (phase, max(1, min(int(progress), 99)))
+    if progress_state is None or progress_state.get(job_id) != current:
+        log_event(
+            logger,
+            logging.DEBUG,
+            "pdf_extraction_progress",
+            job_id=job_id,
+            phase=current[0],
+            progress=current[1],
+        )
+        if progress_state is not None:
+            progress_state[job_id] = current
 
 
 def _raise_if_repository_sync_active() -> None:
@@ -1050,6 +1181,13 @@ def run_isolated_pdf_extractor(
             dir=temp_root,
         )
     except OSError as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_parser_staging_failed",
+            error=exc,
+            error_code="extractor_staging_unavailable",
+        )
         raise PDFIndexingError(
             "extractor_staging_unavailable",
             "OWL could not create a private PDF extraction staging file.",
@@ -1069,6 +1207,13 @@ def run_isolated_pdf_extractor(
                 preexec_fn=_limit_extractor_process_memory if os.name == "posix" else None,
             )
         except OSError as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "pdf_parser_spawn_failed",
+                error=exc,
+                error_code="extractor_unavailable",
+            )
             raise PDFIndexingError(
                 "extractor_unavailable",
                 "OWL could not start the isolated PDF extractor.",
@@ -1092,6 +1237,14 @@ def run_isolated_pdf_extractor(
                     continue
                 break
         except subprocess.TimeoutExpired as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "pdf_parser_timeout",
+                error=exc,
+                error_code="pdf_extraction_timeout",
+                delay_seconds=settings.PDF_EXTRACTION_TIMEOUT_SECONDS,
+            )
             if process.poll() is None:
                 process.kill()
             process.wait()
@@ -1105,6 +1258,13 @@ def run_isolated_pdf_extractor(
             process.wait()
             raise
         if process.returncode != 0:
+            log_event(
+                logger,
+                logging.ERROR,
+                "pdf_parser_process_failed",
+                return_code=process.returncode,
+                error_code="extractor_failed",
+            )
             raise PDFIndexingError(
                 "extractor_failed",
                 "The isolated PDF extractor stopped without a valid result.",
@@ -1115,6 +1275,13 @@ def run_isolated_pdf_extractor(
         )
         output_size = output.tell()
         if output_size > maximum_output_bytes:
+            log_event(
+                logger,
+                logging.ERROR,
+                "pdf_parser_output_limit_exceeded",
+                byte_count=output_size,
+                error_code="extractor_output_too_large",
+            )
             raise PDFIndexingError(
                 "extractor_output_too_large",
                 "The isolated PDF extractor exceeded its output limit.",
@@ -1123,6 +1290,13 @@ def run_isolated_pdf_extractor(
         try:
             payload = json.load(output)
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "pdf_parser_output_invalid",
+                error=exc,
+                error_code="invalid_extractor_response",
+            )
             raise PDFIndexingError(
                 "invalid_extractor_response",
                 "The isolated PDF extractor returned an invalid response.",
@@ -1147,6 +1321,17 @@ def _attach_revision(
     existing_revision: PDFTextRevision | None = None,
 ) -> bool:
     now = timezone.now()
+    if (staged is not None and staged.state == PDFTextRevisionState.PARTIAL) or (
+        existing_revision is not None and existing_revision.state == PDFTextRevisionState.PARTIAL
+    ):
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_partial_publication",
+            job_id=job_id,
+            error_code="partial_extraction",
+            stage="text_publication",
+        )
     with transaction.atomic():
         job = (
             PDFExtractionJob.objects.select_for_update()
@@ -1155,6 +1340,13 @@ def _attach_revision(
         )
         document = job.document
         if job.status != PDFExtractionJobStatus.RUNNING:
+            log_event(
+                logger,
+                logging.WARNING,
+                "pdf_publication_skipped",
+                job_id=job_id,
+                reason="lease_not_running",
+            )
             return False
         if getattr(document, "local_policy", None) is not None:
             raise PDFExtractionExcluded
@@ -1279,6 +1471,18 @@ def _attach_revision(
                 "error_summary",
             )
         )
+    log_event(
+        logger,
+        logging.INFO,
+        "pdf_text_published",
+        repository_id=document.repository_id,
+        document_id=document.pk,
+        job_id=job.pk,
+        page_count=revision.page_count,
+        byte_count=revision.source_byte_size,
+        status=revision.state,
+        indexed_count=1,
+    )
     return True
 
 
@@ -1288,6 +1492,16 @@ def _fail_job(
     *,
     content_sha256: str = "",
 ) -> None:
+    # Emit the actual failure first: the following database transaction can fail
+    # too, and must not erase the only diagnostic for the original failure.
+    log_event(
+        logger,
+        logging.ERROR,
+        "pdf_extraction_failed",
+        error=error,
+        job_id=job_id,
+        error_code=error.code if error.code in _LOGGABLE_PDF_ERROR_CODES else "pdf_indexing_error",
+    )
     now = timezone.now()
     with transaction.atomic():
         job = (
@@ -1357,6 +1571,17 @@ def _execute_claimed_extraction_job(
     if job.status != PDFExtractionJobStatus.RUNNING:
         return job
 
+    started = time.monotonic()
+    log_event(
+        logger,
+        logging.INFO,
+        "pdf_extraction_started",
+        repository_id=job.document.repository_id,
+        document_id=job.document_id,
+        job_id=job.pk,
+        worker_pid=job.worker_pid,
+        byte_count=job.target_file_size,
+    )
     content_sha256 = ""
 
     def hashing_heartbeat() -> None:
@@ -1381,6 +1606,14 @@ def _execute_claimed_extraction_job(
             extractor_version=PDF_EXTRACTOR_VERSION,
         ).first()
         if reusable is not None:
+            log_event(
+                logger,
+                logging.DEBUG,
+                "pdf_text_revision_reuse_selected",
+                document_id=job.document_id,
+                job_id=job.pk,
+                page_count=reusable.page_count,
+            )
             second_hash, second_size = _hash_pdf(path, hashing_heartbeat)
             if second_hash != content_sha256 or second_size != source_size:
                 raise PDFExtractionTargetChanged(
@@ -1403,6 +1636,28 @@ def _execute_claimed_extraction_job(
                     "invalid_extractor_response",
                     "The isolated PDF extractor returned an invalid response.",
                 )
+            failed_pages = sum(page.state == PDFPageExtractionState.FAILED for page in staged.pages)
+            if failed_pages:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "pdf_page_extraction_failed",
+                    repository_id=job.document.repository_id,
+                    document_id=job.document_id,
+                    job_id=job.pk,
+                    failed_count=failed_pages,
+                    page_count=staged.page_count,
+                    error_code="pdf_page_extraction_failed",
+                )
+            log_event(
+                logger,
+                logging.DEBUG,
+                "pdf_parser_result_received",
+                job_id=job.pk,
+                page_count=staged.page_count,
+                byte_count=staged.source_size_bytes,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
             if not staged.publishable:
                 if _SHA256.fullmatch(staged.content_sha256_before):
                     content_sha256 = staged.content_sha256_before
@@ -1427,6 +1682,15 @@ def _execute_claimed_extraction_job(
                 staged=staged,
             )
     except PDFExtractionExcluded:
+        log_event(
+            logger,
+            logging.WARNING,
+            "pdf_extraction_cancelled_by_policy",
+            repository_id=job.document.repository_id,
+            document_id=job.document_id,
+            job_id=job.pk,
+            reason="local_policy",
+        )
         PDFExtractionJob.objects.filter(pk=job.pk, status=PDFExtractionJobStatus.RUNNING).update(
             status=PDFExtractionJobStatus.CANCELLED,
             completed_at=timezone.now(),
@@ -1440,9 +1704,28 @@ def _execute_claimed_extraction_job(
         _queue_current_target_after_obsolete_job(job.pk)
     except PDFIndexingError as exc:
         _fail_job(job.pk, exc, content_sha256=content_sha256)
-    except (OperationalError, IntegrityError):
+    except (OperationalError, IntegrityError) as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_extraction_database_failed",
+            error=exc,
+            repository_id=job.document.repository_id,
+            document_id=job.document_id,
+            job_id=job.pk,
+        )
         raise
-    except Exception:
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_extraction_unexpected_error",
+            error=exc,
+            repository_id=job.document.repository_id,
+            document_id=job.document_id,
+            job_id=job.pk,
+            error_code="pdf_indexing_worker_error",
+        )
         _fail_job(
             job.pk,
             PDFIndexingError(
@@ -1451,17 +1734,28 @@ def _execute_claimed_extraction_job(
             ),
             content_sha256=content_sha256,
         )
-    return PDFExtractionJob.objects.select_related("document__repository").get(pk=job.pk)
+    completed = PDFExtractionJob.objects.select_related("document__repository").get(pk=job.pk)
+    log_event(
+        logger,
+        logging.INFO,
+        "pdf_extraction_finished",
+        repository_id=job.document.repository_id,
+        document_id=job.document_id,
+        job_id=job.pk,
+        status=completed.status,
+        elapsed_ms=int((time.monotonic() - started) * 1000),
+    )
+    return completed
 
 
-def execute_claimed_extraction_job(
-    job_id: int,
+@_logged_indexing_errors("extraction_execution")
+def _execute_claimed_extraction_with_checkout(
+    job: PDFExtractionJob,
     *,
     extraction_runner: ExtractionRunner = run_isolated_pdf_extractor,
 ) -> PDFExtractionJob:
     """Keep a checkout stable and defer if synchronization overtakes the claim."""
 
-    job = PDFExtractionJob.objects.select_related("document__repository").get(pk=job_id)
     if job.status != PDFExtractionJobStatus.RUNNING:
         return job
     try:
@@ -1475,7 +1769,18 @@ def execute_claimed_extraction_job(
                 job.pk,
                 extraction_runner=extraction_runner,
             )
-    except (PDFExtractionDeferred, RepositoryCheckoutBusy):
+    except (PDFExtractionDeferred, RepositoryCheckoutBusy) as exc:
+        log_event(
+            logger,
+            logging.WARNING,
+            "pdf_extraction_deferred",
+            repository_id=job.document.repository_id,
+            document_id=job.document_id,
+            job_id=job.pk,
+            reason="checkout_busy"
+            if isinstance(exc, RepositoryCheckoutBusy)
+            else "repository_sync",
+        )
         PDFExtractionJob.objects.filter(
             pk=job.pk,
             status=PDFExtractionJobStatus.RUNNING,
@@ -1493,7 +1798,17 @@ def execute_claimed_extraction_job(
             error_summary="",
         )
         return PDFExtractionJob.objects.select_related("document__repository").get(pk=job.pk)
-    except OSError:
+    except OSError as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_checkout_lock_failed",
+            error=exc,
+            repository_id=job.document.repository_id,
+            document_id=job.document_id,
+            job_id=job.pk,
+            error_code="pdf_checkout_lock_unavailable",
+        )
         _fail_job(
             job.pk,
             PDFIndexingError(
@@ -1502,6 +1817,32 @@ def execute_claimed_extraction_job(
             ),
         )
         return PDFExtractionJob.objects.select_related("document__repository").get(pk=job.pk)
+
+
+def execute_claimed_extraction_job(
+    job_id: int,
+    *,
+    extraction_runner: ExtractionRunner = run_isolated_pdf_extractor,
+) -> PDFExtractionJob:
+    """Keep safe correlation IDs attached to every nested controller diagnostic."""
+
+    try:
+        job = PDFExtractionJob.objects.select_related("document__repository").get(pk=job_id)
+    except Exception as exc:
+        log_event(
+            logger, logging.ERROR, "pdf_extraction_job_lookup_failed", error=exc, job_id=job_id
+        )
+        raise
+    token = _PROGRESS_LOG_STATE.set({})
+    try:
+        with logging_context(
+            repository_id=job.document.repository_id, document_id=job.document_id, job_id=job.pk
+        ):
+            return _execute_claimed_extraction_with_checkout(
+                job, extraction_runner=extraction_runner
+            )
+    finally:
+        _PROGRESS_LOG_STATE.reset(token)
 
 
 def work_one_extraction_job() -> PDFExtractionJob | None:
@@ -1517,19 +1858,29 @@ def work_one_extraction_job() -> PDFExtractionJob | None:
 def launch_index_worker() -> subprocess.Popen[bytes]:
     """Start the detached durable PDF queue worker without blocking the request."""
 
-    return subprocess.Popen(
-        [
-            sys.executable,
-            str(Path(settings.BASE_DIR) / "manage.py"),
-            "bitbucket_index_worker",
-            "--idle-timeout",
-            str(settings.PDF_EXTRACTION_WORKER_IDLE_SECONDS),
-            "--no-startup-sweep",
-        ],
-        cwd=settings.BASE_DIR,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        start_new_session=os.name != "nt",
+    try:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(settings.BASE_DIR) / "manage.py"),
+                "bitbucket_index_worker",
+                "--idle-timeout",
+                str(settings.PDF_EXTRACTION_WORKER_IDLE_SECONDS),
+                "--no-startup-sweep",
+            ],
+            cwd=settings.BASE_DIR,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=os.name != "nt",
+        )
+    except OSError as exc:
+        log_event(
+            logger, logging.ERROR, "pdf_index_worker_spawn_failed", error=exc, stage="worker_launch"
+        )
+        raise
+    log_event(
+        logger, logging.INFO, "pdf_index_worker_spawned", worker_pid=getattr(process, "pid", None)
     )
+    return process

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import queue
 import re
@@ -11,6 +12,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -24,6 +26,7 @@ from bitbucket_search.models import (
     PDFLocalPolicyState,
     RepositorySyncPhase,
 )
+from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
 from bitbucket_search.services.path_safety import has_disallowed_path_characters
 from bitbucket_search.services.repository_lock import repository_checkout_lock
 
@@ -37,6 +40,35 @@ _GIT_LFS_POINTER_VERSION = b"version https://git-lfs.github.com/spec/v1"
 _GIT_LFS_POINTER_OID = re.compile(rb"^oid sha256:[0-9a-f]{64}$", re.MULTILINE)
 _GIT_LFS_POINTER_SIZE = re.compile(rb"^size [0-9]+$", re.MULTILINE)
 _GIT_LFS_POINTER_MAX_BYTES = 8_192
+logger = get_logger("git")
+_GIT_COMMAND_OPERATIONS = frozenset(
+    {
+        "clone",
+        "fetch",
+        "merge",
+        "checkout",
+        "sparse-checkout",
+        "status",
+        "rev-parse",
+        "symbolic-ref",
+        "remote",
+        "check-ref-format",
+        "rev-list",
+        "ls-files",
+        "ls-tree",
+        "log",
+        "lfs",
+    }
+)
+
+
+def _git_command_operation(arguments: Sequence[str]) -> str:
+    """Select a fixed Git command label without exposing its arguments."""
+
+    position = 3 if len(arguments) > 1 and arguments[1] == "-C" else 1
+    if len(arguments) > position and arguments[position] in _GIT_COMMAND_OPERATIONS:
+        return arguments[position]
+    return "git_command"
 
 
 class RepositorySyncError(RuntimeError):
@@ -122,6 +154,9 @@ def _run_capture(
     heartbeat_callback: HeartbeatCallback | None = None,
     input_text: str | None = None,
 ) -> str:
+    started_at = time.monotonic()
+    operation = _git_command_operation(arguments)
+    log_event(logger, logging.DEBUG, "git_command_started", stage="capture", operation=operation)
     try:
         process = subprocess.Popen(
             list(arguments),
@@ -135,6 +170,15 @@ def _run_capture(
             close_fds=True,
         )
     except OSError as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "git_process_spawn_failed",
+            error=exc,
+            error_code=failure_code,
+            stage="capture",
+            operation=operation,
+        )
         raise RepositorySyncError(failure_code, failure_summary) from exc
 
     deadline = time.monotonic() + settings.BITBUCKET_GIT_TIMEOUT_SECONDS
@@ -164,6 +208,15 @@ def _run_capture(
         if process.poll() is None:
             process.kill()
         process.communicate()
+        log_event(
+            logger,
+            logging.ERROR,
+            "git_process_timeout",
+            error=exc,
+            operation=operation,
+            error_code=failure_code,
+            elapsed_ms=round((time.monotonic() - started_at) * 1000),
+        )
         raise RepositorySyncError(failure_code, failure_summary) from exc
     except BaseException:
         if process.poll() is None:
@@ -172,7 +225,24 @@ def _run_capture(
         raise
 
     if process.returncode != 0:
+        log_event(
+            logger,
+            logging.ERROR,
+            "git_process_failed",
+            error_code=failure_code,
+            operation=operation,
+            return_code=process.returncode,
+            elapsed_ms=round((time.monotonic() - started_at) * 1000),
+        )
         raise RepositorySyncError(failure_code, failure_summary)
+    log_event(
+        logger,
+        logging.DEBUG,
+        "git_command_completed",
+        stage="capture",
+        operation=operation,
+        elapsed_ms=round((time.monotonic() - started_at) * 1000),
+    )
     return stdout.strip()
 
 
@@ -189,6 +259,16 @@ def _run_streaming(
 ) -> None:
     """Run Git without a shell while emitting progress and silent-period heartbeats."""
 
+    started_at = time.monotonic()
+    operation = _git_command_operation(arguments)
+    log_event(
+        logger,
+        logging.DEBUG,
+        "git_command_started",
+        stage="streaming",
+        phase=phase,
+        operation=operation,
+    )
     try:
         process = subprocess.Popen(
             list(arguments),
@@ -202,6 +282,15 @@ def _run_streaming(
             close_fds=True,
         )
     except OSError as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "git_process_spawn_failed",
+            error=exc,
+            error_code=failure_code,
+            phase=phase,
+            operation=operation,
+        )
         raise RepositorySyncError(failure_code, failure_summary) from exc
 
     chunks: queue.Queue[str | None] = queue.Queue()
@@ -211,22 +300,44 @@ def _run_streaming(
         try:
             while chunk := process.stderr.read(256):
                 chunks.put(chunk)
+        except Exception as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "git_progress_read_failed",
+                error=exc,
+                operation=operation,
+                phase=phase,
+            )
         finally:
             chunks.put(None)
 
-    reader = threading.Thread(target=read_stderr, daemon=True)
-    reader.start()
-    deadline = time.monotonic() + settings.BITBUCKET_GIT_TIMEOUT_SECONDS
-    latest_progress = progress_start
-    buffer = ""
-    stream_finished = False
-    progress_callback(phase, latest_progress, status_message)
-
+    reader = None
+    reader_started = False
     try:
+        # A failed reader startup or first DB-backed heartbeat must still reap
+        # Git before releasing the repository's checkout lock.
+        reader = threading.Thread(target=copy_context().run, args=(read_stderr,), daemon=True)
+        reader.start()
+        reader_started = True
+        deadline = time.monotonic() + settings.BITBUCKET_GIT_TIMEOUT_SECONDS
+        latest_progress = progress_start
+        buffer = ""
+        stream_finished = False
+        progress_callback(phase, latest_progress, status_message)
         while process.poll() is None or not stream_finished:
             if time.monotonic() >= deadline:
                 process.kill()
                 process.wait()
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "git_process_timeout",
+                    error_code=failure_code,
+                    operation=operation,
+                    phase=phase,
+                    elapsed_ms=round((time.monotonic() - started_at) * 1000),
+                )
                 raise RepositorySyncError(failure_code, failure_summary)
             try:
                 chunk = chunks.get(timeout=1)
@@ -247,11 +358,31 @@ def _run_streaming(
         if process.poll() is None:
             process.kill()
         process.wait()
-        reader.join(timeout=2)
+        if reader_started:
+            reader.join(timeout=2)
 
     if process.returncode != 0:
+        log_event(
+            logger,
+            logging.ERROR,
+            "git_process_failed",
+            error_code=failure_code,
+            return_code=process.returncode,
+            phase=phase,
+            operation=operation,
+            elapsed_ms=round((time.monotonic() - started_at) * 1000),
+        )
         raise RepositorySyncError(failure_code, failure_summary)
     progress_callback(phase, progress_end, status_message)
+    log_event(
+        logger,
+        logging.DEBUG,
+        "git_command_completed",
+        stage="streaming",
+        phase=phase,
+        operation=operation,
+        elapsed_ms=round((time.monotonic() - started_at) * 1000),
+    )
 
 
 def _git_value(
@@ -340,6 +471,13 @@ def apply_document_checkout_policy(
     patterns = list(_DOCUMENT_PATTERNS)
     for relative_path in excluded_paths:
         patterns.extend(_literal_document_policy_patterns(relative_path))
+    log_event(
+        logger,
+        logging.DEBUG,
+        "git_document_policy_selected",
+        repository_id=repository.pk,
+        skipped_count=(len(patterns) - len(_DOCUMENT_PATTERNS)) // 2,
+    )
     _run_capture(
         ("git", "-C", str(target), "sparse-checkout", "set", "--no-cone", "--stdin"),
         failure_code="sparse_checkout_failed",
@@ -421,7 +559,8 @@ def _is_git_lfs_pointer(candidate: Path, *, size: int) -> bool:
         return False
     try:
         content = candidate.read_bytes()
-    except OSError:
+    except OSError as exc:
+        log_event(logger, logging.ERROR, "git_lfs_pointer_read_failed", error=exc)
         return False
     normalized = content.replace(b"\r\n", b"\n")
     return (
@@ -470,7 +609,8 @@ def _scan_documents(
                 continue
             try:
                 stat = candidate.stat(follow_symlinks=False)
-            except OSError:
+            except OSError as exc:
+                log_event(logger, logging.ERROR, "git_document_stat_failed", error=exc)
                 continue
             if _is_git_lfs_pointer(candidate, size=stat.st_size):
                 lfs_pointer_count += 1
@@ -480,6 +620,15 @@ def _scan_documents(
             else:
                 vsdx_count += 1
             document_bytes += stat.st_size
+    log_event(
+        logger,
+        logging.DEBUG,
+        "git_document_scan_completed",
+        pdf_count=pdf_count,
+        vsdx_count=vsdx_count,
+        byte_count=document_bytes,
+        count=lfs_pointer_count,
+    )
     return DocumentStats(pdf_count, vsdx_count, document_bytes), lfs_pointer_count
 
 
@@ -611,6 +760,13 @@ def _remove_staging_directory(staging_path: Path) -> None:
     resolved = staging_path.resolve(strict=False)
     if resolved.parent == temp_root and resolved.name.startswith("repository-"):
         shutil.rmtree(resolved, ignore_errors=True)
+        if resolved.exists():
+            log_event(
+                logger,
+                logging.ERROR,
+                "git_staging_cleanup_failed",
+                error_code="staging_cleanup_failed",
+            )
 
 
 def _clone(
@@ -663,6 +819,13 @@ def _clone(
         except RepositorySyncError as filtered_error:
             if filtered_error.code != "clone_failed":
                 raise
+            log_event(
+                logger,
+                logging.WARNING,
+                "git_clone_compatibility_fallback",
+                repository_id=repository.pk,
+                reason="filtered_clone_failed",
+            )
             _remove_staging_directory(staging)
             progress_callback(
                 RepositorySyncPhase.CLONING,
@@ -924,6 +1087,51 @@ def synchronize_repository(
 ) -> RepositorySyncResult:
     """Clone once or safely fast-forward an existing OWL-managed checkout."""
 
+    started_at = time.monotonic()
+    log_event(
+        logger,
+        logging.INFO,
+        "git_repository_sync_started",
+        repository_id=repository.pk,
+        operation=operation,
+    )
+    try:
+        with logging_context(repository_id=repository.pk):
+            result = _synchronize_repository(
+                repository, operation=operation, progress_callback=progress_callback
+            )
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "git_repository_sync_failed",
+            error=exc,
+            repository_id=repository.pk,
+            operation=operation,
+            error_code=exc.code if isinstance(exc, RepositorySyncError) else "git_sync_error",
+            elapsed_ms=round((time.monotonic() - started_at) * 1000),
+        )
+        raise
+    log_event(
+        logger,
+        logging.INFO,
+        "git_repository_sync_completed",
+        repository_id=repository.pk,
+        operation=operation,
+        pdf_count=result.documents.pdf_count,
+        vsdx_count=result.documents.vsdx_count,
+        byte_count=result.documents.document_bytes,
+        elapsed_ms=round((time.monotonic() - started_at) * 1000),
+    )
+    return result
+
+
+def _synchronize_repository(
+    repository: BitbucketRepository,
+    *,
+    operation: str,
+    progress_callback: ProgressCallback,
+) -> RepositorySyncResult:
     # Native document actions take this same cross-process lock without
     # waiting. Keeping it for the complete Git operation prevents a checkout
     # path from being replaced after OWL validates it but before the OS opens

@@ -10,6 +10,7 @@ from __future__ import annotations
 import errno
 import http.client
 import json
+import logging
 import socket
 import ssl
 import sys
@@ -18,7 +19,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from enum import StrEnum
+from functools import wraps
 from html.parser import HTMLParser
+from time import perf_counter
 from typing import Protocol
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit
 
@@ -29,6 +32,7 @@ from bookmark_manager.services.confluence_validation import (
     PageInputError,
     resolve_safe_addresses,
 )
+from bookmark_manager.services.logging_events import get_logger, log_event, logging_context
 
 DEFAULT_MAX_RESPONSE_BYTES = 1_048_576
 MAX_ALLOWED_RESPONSE_BYTES = 8_388_608
@@ -36,6 +40,63 @@ MAX_TIMEOUT_SECONDS = 60.0
 MAX_REDIRECTS = 3
 CHILD_PAGE_LIMIT = 50
 MAX_DESCENDANT_PAGES = 500
+logger = get_logger("confluence")
+
+
+def _logged_confluence_call(operation: str):
+    def decorate(function):
+        @wraps(function)
+        def invoke(self, *args, **kwargs):
+            started = perf_counter()
+            context = {"operation": operation}
+            invalid_input = False
+            if operation in {"get_page", "get_descendants"}:
+                page_id = args[0] if args else kwargs.get("page_id")
+                try:
+                    context["page_id"] = _normalize_requested_page_id(page_id)
+                except (PageInputError, TypeError, ValueError):
+                    invalid_input = True
+            elif operation == "find_page":
+                try:
+                    _required_text(
+                        args[1] if len(args) > 1 else kwargs.get("title"), max_length=500
+                    )
+                    _optional_text(args[0] if args else kwargs.get("space_key"), max_length=255)
+                except (TypeError, ValueError):
+                    invalid_input = True
+            log_event(logger, logging.INFO, "confluence_operation_requested", **context)
+            try:
+                with logging_context(**context):
+                    result = function(self, *args, **kwargs)
+            except Exception as error:
+                log_event(
+                    logger, logging.ERROR, "confluence_operation_failed", error=error, **context
+                )
+                raise
+            log_event(
+                logger,
+                logging.INFO
+                if result.ok
+                else (logging.WARNING if invalid_input else logging.ERROR),
+                "confluence_operation_completed" if result.ok else "confluence_operation_failed",
+                status=result.code.value
+                if isinstance(result.code, ConfluenceResultCode)
+                else "unsupported_response",
+                reason=result.error_kind.value
+                if isinstance(result.error_kind, ConfluenceErrorKind)
+                else None,
+                http_status=getattr(result, "http_status", None),
+                elapsed_ms=round((perf_counter() - started) * 1000),
+                count=len(result.pages)
+                if isinstance(result, ConfluenceDescendantsResult)
+                else None,
+                **context,
+            )
+            return result
+
+        return invoke
+
+    return decorate
 
 
 class ConfluenceResultCode(StrEnum):
@@ -235,7 +296,9 @@ class StdlibHttpTransport:
             target = f"{target}?{parsed.query}"
         addresses = self._addresses(request.origin)
         last_error: OSError | ssl.SSLError | None = None
-        for address in addresses:
+        for attempt, address in enumerate(addresses, start=1):
+            started = perf_counter()
+            log_event(logger, logging.DEBUG, "confluence_address_attempt", attempt=attempt)
             connection: http.client.HTTPConnection
             if request.origin.scheme == "https":
                 connection = _PinnedHTTPSConnection(
@@ -269,7 +332,20 @@ class StdlibHttpTransport:
                 headers = {name.casefold(): value for name, value in response.getheaders()}
                 return HttpResponse(status=response.status, headers=headers, body=body)
             except (OSError, ssl.SSLError) as exc:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "confluence_address_failed",
+                    error=exc,
+                    attempt=attempt,
+                    stage="transport",
+                    elapsed_ms=round((perf_counter() - started) * 1000),
+                )
                 last_error = exc
+                if attempt < len(addresses):
+                    log_event(
+                        logger, logging.DEBUG, "confluence_address_retry", attempt=attempt + 1
+                    )
             finally:
                 connection.close()
         if last_error is not None:
@@ -347,6 +423,7 @@ class ConfluenceAdapter:
             f"max_response_bytes={self.max_response_bytes!r})"
         )
 
+    @_logged_confluence_call("test_connection")
     def test_connection(self) -> ConfluenceResult:
         """Make one explicit logical GET and classify the sanitized outcome."""
 
@@ -374,6 +451,7 @@ class ConfluenceAdapter:
             http_status=response.status,
         )
 
+    @_logged_confluence_call("find_page")
     def find_page(self, space_key: str, title: str) -> ConfluenceResult:
         """Resolve one exact page title within the optional exact space key.
 
@@ -439,7 +517,14 @@ class ConfluenceAdapter:
                     _required_text(raw_page.get("id"), max_length=32)
                 )
                 exact_payloads[page_id] = raw_page
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as error:
+            log_event(
+                logger,
+                logging.ERROR,
+                "confluence_metadata_failed",
+                error=error,
+                stage="lookup_results",
+            )
             return _malformed_result()
 
         if not exact_payloads:
@@ -455,7 +540,14 @@ class ConfluenceAdapter:
                 raise ValueError("Page lookup title metadata is inconsistent.")
             if normalized_space_key and page.space_key != normalized_space_key:
                 raise ValueError("Page lookup space metadata is inconsistent.")
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as error:
+            log_event(
+                logger,
+                logging.ERROR,
+                "confluence_metadata_failed",
+                error=error,
+                stage="lookup_page",
+            )
             return _malformed_result()
         return ConfluenceResult(
             code=ConfluenceResultCode.SUCCESS,
@@ -464,6 +556,7 @@ class ConfluenceAdapter:
             http_status=response.status,
         )
 
+    @_logged_confluence_call("get_page")
     def get_page(self, page_id: str) -> ConfluenceResult:
         """Fetch and normalize one page and its ordered ancestor chain."""
 
@@ -491,7 +584,10 @@ class ConfluenceAdapter:
             return _malformed_result()
         try:
             page = _normalize_page(payload, normalized_page_id, self.origin)
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as error:
+            log_event(
+                logger, logging.ERROR, "confluence_metadata_failed", error=error, stage="page"
+            )
             return _malformed_result()
         return ConfluenceResult(
             code=ConfluenceResultCode.SUCCESS,
@@ -500,6 +596,7 @@ class ConfluenceAdapter:
             http_status=response.status,
         )
 
+    @_logged_confluence_call("get_descendants")
     def get_descendant_pages(self, page_id: str) -> ConfluenceDescendantsResult:
         """Load child pages recursively, with a fixed 500-page safety limit."""
 
@@ -556,7 +653,14 @@ class ConfluenceAdapter:
                             _required_text(raw_page.get("id"), max_length=32)
                         )
                         child = _normalize_page(raw_page, child_id, self.origin)
-                    except (KeyError, TypeError, ValueError):
+                    except (KeyError, TypeError, ValueError) as error:
+                        log_event(
+                            logger,
+                            logging.ERROR,
+                            "confluence_metadata_failed",
+                            error=error,
+                            stage="descendant_page",
+                        )
                         return _malformed_descendants_result()
                     if child.page_id in seen_page_ids:
                         return _malformed_descendants_result()
@@ -585,6 +689,15 @@ class ConfluenceAdapter:
     def _perform_get(self, initial_url: str) -> HttpResponse | ConfluenceResult:
         url = initial_url
         for redirect_count in range(MAX_REDIRECTS + 1):
+            started = perf_counter()
+            log_event(
+                logger,
+                logging.DEBUG,
+                "confluence_http_requested",
+                attempt=redirect_count + 1,
+                redirect_count=redirect_count,
+                timeout_seconds=self.timeout_seconds,
+            )
             request = HttpRequest(
                 url=url,
                 origin=self.origin,
@@ -599,22 +712,58 @@ class ConfluenceAdapter:
             )
             try:
                 response = self._transport.send(request)
-            except ResponseTooLargeError:
+            except ResponseTooLargeError as error:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "confluence_http_failed",
+                    error=error,
+                    reason="response_too_large",
+                    attempt=redirect_count + 1,
+                    elapsed_ms=round((perf_counter() - started) * 1000),
+                )
                 return ConfluenceResult(
                     code=ConfluenceResultCode.UNSUPPORTED_RESPONSE,
                     message="Confluence returned more data than OWL can safely inspect.",
                     error_kind=ConfluenceErrorKind.RESPONSE_TOO_LARGE,
                 )
-            except ssl.SSLError:
+            except ssl.SSLError as error:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "confluence_http_failed",
+                    error=error,
+                    reason="tls",
+                    attempt=redirect_count + 1,
+                    elapsed_ms=round((perf_counter() - started) * 1000),
+                )
                 return _unreachable_result(ConfluenceErrorKind.TLS)
-            except TimeoutError:
+            except TimeoutError as error:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "confluence_http_failed",
+                    error=error,
+                    reason="timeout",
+                    attempt=redirect_count + 1,
+                    elapsed_ms=round((perf_counter() - started) * 1000),
+                )
                 return _unreachable_result(ConfluenceErrorKind.TIMEOUT)
             except (
                 OriginResolutionError,
                 UnsafeRequestError,
                 OSError,
                 http.client.HTTPException,
-            ):
+            ) as error:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "confluence_http_failed",
+                    error=error,
+                    reason="connectivity",
+                    attempt=redirect_count + 1,
+                    elapsed_ms=round((perf_counter() - started) * 1000),
+                )
                 return _unreachable_result(ConfluenceErrorKind.CONNECTIVITY)
 
             if (
@@ -623,7 +772,22 @@ class ConfluenceAdapter:
                 or not 100 <= response.status <= 599
                 or not isinstance(response.body, bytes)
             ):
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "confluence_protocol_failed",
+                    reason="invalid_response_shape",
+                )
                 return _malformed_result()
+            log_event(
+                logger,
+                logging.DEBUG,
+                "confluence_http_completed",
+                http_status=response.status,
+                byte_count=len(response.body),
+                attempt=redirect_count + 1,
+                elapsed_ms=round((perf_counter() - started) * 1000),
+            )
             if len(response.body) > self.max_response_bytes:
                 return ConfluenceResult(
                     code=ConfluenceResultCode.UNSUPPORTED_RESPONSE,
@@ -663,6 +827,13 @@ class ConfluenceAdapter:
                     http_status=response.status,
                 )
             url = redirected_url
+            log_event(
+                logger,
+                logging.DEBUG,
+                "confluence_redirect_followed",
+                redirect_count=redirect_count + 1,
+                http_status=response.status,
+            )
         raise AssertionError("The bounded redirect loop must always return.")
 
 
@@ -759,7 +930,8 @@ def _retry_after_seconds(value: str | None) -> int | None:
 def _decode_object(body: bytes) -> dict[str, object] | None:
     try:
         decoded = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        log_event(logger, logging.ERROR, "confluence_json_failed", error=error, stage="decode")
         return None
     if not isinstance(decoded, dict):
         return None

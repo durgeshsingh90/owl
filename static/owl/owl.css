@@ -3288,9 +3288,196 @@ body[data-theme="dark"] .notification-center {
 }
 
 .notification-center__background {
-    padding: 0.9rem 1.1rem 1rem;
+    padding: 0.7rem 1.1rem;
     border-bottom: 1px solid var(--notification-line);
     background: color-mix(in srgb, var(--notification-surface) 74%, transparent);
+}
+
+.notification-center__background-toggle {
+    min-height: 24px;
+    cursor: pointer;
+    list-style: none;
+}
+
+.notification-center__background-toggle::-webkit-details-marker,
+.notification-repository__summary::-webkit-details-marker {
+    display: none;
+}
+
+.notification-center__background-toggle::after,
+.notification-repository__summary::after {
+    width: 6px;
+    height: 6px;
+    flex: 0 0 6px;
+    border-right: 1px solid currentColor;
+    border-bottom: 1px solid currentColor;
+    color: var(--notification-muted);
+    content: "";
+    transform: rotate(45deg) translateY(-2px);
+}
+
+.notification-center__background[open] > summary::after,
+.notification-repository__details[open] > summary::after {
+    transform: rotate(225deg) translate(-1px, -1px);
+}
+
+.notification-center__background-toggle > .notification-center__background-label {
+    flex: 1;
+    color: var(--notification-ink);
+    font-size: 12px;
+    font-weight: 750;
+}
+
+.notification-center__repositories {
+    padding: 0.8rem 0.85rem 0.55rem;
+    border-bottom: 1px solid var(--notification-line);
+}
+
+.notification-center__repositories > .notification-center__section-heading {
+    padding: 0 0.25rem 0.45rem;
+}
+
+.notification-center__repository-message {
+    margin: 0;
+    padding: 0.35rem 0.25rem;
+    color: var(--notification-muted);
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.notification-center__repository-list {
+    max-height: min(240px, 35vh);
+    margin: 0;
+    padding: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    list-style: none;
+    scrollbar-width: thin;
+    scrollbar-gutter: stable;
+}
+
+.notification-center__repository-list[hidden],
+.notification-center__repository-message[hidden],
+.notification-repository__link[hidden] {
+    display: none;
+}
+
+.notification-repository + .notification-repository {
+    border-top: 1px solid var(--notification-line);
+}
+
+.notification-repository__summary {
+    display: grid;
+    min-height: 36px;
+    grid-template-columns: 16px minmax(0, 1fr) minmax(0, auto) auto 8px;
+    align-items: center;
+    gap: 7px;
+    padding: 0.35rem 0.25rem;
+    border-radius: 5px;
+    cursor: pointer;
+    list-style: none;
+}
+
+.notification-repository__summary:hover,
+.notification-repository__details[open] > summary {
+    background: var(--notification-surface);
+}
+
+.notification-repository__summary:focus-visible,
+.notification-center__background-toggle:focus-visible,
+.notification-repository__link:focus-visible {
+    outline: 2px solid var(--notification-accent);
+    outline-offset: -2px;
+}
+
+.notification-repository__icon {
+    display: grid;
+    width: 15px;
+    height: 15px;
+    place-items: center;
+    color: var(--notification-muted);
+    font-size: 14px;
+    font-weight: 800;
+    line-height: 1;
+}
+
+.notification-repository[data-tone="success"] .notification-repository__icon {
+    color: var(--notification-success);
+}
+
+.notification-repository[data-tone="error"] .notification-repository__icon,
+.notification-repository[data-tone="error"] .notification-repository__status {
+    color: var(--notification-danger);
+}
+
+.notification-repository[data-tone="progress"] .notification-repository__icon {
+    width: 12px;
+    height: 12px;
+    border: 1.5px solid var(--notification-line);
+    border-top-color: var(--notification-accent);
+    border-radius: 50%;
+    animation: notification-spin 0.8s linear infinite;
+}
+
+.notification-center__repository-list[data-stale="true"] .notification-repository__icon {
+    animation: none;
+}
+
+.notification-repository__name,
+.notification-repository__status {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.notification-repository__name {
+    color: var(--notification-ink);
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.notification-repository__status {
+    max-width: 85px;
+    color: var(--notification-muted);
+    font-size: 10px;
+}
+
+.notification-repository__time {
+    max-width: 68px;
+    color: var(--notification-muted);
+    font-size: 9px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+.notification-repository__body {
+    padding: 0.2rem 0.4rem 0.65rem 27px;
+    overflow-wrap: anywhere;
+    color: var(--notification-muted);
+    font-size: 10px;
+    line-height: 1.5;
+}
+
+.notification-repository__full-name {
+    display: block;
+    color: var(--notification-ink);
+    font-size: 11px;
+}
+
+.notification-repository__detail {
+    margin: 0.25rem 0;
+}
+
+.notification-repository__date {
+    margin: 0.15rem 0;
+}
+
+.notification-repository__link {
+    display: inline-block;
+    margin: 0.35rem 0.85rem 0 0;
+    color: var(--notification-accent);
+    text-underline-offset: 3px;
 }
 
 .notification-center__section-heading {
@@ -3377,9 +3564,9 @@ body[data-theme="dark"] .notification-center {
 
 .notification-center__schedule {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.55rem;
-    margin: 0.75rem 0 0;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.45rem;
+    margin: 0.65rem 0 0.15rem;
 }
 
 .notification-center__schedule[hidden] {
@@ -3387,11 +3574,15 @@ body[data-theme="dark"] .notification-center {
 }
 
 .notification-center__schedule > div {
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
     min-width: 0;
-    padding: 0.58rem 0.65rem;
-    border: 1px solid var(--notification-line);
-    border-radius: 9px;
-    background: var(--notification-bg);
+    align-items: baseline;
+    gap: 0.75rem;
+}
+
+.notification-center__schedule > div[hidden] {
+    display: none;
 }
 
 .notification-center__schedule dt,
@@ -3408,7 +3599,6 @@ body[data-theme="dark"] .notification-center {
 }
 
 .notification-center__schedule dd {
-    margin-top: 3px;
     overflow-wrap: anywhere;
     color: var(--notification-ink);
     font-size: 10px;
@@ -3599,5 +3789,622 @@ a.notification-card__title:hover {
 
     .notification-center__schedule {
         grid-template-columns: minmax(0, 1fr);
+    }
+
+    .notification-repository__summary {
+        min-height: 44px;
+        gap: 5px;
+    }
+
+    .notification-repository__status {
+        max-width: 70px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .notification-repository[data-tone="progress"] .notification-repository__icon {
+        animation: none;
+    }
+}
+
+/* Home: compact Git-history rankings, isolated from bookmark analytics. */
+.knowledge-git-activity {
+    --git-activity-accent: var(--knowledge-blue);
+    min-width: 0;
+}
+
+.knowledge-git-activity .knowledge-git-activity__heading {
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 0.65rem;
+}
+
+.knowledge-git-activity .knowledge-git-activity__filters {
+    max-width: 100%;
+    flex-wrap: wrap;
+    overflow: visible;
+}
+
+.knowledge-git-activity .knowledge-git-activity__filters a {
+    display: grid;
+    min-height: 36px;
+    align-items: center;
+}
+
+.knowledge-git-activity__summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.9rem;
+}
+
+.knowledge-git-activity__summary p,
+.knowledge-git-activity__caption,
+.knowledge-git-activity__coverage,
+.knowledge-git-activity__note {
+    margin: 0;
+    color: var(--knowledge-muted);
+    font-size: 0.69rem;
+    line-height: 1.55;
+}
+
+.knowledge-git-activity__summary p > span {
+    padding-inline: 0.3rem;
+}
+
+.knowledge-git-activity__metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.65rem;
+    margin: 0 0 1rem;
+}
+
+.knowledge-git-activity__metrics > div {
+    min-width: 0;
+    padding: 0.8rem 1rem;
+    border: 1px solid var(--knowledge-line);
+    border-radius: 12px;
+    background: var(--knowledge-surface);
+}
+
+.knowledge-git-activity__metrics dt {
+    color: var(--knowledge-muted);
+    font-size: 0.7rem;
+    font-weight: 650;
+    overflow-wrap: anywhere;
+}
+
+.knowledge-git-activity__metrics dd {
+    margin: 0.3rem 0 0;
+    color: var(--knowledge-ink);
+    font-size: 1.65rem;
+    font-weight: 700;
+    line-height: 1.1;
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+}
+
+.knowledge-git-activity__rankings {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.85rem;
+    align-items: start;
+}
+
+.knowledge-git-activity__ranking {
+    min-width: 0;
+    overflow: hidden;
+    padding: 1rem;
+    border: 1px solid var(--knowledge-line);
+    border-radius: 14px;
+    background: var(--knowledge-surface);
+}
+
+.knowledge-git-activity__ranking--repositories { --git-activity-accent: var(--knowledge-green); }
+.knowledge-git-activity__ranking--folders { --git-activity-accent: #a68be0; }
+
+.knowledge-git-activity__panel-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.knowledge-git-activity__panel-heading h3 {
+    min-width: 0;
+    margin: 0;
+    color: var(--knowledge-ink);
+    font-size: 0.83rem;
+    font-weight: 740;
+    overflow-wrap: anywhere;
+}
+
+.knowledge-git-activity__panel-heading > span {
+    flex: 0 0 auto;
+    color: var(--knowledge-muted);
+    font-size: 0.62rem;
+}
+
+.knowledge-git-activity__caption {
+    margin-top: 0.2rem;
+    font-size: 0.65rem;
+}
+
+.knowledge-git-activity__list {
+    display: grid;
+    gap: 0.75rem;
+    margin: 1rem 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.knowledge-git-activity__list > li {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: 1.1rem minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.2rem 0.45rem;
+}
+
+.knowledge-git-activity__rank {
+    color: var(--knowledge-muted);
+    font-size: 0.66rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.knowledge-git-activity__identity {
+    min-width: 0;
+}
+
+.knowledge-git-activity__identity strong,
+.knowledge-git-activity__identity a,
+.knowledge-git-activity__identity small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.knowledge-git-activity__identity strong,
+.knowledge-git-activity__identity a {
+    color: var(--knowledge-ink);
+    font-size: 0.72rem;
+    font-weight: 650;
+    text-decoration: none;
+}
+
+.knowledge-git-activity__identity a:hover {
+    color: var(--knowledge-accent-soft);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+
+.knowledge-git-activity__identity small {
+    margin-top: 0.15rem;
+    color: var(--knowledge-muted);
+    font-size: 0.61rem;
+}
+
+.knowledge-git-activity__count {
+    color: var(--knowledge-ink);
+    font-size: 0.75rem;
+    font-weight: 740;
+    font-variant-numeric: tabular-nums;
+}
+
+.knowledge-git-activity__bar {
+    -webkit-appearance: none;
+    appearance: none;
+    display: block;
+    grid-column: 2 / -1;
+    width: 100%;
+    height: 3px;
+    margin-top: 0.2rem;
+    overflow: hidden;
+    border: 0;
+    border-radius: 99px;
+    background: color-mix(in srgb, var(--git-activity-accent) 12%, transparent);
+}
+
+.knowledge-git-activity__bar::-webkit-progress-bar {
+    border-radius: inherit;
+    background: color-mix(in srgb, var(--git-activity-accent) 12%, transparent);
+}
+
+.knowledge-git-activity__bar::-webkit-progress-value {
+    border-radius: inherit;
+    background: var(--git-activity-accent);
+}
+
+.knowledge-git-activity__bar::-moz-progress-bar {
+    border-radius: inherit;
+    background: var(--git-activity-accent);
+}
+
+.knowledge-git-activity__list .knowledge-git-activity__list-empty {
+    display: block;
+    padding-block: 1rem;
+    color: var(--knowledge-muted);
+    font-size: 0.73rem;
+}
+
+.knowledge-git-activity__empty {
+    display: grid;
+    gap: 0.4rem;
+    justify-items: center;
+    padding: 1.75rem 1rem;
+    border: 1px dashed var(--knowledge-line);
+    border-radius: 14px;
+    background: var(--knowledge-surface);
+    text-align: center;
+}
+
+.knowledge-git-activity__empty > span {
+    color: var(--knowledge-blue);
+    font-size: 1.4rem;
+}
+
+.knowledge-git-activity__empty strong {
+    color: var(--knowledge-ink);
+    font-size: 0.86rem;
+}
+
+.knowledge-git-activity__empty p {
+    max-width: 34rem;
+    margin: 0;
+    color: var(--knowledge-muted);
+    font-size: 0.74rem;
+}
+
+.knowledge-git-activity__empty a {
+    padding: 0.45rem 0.6rem;
+    color: var(--knowledge-accent-soft);
+    font-size: 0.74rem;
+    font-weight: 700;
+    text-decoration: none;
+}
+
+.knowledge-git-activity__coverage,
+.knowledge-git-activity__note {
+    margin-top: 0.8rem;
+    overflow-wrap: anywhere;
+}
+
+.knowledge-git-activity__coverage + .knowledge-git-activity__note {
+    margin-top: 0.3rem;
+}
+
+.knowledge-git-activity a:focus-visible {
+    outline: 2px solid var(--knowledge-accent-soft);
+    outline-offset: 3px;
+}
+
+@media (max-width: 1120px) and (min-width: 901px), (max-width: 760px) {
+    .knowledge-git-activity__rankings {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 620px) {
+    .knowledge-git-activity .knowledge-git-activity__heading {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .knowledge-git-activity .knowledge-git-activity__filters {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .knowledge-git-activity .knowledge-git-activity__filters a {
+        min-height: 40px;
+        text-align: center;
+    }
+
+    .knowledge-git-activity__metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0.55rem;
+    }
+
+    .knowledge-git-activity__ranking {
+        padding: 0.9rem;
+    }
+
+    .knowledge-git-activity__identity strong,
+    .knowledge-git-activity__identity a {
+        font-size: 0.77rem;
+    }
+}
+
+/* Home: saved Confluence writer/editor activity, independent of Git rankings. */
+.knowledge-bookmark-people {
+    --bookmark-people-accent: var(--knowledge-accent-soft);
+    min-width: 0;
+}
+
+.knowledge-bookmark-people .knowledge-bookmark-people__heading {
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 0.65rem;
+}
+
+.knowledge-bookmark-people .knowledge-bookmark-people__filters {
+    max-width: 100%;
+    flex-wrap: wrap;
+    overflow: visible;
+}
+
+.knowledge-bookmark-people .knowledge-bookmark-people__filters a {
+    display: grid;
+    min-height: 36px;
+    align-items: center;
+}
+
+.knowledge-bookmark-people__summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.9rem;
+}
+
+.knowledge-bookmark-people__summary p,
+.knowledge-bookmark-people__caption,
+.knowledge-bookmark-people__coverage,
+.knowledge-bookmark-people__note {
+    margin: 0;
+    color: var(--knowledge-muted);
+    font-size: 0.69rem;
+    line-height: 1.55;
+}
+
+.knowledge-bookmark-people__summary p > span {
+    padding-inline: 0.3rem;
+}
+
+.knowledge-bookmark-people__metrics {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.65rem;
+    margin: 0 0 1rem;
+}
+
+.knowledge-bookmark-people__metrics > div {
+    min-width: 0;
+    padding: 0.8rem 1rem;
+    border: 1px solid var(--knowledge-line);
+    border-radius: 12px;
+    background: var(--knowledge-surface);
+}
+
+.knowledge-bookmark-people__metrics dt {
+    color: var(--knowledge-muted);
+    font-size: 0.7rem;
+    font-weight: 650;
+    overflow-wrap: anywhere;
+}
+
+.knowledge-bookmark-people__metrics dd {
+    margin: 0.3rem 0 0;
+    color: var(--knowledge-ink);
+    font-size: 1.65rem;
+    font-weight: 700;
+    line-height: 1.1;
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+}
+
+.knowledge-bookmark-people__rankings {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.85rem;
+    align-items: start;
+}
+
+.knowledge-bookmark-people__ranking {
+    min-width: 0;
+    overflow: hidden;
+    padding: 1rem;
+    border: 1px solid var(--knowledge-line);
+    border-radius: 14px;
+    background: var(--knowledge-surface);
+}
+
+.knowledge-bookmark-people__ranking--updated {
+    --bookmark-people-accent: var(--knowledge-green);
+}
+
+.knowledge-bookmark-people__panel-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.knowledge-bookmark-people__panel-heading h3 {
+    min-width: 0;
+    margin: 0;
+    color: var(--knowledge-ink);
+    font-size: 0.83rem;
+    font-weight: 740;
+    overflow-wrap: anywhere;
+}
+
+.knowledge-bookmark-people__panel-heading > span {
+    flex: 0 0 auto;
+    color: var(--knowledge-muted);
+    font-size: 0.62rem;
+}
+
+.knowledge-bookmark-people__caption {
+    margin-top: 0.2rem;
+    font-size: 0.65rem;
+}
+
+.knowledge-bookmark-people__list {
+    display: grid;
+    gap: 0.8rem;
+    margin: 1rem 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.knowledge-bookmark-people__list > li {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: 1.1rem minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.2rem 0.45rem;
+}
+
+.knowledge-bookmark-people__rank {
+    color: var(--knowledge-muted);
+    font-size: 0.66rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.knowledge-bookmark-people__name {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--knowledge-ink);
+    font-size: 0.74rem;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.knowledge-bookmark-people__count {
+    color: var(--knowledge-ink);
+    font-size: 0.75rem;
+    font-weight: 740;
+    font-variant-numeric: tabular-nums;
+}
+
+.knowledge-bookmark-people__bar {
+    -webkit-appearance: none;
+    appearance: none;
+    display: block;
+    grid-column: 2 / -1;
+    width: 100%;
+    height: 3px;
+    margin-top: 0.2rem;
+    overflow: hidden;
+    border: 0;
+    border-radius: 99px;
+    background: color-mix(in srgb, var(--bookmark-people-accent) 12%, transparent);
+}
+
+.knowledge-bookmark-people__bar::-webkit-progress-bar {
+    border-radius: inherit;
+    background: color-mix(in srgb, var(--bookmark-people-accent) 12%, transparent);
+}
+
+.knowledge-bookmark-people__bar::-webkit-progress-value {
+    border-radius: inherit;
+    background: var(--bookmark-people-accent);
+}
+
+.knowledge-bookmark-people__bar::-moz-progress-bar {
+    border-radius: inherit;
+    background: var(--bookmark-people-accent);
+}
+
+.knowledge-bookmark-people__list .knowledge-bookmark-people__list-empty {
+    display: block;
+    padding-block: 1rem;
+    color: var(--knowledge-muted);
+    font-size: 0.73rem;
+}
+
+.knowledge-bookmark-people__empty {
+    display: grid;
+    gap: 0.4rem;
+    justify-items: center;
+    padding: 1.75rem 1rem;
+    border: 1px dashed var(--knowledge-line);
+    border-radius: 14px;
+    background: var(--knowledge-surface);
+    text-align: center;
+}
+
+.knowledge-bookmark-people__empty > span {
+    color: var(--knowledge-accent-soft);
+    font-size: 1.4rem;
+}
+
+.knowledge-bookmark-people__empty strong {
+    color: var(--knowledge-ink);
+    font-size: 0.86rem;
+}
+
+.knowledge-bookmark-people__empty p {
+    max-width: 34rem;
+    margin: 0;
+    color: var(--knowledge-muted);
+    font-size: 0.74rem;
+}
+
+.knowledge-bookmark-people__empty a {
+    padding: 0.45rem 0.6rem;
+    color: var(--knowledge-accent-soft);
+    font-size: 0.74rem;
+    font-weight: 700;
+    text-decoration: none;
+}
+
+.knowledge-bookmark-people__coverage,
+.knowledge-bookmark-people__note {
+    margin-top: 0.8rem;
+    overflow-wrap: anywhere;
+}
+
+.knowledge-bookmark-people__coverage + .knowledge-bookmark-people__note {
+    margin-top: 0.3rem;
+}
+
+.knowledge-bookmark-people a:focus-visible {
+    outline: 2px solid var(--knowledge-accent-soft);
+    outline-offset: 3px;
+}
+
+@media (max-width: 760px) {
+    .knowledge-bookmark-people__rankings {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 620px) {
+    .knowledge-bookmark-people .knowledge-bookmark-people__heading {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .knowledge-bookmark-people .knowledge-bookmark-people__filters {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .knowledge-bookmark-people .knowledge-bookmark-people__filters a {
+        min-height: 40px;
+        text-align: center;
+    }
+
+    .knowledge-bookmark-people__metrics {
+        gap: 0.45rem;
+    }
+
+    .knowledge-bookmark-people__metrics > div {
+        padding: 0.75rem 0.65rem;
+    }
+
+    .knowledge-bookmark-people__ranking {
+        padding: 0.9rem;
+    }
+
+    .knowledge-bookmark-people__name {
+        font-size: 0.77rem;
     }
 }

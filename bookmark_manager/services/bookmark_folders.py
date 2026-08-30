@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from bookmark_manager.models import Bookmark, BookmarkFolder
+from bookmark_manager.services.logging_events import logged_operation
 
 
 class BookmarkFolderError(ValueError):
@@ -23,6 +25,7 @@ class BookmarkFolderMoveResult:
     updated_count: int
 
 
+@logged_operation("create_folder", expected_errors=(ValidationError,))
 @transaction.atomic
 def create_bookmark_folder(*, name: str) -> BookmarkFolder:
     """Create one flat manual folder with a normalized, case-insensitive identity."""
@@ -32,6 +35,10 @@ def create_bookmark_folder(*, name: str) -> BookmarkFolder:
     return folder
 
 
+@logged_operation(
+    "move_to_folder",
+    expected_errors=(BookmarkFolderError, Bookmark.DoesNotExist, BookmarkFolder.DoesNotExist),
+)
 @transaction.atomic
 def move_bookmarks_to_folder(
     bookmarks_or_pks: Iterable[Bookmark | int],
@@ -64,6 +71,7 @@ def move_bookmark_to_folder(
     return move_bookmarks_to_folder((bookmark_or_pk,), folder_or_pk)
 
 
+@logged_operation("unfile_bookmarks", expected_errors=(BookmarkFolderError, Bookmark.DoesNotExist))
 @transaction.atomic
 def unfile_bookmarks(
     bookmarks_or_pks: Iterable[Bookmark | int],

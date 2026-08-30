@@ -355,15 +355,22 @@ def test_bookmark_save_logs_safe_console_progress(configured_profile, caplog):
         )
     )
 
-    with caplog.at_level(logging.INFO, logger="owl.bookmarks"):
-        result = save_bookmark_input(pasted_url, client_factory=lambda _profile: client)
+    logger = logging.getLogger("owl.bookmarks")
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.DEBUG, logger="owl.bookmarks"):
+            result = save_bookmark_input(pasted_url, client_factory=lambda _profile: client)
+    finally:
+        logger.removeHandler(caplog.handler)
 
     assert result.bookmark.page_text == page_text
-    assert "Confluence page identified page_id=300 input_kind=legacy_url" in caplog.text
-    assert "Fetching selected Confluence page page_id=300 descendants=false" in caplog.text
-    assert "ancestors=2" in caplog.text
-    assert f"page_text_characters={len(page_text)}" in caplog.text
-    assert "Bookmark save completed page_id=300" in caplog.text
+    assert (
+        "event=bookmark_page_identified operation=save page_id=300 reason=legacy_url" in caplog.text
+    )
+    assert "event=bookmark_metadata_requested operation=save page_id=300" in caplog.text
+    assert "event=bookmark_metadata_loaded operation=save page_id=300 count=2" in caplog.text
+    assert "event=bookmark_action_completed" in caplog.text
+    assert f"bookmark_id={result.bookmark.pk} status=created" in caplog.text
     assert pasted_url not in caplog.text
     assert page_text not in caplog.text
     assert SYNTHETIC_PAT not in caplog.text

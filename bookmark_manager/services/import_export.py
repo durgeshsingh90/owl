@@ -11,10 +11,13 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import logging
 import re
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
+from functools import wraps
 from pathlib import PurePosixPath
 from urllib.parse import parse_qs, parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
 
@@ -47,8 +50,10 @@ from bookmark_manager.services.confluence_validation import (
     parse_page_input,
     parse_page_lookup_input,
 )
+from bookmark_manager.services.logging_events import get_logger, log_event, logging_context
 from core.logging import redact_log_text
 
+logger = get_logger("import_export")
 DOCUMENT_TYPE = "owl.bookmark-export"
 EXPORT_SCHEMA_VERSION = 1
 MAX_IMPORT_BYTES = 10 * 1024 * 1024
@@ -173,6 +178,62 @@ class _PreparedJsonRecord:
     legacy_order: tuple[datetime, int]
 
 
+def _logged_transfer(operation: str):
+    """Observe I/O boundaries without inspecting imported or exported content."""
+
+    def decorate(function):
+        @wraps(function)
+        def observed(*args, **kwargs):
+            started = time.monotonic()
+            with logging_context(operation=operation):
+                log_event(logger, logging.INFO, "bookmark_transfer_started")
+                try:
+                    result = function(*args, **kwargs)
+                except ImportDocumentError as exc:
+                    log_event(
+                        logger,
+                        logging.WARNING,
+                        "bookmark_transfer_rejected",
+                        error=exc,
+                        reason="invalid_document",
+                        elapsed_ms=round((time.monotonic() - started) * 1000),
+                    )
+                    raise
+                except Exception as exc:
+                    log_event(
+                        logger,
+                        logging.ERROR,
+                        "bookmark_transfer_failed",
+                        error=exc,
+                        elapsed_ms=round((time.monotonic() - started) * 1000),
+                    )
+                    raise
+                context = {}
+                if isinstance(result, BookmarkImportResult):
+                    context = {
+                        "run_id": result.run.pk,
+                        "status": result.run.status,
+                        "processed_count": result.run.processed_records,
+                        "imported_count": result.imported_records,
+                        "skipped_count": result.skipped_records,
+                        "failed_count": result.failed_records,
+                    }
+                elif isinstance(result, dict):
+                    context = {"count": result["record_count"]}
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "bookmark_transfer_completed",
+                    elapsed_ms=round((time.monotonic() - started) * 1000),
+                    **context,
+                )
+                return result
+
+        return observed
+
+    return decorate
+
+
 def export_bookmarks_document(*, generated_at: datetime | None = None) -> dict[str, object]:
     """Return a complete versioned bookmark export containing no configuration.
 
@@ -183,8 +244,14 @@ def export_bookmarks_document(*, generated_at: datetime | None = None) -> dict[s
 
     generation_time = generated_at or timezone.now()
     if not isinstance(generation_time, datetime) or timezone.is_naive(generation_time):
+        log_event(logger, logging.WARNING, "bookmark_export_invalid_time")
         raise ValueError("The export generation time must include a timezone.")
+    return _export_bookmarks_document(generation_time)
 
+
+@_logged_transfer("export_document")
+def _export_bookmarks_document(generation_time: datetime) -> dict[str, object]:
+    log_event(logger, logging.DEBUG, "bookmark_export_selection_started")
     nodes = {node.pk: node for node in ConfluencePageNode.objects.all()}
     bookmarks = list(Bookmark.objects.prefetch_related("tags").order_by("pk"))
     records = [_export_record(bookmark, nodes) for bookmark in bookmarks]
@@ -205,14 +272,22 @@ def export_bookmarks_document(*, generated_at: datetime | None = None) -> dict[s
 def export_bookmarks_json(*, generated_at: datetime | None = None, indent: int = 2) -> str:
     """Serialize a current export as stable UTF-8-compatible JSON text."""
 
-    return json.dumps(
-        export_bookmarks_document(generated_at=generated_at),
-        ensure_ascii=False,
-        indent=indent,
-        sort_keys=True,
+    document = export_bookmarks_document(generated_at=generated_at)
+    try:
+        serialized = json.dumps(document, ensure_ascii=False, indent=indent, sort_keys=True)
+    except Exception as exc:
+        log_event(logger, logging.ERROR, "bookmark_export_serialization_failed", error=exc)
+        raise
+    log_event(
+        logger,
+        logging.DEBUG,
+        "bookmark_export_serialized",
+        count=document["record_count"],
     )
+    return serialized
 
 
+@_logged_transfer("import_json")
 def import_bookmarks_document(
     payload: bytes | str | Mapping[str, object] | Sequence[object],
     *,
@@ -266,6 +341,15 @@ def import_bookmarks_document(
         status=BookmarkImportStatus.RUNNING,
         started_at=import_time,
     )
+    log_event(
+        logger,
+        logging.INFO,
+        "bookmark_import_run_created",
+        run_id=run.pk,
+        count=len(records),
+        byte_count=len(source_bytes),
+        stage="offline_restore" if current_owl_export else "legacy_merge",
+    )
 
     saver = bookmark_saver or save_bookmark_input
     load_profile = profile_loader or get_active_profile
@@ -279,7 +363,15 @@ def import_bookmarks_document(
             profile_loaded = True
             try:
                 profile = load_profile()
-            except ConfigurationUnavailable:
+            except ConfigurationUnavailable as exc:
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "bookmark_import_profile_unavailable",
+                    error=exc,
+                    run_id=run.pk,
+                    reason="offline_merge_when_possible",
+                )
                 profile_error = "Connect Confluence to retrieve this JSON record from its Page ID."
         return profile
 
@@ -291,7 +383,15 @@ def import_bookmarks_document(
         except ImportRecordError as exc:
             normalized_record = None
             normalization_error = str(exc)
-        except Exception:
+        except Exception as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "bookmark_import_normalization_failed",
+                error=exc,
+                run_id=run.pk,
+                record_number=record_number,
+            )
             normalized_record = None
             normalization_error = "The record could not be normalized safely."
         else:
@@ -373,10 +473,19 @@ def import_bookmarks_document(
                     )
                     if can_fetch:
                         try:
-                            save_result = saver(save_input)
+                            with logging_context(run_id=run.pk, record_number=item.record_number):
+                                save_result = saver(save_input)
                         except BookmarkActionError as exc:
                             if exc.code != "not_found":
                                 raise
+                            log_event(
+                                logger,
+                                logging.WARNING,
+                                "bookmark_import_deleted_reference_fallback",
+                                run_id=run.pk,
+                                record_number=item.record_number,
+                                reason="remote_not_found",
+                            )
                             if not page_id:
                                 raise ImportRecordError(exc.message) from exc
                             not_found_profile = loaded_profile or active_profile()
@@ -454,22 +563,27 @@ def import_bookmarks_document(
                 page_id,
                 str(exc),
                 source_url=item.source_url,
+                error=exc,
             )
-        except IntegrityError:
+        except IntegrityError as exc:
             _record_failure(
                 run,
                 item.record_number,
                 page_id,
                 "The record conflicts with existing bookmark data.",
                 source_url=item.source_url,
+                error=exc,
+                error_code="database_conflict",
             )
-        except Exception:
+        except Exception as exc:
             _record_failure(
                 run,
                 item.record_number,
                 page_id,
                 "The record could not be imported safely.",
                 source_url=item.source_url,
+                error=exc,
+                error_code="record_processing_failed",
             )
         else:
             if created:
@@ -494,6 +608,7 @@ def import_bookmarks_document(
     return BookmarkImportResult(run=run)
 
 
+@_logged_transfer("import_text")
 def import_bookmarks_text(
     payload: bytes | str,
     *,
@@ -537,6 +652,15 @@ def import_bookmarks_text(
         status=BookmarkImportStatus.RUNNING,
         started_at=import_time,
     )
+    log_event(
+        logger,
+        logging.INFO,
+        "bookmark_import_run_created",
+        run_id=run.pk,
+        count=len(urls),
+        byte_count=len(source_bytes),
+        stage="text_urls",
+    )
     saver = bookmark_saver or save_bookmark_input
     load_profile = profile_loader or get_active_profile
     profile_loaded = False
@@ -556,7 +680,15 @@ def import_bookmarks_text(
                     profile_loaded = True
                     try:
                         profile = load_profile()
-                    except ConfigurationUnavailable:
+                    except ConfigurationUnavailable as exc:
+                        log_event(
+                            logger,
+                            logging.WARNING,
+                            "bookmark_import_profile_unavailable",
+                            error=exc,
+                            run_id=run.pk,
+                            reason="confluence_profile_required",
+                        )
                         profile_error = (
                             "Connect Confluence before importing Confluence URLs from text."
                         )
@@ -588,10 +720,19 @@ def import_bookmarks_text(
             elif truncated:
                 raise ImportRecordError("Incomplete or truncated URL.")
             try:
-                result = saver(save_input)
+                with logging_context(run_id=run.pk, record_number=record_number):
+                    result = saver(save_input)
             except BookmarkActionError as exc:
                 if exc.code != "not_found" or not page_id or profile is None:
                     raise
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "bookmark_import_deleted_reference_fallback",
+                    run_id=run.pk,
+                    record_number=record_number,
+                    reason="remote_not_found",
+                )
                 deleted_record = _minimal_not_found_record(
                     page_id=page_id,
                     source_url=url,
@@ -613,6 +754,7 @@ def import_bookmarks_text(
                 page_id,
                 f"Incomplete Confluence URL: {exc}",
                 source_url=url,
+                error=exc,
             )
         except (BookmarkActionError, ImportRecordError) as exc:
             _record_failure(
@@ -621,14 +763,17 @@ def import_bookmarks_text(
                 page_id,
                 str(exc),
                 source_url=url,
+                error=exc,
             )
-        except Exception:
+        except Exception as exc:
             _record_failure(
                 run,
                 record_number,
                 page_id,
                 "The bookmark could not be saved.",
                 source_url=url,
+                error=exc,
+                error_code="record_processing_failed",
             )
         else:
             created = (
@@ -2118,17 +2263,40 @@ def _record_failure(
     reason: str,
     *,
     source_url: object = "",
+    error: BaseException | None = None,
+    error_code: str = "record_rejected",
 ) -> None:
-    BookmarkImportFailure.objects.update_or_create(
-        import_run=run,
+    # Emit first: a failing database must not erase the original failure evidence.
+    log_event(
+        logger,
+        logging.ERROR,
+        "bookmark_import_record_failed",
+        error=error,
+        run_id=run.pk,
         record_number=record_number,
-        defaults={
-            "page_id": page_id if page_id.isdecimal() and len(page_id) <= 64 else "",
-            "source_url": _safe_failure_source_url(source_url),
-            "reason": _sanitize_failure_reason(reason),
-        },
+        error_code=error_code,
     )
-    run.failed_records = run.failures.count()
+    try:
+        BookmarkImportFailure.objects.update_or_create(
+            import_run=run,
+            record_number=record_number,
+            defaults={
+                "page_id": page_id if page_id.isdecimal() and len(page_id) <= 64 else "",
+                "source_url": _safe_failure_source_url(source_url),
+                "reason": _sanitize_failure_reason(reason),
+            },
+        )
+        run.failed_records = run.failures.count()
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "bookmark_import_failure_persistence_failed",
+            error=exc,
+            run_id=run.pk,
+            record_number=record_number,
+        )
+        raise
 
 
 def _update_run_progress(
@@ -2137,18 +2305,45 @@ def _update_run_progress(
     imported: int,
     skipped: int,
 ) -> None:
+    prior_processed = run.processed_records
     run.processed_records = processed
     run.imported_records = imported
     run.skipped_records = skipped
-    run.failed_records = run.failures.count()
-    run.save(
-        update_fields=[
-            "processed_records",
-            "imported_records",
-            "skipped_records",
-            "failed_records",
-        ]
-    )
+    try:
+        run.failed_records = run.failures.count()
+        run.save(
+            update_fields=[
+                "processed_records",
+                "imported_records",
+                "skipped_records",
+                "failed_records",
+            ]
+        )
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "bookmark_import_progress_persistence_failed",
+            error=exc,
+            run_id=run.pk,
+            processed_count=processed,
+        )
+        raise
+    if processed != prior_processed and (
+        processed == run.total_records
+        or processed // max(1, (run.total_records + 19) // 20)
+        != prior_processed // max(1, (run.total_records + 19) // 20)
+    ):
+        log_event(
+            logger,
+            logging.DEBUG,
+            "bookmark_import_progress",
+            run_id=run.pk,
+            processed_count=processed,
+            imported_count=imported,
+            skipped_count=skipped,
+            failed_count=run.failed_records,
+        )
 
 
 def _safe_filename(value: object) -> str:

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.db.models import Count
+from django.db.models import Count, Q
 
 from bitbucket_search.models import (
     BitbucketPeopleGroup,
@@ -20,6 +21,9 @@ from bitbucket_search.models import (
     canonical_people_name,
     normalize_people_name,
 )
+from bitbucket_search.services.logging_events import get_logger, log_event
+
+logger = get_logger("actions")
 
 
 class PeopleGroupValidationError(ValueError):
@@ -34,6 +38,13 @@ class GitPersonSummary:
     aliases: tuple[str, ...]
     commit_count: int
     pdf_count: int
+    repository_names: tuple[str, ...] = ()
+
+    @property
+    def repository_count(self) -> int:
+        """Count repository identities, even when display names are shared."""
+
+        return len(self.repository_names)
 
 
 def git_people_summaries() -> tuple[GitPersonSummary, ...]:
@@ -42,13 +53,21 @@ def git_people_summaries() -> tuple[GitPersonSummary, ...]:
     ``GitCommit`` already guarantees one row per repository and commit hash, so
     counting rows here counts each available commit once. PDF counts describe
     active PDFs whose latest available Git commit has this committer identity.
+    Repository involvement comes from that history, independently of whether
+    any current PDF is attributed to the person or matches the current search.
     """
 
     alias_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    repositories_by_identity: dict[str, dict[int, str]] = defaultdict(dict)
     for row in (
         GitCommit.objects.filter(repository__enabled=True)
+        .filter(
+            Q(in_activity_history=True)
+            | Q(repository__activity_indexed_commit="")
+            | Q(repository__activity_indexed_at__isnull=True)
+        )
         .order_by()
-        .values("committer_name")
+        .values("committer_name", "repository_id", "repository__display_name")
         .annotate(row_count=Count("id"))
         .iterator()
     ):
@@ -56,7 +75,9 @@ def git_people_summaries() -> tuple[GitPersonSummary, ...]:
             display_name = canonical_people_name(row["committer_name"])
         except InvalidPeopleName:
             continue
-        alias_counts[display_name.casefold()][display_name] += row["row_count"]
+        identity = display_name.casefold()
+        alias_counts[identity][display_name] += row["row_count"]
+        repositories_by_identity[identity][row["repository_id"]] = row["repository__display_name"]
 
     pdf_counts: Counter[str] = Counter()
     for row in (
@@ -94,6 +115,17 @@ def git_people_summaries() -> tuple[GitPersonSummary, ...]:
                 aliases=(canonical_name, *remaining_aliases),
                 commit_count=sum(counts_by_alias.values()),
                 pdf_count=pdf_counts[identity],
+                repository_names=tuple(
+                    repository_name
+                    for _repository_id, repository_name in sorted(
+                        repositories_by_identity[identity].items(),
+                        key=lambda repository: (
+                            repository[1].casefold(),
+                            repository[1],
+                            repository[0],
+                        ),
+                    )
+                ),
             )
         )
 
@@ -108,13 +140,33 @@ def git_people_summaries() -> tuple[GitPersonSummary, ...]:
     return tuple(summaries)
 
 
-@transaction.atomic
 def create_people_group(
     name: object,
     member_names: Iterable[object],
 ) -> BitbucketPeopleGroup:
     """Create a group containing canonical names for currently known committers."""
 
+    log_event(logger, logging.INFO, "people_group_create_requested")
+    try:
+        group, member_count = _create_people_group(name, member_names)
+    except PeopleGroupValidationError as error:
+        log_event(
+            logger,
+            logging.WARNING,
+            "people_group_create_rejected",
+            error=error,
+            reason="invalid_group",
+        )
+        raise
+    except Exception as error:
+        log_event(logger, logging.ERROR, "people_group_create_failed", error=error)
+        raise
+    log_event(logger, logging.INFO, "people_group_create_completed", count=member_count)
+    return group
+
+
+@transaction.atomic
+def _create_people_group(name: object, member_names: Iterable[object]):
     try:
         group_name = canonical_people_name(name)
     except InvalidPeopleName as error:
@@ -173,4 +225,4 @@ def create_people_group(
         raise PeopleGroupValidationError(
             "A People group with this name or member already exists."
         ) from error
-    return group
+    return group, len(canonical_members)

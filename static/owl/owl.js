@@ -102,6 +102,25 @@
         return exactDateFormatter ? exactDateFormatter.format(date) : date.toLocaleString();
     };
 
+    const compactRepositoryDate = (value) => {
+        if (!value) {
+            return "—";
+        }
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+            return "—";
+        }
+        const now = new Date();
+        if (date.toDateString() === now.toDateString()) {
+            return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+        }
+        return date.toLocaleDateString(undefined, {
+            day: "numeric",
+            month: "short",
+            ...(date.getFullYear() === now.getFullYear() ? {} : { year: "2-digit" }),
+        });
+    };
+
     const createNotificationElement = (tagName, className, text) => {
         const element = document.createElement(tagName);
         if (className) {
@@ -121,7 +140,7 @@
 
     const localTargetPath = (value) => {
         const path = String(value || "");
-        return path.startsWith("/") && !path.startsWith("//") ? path : "";
+        return path.startsWith("/") && !path.startsWith("//") && !/[\\\u0000-\u001f\u007f]/.test(path) ? path : "";
     };
 
     document.querySelectorAll("[data-notification-center]").forEach((center) => {
@@ -145,6 +164,9 @@
         const lastSuccess = center.querySelector("[data-notification-last-success]");
         const retryRow = center.querySelector("[data-notification-retry-row]");
         const retry = center.querySelector("[data-notification-retry]");
+        const repositoryList = center.querySelector("[data-notification-repository-list]");
+        const repositoryCount = center.querySelector("[data-notification-repository-count]");
+        const repositoryMessage = center.querySelector("[data-notification-repository-message]");
         const bitbucketScheduleTickForm = center.querySelector(
             "[data-bitbucket-schedule-tick-form]",
         );
@@ -160,6 +182,9 @@
         let unreadCount = 0;
         let pollTimer = null;
         let requestInFlight = false;
+        let repositoriesActive = false;
+        let notificationSignature = null;
+        const repositoryRows = new Map();
 
         const announce = (message) => {
             if (!live) {
@@ -202,6 +227,7 @@
             toggle.setAttribute("aria-expanded", "true");
             toggle.setAttribute("aria-label", "Close notifications");
             panel.focus();
+            void load();
         };
 
         const post = async (url, values = {}) => {
@@ -328,6 +354,125 @@
             return article;
         };
 
+        const createRepositoryRow = () => {
+            const row = createNotificationElement("li", "notification-repository");
+            const details = createNotificationElement("details", "notification-repository__details");
+            const summary = createNotificationElement("summary", "notification-repository__summary");
+            const icon = createNotificationElement("span", "notification-repository__icon");
+            icon.setAttribute("aria-hidden", "true");
+            const name = createNotificationElement("span", "notification-repository__name");
+            const status = createNotificationElement("span", "notification-repository__status");
+            const time = createNotificationElement("time", "notification-repository__time");
+            summary.append(icon, name, status, time);
+            const body = createNotificationElement("div", "notification-repository__body");
+            const fullName = createNotificationElement("strong", "notification-repository__full-name");
+            const detail = createNotificationElement("p", "notification-repository__detail");
+            const updated = createNotificationElement("p", "notification-repository__date");
+            const lastSuccess = createNotificationElement("p", "notification-repository__date");
+            const lastOutcome = createNotificationElement("p", "notification-repository__date");
+            const link = createNotificationElement("a", "notification-repository__link", "View repository");
+            const statusLink = createNotificationElement("a", "notification-repository__link", "Full status");
+            body.append(fullName, detail, updated, lastOutcome, lastSuccess, link, statusLink);
+            details.append(summary, body);
+            row.append(details);
+            return { row, details, summary, icon, name, status, time, fullName, detail, updated, lastSuccess, lastOutcome, link, statusLink };
+        };
+
+        const renderRepositories = (snapshot) => {
+            if (!repositoryList) {
+                return;
+            }
+            repositoryList.setAttribute("aria-busy", "false");
+            if (!snapshot || !Array.isArray(snapshot.items)) {
+                repositoryList.dataset.stale = "true";
+                if (repositoryMessage) {
+                    repositoryMessage.hidden = false;
+                    repositoryMessage.textContent = repositoryRows.size
+                        ? "Status unavailable · showing the last check."
+                        : "Repository status is temporarily unavailable.";
+                }
+                return;
+            }
+
+            const items = snapshot.items;
+            repositoryList.dataset.stale = "false";
+            repositoriesActive = Number(snapshot.activeCount) > 0;
+            if (repositoryCount) {
+                repositoryCount.textContent = `${items.length} ${items.length === 1 ? "repository" : "repositories"}`;
+                repositoryCount.title = `${Math.max(0, Number(snapshot.activeCount) || 0)} active · ${Math.max(0, Number(snapshot.failedCount) || 0)} need attention`;
+            }
+            if (repositoryMessage) {
+                repositoryMessage.hidden = items.length > 0;
+                repositoryMessage.textContent = "No repositories added.";
+            }
+            repositoryList.hidden = items.length === 0;
+            const currentIds = new Set();
+            items.forEach((item, index) => {
+                const id = String(item.id);
+                currentIds.add(id);
+                let elements = repositoryRows.get(id);
+                if (!elements) {
+                    elements = createRepositoryRow();
+                    repositoryRows.set(id, elements);
+                }
+                const name = String(item.name || "Unnamed repository");
+                const status = String(item.statusLabel || "Status unavailable");
+                const compactStatuses = {
+                    pending: "Not synced", queued: "Queued", cloning: "Downloading",
+                    refreshing: "Refreshing", cataloging: "Cataloguing", indexing: "Indexing",
+                    failed: "Needs attention", ready: "Ready", disabled: "Disabled", cancelled: "Cancelled",
+                };
+                const tone = ["success", "progress", "error", "neutral"].includes(item.statusTone)
+                    ? item.statusTone
+                    : item.status === "ready" ? "success" : item.status === "failed" ? "error"
+                        : ["queued", "cloning", "refreshing", "cataloging", "indexing"].includes(item.status) ? "progress" : "neutral";
+                elements.row.dataset.tone = tone;
+                elements.icon.textContent = tone === "success" ? "✓" : tone === "error" ? "!" : tone === "progress" ? "" : "·";
+                elements.name.textContent = name;
+                elements.status.textContent = compactStatuses[item.status] || status;
+                elements.time.textContent = compactRepositoryDate(item.updatedAt);
+                elements.time.dateTime = item.updatedAt || "";
+                elements.time.title = formatNotificationDate(item.updatedAt, "Time unavailable");
+                elements.fullName.textContent = name;
+                elements.detail.textContent = `${status}. ${item.detail || "No additional status details."}`;
+                elements.updated.textContent = `Last update: ${formatNotificationDate(item.updatedAt, "Not yet")}`;
+                elements.lastSuccess.textContent = `Last successful sync: ${formatNotificationDate(item.lastSuccessAt, "Not yet")}`;
+                const outcomes = { succeeded: "Succeeded", success: "Succeeded", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted" };
+                const outcome = outcomes[item.lastOutcome];
+                elements.lastOutcome.hidden = !outcome;
+                elements.lastOutcome.textContent = outcome
+                    ? `Last completed sync: ${outcome} · ${formatNotificationDate(item.lastOutcomeAt, "Time unavailable")}`
+                    : "";
+                elements.summary.title = `${name} · ${status}\n${item.detail || ""}\n${formatNotificationDate(item.updatedAt, "Time unavailable")}`;
+                elements.summary.setAttribute("aria-label", `${name}: ${status}. Updated ${formatNotificationDate(item.updatedAt, "time unavailable")}. Details`);
+                const targetPath = localTargetPath(item.targetPath);
+                elements.link.hidden = !targetPath;
+                if (targetPath) {
+                    elements.link.href = targetPath;
+                } else {
+                    elements.link.removeAttribute("href");
+                }
+                const statusPath = localTargetPath(item.statusTargetPath);
+                elements.statusLink.hidden = !statusPath;
+                if (statusPath) {
+                    elements.statusLink.href = statusPath;
+                } else {
+                    elements.statusLink.removeAttribute("href");
+                }
+
+                // Keep existing nodes, disclosure state, keyboard focus and scroll position across polling.
+                if (repositoryList.children[index] !== elements.row) {
+                    repositoryList.insertBefore(elements.row, repositoryList.children[index] || null);
+                }
+            });
+            repositoryRows.forEach((elements, id) => {
+                if (!currentIds.has(id)) {
+                    elements.row.remove();
+                    repositoryRows.delete(id);
+                }
+            });
+        };
+
         const renderRefresh = (refresh = {}, schedule = {}) => {
             isActive = Boolean(refresh.active);
             const processed = Math.max(0, Number.parseInt(refresh.processed, 10) || 0);
@@ -376,19 +521,25 @@
                 retry.textContent = `${failures || 1} failed attempt${failures === 1 ? "" : "s"}; next try ${formatNotificationDate(schedule.next_run_at, "soon")}`;
             }
             if (backgroundState) {
-                backgroundState.textContent = isActive ? "In progress" : retrying ? "Retry scheduled" : scheduleEnabled ? "Weekly refresh on" : "Automatic refresh off";
+                backgroundState.textContent = isActive ? "Refreshing" : retrying ? "Retry scheduled" : scheduleEnabled ? "Weekly · on" : "Off";
             }
         };
 
         const render = (payload) => {
             const notifications = Array.isArray(payload.notifications) ? payload.notifications : [];
-            list.replaceChildren(...notifications.map(renderNotification));
+            const nextSignature = JSON.stringify(notifications);
+            if (nextSignature !== notificationSignature) {
+                list.replaceChildren(...notifications.map(renderNotification));
+                notificationSignature = nextSignature;
+            }
             list.setAttribute("aria-busy", "false");
             if (empty) {
                 empty.hidden = notifications.length > 0;
             }
 
             renderRefresh(payload.refresh || {}, payload.schedule || {});
+            renderRepositories(payload.repositoryStatuses);
+            isActive = isActive || repositoriesActive;
             refreshBadge(payload.unread_count ?? payload.unreadCount ?? 0, isActive);
             window.dispatchEvent(new CustomEvent("owl:refresh-status", {
                 detail: payload.refresh || {},
@@ -420,6 +571,16 @@
                 render(await response.json());
             } catch (error) {
                 list.setAttribute("aria-busy", "false");
+                if (repositoryList) {
+                    repositoryList.setAttribute("aria-busy", "false");
+                    repositoryList.dataset.stale = "true";
+                }
+                if (repositoryMessage) {
+                    repositoryMessage.hidden = false;
+                    repositoryMessage.textContent = repositoryRows.size
+                        ? "Could not update · showing the last check."
+                        : "Repository status is temporarily unavailable.";
+                }
                 if (!hasLoaded) {
                     list.replaceChildren(createNotificationElement("p", "notification-center__error", error.message));
                     if (empty) {

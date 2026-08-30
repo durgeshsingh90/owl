@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import secrets
+import time
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import wraps
 from typing import Protocol
 
 from django.conf import settings
@@ -30,12 +32,15 @@ from bookmark_manager.services.confluence_validation import (
     OriginValidationError,
     validate_confluence_origin,
 )
+from bookmark_manager.services.logging_events import get_logger, log_event, logging_context
 from bookmark_manager.services.secret_store import (
     SecretStore,
     SecretStoreError,
     credential_source_for_store,
     get_secret_store,
 )
+
+logger = get_logger("configuration")
 
 VERIFICATION_CACHE_PREFIX = "owl:confluence:verification:"
 VERIFICATION_TTL_SECONDS = 10 * 60
@@ -93,6 +98,69 @@ class _BoundCredential:
     origin: str
     auth_mode: str
     token: str = field(repr=False)
+
+
+def _logged_configuration_action(operation: str):
+    """Log settings I/O without placing form values or receipt data in events."""
+
+    def decorate(function):
+        @wraps(function)
+        def observed(*args, **kwargs):
+            started = time.monotonic()
+            with logging_context(operation=operation):
+                log_event(logger, logging.INFO, "configuration_action_started")
+                try:
+                    result = function(*args, **kwargs)
+                except Exception as exc:
+                    log_event(
+                        logger,
+                        logging.ERROR,
+                        "configuration_action_failed",
+                        error=exc,
+                        elapsed_ms=round((time.monotonic() - started) * 1000),
+                    )
+                    raise
+                level = logging.INFO
+                if not result.success:
+                    level = (
+                        logging.WARNING
+                        if result.state
+                        in (
+                            ConnectionStatus.CONFIGURATION_ERROR,
+                            ConnectionStatus.MANAGED_EXTERNALLY,
+                        )
+                        else logging.ERROR
+                    )
+                log_event(
+                    logger,
+                    level,
+                    "configuration_action_completed"
+                    if result.success
+                    else "configuration_action_failed",
+                    status=result.state,
+                    elapsed_ms=round((time.monotonic() - started) * 1000),
+                )
+                return result
+
+        return observed
+
+    return decorate
+
+
+def _logged_configuration_read(function):
+    @wraps(function)
+    def observed(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except ConfigurationUnavailable:
+            # Expected absence is quiet; concrete database/store errors are logged
+            # where they occur before being translated into this safe exception.
+            raise
+        except Exception as exc:
+            log_event(logger, logging.ERROR, "configuration_read_failed", error=exc)
+            raise
+
+    return observed
 
 
 def _credential_envelope(origin: CanonicalOrigin, auth_mode: str, token: str) -> str:
@@ -173,11 +241,18 @@ def _store_or_unavailable(secret_store: SecretStore | None = None) -> SecretStor
     try:
         store = secret_store or get_secret_store()
     except SecretStoreError as exc:
+        log_event(logger, logging.ERROR, "configuration_store_unavailable", error=exc)
         raise ConfigurationUnavailable(
             "The configured credential store is unavailable. Enable it or use a complete "
             "ignored environment profile."
         ) from exc
     if not store.is_available():
+        log_event(
+            logger,
+            logging.ERROR,
+            "configuration_store_unavailable",
+            reason="availability_check_failed",
+        )
         raise ConfigurationUnavailable(
             "The configured credential store is unavailable. Enable it or use a complete "
             "ignored environment profile."
@@ -185,11 +260,15 @@ def _store_or_unavailable(secret_store: SecretStore | None = None) -> SecretStor
     return store
 
 
+@_logged_configuration_read
 def get_configuration_summary(*, secret_store: SecretStore | None = None) -> ConfigurationSummary:
     """Describe the active source without returning an origin or retrieving a PAT for HTML."""
 
     has_environment_url, has_environment_pat = _environment_profile_state()
     if has_environment_url != has_environment_pat:
+        log_event(
+            logger, logging.WARNING, "configuration_environment_incomplete", operation="summary"
+        )
         return _configuration_error("Set both Confluence environment values or remove both.")
 
     if has_environment_url and has_environment_pat:
@@ -205,7 +284,14 @@ def get_configuration_summary(*, secret_store: SecretStore | None = None) -> Con
 
     try:
         configuration = ConfluenceConfiguration.objects.filter(pk=1).first()
-    except (OperationalError, ProgrammingError):
+    except (OperationalError, ProgrammingError) as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "configuration_database_read_failed",
+            error=exc,
+            operation="summary",
+        )
         return ConfigurationSummary(
             source=CredentialSource.NONE,
             complete=False,
@@ -234,6 +320,7 @@ def get_configuration_summary(*, secret_store: SecretStore | None = None) -> Con
             detail="Open Confluence settings to connect Bookmark Manager.",
         )
 
+    stored_value = None
     try:
         store = _store_or_unavailable(secret_store)
         stored_value = store.get()
@@ -242,7 +329,17 @@ def get_configuration_summary(*, secret_store: SecretStore | None = None) -> Con
             expected_origin=configuration.base_url,
             expected_auth_mode=configuration.auth_mode,
         )
-    except (ConfigurationUnavailable, SecretStoreError):
+    except (ConfigurationUnavailable, SecretStoreError) as exc:
+        if isinstance(exc, SecretStoreError) or (
+            isinstance(exc, CredentialEnvelopeError) and stored_value
+        ):
+            log_event(
+                logger,
+                logging.ERROR,
+                "configuration_credential_read_failed",
+                error=exc,
+                operation="summary",
+            )
         return ConfigurationSummary(
             source=configuration.credential_source,
             complete=False,
@@ -270,16 +367,25 @@ def _validate_origin(value: str) -> CanonicalOrigin:
     )
 
 
+@_logged_configuration_read
 def get_active_profile(*, secret_store: SecretStore | None = None) -> ActiveConfluenceProfile:
     """Resolve credentials for explicit server-side requests; never pass this to templates."""
 
     has_environment_url, has_environment_pat = _environment_profile_state()
     if has_environment_url != has_environment_pat:
+        log_event(logger, logging.WARNING, "configuration_environment_incomplete")
         raise ConfigurationUnavailable("The environment-managed Confluence profile is incomplete.")
     if has_environment_url and has_environment_pat:
         try:
             origin = _validate_origin(settings.CONFLUENCE_BASE_URL)
         except OriginValidationError as exc:
+            log_event(
+                logger,
+                logging.WARNING,
+                "configuration_origin_invalid",
+                error=exc,
+                stage="environment",
+            )
             raise ConfigurationUnavailable(str(exc)) from exc
         return ActiveConfluenceProfile(
             origin=origin,
@@ -291,6 +397,7 @@ def get_active_profile(*, secret_store: SecretStore | None = None) -> ActiveConf
     try:
         configuration = ConfluenceConfiguration.objects.filter(pk=1).first()
     except (OperationalError, ProgrammingError) as exc:
+        log_event(logger, logging.ERROR, "configuration_database_read_failed", error=exc)
         raise ConfigurationUnavailable("Run database migrations before using Confluence.") from exc
     if configuration is None or not configuration.base_url:
         raise ConfigurationUnavailable("Configure Confluence before using this action.")
@@ -298,17 +405,24 @@ def get_active_profile(*, secret_store: SecretStore | None = None) -> ActiveConf
     try:
         origin = _validate_origin(configuration.base_url)
     except OriginValidationError as exc:
+        log_event(logger, logging.ERROR, "configuration_origin_invalid", error=exc, stage="stored")
         raise ConfigurationUnavailable(str(exc)) from exc
     store = _store_or_unavailable(secret_store)
     try:
         stored_value = store.get()
     except SecretStoreError as exc:
+        log_event(logger, logging.ERROR, "configuration_credential_read_failed", error=exc)
         raise ConfigurationUnavailable("The securely stored credential could not be read.") from exc
-    bound = _bound_credential(
-        stored_value,
-        expected_origin=origin.base_url,
-        expected_auth_mode=configuration.auth_mode,
-    )
+    try:
+        bound = _bound_credential(
+            stored_value,
+            expected_origin=origin.base_url,
+            expected_auth_mode=configuration.auth_mode,
+        )
+    except CredentialEnvelopeError as exc:
+        if stored_value:
+            log_event(logger, logging.ERROR, "configuration_credential_invalid", error=exc)
+        raise
     return ActiveConfluenceProfile(
         origin=origin,
         token=bound.token,
@@ -393,6 +507,7 @@ def _result_state(result: ConfluenceResult) -> str:
     return mapping[result.code]
 
 
+@_logged_configuration_action("test_connection")
 def test_candidate_connection(
     *,
     base_url: str,
@@ -423,6 +538,7 @@ def test_candidate_connection(
 
     token = personal_access_token.strip()
     if not token:
+        stored_value = None
         try:
             current = ConfluenceConfiguration.objects.filter(pk=1).first()
             if current is None or current.base_url != origin.base_url:
@@ -434,7 +550,11 @@ def test_candidate_connection(
                 expected_origin=origin.base_url,
                 expected_auth_mode=normalized_auth_mode,
             ).token
-        except (ConfigurationUnavailable, SecretStoreError):
+        except (ConfigurationUnavailable, SecretStoreError) as exc:
+            if isinstance(exc, SecretStoreError) or (
+                isinstance(exc, CredentialEnvelopeError) and stored_value
+            ):
+                log_event(logger, logging.ERROR, "configuration_credential_read_failed", error=exc)
             token = ""
     if not token:
         return ConfigurationActionResult(
@@ -444,10 +564,12 @@ def test_candidate_connection(
             "Enter a PAT to test this Confluence origin.",
         )
 
+    log_event(logger, logging.DEBUG, "configuration_connection_test_started")
     try:
         tester = (tester_factory or _default_tester_factory)(origin, token, normalized_auth_mode)
         result = tester.test_connection()
-    except Exception:
+    except Exception as exc:
+        log_event(logger, logging.ERROR, "configuration_connection_test_failed", error=exc)
         return ConfigurationActionResult(
             False,
             ConnectionStatus.UNREACHABLE,
@@ -456,6 +578,14 @@ def test_candidate_connection(
         )
 
     state = _result_state(result)
+    log_event(
+        logger,
+        logging.DEBUG if state == ConnectionStatus.CONNECTED else logging.ERROR,
+        "configuration_connection_test_completed"
+        if state == ConnectionStatus.CONNECTED
+        else "configuration_connection_test_failed",
+        status=state,
+    )
     verified_at = timezone.now() if state == ConnectionStatus.CONNECTED else None
     receipt = (
         _issue_verification_receipt(origin, normalized_auth_mode, token, verified_at)
@@ -476,6 +606,7 @@ def _action_failure(state: str, label: str, detail: str) -> ConfigurationActionR
     return ConfigurationActionResult(False, state, label, detail)
 
 
+@_logged_configuration_action("save")
 def save_ui_configuration(
     *,
     base_url: str,
@@ -509,7 +640,8 @@ def save_ui_configuration(
     try:
         store = _store_or_unavailable(secret_store)
         previous_stored_value = store.get()
-    except (ConfigurationUnavailable, SecretStoreError):
+    except (ConfigurationUnavailable, SecretStoreError) as exc:
+        log_event(logger, logging.ERROR, "configuration_credential_read_failed", error=exc)
         return _action_failure(
             ConnectionStatus.CREDENTIAL_STORE_UNAVAILABLE,
             "Credential store unavailable",
@@ -532,7 +664,8 @@ def save_ui_configuration(
                 expected_origin=current.base_url,
                 expected_auth_mode=current.auth_mode,
             )
-        except CredentialEnvelopeError:
+        except CredentialEnvelopeError as exc:
+            log_event(logger, logging.ERROR, "configuration_credential_invalid", error=exc)
             return _action_failure(
                 ConnectionStatus.CREDENTIAL_STORE_UNAVAILABLE,
                 "Credential store unavailable",
@@ -585,6 +718,13 @@ def save_ui_configuration(
 
     credential_written = False
     credential_source = credential_source_for_store(store)
+    log_event(
+        logger,
+        logging.DEBUG,
+        "configuration_save_prepared",
+        stage="replace_credential" if credential_write_required else "retain_credential",
+        status=connection_status,
+    )
     try:
         if credential_write_required:
             store.set(_credential_envelope(origin, normalized_auth_mode, submitted_secret))
@@ -610,13 +750,24 @@ def save_ui_configuration(
                     "last_error_message": "",
                 },
             )
-    except (CredentialEnvelopeError, DatabaseError, SecretStoreError):
+    except (CredentialEnvelopeError, DatabaseError, SecretStoreError) as exc:
+        log_event(logger, logging.ERROR, "configuration_save_failed", error=exc)
         if credential_written:
-            with suppress(SecretStoreError):
+            log_event(logger, logging.WARNING, "configuration_credential_restore_started")
+            try:
                 if previous_stored_value:
                     store.set(previous_stored_value)
                 else:
                     store.delete()
+            except SecretStoreError as restore_error:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "configuration_credential_restore_failed",
+                    error=restore_error,
+                )
+            else:
+                log_event(logger, logging.INFO, "configuration_credential_restored")
         return _action_failure(
             ConnectionStatus.CREDENTIAL_STORE_UNAVAILABLE,
             "Not saved",
@@ -632,6 +783,7 @@ def save_ui_configuration(
     )
 
 
+@_logged_configuration_action("remove")
 def remove_ui_configuration(
     *, secret_store: SecretStore | None = None
 ) -> ConfigurationActionResult:
@@ -655,7 +807,8 @@ def remove_ui_configuration(
         store = _store_or_unavailable(secret_store)
         previous_stored_value = store.get()
         store.delete()
-    except (ConfigurationUnavailable, SecretStoreError):
+    except (ConfigurationUnavailable, SecretStoreError) as exc:
+        log_event(logger, logging.ERROR, "configuration_credential_remove_failed", error=exc)
         return _action_failure(
             ConnectionStatus.CREDENTIAL_STORE_UNAVAILABLE,
             "Credential not removed",
@@ -675,10 +828,21 @@ def remove_ui_configuration(
             locked.last_error_code = ""
             locked.last_error_message = ""
             locked.save()
-    except DatabaseError:
+    except DatabaseError as exc:
+        log_event(logger, logging.ERROR, "configuration_remove_failed", error=exc)
         if previous_stored_value:
-            with suppress(SecretStoreError):
+            log_event(logger, logging.WARNING, "configuration_credential_restore_started")
+            try:
                 store.set(previous_stored_value)
+            except SecretStoreError as restore_error:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "configuration_credential_restore_failed",
+                    error=restore_error,
+                )
+            else:
+                log_event(logger, logging.INFO, "configuration_credential_restored")
         return _action_failure(
             ConnectionStatus.CREDENTIAL_STORE_UNAVAILABLE,
             "Credential not removed",

@@ -7,12 +7,14 @@ identifiers: filtering and sorting never update ``ConfluencePageNode.parent``.
 
 from __future__ import annotations
 
+import logging
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from enum import StrEnum
+from time import perf_counter
 from typing import Any, Self
 
 from django.db.models import F, Q, QuerySet
@@ -30,7 +32,10 @@ from bookmark_manager.models import (
     Tag,
 )
 from bookmark_manager.services.confluence_validation import extract_page_id_from_url
+from bookmark_manager.services.logging_events import get_logger, log_event
 from bookmark_manager.services.web_bookmarks import WebBookmarkError, canonicalize_web_url
+
+logger = get_logger("search")
 
 
 class InvalidBookmarkQuery(ValueError):
@@ -378,6 +383,40 @@ def query_bookmarks(
 ) -> BookmarkQueryResult:
     """Search, filter, and sort bookmarks entirely from the local database."""
 
+    started = perf_counter()
+    log_event(logger, logging.DEBUG, "bookmark_search_started")
+    try:
+        result = _query_bookmarks(query, at=at)
+    except InvalidBookmarkQuery as exc:
+        log_event(
+            logger, logging.WARNING, "bookmark_search_rejected", error=exc, reason="invalid_query"
+        )
+        raise
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "bookmark_search_failed",
+            error=exc,
+            elapsed_ms=round((perf_counter() - started) * 1000),
+        )
+        raise
+    log_event(
+        logger,
+        logging.DEBUG,
+        "bookmark_search_completed",
+        result_count=result.matching_count,
+        filter_count=result.active_filter_count,
+        elapsed_ms=round((perf_counter() - started) * 1000),
+    )
+    return result
+
+
+def _query_bookmarks(
+    query: BookmarkQuery | None = None,
+    *,
+    at: datetime | None = None,
+) -> BookmarkQueryResult:
     query = query or BookmarkQuery()
     if not isinstance(query, BookmarkQuery):
         raise InvalidBookmarkQuery("query must be a BookmarkQuery.")

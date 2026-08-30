@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from time import perf_counter
 
 from django.conf import settings
 from django.db import models, transaction
@@ -21,6 +22,7 @@ from django.utils import timezone
 
 from bitbucket_search.models import PDFDocument, PDFDocumentLifecycle
 from bitbucket_search.services.git_sync import RepositorySyncError, managed_repository_path
+from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
 from bitbucket_search.services.path_safety import has_disallowed_path_characters
 from bitbucket_search.services.pdf_search_query import MAX_SEARCH_PAGE_SIZE
 from bitbucket_search.services.repository_lock import (
@@ -29,7 +31,16 @@ from bitbucket_search.services.repository_lock import (
 )
 
 _NATIVE_ACTION_TIMEOUT_SECONDS = 10
-logger = logging.getLogger(__name__)
+logger = get_logger("actions")
+_EXPECTED_REJECTIONS = {
+    "document_not_found",
+    "invalid_document_selection",
+    "too_many_documents",
+    "invalid_document_path",
+    "invalid_open_time",
+    "unsupported_document_type",
+    "repository_refresh_in_progress",
+}
 
 
 class DocumentActionError(RuntimeError):
@@ -39,6 +50,43 @@ class DocumentActionError(RuntimeError):
         self.code = code
         self.summary = " ".join(summary.split())[:500]
         super().__init__(self.summary)
+
+
+@contextmanager
+def _logged_action(operation: str, **context):
+    """Log only IDs and outcomes, never paths, filenames, or native command arguments."""
+
+    started = perf_counter()
+    context.update(operation=operation, stage="validation")
+    log_event(logger, logging.INFO, "pdf_action_requested", **context)
+    try:
+        with logging_context(document_id=context.get("document_id")):
+            yield context
+    except Exception as error:
+        code = error.code if isinstance(error, DocumentActionError) else "action_failed"
+        level = (
+            logging.WARNING
+            if code in _EXPECTED_REJECTIONS and context.get("stage") != "usage"
+            else logging.ERROR
+        )
+        log_event(
+            logger,
+            level,
+            "pdf_action_failed",
+            error=error,
+            error_code=code,
+            elapsed_ms=round((perf_counter() - started) * 1000),
+            **context,
+        )
+        raise
+    else:
+        log_event(
+            logger,
+            logging.INFO,
+            "pdf_action_completed",
+            elapsed_ms=round((perf_counter() - started) * 1000),
+            **context,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,6 +344,7 @@ def reveal_pdf_in_folder(path: Path) -> None:
 def record_successful_open(document_id: int, at: datetime | None = None) -> PDFDocument:
     """Atomically count a successful native open for an active PDF."""
 
+    log_event(logger, logging.DEBUG, "pdf_usage_update_started", document_id=document_id)
     open_time = at or timezone.now()
     if timezone.is_naive(open_time):
         raise DocumentActionError(
@@ -390,12 +439,16 @@ def _locked_documents(
 def open_registered_pdf(document_id: int) -> PDFDocument:
     """Validate and open one registered PDF, then atomically record the success."""
 
-    registered = _registered_document(document_id)
-    with _locked_documents((registered,)) as documents:
-        document = documents[0]
-        path = validated_pdf_path(document)
-        open_pdf_native(path)
-        return record_successful_open(document.pk)
+    with _logged_action("open", document_id=document_id) as context:
+        registered = _registered_document(document_id)
+        context["repository_id"] = registered.repository_id
+        with _locked_documents((registered,)) as documents:
+            document = documents[0]
+            path = validated_pdf_path(document)
+            context["stage"] = "native"
+            open_pdf_native(path)
+            context["stage"] = "usage"
+            return record_successful_open(document.pk)
 
 
 def open_registered_pdfs(document_ids: Sequence[int]) -> BulkDocumentOpenResult:
@@ -406,6 +459,18 @@ def open_registered_pdfs(document_ids: Sequence[int]) -> BulkDocumentOpenResult:
     PDFs from opening, and only successful native dispatches increment usage.
     """
 
+    count = len(document_ids) if isinstance(document_ids, Sequence) else 0
+    with _logged_action("open_all", count=count) as context:
+        result = _open_registered_pdfs(document_ids)
+        context.update(
+            result_count=result.opened_count,
+            failed_count=result.failed_count + result.usage_failure_count,
+            status="partial" if result.failures or result.usage_failures else "opened",
+        )
+        return result
+
+
+def _open_registered_pdfs(document_ids: Sequence[int]) -> BulkDocumentOpenResult:
     registered = _registered_documents(document_ids)
     with _locked_documents(registered) as documents:
         validated_documents = tuple(
@@ -418,6 +483,16 @@ def open_registered_pdfs(document_ids: Sequence[int]) -> BulkDocumentOpenResult:
             try:
                 open_pdf_native(path)
             except DocumentActionError as exc:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "pdf_bulk_native_failed",
+                    error=exc,
+                    document_id=document.pk,
+                    repository_id=document.repository_id,
+                    error_code=exc.code,
+                    stage="native",
+                )
                 failures.append(
                     BulkDocumentOpenFailure(
                         document_id=document.pk,
@@ -432,6 +507,16 @@ def open_registered_pdfs(document_ids: Sequence[int]) -> BulkDocumentOpenResult:
                 # The OS already accepted this open. Preserve that accurate
                 # outcome, continue the batch, and report the separate usage
                 # bookkeeping failure instead of claiming the open failed.
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "pdf_usage_update_failed",
+                    error=exc,
+                    document_id=document.pk,
+                    repository_id=document.repository_id,
+                    error_code=exc.code,
+                    stage="usage",
+                )
                 opened.append(document)
                 usage_failures.append(
                     BulkDocumentUsageFailure(
@@ -440,10 +525,16 @@ def open_registered_pdfs(document_ids: Sequence[int]) -> BulkDocumentOpenResult:
                         summary=exc.summary,
                     )
                 )
-            except Exception:
-                logger.exception(
-                    "A successful native PDF open could not be recorded",
-                    extra={"document_id": document.pk},
+            except Exception as error:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "pdf_usage_update_failed",
+                    error=error,
+                    document_id=document.pk,
+                    repository_id=document.repository_id,
+                    error_code="usage_record_failed",
+                    stage="usage",
                 )
                 opened.append(document)
                 usage_failures.append(
@@ -465,9 +556,12 @@ def open_registered_pdfs(document_ids: Sequence[int]) -> BulkDocumentOpenResult:
 def reveal_registered_pdf(document_id: int) -> PDFDocument:
     """Validate and reveal one registered PDF without changing its open count."""
 
-    registered = _registered_document(document_id)
-    with _locked_documents((registered,)) as documents:
-        document = documents[0]
-        path = validated_pdf_path(document)
-        reveal_pdf_in_folder(path)
-        return document
+    with _logged_action("reveal", document_id=document_id) as context:
+        registered = _registered_document(document_id)
+        context["repository_id"] = registered.repository_id
+        with _locked_documents((registered,)) as documents:
+            document = documents[0]
+            path = validated_pdf_path(document)
+            context["stage"] = "native"
+            reveal_pdf_in_folder(path)
+            return document

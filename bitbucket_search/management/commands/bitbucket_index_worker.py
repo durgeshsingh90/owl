@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import time
 
 from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import OperationalError, close_old_connections
 
+from bitbucket_search.services.logging_events import get_logger, log_event
 from bitbucket_search.services.pdf_indexing import (
     sweep_pdf_extraction_queue,
     work_one_extraction_job,
 )
+
+logger = get_logger("worker")
 
 
 class Command(BaseCommand):
@@ -33,6 +38,34 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        started = time.monotonic()
+        log_event(logger, logging.INFO, "pdf_index_worker_started", worker_pid=os.getpid())
+        try:
+            return self._run(*args, **options)
+        except KeyboardInterrupt:
+            log_event(
+                logger, logging.INFO, "pdf_index_worker_stop_requested", reason="keyboard_interrupt"
+            )
+            raise
+        except Exception as exc:
+            log_event(
+                logger,
+                logging.CRITICAL,
+                "pdf_index_worker_crashed",
+                error=exc,
+                worker_pid=os.getpid(),
+            )
+            raise
+        finally:
+            log_event(
+                logger,
+                logging.INFO,
+                "pdf_index_worker_stopped",
+                worker_pid=os.getpid(),
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
+
+    def _run(self, *args, **options):
         once = options["once"]
         idle_timeout = max(0, options["idle_timeout"])
         poll_interval = min(max(options["poll_interval"], 0.1), 10.0)
@@ -45,8 +78,14 @@ class Command(BaseCommand):
                 close_old_connections()
                 try:
                     sweep_pdf_extraction_queue()
-                except OperationalError:
-                    pass
+                except OperationalError as exc:
+                    log_event(
+                        logger,
+                        logging.ERROR,
+                        "pdf_worker_queue_recovery_failed",
+                        error=exc,
+                        stage="startup_or_periodic_sweep",
+                    )
                 finally:
                     close_old_connections()
                 next_reconciliation_at = (
@@ -55,7 +94,14 @@ class Command(BaseCommand):
             close_old_connections()
             try:
                 completed = work_one_extraction_job()
-            except OperationalError:
+            except OperationalError as exc:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "pdf_worker_database_failed",
+                    error=exc,
+                    stage="queue_execution",
+                )
                 completed = None
             finally:
                 close_old_connections()

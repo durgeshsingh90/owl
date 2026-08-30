@@ -26,6 +26,40 @@ Home also shows a cached approximation of the local database size, table count, 
 entries, and the exact date and time of that measurement. Home reads OWL's local database and does
 not contact an external service by itself.
 
+The **Bitbucket activity** section ranks Git committers, repositories, and folders for the last
+7 days, calendar month, 6 calendar months, or calendar year (rolling back from the current time).
+It counts available commits across all file types in each enabled repository's synchronized
+branch, not only PDF changes. Counts use the Git committer and commit timestamp, not the person
+who pushed. Each `(repository, commit)` counts once; a folder receives one count per commit
+touching files directly inside it, including deleted and renamed files. Folder totals can exceed
+repository totals because one commit can touch multiple folders. Merge-folder changes are
+measured against the first parent, and unavailable shallow-boundary diffs are omitted.
+Unusual folder-name bytes and control characters are shown as lossless escapes; ordinary UTF-8
+names are unchanged.
+
+Activity history is indexed in the existing background clone/refresh pipeline, before PDF text
+extraction is queued. After upgrading, run `python manage.py migrate`, restart OWL and its workers,
+and refresh existing repositories once to populate their history. The dashboard reports pending,
+stale, and shallow history rather than treating older PDF-only metadata as complete analytics;
+it keeps the last successfully published snapshot while a refresh is running or has failed.
+The rankings show the top 10 in each category; the summary totals include all matching activity.
+
+**Bookmark Manager activity** ranks the people with the most pages written and latest page
+updates, with Today, last 7 days, last month, and last year filters. Today starts at local midnight;
+month and year are rolling calendar periods. These filters stay independent of the Bitbucket
+period and bookmark activity calendar. Rankings use saved Confluence pages only, based on source
+creation/update timestamps—not when OWL saved or refreshed a bookmark. Writers include the saved
+creator/author, deduplicated per person and page; editor rankings use each page's latest stored
+modifier. A page with multiple writers can credit multiple people while counting once in the
+page total. Display names are normalized for grouping, matching the name-based People panel.
+
+These are page counts, not a complete historical edit log: a later refresh can replace a page's
+latest editor. Initial creation alone does not count as an update; OWL requires a later source
+update date or a version greater than one. Missing people/date metadata is reported and excluded
+from attribution. Ordinary web bookmarks are excluded because OWL has no reliable writer/editor
+metadata for them. This section needs no new migration or source requests; existing metadata is
+available immediately and is updated by the normal bookmark refresh.
+
 ### Bookmark Manager — working
 
 Bookmark Manager is the main implemented app. It can:
@@ -57,10 +91,13 @@ Bookmark Manager is the main implemented app. It can:
   temporary or credential failures retry after two hours until a later success, while permanently
   deleted pages remain visible as references without causing an endless retry loop.
 
-The notification bell shared by every OWL app shows unread import, export, and Confluence refresh
-cards. It also shows live background progress, the next weekly refresh, retry state, and exact local
-timestamps. Notifications are stored locally and contain sanitized status text rather than
-credentials or Confluence page bodies.
+The notification bell shared by every OWL app shows unread import, export, Confluence, and
+Bitbucket refresh cards. A compact, scrollable repository section shows the current status of
+every repository, including running work and failed or successful syncs. Expand a repository row
+for safe diagnostics and exact timestamps; older notification cards remain separate history and
+do not override the latest status. Confluence's weekly schedule and retry details are collapsed
+by default. Reading notification status never starts or recovers repository jobs. Notifications
+are stored locally and contain sanitized status text rather than credentials or page bodies.
 
 All searching and organization happen against OWL's local SQLite database. Confluence is contacted
 only for an explicit connection test, a save/import that retrieves a Confluence page, or a refresh
@@ -293,6 +330,58 @@ exclusion rule remains so later pulls do not recreate the deleted PDF. No remote
 files are changed. This is not a secure erase of Git's historical object cache, database
 backups, or text still shared by another PDF. Exclusion and deletion wait until repository
 synchronization and PDF extraction are idle; local modifications are never overwritten.
+
+### Bitbucket backend logs
+
+Bitbucket web actions and background workers share two local, rotating logs under
+`OWL_DATA_ROOT/logs` (by default `var/logs`):
+
+- `bitbucket.log`: detailed events; `BITBUCKET_LOG_LEVEL=DEBUG` is the default.
+- `bitbucket-errors.log`: every emitted ERROR and CRITICAL event, independently of
+  the diagnostic log's level.
+
+Supported levels are `DEBUG`, `INFO`, `WARNING`, `ERROR`, and `CRITICAL`. DEBUG records
+stage/progress details; INFO records queue, start, and completion events; WARNING
+records expected fallbacks or deferred work. Operational failures—including caught
+database errors, extraction/page failures, checkout errors, and cleanup failures—use
+ERROR. Fatal worker exits use CRITICAL. The console follows `OWL_LOG_LEVEL` (INFO by
+default), so full debug detail can stay in the file without filling the terminal.
+
+Events include applicable repository, job, and PDF IDs, process/thread identifiers,
+stage, counts, timing, and safe error codes. Error diagnostics can include exception
+categories, OS/SQLite codes, and code-frame locations, but never raw exception messages,
+source lines, credentials, repository URLs, local PDF paths, search terms, or PDF text.
+Normal empty-queue polling is not logged. Rotation uses `OWL_LOG_MAX_BYTES` and
+`OWL_LOG_BACKUP_COUNT`; writes and rotation are locked across concurrent workers.
+Restart OWL and its workers after changing log levels. Keep the files private: IDs and
+operational timing still describe your local workspace. If log storage is unavailable,
+OWL reports a content-free message to stderr rather than exposing the failed record.
+
+### Bookmark Manager backend logs
+
+Bookmark actions, local search, imports/exports, Confluence requests, configuration,
+and background refresh workers write to `OWL_DATA_ROOT/logs` (normally `var/logs`):
+
+- `bookmarks.log`: detailed events, controlled by `BOOKMARK_LOG_LEVEL` (default `DEBUG`).
+- `bookmarks-errors.log`: ERROR and CRITICAL failures, regardless of the detailed
+  file's threshold.
+
+All five levels are supported: DEBUG for stages, request timings, and counts; INFO
+for work starting and completing; WARNING for validation, retries, and expected
+fallbacks; ERROR for failed operations, failed import/refresh items, caught database
+or credential-store errors, and notification failures; CRITICAL for fatal worker or
+scheduler exits. Routine idle/status polling is quiet. The console follows
+`OWL_LOG_LEVEL` (default `INFO`).
+
+Diagnostics include applicable refresh/import run, bookmark, and page IDs, safe
+error categories/codes, stages, HTTP status, counts, and elapsed time. They never
+record credentials, request headers, raw exception messages, URLs, imported
+documents, page contents, search terms, titles, or person names. Both applications
+share the safe formatter and process-locked rotating file handler. Rotation uses
+`OWL_LOG_MAX_BYTES` and `OWL_LOG_BACKUP_COUNT`.
+
+Restart OWL and its workers after changing levels. No database migration is needed.
+Treat these files as private workspace diagnostics even though content is omitted.
 
 ## Connect Confluence and save a bookmark
 

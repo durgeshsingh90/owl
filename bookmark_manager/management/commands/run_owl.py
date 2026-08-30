@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from django.conf import settings
@@ -16,6 +17,7 @@ from django.core.management.base import BaseCommand
 from django.db import close_old_connections
 from django.utils import timezone
 
+from bitbucket_search.services.logging_events import get_logger, log_event
 from bitbucket_search.services.pdf_indexing import sweep_pdf_extraction_queue
 from bitbucket_search.services.repository_sync import (
     queue_due_daily_repository_refreshes,
@@ -25,10 +27,12 @@ from bitbucket_search.services.repository_sync import (
 )
 from bookmark_manager.models import NotificationKind, NotificationState
 from bookmark_manager.services.bookmark_refresh import queue_due_scheduled_refresh
+from bookmark_manager.services.logging_events import get_logger as get_bookmark_logger
+from bookmark_manager.services.logging_events import log_event as log_bookmark_event
 from bookmark_manager.services.notifications import publish_notification
 
-logger = logging.getLogger("owl.bookmarks.refresh")
-bitbucket_logger = logging.getLogger("owl.bitbucket.worker")
+logger = get_bookmark_logger("supervisor")
+bitbucket_logger = get_logger("supervisor")
 SCHEDULER_EVENT_KEY = "confluence-refresh:scheduler"
 
 
@@ -58,25 +62,66 @@ def _publish_scheduler_state(*, recovered: bool) -> None:
 def _scheduler_loop(stop_event: threading.Event, *, poll_seconds: int) -> None:
     """Keep schedule checks resident in the web process and recover after errors."""
 
+    started_at = time.monotonic()
+    log_bookmark_event(logger, logging.INFO, "resident_refresh_scheduler_started")
+    try:
+        _run_refresh_scheduler_loop(stop_event, poll_seconds=poll_seconds)
+    except BaseException as exc:
+        log_bookmark_event(
+            logger,
+            logging.CRITICAL,
+            "resident_refresh_scheduler_terminated",
+            error=exc,
+        )
+        raise
+    finally:
+        log_bookmark_event(
+            logger,
+            logging.INFO,
+            "resident_refresh_scheduler_stopped",
+            elapsed_ms=(time.monotonic() - started_at) * 1000,
+        )
+
+
+def _run_refresh_scheduler_loop(stop_event: threading.Event, *, poll_seconds: int) -> None:
     scheduler_failed = False
     while not stop_event.is_set():
         try:
             close_old_connections()
             queue_due_scheduled_refresh()
-        except Exception:
-            logger.exception("The resident Confluence refresh scheduler check failed")
+        except Exception as exc:
+            log_bookmark_event(
+                logger,
+                logging.ERROR,
+                "resident_refresh_scheduler_check_failed",
+                error=exc,
+                stage="schedule_check",
+            )
             if not scheduler_failed:
                 try:
                     _publish_scheduler_state(recovered=False)
-                except Exception:
-                    logger.exception("The scheduler failure notification could not be recorded")
+                except Exception as exc:
+                    log_bookmark_event(
+                        logger,
+                        logging.ERROR,
+                        "resident_refresh_scheduler_notification_failed",
+                        error=exc,
+                        stage="failure_notification",
+                    )
             scheduler_failed = True
         else:
             if scheduler_failed:
                 try:
                     _publish_scheduler_state(recovered=True)
-                except Exception:
-                    logger.exception("The scheduler recovery notification could not be recorded")
+                except Exception as exc:
+                    log_bookmark_event(
+                        logger,
+                        logging.ERROR,
+                        "resident_refresh_scheduler_notification_failed",
+                        error=exc,
+                        stage="recovery_notification",
+                    )
+                log_bookmark_event(logger, logging.INFO, "resident_refresh_scheduler_recovered")
             scheduler_failed = False
         finally:
             close_old_connections()
@@ -122,15 +167,33 @@ def _launch_resident_bitbucket_worker(command: str) -> subprocess.Popen[bytes]:
     elif command == "bitbucket_index_worker":
         arguments.append("--no-startup-sweep")
 
-    return subprocess.Popen(
-        arguments,
-        cwd=settings.BASE_DIR,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        start_new_session=os.name != "nt",
+    try:
+        process = subprocess.Popen(
+            arguments,
+            cwd=settings.BASE_DIR,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=os.name != "nt",
+        )
+    except OSError as exc:
+        log_event(
+            bitbucket_logger,
+            logging.ERROR,
+            "resident_worker_spawn_failed",
+            error=exc,
+            operation=command,
+        )
+        raise
+    log_event(
+        bitbucket_logger,
+        logging.INFO,
+        "resident_worker_spawned",
+        operation=command,
+        worker_pid=getattr(process, "pid", None),
     )
+    return process
 
 
 def _stop_resident_bitbucket_worker(process: subprocess.Popen[bytes]) -> None:
@@ -144,25 +207,98 @@ def _stop_resident_bitbucket_worker(process: subprocess.Popen[bytes]) -> None:
         else:
             os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=5)
-    except (OSError, ProcessLookupError):
+    except ProcessLookupError:
+        log_event(
+            bitbucket_logger,
+            logging.DEBUG,
+            "resident_worker_already_stopped",
+            worker_pid=getattr(process, "pid", None),
+        )
         return
-    except subprocess.TimeoutExpired:
+    except OSError as exc:
+        log_event(
+            bitbucket_logger,
+            logging.ERROR,
+            "resident_worker_stop_failed",
+            error=exc,
+            worker_pid=getattr(process, "pid", None),
+        )
+        return
+    except subprocess.TimeoutExpired as exc:
+        log_event(
+            bitbucket_logger,
+            logging.ERROR,
+            "resident_worker_stop_timeout",
+            error=exc,
+            worker_pid=getattr(process, "pid", None),
+        )
         try:
             if os.name == "nt":
                 process.kill()
             else:
                 os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=2)
-        except (OSError, ProcessLookupError, subprocess.TimeoutExpired):
+        except ProcessLookupError:
+            log_event(
+                bitbucket_logger,
+                logging.DEBUG,
+                "resident_worker_already_stopped",
+                worker_pid=getattr(process, "pid", None),
+            )
             return
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log_event(
+                bitbucket_logger,
+                logging.ERROR,
+                "resident_worker_force_stop_failed",
+                error=exc,
+                worker_pid=getattr(process, "pid", None),
+            )
+            return
+    log_event(
+        bitbucket_logger,
+        logging.INFO,
+        "resident_worker_stopped",
+        worker_pid=getattr(process, "pid", None),
+    )
 
 
 def _bitbucket_queue_loop(stop_event: threading.Event, *, poll_seconds: int) -> None:
+    started = time.monotonic()
+    log_event(
+        bitbucket_logger,
+        logging.INFO,
+        "bitbucket_supervisor_started",
+        worker_pid=os.getpid(),
+        worker_count=len(_resident_bitbucket_worker_specs()),
+    )
+    try:
+        _run_bitbucket_queue_loop(stop_event, poll_seconds=poll_seconds)
+    except Exception as exc:
+        log_event(
+            bitbucket_logger,
+            logging.CRITICAL,
+            "bitbucket_supervisor_crashed",
+            error=exc,
+            worker_pid=os.getpid(),
+        )
+        raise
+    finally:
+        log_event(
+            bitbucket_logger,
+            logging.INFO,
+            "bitbucket_supervisor_stopped",
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+        )
+
+
+def _run_bitbucket_queue_loop(stop_event: threading.Event, *, poll_seconds: int) -> None:
     """Sweep durable queues and supervise their bounded resident controllers."""
 
     workers: dict[str, subprocess.Popen[bytes]] = {}
     startup_sweep_pending = True
     repository_workers_active = resident_repository_workers_active()
+    failed_previous_pass = False
 
     def publish_repository_worker_state(active: bool) -> None:
         nonlocal repository_workers_active
@@ -170,6 +306,12 @@ def _bitbucket_queue_loop(stop_event: threading.Event, *, poll_seconds: int) -> 
             return
         set_resident_repository_workers_active(active)
         repository_workers_active = active
+        log_event(
+            bitbucket_logger,
+            logging.DEBUG,
+            "resident_repository_worker_availability_changed",
+            active_count=int(active),
+        )
 
     def reconcile_repository_worker_state() -> None:
         publish_repository_worker_state(
@@ -184,6 +326,7 @@ def _bitbucket_queue_loop(stop_event: threading.Event, *, poll_seconds: int) -> 
     publish_repository_worker_state(False)
     try:
         while not stop_event.is_set():
+            stage = "daily_schedule"
             try:
                 close_old_connections()
                 # These calls are idempotent. The startup extraction sweep first
@@ -191,16 +334,44 @@ def _bitbucket_queue_loop(stop_event: threading.Event, *, poll_seconds: int) -> 
                 # cannot publish after OWL has restarted. Later sweeps use the
                 # normal heartbeat timeout and bounded retry policy.
                 queue_due_daily_repository_refreshes()
+                stage = "repository_lease_recovery"
                 repository_status_snapshot()
+                stage = "pdf_lease_recovery"
                 sweep_pdf_extraction_queue(interrupt_running=startup_sweep_pending)
                 startup_sweep_pending = False
 
                 for role, command in _resident_bitbucket_worker_specs():
                     worker = workers.get(role)
-                    if worker is None or worker.poll() is not None:
+                    return_code = worker.poll() if worker is not None else None
+                    if worker is not None and return_code is not None:
+                        log_event(
+                            bitbucket_logger,
+                            logging.ERROR if return_code else logging.INFO,
+                            "resident_worker_exited",
+                            operation=command,
+                            worker_pid=getattr(worker, "pid", None),
+                            return_code=return_code,
+                        )
+                    if worker is None or return_code is not None:
+                        stage = "resident_worker_launch"
                         workers[role] = _launch_resident_bitbucket_worker(command)
-            except Exception:
-                bitbucket_logger.exception("The resident Bitbucket/PDF queue supervisor failed")
+                if failed_previous_pass:
+                    log_event(
+                        bitbucket_logger,
+                        logging.INFO,
+                        "bitbucket_supervisor_recovered",
+                        worker_count=len(workers),
+                    )
+                failed_previous_pass = False
+            except Exception as exc:
+                failed_previous_pass = True
+                log_event(
+                    bitbucket_logger,
+                    logging.ERROR,
+                    "bitbucket_supervisor_pass_failed",
+                    error=exc,
+                    stage=stage,
+                )
             finally:
                 try:
                     reconcile_repository_worker_state()

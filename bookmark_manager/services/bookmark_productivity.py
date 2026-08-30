@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from bookmark_manager.models import Bookmark, BookmarkActivityType, SavedBookmarkView, Tag
 from bookmark_manager.services.bookmark_analytics import record_daily_activity
+from bookmark_manager.services.logging_events import logged_operation
 
 _TAG_SEPARATOR = re.compile(r"[,;\n]+")
 _MAX_TAGS_PER_BOOKMARK = 30
@@ -52,6 +53,9 @@ def parse_tag_names(raw_value: str) -> tuple[str, ...]:
     return tuple(names)
 
 
+@logged_operation(
+    "update_organisation", expected_errors=(BookmarkProductivityError, Bookmark.DoesNotExist)
+)
 @transaction.atomic
 def update_bookmark_organisation(
     bookmark_or_pk: Bookmark | int,
@@ -84,6 +88,7 @@ def update_bookmark_organisation(
     return OrganisationResult(bookmark=bookmark, tags=display_tags)
 
 
+@logged_operation("toggle_flag", expected_errors=(BookmarkProductivityError, Bookmark.DoesNotExist))
 @transaction.atomic
 def toggle_bookmark_flag(bookmark_or_pk: Bookmark | int, field_name: str) -> Bookmark:
     """Atomically toggle favorite or pin without coupling the independent flags."""
@@ -100,6 +105,7 @@ def toggle_bookmark_flag(bookmark_or_pk: Bookmark | int, field_name: str) -> Boo
     return bookmark
 
 
+@logged_operation("save_view", expected_errors=(BookmarkProductivityError,))
 @transaction.atomic
 def save_bookmark_view(
     *,

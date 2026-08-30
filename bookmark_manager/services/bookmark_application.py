@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import wraps
+from time import perf_counter
 from urllib.parse import parse_qs, urlsplit
 
 from django.conf import settings
@@ -33,6 +35,7 @@ from bookmark_manager.services.confluence_validation import (
     parse_page_input,
     parse_page_lookup_input,
 )
+from bookmark_manager.services.logging_events import get_logger, log_event, logging_context
 from bookmark_manager.services.secret_store import SecretStore
 from bookmark_manager.services.web_bookmarks import (
     WebBookmarkError,
@@ -43,7 +46,87 @@ from bookmark_manager.services.web_bookmarks import (
 
 type ClientFactory = Callable[[ActiveConfluenceProfile], ConfluenceClient]
 
-logger = logging.getLogger("owl.bookmarks")
+logger = get_logger("actions")
+_VALIDATION_CODES = {
+    "invalid_url",
+    "invalid_page_id",
+    "invalid_page_url",
+    "unsupported_page_url",
+    "foreign_origin",
+    "origin_mismatch",
+    "configuration_required",
+    "unsafe_bookmark_url",
+    "missing_input",
+    "empty_input",
+    "invalid_input",
+    "ambiguous_page_url",
+    "invalid_page_input",
+    "disallowed_origin",
+    "disallowed_context",
+}
+_ACTION_CODES = _VALIDATION_CODES | {
+    "invalid_credential",
+    "access_denied",
+    "not_found",
+    "rate_limited",
+    "unreachable",
+    "unsupported_response",
+    "missing_page",
+}
+
+
+def _safe_action_code(code: object) -> str:
+    return code if isinstance(code, str) and code in _ACTION_CODES else "action_failed"
+
+
+def _safe_result_code(code: object) -> str:
+    return code.value if isinstance(code, ConfluenceResultCode) else "unsupported_response"
+
+
+def _logged_action(operation: str):
+    def decorate(function):
+        @wraps(function)
+        def invoke(*args, **kwargs):
+            candidate = args[0] if args else kwargs.get("bookmark")
+            bookmark = candidate if isinstance(candidate, Bookmark) else None
+            context = {"operation": operation, "bookmark_id": bookmark.pk if bookmark else None}
+            started = perf_counter()
+            log_event(logger, logging.INFO, "bookmark_action_requested", **context)
+            try:
+                with logging_context(**context):
+                    result = function(*args, **kwargs)
+            except Exception as error:
+                code = (
+                    _safe_action_code(error.code)
+                    if isinstance(error, BookmarkActionError)
+                    else "action_failed"
+                )
+                log_event(
+                    logger,
+                    logging.WARNING if code in _VALIDATION_CODES else logging.ERROR,
+                    "bookmark_action_failed",
+                    error=error,
+                    error_code=code,
+                    **context,
+                )
+                raise
+            if isinstance(result, BookmarkSaveResult):
+                context.update(
+                    bookmark_id=result.bookmark.pk,
+                    status="created" if result.created else "existing",
+                )
+            log_event(
+                logger,
+                logging.INFO,
+                "bookmark_action_completed",
+                elapsed_ms=round((perf_counter() - started) * 1000),
+                **context,
+            )
+            return result
+
+        return invoke
+
+    return decorate
 
 
 def _looks_like_confluence_page_url(value: str) -> bool:
@@ -158,6 +241,7 @@ def _result_error(code: ConfluenceResultCode, message: str) -> BookmarkActionErr
     return BookmarkActionError(error_code, message, configuration_state)
 
 
+@_logged_action("save")
 def save_bookmark_input(
     value: str,
     *,
@@ -167,14 +251,22 @@ def save_bookmark_input(
     """Validate one supported input and save/reveal its stable Page ID."""
 
     candidate = str(value or "").strip()
-    logger.info(
-        "Bookmark save started input_type=%s",
-        "url" if candidate.casefold().startswith(("http://", "https://")) else "page_id",
+    log_event(
+        logger,
+        logging.DEBUG,
+        "bookmark_input_classified",
+        reason="url" if candidate.casefold().startswith(("http://", "https://")) else "page_id",
     )
     profile = None
     try:
         profile = get_active_profile(secret_store=secret_store)
     except ConfigurationUnavailable as exc:
+        log_event(
+            logger,
+            logging.DEBUG,
+            "bookmark_configuration_fallback",
+            reason="configuration_unavailable",
+        )
         if candidate.casefold().startswith(("http://", "https://")):
             try:
                 return save_web_bookmark(candidate)
@@ -210,10 +302,8 @@ def save_bookmark_input(
         if existing_by_url is not None and (
             existing_by_url.source_type == "web" or existing_by_url.page_text
         ):
-            logger.info(
-                "Bookmark already exists bookmark_id=%s page_id=%s source_requested=false",
-                existing_by_url.pk,
-                existing_by_url.page_id,
+            log_event(
+                logger, logging.DEBUG, "bookmark_existing_reused", bookmark_id=existing_by_url.pk
             )
             return BookmarkSaveResult(
                 existing_by_url,
@@ -229,17 +319,22 @@ def save_bookmark_input(
             lookup = parse_page_lookup_input(candidate, profile.origin)
         except PageInputError as exc:
             selected_error = exc if _looks_like_title_lookup_url(candidate) else page_input_error
-            logger.warning("Bookmark input rejected reason=%s", selected_error.code)
+            log_event(
+                logger,
+                logging.WARNING,
+                "bookmark_input_rejected",
+                error=selected_error,
+                error_code=_safe_action_code(selected_error.code),
+            )
             raise BookmarkActionError(selected_error.code, str(selected_error)) from selected_error
-        logger.info(
-            "Resolving Confluence page title space_supplied=%s",
-            bool(lookup.space_key),
-        )
+        log_event(logger, logging.DEBUG, "bookmark_title_lookup_started")
         lookup_result = client.find_page(lookup.space_key, lookup.title)
         if not lookup_result.ok or lookup_result.page is None:
-            logger.warning(
-                "Confluence page title lookup failed result=%s",
-                lookup_result.code.value,
+            log_event(
+                logger,
+                logging.ERROR,
+                "bookmark_title_lookup_failed",
+                error_code=_safe_result_code(lookup_result.code),
             )
             raise _result_error(lookup_result.code, lookup_result.message) from None
         resolved_page = lookup_result.page
@@ -249,14 +344,10 @@ def save_bookmark_input(
         page_id = parsed.page_id
         input_kind = parsed.kind.value
 
-    logger.info(
-        "Confluence page identified page_id=%s input_kind=%s",
-        page_id,
-        input_kind,
-    )
+    log_event(logger, logging.DEBUG, "bookmark_page_identified", page_id=page_id, reason=input_kind)
 
     def load_metadata(page_id: str) -> ConfluencePageSnapshot:
-        logger.info("Fetching selected Confluence page page_id=%s descendants=false", page_id)
+        log_event(logger, logging.DEBUG, "bookmark_metadata_requested", page_id=page_id)
         page = (
             resolved_page
             if resolved_page is not None and resolved_page.page_id == page_id
@@ -265,19 +356,22 @@ def save_bookmark_input(
         if page is None:
             result = client.get_page(page_id)
             if not result.ok or result.page is None:
-                logger.warning(
-                    "Confluence page fetch failed page_id=%s result=%s",
-                    page_id,
-                    result.code.value,
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "bookmark_metadata_failed",
+                    page_id=page_id,
+                    error_code=_safe_result_code(result.code),
                 )
                 raise _result_error(result.code, result.message)
             page = result.page
         snapshot = snapshot_from_confluence_page(page)
-        logger.info(
-            "Confluence page loaded page_id=%s ancestors=%d page_text_characters=%d",
-            page_id,
-            len(snapshot.ancestors),
-            len(snapshot.page_text),
+        log_event(
+            logger,
+            logging.DEBUG,
+            "bookmark_metadata_loaded",
+            page_id=page_id,
+            count=len(snapshot.ancestors),
         )
         return snapshot
 
@@ -290,16 +384,10 @@ def save_bookmark_input(
     else:
         result = save_bookmark_by_page_id(page_id, load_metadata)
     result = finish_confluence_bookmark(result)
-    logger.info(
-        "Bookmark save completed page_id=%s bookmark_id=%s created=%s source_requested=%s",
-        page_id,
-        result.bookmark.pk,
-        result.created,
-        result.source_requested,
-    )
     return result
 
 
+@_logged_action("validate_open")
 def validated_open_url(
     bookmark: Bookmark,
     *,

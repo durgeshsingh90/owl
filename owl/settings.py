@@ -342,6 +342,8 @@ FILE_UPLOAD_PERMISSIONS = 0o600
 FILE_UPLOAD_DIRECTORY_PERMISSIONS = 0o700
 DJANGO_LOG_LEVEL = _env_log_level("DJANGO_LOG_LEVEL", "INFO")
 OWL_LOG_LEVEL = _env_log_level("OWL_LOG_LEVEL", "INFO")
+BITBUCKET_LOG_LEVEL = _env_log_level("BITBUCKET_LOG_LEVEL", "DEBUG")
+BOOKMARK_LOG_LEVEL = _env_log_level("BOOKMARK_LOG_LEVEL", "DEBUG")
 OWL_LOG_MAX_BYTES = _env_int("OWL_LOG_MAX_BYTES", 5_242_880, minimum=1_024)
 OWL_LOG_BACKUP_COUNT = _env_int("OWL_LOG_BACKUP_COUNT", 3, minimum=1)
 
@@ -432,7 +434,17 @@ LOGGING = {
             "()": "core.logging.SecretSafeFormatter",
             "format": "{asctime} {levelname} {name}: {message}",
             "style": "{",
-        }
+        },
+        "bitbucket": {
+            "()": "core.logging.SecretSafeFormatter",
+            "format": "{asctime} {levelname} {name} pid={process} thread={threadName}: {message}",
+            "style": "{",
+        },
+        "bookmarks": {
+            "()": "core.logging.SecretSafeFormatter",
+            "format": "{asctime} {levelname} {name} pid={process} thread={threadName}: {message}",
+            "style": "{",
+        },
     },
     "handlers": {
         "console": {
@@ -448,8 +460,80 @@ LOGGING = {
             "delay": True,
             "formatter": "safe",
         },
+        "bitbucket_console": {
+            "class": "logging.StreamHandler",
+            "level": OWL_LOG_LEVEL,
+            "formatter": "bitbucket",
+        },
+        "bitbucket_file": {
+            "class": "core.logging.ProcessSafeRotatingFileHandler",
+            "filename": LOG_ROOT / "bitbucket.log",
+            "level": BITBUCKET_LOG_LEVEL,
+            "maxBytes": OWL_LOG_MAX_BYTES,
+            "backupCount": OWL_LOG_BACKUP_COUNT,
+            "encoding": "utf-8",
+            "delay": True,
+            "formatter": "bitbucket",
+        },
+        "bitbucket_errors": {
+            "class": "core.logging.ProcessSafeRotatingFileHandler",
+            "filename": LOG_ROOT / "bitbucket-errors.log",
+            "level": "ERROR",
+            "maxBytes": OWL_LOG_MAX_BYTES,
+            "backupCount": OWL_LOG_BACKUP_COUNT,
+            "encoding": "utf-8",
+            "delay": True,
+            "formatter": "bitbucket",
+        },
+        "bookmarks_console": {
+            "class": "logging.StreamHandler",
+            "level": OWL_LOG_LEVEL,
+            "formatter": "bookmarks",
+        },
+        "bookmarks_file": {
+            "class": "core.logging.ProcessSafeRotatingFileHandler",
+            "filename": LOG_ROOT / "bookmarks.log",
+            "level": BOOKMARK_LOG_LEVEL,
+            "maxBytes": OWL_LOG_MAX_BYTES,
+            "backupCount": OWL_LOG_BACKUP_COUNT,
+            "encoding": "utf-8",
+            "delay": True,
+            "formatter": "bookmarks",
+        },
+        "bookmarks_errors": {
+            "class": "core.logging.ProcessSafeRotatingFileHandler",
+            "filename": LOG_ROOT / "bookmarks-errors.log",
+            "level": "ERROR",
+            "maxBytes": OWL_LOG_MAX_BYTES,
+            "backupCount": OWL_LOG_BACKUP_COUNT,
+            "encoding": "utf-8",
+            "delay": True,
+            "formatter": "bookmarks",
+        },
     },
     "loggers": {
+        "owl.bookmarks": {
+            "handlers": ["bookmarks_console", "bookmarks_file", "bookmarks_errors"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+        "bookmark_manager": {
+            "handlers": ["bookmarks_console", "bookmarks_file", "bookmarks_errors"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+        "owl.bitbucket": {
+            "handlers": ["bitbucket_console", "bitbucket_file", "bitbucket_errors"],
+            # Keep ERROR events available to their own handler even if the
+            # diagnostic file is configured to show only CRITICAL events.
+            "level": "DEBUG",
+            "propagate": False,
+        },
+        "bitbucket_search": {
+            "handlers": ["bitbucket_console", "bitbucket_file", "bitbucket_errors"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
         "django": {
             "handlers": ["console", "local_file"],
             "level": DJANGO_LOG_LEVEL,

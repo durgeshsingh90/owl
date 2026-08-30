@@ -192,6 +192,8 @@ class BitbucketRepository(models.Model):
     last_synced_commit = models.CharField(max_length=64, blank=True)
     history_is_shallow = models.BooleanField(default=True)
     metadata_indexed_commit = models.CharField(max_length=64, blank=True)
+    activity_indexed_commit = models.CharField(max_length=64, blank=True)
+    activity_indexed_at = models.DateTimeField(null=True, blank=True)
     last_sync_started_at = models.DateTimeField(null=True, blank=True)
     last_sync_completed_at = models.DateTimeField(null=True, blank=True)
     last_sync_successful_at = models.DateTimeField(null=True, blank=True, db_index=True)
@@ -225,7 +227,7 @@ class BitbucketRepository(models.Model):
 
 
 class GitCommit(models.Model):
-    """One commit reachable in a repository's locally available branch history."""
+    """One Git commit retained for available history or PDF provenance."""
 
     repository = models.ForeignKey(
         BitbucketRepository,
@@ -238,6 +240,7 @@ class GitCommit(models.Model):
     authored_at = models.DateTimeField()
     committed_at = models.DateTimeField()
     is_shallow_boundary = models.BooleanField(default=False)
+    in_activity_history = models.BooleanField(default=False, db_index=True)
 
     class Meta:
         ordering = ["-committed_at", "-id"]
@@ -256,6 +259,25 @@ class GitCommit(models.Model):
 
     def __str__(self) -> str:
         return f"{self.repository.display_name} — {self.commit_hash[:12]}"
+
+
+class GitCommitFolder(models.Model):
+    """One escaped direct-folder display path touched by a commit; empty means root."""
+
+    commit = models.ForeignKey(GitCommit, on_delete=models.CASCADE, related_name="folders")
+    folder_path = models.CharField(max_length=2048, blank=True)
+
+    class Meta:
+        ordering = ["folder_path", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("commit", "folder_path"),
+                name="bitbucket_unique_commit_folder",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.commit_id} — {self.folder_path or '/'}"
 
 
 class BitbucketPeopleGroup(models.Model):

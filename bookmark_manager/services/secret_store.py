@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
+import time
 from abc import ABC, abstractmethod
-from functools import lru_cache
+from functools import lru_cache, wraps
 from typing import Final
 
 from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
 from django.db import DatabaseError
 
+from bookmark_manager.services.logging_events import get_logger, log_event
+
+logger = get_logger("secret_store")
 KEYRING_SERVICE: Final = "owl.confluence"
 KEYRING_ACCOUNT: Final = "active"
 
@@ -24,6 +29,50 @@ class SecretStoreUnavailable(SecretStoreError):
 
 class SecretStoreOperationError(SecretStoreError):
     """A credential operation failed without exposing the credential value."""
+
+
+def _logged_secret_operation(operation: str, backend: str):
+    """Record backend outcomes without inspecting credentials or backend messages."""
+
+    def decorate(function):
+        @wraps(function)
+        def observed(self, *args, **kwargs):
+            started = time.monotonic()
+            try:
+                result = function(self, *args, **kwargs)
+            except Exception as exc:
+                missing_input = operation == "set" and not (
+                    args[0] if args else kwargs.get("value")
+                )
+                log_event(
+                    logger,
+                    logging.WARNING if missing_input else logging.ERROR,
+                    "credential_store_operation_rejected"
+                    if missing_input
+                    else "credential_store_operation_failed",
+                    error=exc.__cause__
+                    if isinstance(exc, SecretStoreError) and exc.__cause__ is not None
+                    else exc,
+                    operation=operation,
+                    stage=backend,
+                    elapsed_ms=round((time.monotonic() - started) * 1000),
+                )
+                raise
+            # An absent credential is a normal first-run state, not a failure.
+            if operation != "get" or result is not None:
+                log_event(
+                    logger,
+                    logging.DEBUG if operation == "get" else logging.INFO,
+                    "credential_store_operation_completed",
+                    operation=operation,
+                    stage=backend,
+                    elapsed_ms=round((time.monotonic() - started) * 1000),
+                )
+            return result
+
+        return observed
+
+    return decorate
 
 
 class SecretStore(ABC):
@@ -60,11 +109,17 @@ class KeyringSecretStore(SecretStore):
             keyring, _ = self._keyring()
             backend = keyring.get_keyring()
             return bool(getattr(backend, "priority", 0))
-        except SecretStoreError:
-            return False
-        except Exception:
+        except Exception as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "credential_store_availability_failed",
+                error=exc,
+                stage="keyring",
+            )
             return False
 
+    @_logged_secret_operation("get", "keyring")
     def get(self) -> str | None:
         keyring, keyring_error = self._keyring()
         try:
@@ -72,6 +127,7 @@ class KeyringSecretStore(SecretStore):
         except keyring_error as exc:
             raise SecretStoreOperationError("The saved credential could not be read.") from exc
 
+    @_logged_secret_operation("set", "keyring")
     def set(self, value: str) -> None:
         if not value:
             raise ValueError("A non-empty credential is required.")
@@ -81,6 +137,7 @@ class KeyringSecretStore(SecretStore):
         except keyring_error as exc:
             raise SecretStoreOperationError("The credential could not be stored.") from exc
 
+    @_logged_secret_operation("delete", "keyring")
     def delete(self) -> None:
         keyring, keyring_error = self._keyring()
         try:
@@ -91,8 +148,15 @@ class KeyringSecretStore(SecretStore):
             try:
                 if keyring.get_password(KEYRING_SERVICE, KEYRING_ACCOUNT) is None:
                     return
-            except keyring_error:
-                pass
+            except keyring_error as read_error:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "credential_store_absence_check_failed",
+                    error=read_error,
+                    operation="delete",
+                    stage="keyring",
+                )
             raise SecretStoreOperationError("The credential could not be removed.") from exc
 
 
@@ -119,10 +183,18 @@ class DatabaseSecretStore(SecretStore):
                 .objects.values_list("credential_ciphertext", flat=True)
                 .first()
             )
-        except DatabaseError:
+        except DatabaseError as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "credential_store_availability_failed",
+                error=exc,
+                stage="database",
+            )
             return False
         return True
 
+    @_logged_secret_operation("get", "database")
     def get(self) -> str | None:
         try:
             ciphertext = (
@@ -144,6 +216,7 @@ class DatabaseSecretStore(SecretStore):
                 "The encrypted database credential could not be read."
             ) from exc
 
+    @_logged_secret_operation("set", "database")
     def set(self, value: str) -> None:
         if not value:
             raise ValueError("A non-empty credential is required.")
@@ -158,6 +231,7 @@ class DatabaseSecretStore(SecretStore):
                 "The encrypted database credential could not be stored."
             ) from exc
 
+    @_logged_secret_operation("delete", "database")
     def delete(self) -> None:
         try:
             self._configuration_model().objects.filter(pk=1).update(credential_ciphertext="")
@@ -203,13 +277,31 @@ def get_secret_store() -> SecretStore:
     backend = settings.CONFLUENCE_SECRET_BACKEND.casefold()
     if backend == "auto":
         keyring_store = KeyringSecretStore()
-        return keyring_store if keyring_store.is_available() else DatabaseSecretStore()
+        if keyring_store.is_available():
+            log_event(logger, logging.DEBUG, "credential_store_selected", stage="keyring")
+            return keyring_store
+        log_event(
+            logger,
+            logging.WARNING,
+            "credential_store_fallback_selected",
+            stage="database",
+            reason="keyring_unavailable",
+        )
+        return DatabaseSecretStore()
     if backend == "keyring":
+        log_event(logger, logging.DEBUG, "credential_store_selected", stage="keyring")
         return KeyringSecretStore()
     if backend == "database":
+        log_event(logger, logging.DEBUG, "credential_store_selected", stage="database")
         return DatabaseSecretStore()
     if backend == "memory" and settings.OWL_ALLOW_IN_MEMORY_SECRET_STORE:
         return InMemorySecretStore()
+    log_event(
+        logger,
+        logging.ERROR,
+        "credential_store_selection_failed",
+        reason="backend_not_permitted",
+    )
     raise SecretStoreUnavailable("The configured credential backend is not permitted.")
 
 

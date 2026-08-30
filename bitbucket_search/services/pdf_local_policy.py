@@ -7,7 +7,9 @@ import os
 import shutil
 import stat
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING
 
 from django.conf import settings
@@ -25,6 +27,7 @@ from bitbucket_search.models import (
     RepositorySyncJobStatus,
     RepositorySyncState,
 )
+from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
 from bitbucket_search.services.repository_lock import (
     RepositoryCheckoutBusy,
     repository_checkout_lock,
@@ -33,7 +36,18 @@ from bitbucket_search.services.repository_lock import (
 if TYPE_CHECKING:
     from bitbucket_search.services.document_actions import DocumentActionError
 
-logger = logging.getLogger(__name__)
+logger = get_logger("policy")
+_EXPECTED_REJECTIONS = {
+    "repository_busy",
+    "pdf_extraction_busy",
+    "repository_not_ready",
+    "document_unavailable",
+    "invalid_document_path",
+    "invalid_pdf_policy",
+    "invalid_pdf_snapshot_path",
+    "pdf_delete_confirmation_required",
+    "dirty_working_tree",
+}
 _FROZEN_STATES = (PDFLocalPolicyState.EXCLUDED, PDFLocalPolicyState.RESUMING)
 _ACTIVE_REPOSITORY_STATES = (
     RepositorySyncState.QUEUED,
@@ -41,6 +55,38 @@ _ACTIVE_REPOSITORY_STATES = (
     RepositorySyncState.FETCHING,
     RepositorySyncState.UPDATING,
 )
+
+
+@contextmanager
+def _logged_policy(operation: str, document_id: int):
+    from bitbucket_search.services.document_actions import DocumentActionError
+
+    started = perf_counter()
+    context = {"operation": operation, "document_id": document_id}
+    log_event(logger, logging.INFO, "pdf_policy_requested", **context)
+    try:
+        with logging_context(document_id=document_id):
+            yield context
+    except Exception as error:
+        code = error.code if isinstance(error, DocumentActionError) else "pdf_policy_failed"
+        log_event(
+            logger,
+            logging.WARNING if code in _EXPECTED_REJECTIONS else logging.ERROR,
+            "pdf_policy_failed",
+            error=error,
+            error_code=code,
+            elapsed_ms=round((perf_counter() - started) * 1000),
+            **context,
+        )
+        raise
+    else:
+        log_event(
+            logger,
+            logging.INFO,
+            "pdf_policy_completed",
+            elapsed_ms=round((perf_counter() - started) * 1000),
+            **context,
+        )
 
 
 def _error(code: str, summary: str) -> DocumentActionError:
@@ -97,6 +143,15 @@ def policy_snapshot_path(policy: PDFLocalPolicy, *, require_exists: bool = False
     try:
         return _policy_snapshot_path(policy, require_exists=require_exists)
     except OSError as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_snapshot_access_failed",
+            error=exc,
+            repository_id=policy.repository_id,
+            document_id=policy.document_id,
+            stage="snapshot_validation",
+        )
         raise _error(
             "pdf_snapshot_unavailable", "OWL could not safely access the frozen PDF copy."
         ) from exc
@@ -168,7 +223,17 @@ class _FileChanges:
             _copy_regular_file(target, backup)
         except Exception:
             # Never restore a partial backup over the intact original.
-            backup.unlink(missing_ok=True)
+            try:
+                backup.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "pdf_policy_cleanup_failed",
+                    error=cleanup_error,
+                    stage="partial_backup_cleanup",
+                )
+                raise
             raise
         self.originals[target] = backup
         self.original_modes[target] = original_mode
@@ -261,6 +326,14 @@ def _change_pdf(document_id: int, *, delete: bool) -> PDFDocument | None:
     )
 
     repository_id = _repository_id(document_id)
+    log_event(
+        logger,
+        logging.DEBUG,
+        "pdf_policy_validation_started",
+        repository_id=repository_id,
+        document_id=document_id,
+        operation="delete" if delete else "exclude",
+    )
     changes = _FileChanges()
     checkout_changed = False
     repository = None
@@ -278,6 +351,13 @@ def _change_pdf(document_id: int, *, delete: bool) -> PDFDocument | None:
                         and policy.state == PDFLocalPolicyState.EXCLUDED
                     ):
                         policy_snapshot_path(policy, require_exists=True)
+                        log_event(
+                            logger,
+                            logging.DEBUG,
+                            "pdf_policy_already_excluded",
+                            repository_id=repository_id,
+                            document_id=document_id,
+                        )
                         return document
                     if (
                         not delete
@@ -350,18 +430,48 @@ def _change_pdf(document_id: int, *, delete: bool) -> PDFDocument | None:
                 if checkout_changed and repository is not None:
                     try:
                         apply_document_checkout_policy(repository)
-                    except Exception:
+                    except Exception as restore_error:
+                        log_event(
+                            logger,
+                            logging.ERROR,
+                            "pdf_policy_rollback_failed",
+                            error=restore_error,
+                            repository_id=repository_id,
+                            document_id=document_id,
+                            stage="checkout_restore",
+                        )
                         restoration_failed = True
                 try:
                     changes.restore()
-                except Exception:
+                except Exception as restore_error:
+                    log_event(
+                        logger,
+                        logging.ERROR,
+                        "pdf_policy_rollback_failed",
+                        error=restore_error,
+                        repository_id=repository_id,
+                        document_id=document_id,
+                        stage="file_restore",
+                    )
                     restoration_failed = True
                 if restoration_failed:
                     raise _error(
                         "pdf_policy_rollback_failed",
                         "The PDF change could not be completed safely. Original file data was retained for recovery; refresh this repository after resolving its local state.",
                     ) from exc
-                changes.discard()
+                try:
+                    changes.discard()
+                except OSError as cleanup_error:
+                    log_event(
+                        logger,
+                        logging.ERROR,
+                        "pdf_policy_cleanup_failed",
+                        error=cleanup_error,
+                        repository_id=repository_id,
+                        document_id=document_id,
+                        stage="rollback_cleanup",
+                    )
+                    raise
                 if isinstance(exc, DocumentActionError):
                     raise
                 if isinstance(exc, RepositorySyncError):
@@ -393,14 +503,23 @@ def _change_pdf(document_id: int, *, delete: bool) -> PDFDocument | None:
 def exclude_registered_pdf(document_id: int) -> PDFDocument:
     """Freeze this PDF's current bytes and exclude its Git path from refresh."""
 
-    document = _change_pdf(document_id, delete=False)
-    assert document is not None
-    return document
+    with _logged_policy("exclude", document_id) as context:
+        document = _change_pdf(document_id, delete=False)
+        assert document is not None
+        context.update(repository_id=document.repository_id, status="excluded")
+        return document
 
 
 def resume_registered_pdf(document_id: int) -> PDFDocument:
     """Keep frozen bytes readable until a later successful refresh replaces them."""
 
+    with _logged_policy("resume", document_id) as context:
+        document = _resume_registered_pdf(document_id)
+        context.update(repository_id=document.repository_id, status="awaiting_refresh")
+        return document
+
+
+def _resume_registered_pdf(document_id: int) -> PDFDocument:
     try:
         with (
             repository_checkout_lock(_repository_id(document_id), blocking=False),
@@ -409,6 +528,13 @@ def resume_registered_pdf(document_id: int) -> PDFDocument:
             document, _repository = _locked_document(document_id)
             policy = PDFLocalPolicy.objects.select_for_update().filter(document=document).first()
             if policy is None:
+                log_event(
+                    logger,
+                    logging.DEBUG,
+                    "pdf_policy_already_included",
+                    repository_id=document.repository_id,
+                    document_id=document_id,
+                )
                 return document
             if policy.state not in _FROZEN_STATES:
                 raise _error(
@@ -446,12 +572,14 @@ def resume_registered_pdf(document_id: int) -> PDFDocument:
 def delete_registered_pdf(document_id: int, *, confirmed: bool = False) -> None:
     """Delete only the selected local PDF and its unshared registered text."""
 
-    if confirmed is not True:
-        raise _error(
-            "pdf_delete_confirmation_required",
-            "Confirm deletion of this PDF and its local indexed data first.",
-        )
-    _change_pdf(document_id, delete=True)
+    with _logged_policy("delete", document_id) as context:
+        if confirmed is not True:
+            raise _error(
+                "pdf_delete_confirmation_required",
+                "Confirm deletion of this PDF and its local indexed data first.",
+            )
+        _change_pdf(document_id, delete=True)
+        context.update(status="deleted", removed_count=1)
 
 
 def complete_resumed_policies(repository_id: int, relative_paths) -> None:
@@ -475,15 +603,45 @@ def complete_resumed_policies(repository_id: int, relative_paths) -> None:
                     PDFLocalPolicy(id=target_policy_id, repository_id=target_repository_id)
                 )
                 if checked != path:
+                    log_event(
+                        logger,
+                        logging.ERROR,
+                        "pdf_snapshot_cleanup_failed",
+                        repository_id=target_repository_id,
+                        policy_id=target_policy_id,
+                        reason="snapshot_path_mismatch",
+                    )
                     return
                 checked.unlink(missing_ok=True)
-            except Exception:
+            except Exception as error:
                 # A completed catalogue remains authoritative. Never leak raw
                 # filesystem errors or make a committed sync look rolled back.
-                logger.warning(
-                    "Private PDF snapshot cleanup needs attention: repository_id=%s policy_id=%s",
-                    target_repository_id,
-                    target_policy_id,
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "pdf_snapshot_cleanup_failed",
+                    error=error,
+                    repository_id=target_repository_id,
+                    policy_id=target_policy_id,
+                    operation="resume",
+                    stage="post_commit_cleanup",
                 )
 
         transaction.on_commit(cleanup)
+    if policies:
+        log_event(
+            logger,
+            logging.DEBUG,
+            "pdf_policies_resume_staged",
+            repository_id=repository_id,
+            count=len(policies),
+        )
+        transaction.on_commit(
+            lambda: log_event(
+                logger,
+                logging.INFO,
+                "pdf_policies_resumed",
+                repository_id=repository_id,
+                count=len(policies),
+            )
+        )

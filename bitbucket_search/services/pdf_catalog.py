@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import re
 import subprocess
@@ -13,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import BinaryIO
+from typing import TYPE_CHECKING, BinaryIO
 
 from django.conf import settings
 from django.db import transaction
@@ -33,10 +34,15 @@ from bitbucket_search.models import (
 from bitbucket_search.services.git_sync import (
     ProgressCallback,
     RepositorySyncError,
+    _git_command_operation,
     _git_environment,
     managed_repository_path,
 )
+from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
 from bitbucket_search.services.path_safety import has_disallowed_path_characters
+
+if TYPE_CHECKING:
+    from bitbucket_search.services.git_activity import GitActivityBuild
 
 HeartbeatCallback = Callable[[], None]
 _PDF_PATHSPEC = "*.[pP][dD][fF]"
@@ -46,6 +52,7 @@ _HEARTBEAT_SECONDS = 1.0
 _STREAM_CHUNK_BYTES = 64 * 1024
 _MAX_TREE_RECORD_BYTES = 1024 * 1024
 _MAX_HISTORY_COMMIT_BYTES = 64 * 1024 * 1024
+logger = get_logger("catalog")
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +81,7 @@ class CatalogBuild:
     documents: tuple[CatalogPDF, ...]
     history_is_shallow: bool
     policy_signature: tuple[tuple[str, str, int | None], ...] = ()
+    activity: GitActivityBuild | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +99,8 @@ def _run_binary_capture(
     failure_code: str,
     failure_summary: str,
 ) -> bytes:
+    operation = _git_command_operation(arguments)
+    log_event(logger, logging.DEBUG, "catalog_git_command_started", operation=operation)
     try:
         process = subprocess.Popen(
             list(arguments),
@@ -101,6 +111,14 @@ def _run_binary_capture(
             close_fds=True,
         )
     except OSError as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "catalog_git_spawn_failed",
+            error=exc,
+            error_code=failure_code,
+            operation=operation,
+        )
         raise RepositorySyncError(failure_code, failure_summary) from exc
 
     deadline = time.monotonic() + settings.BITBUCKET_GIT_TIMEOUT_SECONDS
@@ -123,6 +141,14 @@ def _run_binary_capture(
         if process.poll() is None:
             process.kill()
         process.communicate()
+        log_event(
+            logger,
+            logging.ERROR,
+            "catalog_git_timeout",
+            error=exc,
+            error_code=failure_code,
+            operation=operation,
+        )
         raise RepositorySyncError(failure_code, failure_summary) from exc
     except BaseException:
         if process.poll() is None:
@@ -131,7 +157,16 @@ def _run_binary_capture(
         raise
 
     if process.returncode != 0:
+        log_event(
+            logger,
+            logging.ERROR,
+            "catalog_git_command_failed",
+            error_code=failure_code,
+            return_code=process.returncode,
+            operation=operation,
+        )
         raise RepositorySyncError(failure_code, failure_summary)
+    log_event(logger, logging.DEBUG, "catalog_git_command_completed", operation=operation)
     return output
 
 
@@ -145,6 +180,8 @@ def _run_binary_spooled(
 ) -> Iterator[BinaryIO]:
     """Spool potentially large Git output to disk while keeping the lease alive."""
 
+    operation = _git_command_operation(arguments)
+    log_event(logger, logging.DEBUG, "catalog_git_command_started", operation=operation)
     spool_root = Path(settings.BITBUCKET_TEMP_ROOT).resolve()
     try:
         spool_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -154,6 +191,14 @@ def _run_binary_spooled(
             dir=spool_root,
         )
     except OSError as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "catalog_spool_creation_failed",
+            error=exc,
+            error_code=failure_code,
+            operation=operation,
+        )
         raise RepositorySyncError(failure_code, failure_summary) from exc
 
     with output_file as output:
@@ -167,6 +212,14 @@ def _run_binary_spooled(
                 close_fds=True,
             )
         except OSError as exc:
+            log_event(
+                logger,
+                logging.ERROR,
+                "catalog_git_spawn_failed",
+                error=exc,
+                error_code=failure_code,
+                operation=operation,
+            )
             raise RepositorySyncError(failure_code, failure_summary) from exc
 
         deadline = time.monotonic() + settings.BITBUCKET_GIT_TIMEOUT_SECONDS
@@ -188,6 +241,14 @@ def _run_binary_spooled(
             if process.poll() is None:
                 process.kill()
             process.wait()
+            log_event(
+                logger,
+                logging.ERROR,
+                "catalog_git_timeout",
+                error=exc,
+                error_code=failure_code,
+                operation=operation,
+            )
             raise RepositorySyncError(failure_code, failure_summary) from exc
         except BaseException:
             if process.poll() is None:
@@ -196,8 +257,17 @@ def _run_binary_spooled(
             raise
 
         if process.returncode != 0:
+            log_event(
+                logger,
+                logging.ERROR,
+                "catalog_git_command_failed",
+                error_code=failure_code,
+                return_code=process.returncode,
+                operation=operation,
+            )
             raise RepositorySyncError(failure_code, failure_summary)
         output.seek(0)
+        log_event(logger, logging.DEBUG, "catalog_git_command_completed", operation=operation)
         yield output
 
 
@@ -319,7 +389,9 @@ def _parse_tree_pdfs(
                 "OWL could not read the repository's PDF inventory safely.",
             )
         raw_mode, raw_blob_id, raw_stage = fields
-        if raw_stage != b"0" or raw_mode == b"120000":
+        # A PDF-looking path may be a gitlink (uninitialized submodule), sparse
+        # directory, or symlink. Only regular Git blobs are local PDF documents.
+        if raw_stage != b"0" or raw_mode not in {b"100644", b"100755"}:
             continue
         relative_text = os.fsdecode(raw_path)
         relative = _validated_relative_path(relative_text)
@@ -344,6 +416,7 @@ def _parse_tree_pdfs(
             resolved = candidate.resolve(strict=True)
             stat = resolved.stat(follow_symlinks=False)
         except OSError as exc:
+            log_event(logger, logging.ERROR, "catalog_pdf_access_failed", error=exc)
             raise _pdf_file_access_error(normalized, exc) from exc
         if not resolved.is_relative_to(repository_root) or not resolved.is_file():
             raise RepositorySyncError(
@@ -627,6 +700,41 @@ def build_repository_pdf_catalog(
 ) -> CatalogBuild:
     """Inspect one completed checkout without issuing per-PDF Git commands."""
 
+    started_at = time.monotonic()
+    log_event(logger, logging.DEBUG, "catalog_build_started", repository_id=repository.pk)
+    try:
+        with logging_context(repository_id=repository.pk):
+            catalog = _build_repository_pdf_catalog(
+                repository, result_commit=result_commit, progress_callback=progress_callback
+            )
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "catalog_build_failed",
+            error=exc,
+            repository_id=repository.pk,
+            error_code=exc.code if isinstance(exc, RepositorySyncError) else "pdf_catalog_failed",
+            elapsed_ms=round((time.monotonic() - started_at) * 1000),
+        )
+        raise
+    log_event(
+        logger,
+        logging.INFO,
+        "catalog_build_completed",
+        repository_id=repository.pk,
+        pdf_count=len(catalog.documents),
+        elapsed_ms=round((time.monotonic() - started_at) * 1000),
+    )
+    return catalog
+
+
+def _build_repository_pdf_catalog(
+    repository: BitbucketRepository,
+    *,
+    result_commit: str,
+    progress_callback: ProgressCallback,
+) -> CatalogBuild:
     repository_path = managed_repository_path(repository)
 
     def heartbeat() -> None:
@@ -647,6 +755,14 @@ def build_repository_pdf_catalog(
         for path, state, _document_id in policy_signature
         if state in {PDFLocalPolicyState.EXCLUDED, PDFLocalPolicyState.DELETED}
     )
+    log_event(
+        logger,
+        logging.DEBUG,
+        "catalog_policy_selection",
+        repository_id=repository.pk,
+        skipped_count=len(ignored_paths),
+        count=len(policy_signature),
+    )
     tree_documents = _read_current_pdfs(
         repository_path,
         heartbeat_callback=heartbeat,
@@ -663,12 +779,26 @@ def build_repository_pdf_catalog(
         and repository.pdf_documents.filter(lifecycle_state=PDFDocumentLifecycle.ACTIVE).exists()
     )
     if can_reuse_history:
+        log_event(
+            logger,
+            logging.DEBUG,
+            "catalog_history_reused",
+            repository_id=repository.pk,
+            pdf_count=len(tree_documents),
+        )
         added: dict[str, CommitEvidence] = {}
         last_changed: dict[str, CommitEvidence] = {}
         evidence = {
             item.relative_path: PDFDocumentAddedEvidence.NOT_FOUND for item in tree_documents
         }
     else:
+        log_event(
+            logger,
+            logging.DEBUG,
+            "catalog_history_read_started",
+            repository_id=repository.pk,
+            pdf_count=len(tree_documents),
+        )
         progress_callback(
             RepositorySyncPhase.DISCOVERING,
             99,
@@ -700,10 +830,24 @@ def build_repository_pdf_catalog(
         )
         for item in tree_documents
     )
+    from bitbucket_search.services.git_activity import build_repository_git_activity
+
+    activity = build_repository_git_activity(
+        repository,
+        repository_path=repository_path,
+        result_commit=result_commit,
+        shallow_boundaries=shallow_boundaries,
+        heartbeat_callback=lambda: progress_callback(
+            RepositorySyncPhase.DISCOVERING,
+            99,
+            "Reading available Git commit and folder activity…",
+        ),
+    )
     return CatalogBuild(
         documents=documents,
         history_is_shallow=bool(shallow_boundaries),
         policy_signature=policy_signature,
+        activity=activity,
     )
 
 
@@ -752,7 +896,6 @@ def _commit_map(
     }
 
 
-@transaction.atomic
 def publish_repository_pdf_catalog(
     repository: BitbucketRepository,
     catalog: CatalogBuild,
@@ -762,11 +905,64 @@ def publish_repository_pdf_catalog(
 ) -> None:
     """Switch one repository's active PDF inventory while preserving OWL usage."""
 
+    started_at = time.monotonic()
+    log_event(
+        logger,
+        logging.DEBUG,
+        "catalog_publication_started",
+        repository_id=repository.pk,
+        pdf_count=len(catalog.documents),
+    )
+    try:
+        with logging_context(repository_id=repository.pk):
+            _publish_repository_pdf_catalog(
+                repository, catalog, result_commit=result_commit, observed_at=observed_at
+            )
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "catalog_publication_failed",
+            error=exc,
+            repository_id=repository.pk,
+            error_code=exc.code
+            if isinstance(exc, RepositorySyncError)
+            else "pdf_catalog_publish_failed",
+            elapsed_ms=round((time.monotonic() - started_at) * 1000),
+        )
+        raise
+    elapsed_ms = round((time.monotonic() - started_at) * 1000)
+    transaction.on_commit(
+        lambda: log_event(
+            logger,
+            logging.INFO,
+            "catalog_publication_completed",
+            repository_id=repository.pk,
+            pdf_count=len(catalog.documents),
+            elapsed_ms=elapsed_ms,
+        )
+    )
+
+
+@transaction.atomic
+def _publish_repository_pdf_catalog(
+    repository: BitbucketRepository,
+    catalog: CatalogBuild,
+    *,
+    result_commit: str,
+    observed_at: datetime,
+) -> None:
     policy_signature = _repository_policy_signature(repository)
     if policy_signature != catalog.policy_signature:
         raise RepositorySyncError(
             "document_policy_changed",
             "A local PDF policy changed while the catalogue was being built. Refresh to retry.",
+        )
+    if catalog.activity is not None:
+        from bitbucket_search.services.git_activity import publish_repository_git_activity
+
+        publish_repository_git_activity(
+            repository, catalog.activity, result_commit=result_commit, observed_at=observed_at
         )
     frozen_paths = {
         path
@@ -893,3 +1089,13 @@ def publish_repository_pdf_catalog(
         from bitbucket_search.services.pdf_local_policy import complete_resumed_policies
 
         complete_resumed_policies(repository.pk, resumed_paths)
+    log_event(
+        logger,
+        logging.DEBUG,
+        "catalog_publication_counts",
+        repository_id=repository.pk,
+        count=len(creates),
+        indexed_count=len(updates),
+        removed_count=len(removed),
+        skipped_count=len(blocked_paths),
+    )

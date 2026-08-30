@@ -7,6 +7,7 @@ import pytest
 from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import escape
 
 from bitbucket_search.models import (
     BitbucketPeopleGroup,
@@ -123,6 +124,56 @@ def test_people_context_and_multi_committer_filter_use_or_semantics(loopback_cli
     assert ">Clear</a>" in html
     assert "Create group" in html
     assert "Pushed by" not in html
+
+
+def test_people_repository_badges_stay_global_when_pdf_results_are_filtered(loopback_client):
+    architecture = _repository()
+    payments = BitbucketRepository.objects.create(
+        display_name="payments-platform",
+        canonical_remote_key="bitbucket.org/workspace/payments-platform",
+        remote_url="https://bitbucket.org/workspace/payments-platform.git",
+    )
+    first = _committed_pdf(architecture, person="Alice Smith", filename="A.pdf", marker="a")
+    _committed_pdf(payments, person="Alice Smith", filename="B.pdf", marker="b")
+    _committed_pdf(architecture, person="Bob Jones", filename="C.pdf", marker="c")
+
+    response = loopback_client.get(
+        reverse("bitbucket_search:index"),
+        {"repository": architecture.pk, "committer": "Alice Smith"},
+    )
+
+    assert response.status_code == 200
+    people = {person["name"]: person for person in response.context["git_people"]}
+    assert people["Alice Smith"]["repository_count"] == 2
+    assert people["Alice Smith"]["repository_names"] == ("architecture", "payments-platform")
+    assert people["Alice Smith"]["pdf_count"] == 2
+    assert people["Alice Smith"]["commit_count"] == 2
+    assert people["Bob Jones"]["repository_count"] == 1
+    assert [hit.document.pk for hit in response.context["search_page"].results] == [first.pk]
+    html = response.content.decode()
+    # The shared partial supplies the same count and hover names on both layouts.
+    assert html.count('aria-label="2 repositories: architecture, payments-platform"') == 2
+    assert html.count('title="Repositories: architecture, payments-platform">2 repos</b>') == 2
+    assert html.count('title="Repositories: architecture">1 repo</b>') == 2
+    assert "2 PDFs · 2 commits" in html
+
+
+def test_people_repository_hover_names_are_escaped(loopback_client):
+    repository = _repository()
+    repository.display_name = 'Ops "<img src=x onerror=alert(1)>" & Platform'
+    repository.save(update_fields=("display_name",))
+    _committed_pdf(repository, person="Alice Smith", filename="A.pdf", marker="a")
+
+    response = loopback_client.get(reverse("bitbucket_search:index"))
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    badges = re.findall(r'<b class="bb-people-repository-count"[^>]*>1 repo</b>', html)
+    assert len(badges) == 2
+    for badge in badges:
+        assert f'title="Repositories: {escape(repository.display_name)}"' in badge
+        assert 'tabindex="0" role="note"' in badge
+        assert "<img src=x onerror=alert(1)>" not in badge
 
 
 def test_people_group_can_be_created_then_filters_to_any_member(loopback_client):

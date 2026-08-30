@@ -51,7 +51,12 @@ def test_worker_wakeup_lock_serializes_callers(settings, tmp_path):
 
 def test_repository_synchronization_holds_checkout_lock(monkeypatch):
     repository = SimpleNamespace(pk=23)
-    result = object()
+    result = git_sync.RepositorySyncResult(
+        branch="main",
+        source_commit="a" * 40,
+        result_commit="b" * 40,
+        documents=git_sync.DocumentStats(pdf_count=2, vsdx_count=1, document_bytes=1234),
+    )
     events: list[object] = []
 
     @contextmanager

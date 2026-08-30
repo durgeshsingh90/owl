@@ -1,0 +1,84 @@
+{% load l10n %}
+<section class="knowledge-dashboard-section knowledge-bookmark-people" id="bookmark-people-activity" aria-labelledby="bookmark-people-activity-heading" aria-describedby="bookmark-people-activity-note">
+    <div class="knowledge-section-heading knowledge-bookmark-people__heading">
+        <div><p class="knowledge-kicker">People &amp; pages</p><h2 id="bookmark-people-activity-heading">Bookmark Manager activity</h2></div>
+        {% if bookmark_people_activity_filters %}
+            <nav class="knowledge-activity-filters knowledge-bookmark-people__filters" aria-label="Bookmark people activity period">
+                {% for filter in bookmark_people_activity_filters %}<a href="{{ filter.href }}"{% if filter.selected %} class="is-active" aria-current="page"{% endif %}>{{ filter.label }}</a>{% endfor %}
+            </nav>
+        {% endif %}
+    </div>
+    <div class="knowledge-bookmark-people__summary">
+        <p>{{ bookmark_people_dashboard.label|default:"Last 7 days" }} <span aria-hidden="true">·</span> Saved Confluence pages</p>
+        <a class="knowledge-section-link" href="{% url 'bookmark_manager:index' %}">Browse bookmarks <span aria-hidden="true">→</span></a>
+    </div>
+
+    <dl class="knowledge-bookmark-people__metrics">
+        <div><dt>Pages written</dt><dd>{{ bookmark_people_dashboard.written_pages|default:0 }}</dd></div>
+        <div><dt>Pages updated</dt><dd>{{ bookmark_people_dashboard.updated_pages|default:0 }}</dd></div>
+        <div><dt>People</dt><dd>{{ bookmark_people_dashboard.active_people|default:0 }}</dd></div>
+    </dl>
+
+    {% if bookmark_people_dashboard.has_data %}
+        <div class="knowledge-bookmark-people__rankings">
+            <section class="knowledge-bookmark-people__ranking" aria-labelledby="bookmark-writers-heading">
+                <div class="knowledge-bookmark-people__panel-heading"><h3 id="bookmark-writers-heading">Most pages written</h3><span>Top 10</span></div>
+                <p class="knowledge-bookmark-people__caption">Writers / creators · page creation date</p>
+                <ol class="knowledge-bookmark-people__list" role="list">
+                    {% for person in bookmark_people_dashboard.writers|slice:":10" %}
+                        <li>
+                            <span class="knowledge-bookmark-people__rank" aria-hidden="true">{{ forloop.counter }}</span>
+                            <strong class="knowledge-bookmark-people__name" title="{{ person.name }}{% if person.aliases %} · Names in saved metadata: {{ person.aliases|join:', ' }}{% endif %}">{{ person.name }}</strong>
+                            <span class="knowledge-bookmark-people__count">{{ person.page_count }}<span class="visually-hidden"> page{{ person.page_count|pluralize }}</span></span>
+                            <progress class="knowledge-bookmark-people__bar" value="{{ person.page_count|unlocalize }}" max="{{ bookmark_people_dashboard.writers.0.page_count|unlocalize }}" aria-hidden="true"></progress>
+                        </li>
+                    {% empty %}
+                        <li class="knowledge-bookmark-people__list-empty">No pages with writer and creation-date metadata in this period.</li>
+                    {% endfor %}
+                </ol>
+            </section>
+
+            <section class="knowledge-bookmark-people__ranking knowledge-bookmark-people__ranking--updated" aria-labelledby="bookmark-updaters-heading">
+                <div class="knowledge-bookmark-people__panel-heading"><h3 id="bookmark-updaters-heading">Most pages updated</h3><span>Top 10</span></div>
+                <p class="knowledge-bookmark-people__caption">Pages per latest stored editor · latest update date</p>
+                <ol class="knowledge-bookmark-people__list" role="list">
+                    {% for person in bookmark_people_dashboard.updaters|slice:":10" %}
+                        <li>
+                            <span class="knowledge-bookmark-people__rank" aria-hidden="true">{{ forloop.counter }}</span>
+                            <strong class="knowledge-bookmark-people__name" title="{{ person.name }}{% if person.aliases %} · Names in saved metadata: {{ person.aliases|join:', ' }}{% endif %}">{{ person.name }}</strong>
+                            <span class="knowledge-bookmark-people__count">{{ person.page_count }}<span class="visually-hidden"> page{{ person.page_count|pluralize }}</span></span>
+                            <progress class="knowledge-bookmark-people__bar" value="{{ person.page_count|unlocalize }}" max="{{ bookmark_people_dashboard.updaters.0.page_count|unlocalize }}" aria-hidden="true"></progress>
+                        </li>
+                    {% empty %}
+                        <li class="knowledge-bookmark-people__list-empty">No latest page updates with editor and date metadata in this period.</li>
+                    {% endfor %}
+                </ol>
+            </section>
+        </div>
+    {% else %}
+        <div class="knowledge-bookmark-people__empty">
+            <span aria-hidden="true">⌑</span>
+            {% if not bookmark_people_dashboard.has_confluence_pages %}
+                <strong>No saved Confluence pages yet</strong>
+                <p>Save Confluence pages in Bookmark Manager to see their writers and latest editors here.</p>
+                <a href="{% url 'bookmark_manager:index' %}">Open Bookmark Manager <span aria-hidden="true">→</span></a>
+            {% elif not bookmark_people_dashboard.coverage.written_metadata_pages and not bookmark_people_dashboard.coverage.updated_metadata_pages %}
+                <strong>People metadata is not available yet</strong>
+                <p>Refresh your saved Confluence pages to check for writer, editor, and date details.</p>
+                <a href="{% url 'bookmark_manager:index' %}">Open bookmark refresh <span aria-hidden="true">→</span></a>
+            {% else %}
+                <strong>No page activity in this period</strong>
+                <p>Try a longer period, or refresh your saved pages to check for newer metadata.</p>
+            {% endif %}
+        </div>
+    {% endif %}
+
+    {% if bookmark_people_dashboard.has_confluence_pages %}
+        <p class="knowledge-bookmark-people__coverage">
+            Based on {{ bookmark_people_dashboard.coverage.total_pages }} saved Confluence page{{ bookmark_people_dashboard.coverage.total_pages|pluralize }}.
+            {% if bookmark_people_dashboard.coverage.missing_written_metadata_pages %}Writer or creation-date details are missing on {{ bookmark_people_dashboard.coverage.missing_written_metadata_pages }} page{{ bookmark_people_dashboard.coverage.missing_written_metadata_pages|pluralize }}.{% endif %}
+            {% if bookmark_people_dashboard.coverage.missing_updated_metadata_pages %}Latest-editor or update-date details are missing on {{ bookmark_people_dashboard.coverage.missing_updated_metadata_pages }} page{{ bookmark_people_dashboard.coverage.missing_updated_metadata_pages|pluralize }}.{% endif %}
+        </p>
+    {% endif %}
+    <p class="knowledge-bookmark-people__note" id="bookmark-people-activity-note">Saved Confluence pages only. Updates use each page’s latest stored editor and date, not complete edit history. Co-written pages can appear under multiple people.</p>
+</section>

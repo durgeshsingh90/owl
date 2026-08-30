@@ -90,7 +90,7 @@
                             <strong>{{ person.name }}</strong>
                             <small>{{ person.pdf_count }} PDF{{ person.pdf_count|pluralize }} · {{ person.commit_count }} commit{{ person.commit_count|pluralize }}</small>
                         </span>
-                        <b title="{{ person.pdf_count }} matching PDF{{ person.pdf_count|pluralize }}">{{ person.pdf_count }}</b>
+                        <b class="bb-people-repository-count" tabindex="0" role="note" aria-label="{{ person.repository_count }} repositor{{ person.repository_count|pluralize:'y,ies' }}: {{ person.repository_names|join:', ' }}" title="Repositories: {{ person.repository_names|join:', ' }}">{{ person.repository_count }} repo{{ person.repository_count|pluralize }}</b>
                     </label>
                 </li>
                 {% endfor %}

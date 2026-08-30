@@ -5,9 +5,11 @@ from __future__ import annotations
 import calendar
 import hashlib
 import ipaddress
+import logging
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from functools import wraps
 from pathlib import PurePosixPath, PureWindowsPath
 from urllib.parse import urlencode, urlsplit
 
@@ -15,7 +17,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.core.paginator import EmptyPage, Page, PageNotAnInteger, Paginator
 from django.db import OperationalError
-from django.http import HttpRequest, HttpResponse, HttpResponseForbidden, JsonResponse
+from django.http import Http404, HttpRequest, HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
@@ -46,6 +48,7 @@ from bitbucket_search.services.document_actions import (
     reveal_registered_pdf,
 )
 from bitbucket_search.services.git_sync import RepositorySyncError, managed_repository_path
+from bitbucket_search.services.logging_events import get_logger, log_event
 from bitbucket_search.services.path_safety import has_disallowed_path_characters
 from bitbucket_search.services.pdf_indexing import (
     ExtractionStatusSnapshot,
@@ -134,6 +137,50 @@ class PeopleGroupSummary:
 
 
 MAX_PEOPLE_GROUP_FILTERS = 50
+logger = get_logger("web")
+
+
+def _logged_web_action(operation: str, *, quiet: bool = False):
+    """Trace action routing without serializing request bodies, paths, or queries."""
+
+    def decorate(function):
+        @wraps(function)
+        def invoke(request, *args, **kwargs):
+            context = {
+                "operation": operation,
+                "document_id": kwargs.get("document_id"),
+                "repository_id": kwargs.get("repository_id"),
+            }
+            if not quiet:
+                log_event(logger, logging.DEBUG, "web_action_requested", **context)
+            try:
+                response = function(request, *args, **kwargs)
+            except Http404 as error:
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "web_action_rejected",
+                    error=error,
+                    reason="not_found",
+                    **context,
+                )
+                raise
+            except Exception as error:
+                log_event(logger, logging.ERROR, "web_action_failed", error=error, **context)
+                raise
+            if not quiet:
+                log_event(
+                    logger,
+                    logging.DEBUG,
+                    "web_action_response",
+                    status=response.status_code,
+                    **context,
+                )
+            return response
+
+        return invoke
+
+    return decorate
 
 
 def _is_loopback_request(request: HttpRequest) -> bool:
@@ -147,6 +194,7 @@ def _is_loopback_request(request: HttpRequest) -> bool:
 def _require_local_action(request: HttpRequest) -> HttpResponse | None:
     if settings.OWL_ALLOW_NON_LOOPBACK or _is_loopback_request(request):
         return None
+    log_event(logger, logging.WARNING, "web_action_rejected", reason="non_loopback")
     return HttpResponseForbidden("This action is available only from the local OWL application.")
 
 
@@ -155,6 +203,7 @@ def _require_strict_loopback_action(request: HttpRequest) -> HttpResponse | None
 
     if _is_loopback_request(request):
         return None
+    log_event(logger, logging.WARNING, "filesystem_action_rejected", reason="non_loopback")
     return HttpResponseForbidden("This filesystem action is available only on this computer.")
 
 
@@ -258,6 +307,13 @@ def _display_full_path(document: PDFDocument) -> str:
         or PureWindowsPath(value).drive
         or any(part in {"", ".", ".."} for part in value.split("/"))
     ):
+        log_event(
+            logger,
+            logging.DEBUG,
+            "pdf_display_path_rejected",
+            document_id=document.pk,
+            reason="invalid_registered_path",
+        )
         return "Unavailable: invalid registered path"
     try:
         saved_path = frozen_pdf_path(document)
@@ -265,7 +321,23 @@ def _display_full_path(document: PDFDocument) -> str:
             return str(saved_path)
         repository_root = managed_repository_path(document.repository)
         candidate = repository_root.joinpath(*relative.parts).resolve(strict=False)
-    except (DocumentActionError, OSError, RepositorySyncError, RuntimeError, TypeError, ValueError):
+    except (
+        DocumentActionError,
+        OSError,
+        RepositorySyncError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as error:
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_display_path_failed",
+            error=error,
+            document_id=document.pk,
+            repository_id=document.repository_id,
+            stage="path_resolution",
+        )
         return "Unavailable: invalid managed checkout"
     if not candidate.is_relative_to(repository_root):
         return "Unavailable: invalid registered path"
@@ -910,6 +982,13 @@ def _index_context(
             if requested_search_query.chips:
                 raw_search_input = ""
         except InvalidPDFSearchQuery as error:
+            log_event(
+                logger,
+                logging.WARNING,
+                "pdf_search_validation_rejected",
+                error=error,
+                reason="invalid_search_query",
+            )
             search_error = str(error)
 
     search_active = bool(
@@ -985,6 +1064,8 @@ def _index_context(
             "aliases": person.aliases,
             "commit_count": person.commit_count,
             "pdf_count": person.pdf_count,
+            "repository_count": person.repository_count,
+            "repository_names": person.repository_names,
             "selected": person.name.casefold() in selected_people_keys,
             "group_form_selected": person.name.casefold() in group_form_member_keys,
         }
@@ -1131,6 +1212,7 @@ def _repository_payload(repository: BitbucketRepository) -> dict[str, object]:
 
 @require_GET
 @never_cache
+@_logged_web_action("pdf_index", quiet=True)
 def index(request: HttpRequest) -> HttpResponse:
     """Render the repository-aware Bitbucket Search workspace."""
 
@@ -1139,6 +1221,7 @@ def index(request: HttpRequest) -> HttpResponse:
 
 @require_GET
 @never_cache
+@_logged_web_action("repositories", quiet=True)
 def repositories(request: HttpRequest) -> HttpResponse:
     """Open the same workspace with repository registration expanded."""
 
@@ -1152,6 +1235,7 @@ def repositories(request: HttpRequest) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_web_action("people_group_create", quiet=True)
 def add_people_group(request: HttpRequest) -> HttpResponse:
     """Persist one local group of known Git committers without changing Git."""
 
@@ -1187,6 +1271,7 @@ def add_people_group(request: HttpRequest) -> HttpResponse:
 
 @require_GET
 @never_cache
+@_logged_web_action("pdf_document_page", quiet=True)
 def document_page(request: HttpRequest) -> HttpResponse:
     """Return the next durable PDF timeline fragment for progressive scrolling."""
 
@@ -1228,6 +1313,16 @@ def _document_action_failure(
     *,
     document_id: int | None = None,
 ) -> HttpResponse:
+    log_event(
+        logger,
+        logging.WARNING
+        if error.code
+        in {"invalid_document_selection", "too_many_documents", "confirmation_required"}
+        else logging.DEBUG,
+        "pdf_action_error_response",
+        document_id=document_id,
+        error_code=error.code,
+    )
     status = {
         "document_not_found": 404,
         "invalid_document_selection": 400,
@@ -1374,6 +1469,7 @@ def _bulk_open_payload(result: BulkDocumentOpenResult) -> dict[str, object]:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_web_action("pdf_open")
 def open_document(request: HttpRequest, document_id: int) -> HttpResponse:
     """Open one registered local PDF and count only a successful dispatch."""
 
@@ -1403,6 +1499,7 @@ def open_document(request: HttpRequest, document_id: int) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_web_action("pdf_open_all")
 def open_documents(request: HttpRequest) -> HttpResponse:
     """Open a bounded result-page selection after validating every managed path."""
 
@@ -1466,6 +1563,7 @@ def open_documents(request: HttpRequest) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_web_action("pdf_reveal")
 def reveal_document(request: HttpRequest, document_id: int) -> HttpResponse:
     """Reveal one registered local PDF without changing its open count."""
 
@@ -1492,6 +1590,7 @@ def reveal_document(request: HttpRequest, document_id: int) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_web_action("pdf_exclude")
 def exclude_document(request: HttpRequest, document_id: int) -> HttpResponse:
     """Keep a saved PDF and its indexed text unchanged by future Git refreshes."""
 
@@ -1518,6 +1617,7 @@ def exclude_document(request: HttpRequest, document_id: int) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_web_action("pdf_resume")
 def resume_document(request: HttpRequest, document_id: int) -> HttpResponse:
     """Reinclude a saved PDF, then queue the next background repository refresh."""
 
@@ -1540,7 +1640,16 @@ def resume_document(request: HttpRequest, document_id: int) -> HttpResponse:
             if launch_failed:
                 mark_worker_launch_failed(queued.job.pk)
                 worker_unavailable = True
-    except OperationalError:
+    except OperationalError as error:
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_resume_queue_failed",
+            error=error,
+            document_id=document_id,
+            repository_id=document.repository_id,
+            stage="queue_refresh",
+        )
         worker_unavailable = True
 
     if worker_unavailable:
@@ -1574,6 +1683,7 @@ def resume_document(request: HttpRequest, document_id: int) -> HttpResponse:
 @require_http_methods(["GET", "POST"])
 @csrf_protect
 @never_cache
+@_logged_web_action("pdf_delete")
 def delete_document(request: HttpRequest, document_id: int) -> HttpResponse:
     """Show local-deletion scope before accepting an explicit, CSRF-protected POST."""
 
@@ -1619,6 +1729,7 @@ def delete_document(request: HttpRequest, document_id: int) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_web_action("repository_add")
 def add_repository(request: HttpRequest) -> HttpResponse:
     """Validate one URL, enqueue clone/refresh, and return before Git starts."""
 
@@ -1628,6 +1739,13 @@ def add_repository(request: HttpRequest) -> HttpResponse:
     try:
         queued = register_and_queue_repository(request.POST.get("repository_url"))
     except RepositoryURLValidationError as exc:
+        log_event(
+            logger,
+            logging.WARNING,
+            "repository_url_rejected",
+            error=exc,
+            error_code=exc.code,
+        )
         if _is_async_request(request):
             return JsonResponse(
                 {"state": "invalid", "code": exc.code, "detail": str(exc)},
@@ -1682,6 +1800,7 @@ def add_repository(request: HttpRequest) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_web_action("repository_refresh")
 def refresh_repository(request: HttpRequest, repository_id: int) -> HttpResponse:
     """Queue a safe background fetch/fast-forward for one managed repository."""
 
@@ -1731,6 +1850,7 @@ def refresh_repository(request: HttpRequest, repository_id: int) -> HttpResponse
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_web_action("repository_refresh_all")
 def refresh_all_repositories(request: HttpRequest) -> HttpResponse:
     """Queue a clone/refresh for every enabled repository without blocking the page."""
 
@@ -1740,7 +1860,14 @@ def refresh_all_repositories(request: HttpRequest) -> HttpResponse:
 
     try:
         queued = queue_all_repository_refreshes(require_idle=True)
-    except RepositoryRefreshInProgress:
+    except RepositoryRefreshInProgress as error:
+        log_event(
+            logger,
+            logging.WARNING,
+            "repository_refresh_all_rejected",
+            error=error,
+            reason="repository_busy",
+        )
         detail = "Wait for repository additions and refreshes to finish before refreshing all."
         if _is_async_request(request):
             return JsonResponse(
@@ -1750,6 +1877,12 @@ def refresh_all_repositories(request: HttpRequest) -> HttpResponse:
         messages.warning(request, detail)
         return redirect(reverse("bitbucket_search:index"))
     if queued.eligible_total == 0:
+        log_event(
+            logger,
+            logging.DEBUG,
+            "repository_refresh_all_skipped",
+            reason="no_enabled_repositories",
+        )
         detail = "No enabled repositories are available to refresh."
         if _is_async_request(request):
             return JsonResponse(
@@ -1840,19 +1973,37 @@ def _wake_queued_repository_workers(
     for worker_number, _job_id in enumerate(reservation.job_ids):
         try:
             launch_sync_worker()
-        except OSError:
+        except OSError as error:
+            log_event(
+                logger,
+                logging.ERROR,
+                "repository_worker_wakeup_failed",
+                error=error,
+                job_id=_job_id,
+                worker_count=workers_started,
+                failed_count=len(reservation.job_ids) - worker_number,
+                stage="worker_launch",
+            )
             release_repository_worker_wakeups(
                 reservation,
                 job_ids=reservation.job_ids[worker_number:],
             )
             return workers_started, True
         workers_started += 1
+    if workers_started:
+        log_event(
+            logger,
+            logging.DEBUG,
+            "repository_worker_wakeup_completed",
+            worker_count=workers_started,
+        )
     return workers_started, False
 
 
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_web_action("repository_schedule_tick", quiet=True)
 def tick_repository_schedule(request: HttpRequest) -> JsonResponse:
     """Catch up the latest configured daily slot when any OWL page is open."""
 
@@ -1863,10 +2014,18 @@ def tick_repository_schedule(request: HttpRequest) -> JsonResponse:
     try:
         queued = queue_due_daily_repository_refreshes()
         workers_started, launch_failed = _wake_queued_repository_workers()
-    except OperationalError:
+    except OperationalError as error:
         # Another short SQLite writer can temporarily own the database. The
         # browser retries this idempotent tick, and any jobs already committed
         # remain durable for the resident worker pool.
+        log_event(
+            logger,
+            logging.ERROR,
+            "repository_schedule_request_failed",
+            error=error,
+            queued_count=len(queued),
+            stage="schedule_tick",
+        )
         return JsonResponse(
             {
                 "state": "busy",
@@ -1874,6 +2033,15 @@ def tick_repository_schedule(request: HttpRequest) -> JsonResponse:
                 "workersStarted": 0,
             },
             status=202,
+        )
+    if queued or workers_started:
+        log_event(
+            logger,
+            logging.INFO,
+            "repository_schedule_dispatched",
+            queued_count=len(queued),
+            worker_count=workers_started,
+            status="worker_wakeup_failed" if launch_failed else "queued",
         )
     return JsonResponse(
         {
@@ -1891,6 +2059,7 @@ def tick_repository_schedule(request: HttpRequest) -> JsonResponse:
 
 @require_GET
 @never_cache
+@_logged_web_action("repository_status", quiet=True)
 def repository_status(request: HttpRequest) -> JsonResponse:
     """Expose compact, credential-free progress for the repository rail poller."""
 
@@ -1925,6 +2094,7 @@ def repository_status(request: HttpRequest) -> JsonResponse:
 
 @require_GET
 @never_cache
+@_logged_web_action("pdf_index_status", quiet=True)
 def index_status(request: HttpRequest) -> HttpResponse:
     """Show a truthful summary of durable repository background jobs."""
 

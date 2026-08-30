@@ -22,6 +22,7 @@ from bookmark_manager.models import (
     BookmarkDailyActivity,
     BookmarkSource,
 )
+from bookmark_manager.services.logging_events import logged_operation
 
 ALL_ACTIVITY = "all"
 SUPPORTED_ACTIVITY_FILTERS = (ALL_ACTIVITY, *BookmarkActivityType.values)
@@ -122,6 +123,7 @@ def _require_aware(value: datetime) -> None:
         raise ValueError("Bookmark activity timestamps must include a timezone.")
 
 
+@logged_operation("record_daily_activity", quiet=True, expected_errors=(ValueError,))
 def record_daily_activity(
     activity_type: str,
     *,
@@ -423,6 +425,7 @@ def _interesting_groups(*, now: datetime) -> tuple[DashboardInterestingGroup, ..
     )
 
 
+@logged_operation("load_dashboard", quiet=True, expected_errors=(ValueError,))
 def get_bookmark_dashboard(
     *,
     year: object = None,

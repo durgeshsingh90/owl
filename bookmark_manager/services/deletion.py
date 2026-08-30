@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from django.db import transaction
 
 from bookmark_manager.models import Bookmark, ConfluencePageNode
+from bookmark_manager.services.logging_events import logged_operation
 
 
 class BookmarkDeleteError(ValueError):
@@ -41,6 +42,7 @@ class BulkBookmarkDeleteResult:
     pruned_node_count: int
 
 
+@logged_operation("delete_bookmark", expected_errors=(BookmarkDeleteError, Bookmark.DoesNotExist))
 @transaction.atomic
 def delete_local_bookmark(
     bookmark_or_pk: Bookmark | int,
@@ -82,6 +84,7 @@ def delete_local_bookmark(
     )
 
 
+@logged_operation("delete_bookmarks", expected_errors=(BookmarkDeleteError, Bookmark.DoesNotExist))
 @transaction.atomic
 def delete_local_bookmarks(
     bookmark_pks: Iterable[int],
