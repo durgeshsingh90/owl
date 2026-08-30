@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 
 import pytest
@@ -55,6 +56,21 @@ def _committed_pdf(
     )
 
 
+def test_empty_people_panels_keep_a_visible_disabled_search_bar(loopback_client):
+    response = loopback_client.get(reverse("bitbucket_search:index"))
+    html = response.content.decode()
+
+    assert response.status_code == 200
+    assert "data-people-search-toggle" not in html
+    for panel_id in ("bb-people-desktop", "bb-people-mobile"):
+        assert f'id="{panel_id}-search-panel" data-people-search-panel' in html
+        assert f'for="{panel_id}-search"' in html
+        search = re.search(rf'<input\s+id="{panel_id}-search"(?P<attributes>[^>]*)>', html)
+        assert search is not None
+        assert "disabled" in search.group("attributes")
+        assert f'aria-describedby="{panel_id}-search-status"' in search.group("attributes")
+
+
 def test_people_context_and_multi_committer_filter_use_or_semantics(loopback_client):
     repository = _repository()
     alice = _committed_pdf(
@@ -99,9 +115,10 @@ def test_people_context_and_multi_committer_filter_use_or_semantics(loopback_cli
     assert "No saved groups" not in html
     assert "Create one from committers found in available history" not in html
     assert "data-committer-select" in html
-    assert html.count("data-people-search-toggle") == 2
-    assert 'aria-controls="bb-people-desktop-search-panel"' in html
-    assert 'id="bb-people-desktop-search-panel" hidden data-people-search-panel' in html
+    assert len(re.findall(r"\bdata-people-filter-search(?=[\s>])", html)) == 2
+    assert "data-people-search-toggle" not in html
+    assert 'id="bb-people-desktop-search-panel" data-people-search-panel' in html
+    assert 'id="bb-people-mobile-search-panel" data-people-search-panel' in html
     assert "Clear selection" not in html
     assert ">Clear</a>" in html
     assert "Create group" in html

@@ -5,7 +5,7 @@
 {% block theme_default %}dark{% endblock %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=search-layout-v1">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=people-search-bar-v3">
 {% endblock %}
 
 {% block app_header %}{% endblock %}
@@ -91,8 +91,7 @@
         </div>
     </aside>
 
-    <section class="bb-stage" aria-label="Bitbucket Search workspace">
-        <header class="bb-topbar">
+    <header class="bb-topbar">
             <a class="bb-app-title" href="{% url 'bitbucket_search:index' %}" aria-label="Bitbucket Search">
                 <span class="bb-app-title__icon" aria-hidden="true">
                     <svg viewBox="0 0 24 24" focusable="false">
@@ -191,7 +190,9 @@
                 </button>
                 <span class="bb-local-avatar" aria-label="Local workspace">L</span>
             </div>
-        </header>
+    </header>
+
+    <section class="bb-stage" aria-label="Bitbucket Search workspace">
 
         <form
             class="bb-mobile-refresh-all{% if not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %} bb-mobile-refresh-all--disabled{% elif refresh_all_active_count and refresh_all_active_count >= refresh_all_enabled_count %} bb-mobile-refresh-all--active{% elif refresh_all_active_count %} bb-mobile-refresh-all--partial{% endif %}"
@@ -617,5 +618,5 @@
 {% block global_status %}{% endblock %}
 
 {% block scripts %}
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=people-rail-v1" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=people-search-bar-v2" defer></script>
 {% endblock %}

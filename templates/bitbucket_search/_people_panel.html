@@ -5,16 +5,6 @@
             <strong>Latest Git commit by</strong>
             <span>Committers from available history</span>
         </div>
-        <button
-            class="bb-people-search-toggle"
-            type="button"
-            aria-label="Search people and groups"
-            aria-controls="{{ people_panel_id }}-search-panel"
-            aria-expanded="false"
-            title="Search people and groups"
-            data-people-search-toggle
-            {% if not git_people and not people_groups %}disabled{% endif %}
-        ></button>
     </div>
     {% else %}
     <header class="bb-people-panel__heading">
@@ -27,35 +17,30 @@
                     title="{{ git_people_total }} committer{{ git_people_total|pluralize }} from available history"
                 >{{ git_people_total }}</span>
             </div>
-            <button
-                class="bb-people-search-toggle"
-                type="button"
-                aria-label="Search people and groups"
-                aria-controls="{{ people_panel_id }}-search-panel"
-                aria-expanded="false"
-                title="Search people and groups"
-                data-people-search-toggle
-                {% if not git_people and not people_groups %}disabled{% endif %}
-            ></button>
         </div>
         <p>Committers from available history</p>
     </header>
     {% endif %}
 
-    {% if git_people or people_groups %}
-    <div class="bb-people-search" id="{{ people_panel_id }}-search-panel" hidden data-people-search-panel>
+    <div class="bb-people-search" id="{{ people_panel_id }}-search-panel" data-people-search-panel>
         <label class="visually-hidden" for="{{ people_panel_id }}-search">Search committers and groups</label>
-        <input
-            id="{{ people_panel_id }}-search"
-            type="search"
-            placeholder="Search people or groups…"
-            autocomplete="off"
-            spellcheck="false"
-            data-people-filter-search
-        >
-        <p role="status" aria-live="polite" data-people-filter-search-status>{{ git_people_total }} committer{{ git_people_total|pluralize }} · {{ people_groups|length }} group{{ people_groups|length|pluralize }} available</p>
+        <div class="bb-people-search__field">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4.5 4.5"/></svg>
+            <input
+                id="{{ people_panel_id }}-search"
+                type="search"
+                placeholder="Search people or groups…"
+                autocomplete="off"
+                spellcheck="false"
+                aria-describedby="{{ people_panel_id }}-search-status"
+                data-people-filter-search
+                {% if not git_people and not people_groups %}disabled{% endif %}
+            >
+        </div>
+        <p id="{{ people_panel_id }}-search-status" role="status" aria-live="polite" data-people-filter-search-status>{{ git_people_total }} committer{{ git_people_total|pluralize }} · {{ people_groups|length }} group{{ people_groups|length|pluralize }} available</p>
     </div>
 
+    {% if git_people or people_groups %}
     <form class="bb-people-filter-form" method="get" action="{% url 'bitbucket_search:index' %}" data-people-filter-form>
         {% for name, value in people_filter_hidden_fields %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
         {% with selected_total=selected_people_count|add:selected_group_count %}

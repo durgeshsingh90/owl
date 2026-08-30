@@ -211,8 +211,6 @@
     };
 
     peoplePanels.forEach((panel) => {
-        const searchToggle = panel.querySelector("[data-people-search-toggle]");
-        const searchPanel = panel.querySelector("[data-people-search-panel]");
         const search = panel.querySelector("[data-people-filter-search]");
         const searchStatus = panel.querySelector(
             "[data-people-filter-search-status]",
@@ -262,36 +260,12 @@
             }
         };
 
-        const closePeopleSearch = () => {
-            if (!searchPanel || !searchToggle) {
-                return;
-            }
-            searchPanel.hidden = true;
-            searchToggle.setAttribute("aria-expanded", "false");
-            if (search) {
-                search.value = "";
-            }
-            applyPeopleSearch();
-            searchToggle.focus();
-        };
-
-        searchToggle?.addEventListener("click", () => {
-            if (!searchPanel) {
-                return;
-            }
-            if (!searchPanel.hidden) {
-                closePeopleSearch();
-                return;
-            }
-            searchPanel.hidden = false;
-            searchToggle.setAttribute("aria-expanded", "true");
-            search?.focus();
-        });
         search?.addEventListener("input", applyPeopleSearch);
         search?.addEventListener("keydown", (event) => {
             if (event.key === "Escape") {
                 event.preventDefault();
-                closePeopleSearch();
+                search.value = "";
+                applyPeopleSearch();
             }
         });
         applyPeopleSearch();

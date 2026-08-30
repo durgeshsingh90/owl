@@ -106,6 +106,7 @@
         clamp(280px, 20.45vw, 314px)
         minmax(0, 1fr)
         clamp(248px, 17.6vw, 284px);
+    grid-template-rows: auto minmax(0, 1fr);
     background: var(--bb-bg);
 }
 
@@ -114,6 +115,8 @@
     top: 0;
     z-index: 20;
     display: flex;
+    grid-column: 1;
+    grid-row: 1 / -1;
     height: 100vh;
     min-width: 0;
     flex-direction: column;
@@ -720,8 +723,10 @@
 }
 
 .bb-stage {
+    grid-column: 2;
+    grid-row: 2;
     min-width: 0;
-    min-height: 100vh;
+    min-height: calc(100vh - 81px);
     background:
         radial-gradient(circle at 52% -14%, rgb(40 91 140 / 15%), transparent 29rem),
         var(--bb-stage-bg);
@@ -732,6 +737,8 @@
     top: 0;
     z-index: 15;
     display: flex;
+    grid-column: 2 / -1;
+    grid-row: 1;
     min-height: 81px;
     align-items: center;
     justify-content: space-between;
@@ -1151,9 +1158,11 @@
 
 .bb-people-rail {
     position: sticky;
-    top: 0;
+    top: 81px;
     z-index: 12;
-    height: 100vh;
+    height: calc(100vh - 81px);
+    grid-column: 3;
+    grid-row: 2;
     min-width: 0;
     overflow-y: auto;
     border-left: 1px solid var(--bb-line);
@@ -1275,58 +1284,30 @@
     gap: 0.18rem;
 }
 
-.bb-people-search-toggle {
-    position: relative;
-    width: 32px;
-    height: 32px;
-    flex: 0 0 32px;
-    border: 1px solid var(--bb-line-strong);
-    border-radius: 7px;
-    color: var(--bb-text-soft);
-    background: var(--bb-surface-soft);
-    cursor: pointer;
-}
-
-.bb-people-search-toggle::before {
-    position: absolute;
-    top: 8px;
-    left: 8px;
-    width: 10px;
-    height: 10px;
-    border: 2px solid currentcolor;
-    border-radius: 50%;
-    content: "";
-}
-
-.bb-people-search-toggle::after {
-    position: absolute;
-    top: 19px;
-    left: 19px;
-    width: 7px;
-    height: 2px;
-    border-radius: 999px;
-    background: currentcolor;
-    content: "";
-    transform: rotate(45deg);
-    transform-origin: left center;
-}
-
-.bb-people-search-toggle:hover,
-.bb-people-search-toggle[aria-expanded="true"] {
-    border-color: var(--bb-amber);
-    color: var(--bb-amber);
-    background: var(--bb-amber-soft);
-}
-
-.bb-people-search-toggle:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-}
-
 .bb-people-search {
     display: grid;
     gap: 0.35rem;
-    padding: 0.65rem 0.3rem 0 0.65rem;
+    padding: 0.65rem 0.65rem 0;
+}
+
+.bb-people-search__field {
+    position: relative;
+    min-width: 0;
+}
+
+.bb-people-search__field > svg {
+    position: absolute;
+    top: 50%;
+    left: 0.65rem;
+    width: 15px;
+    height: 15px;
+    fill: none;
+    stroke: var(--bb-muted);
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.5;
+    pointer-events: none;
+    transform: translateY(-50%);
 }
 
 .bb-people-search input,
@@ -1345,7 +1326,12 @@
 }
 
 .bb-people-search input {
-    padding: 0.55rem 0.65rem;
+    padding: 0.55rem 0.65rem 0.55rem 2rem;
+}
+
+.bb-people-search input:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
 }
 
 .bb-people-search input:focus {
@@ -2958,8 +2944,13 @@
         display: none;
     }
 
+    .bb-topbar,
     .bb-stage {
-        min-height: 100vh;
+        grid-column: 1;
+    }
+
+    .bb-stage {
+        min-height: calc(100vh - 81px);
     }
 
     .bb-refresh-all--desktop {
@@ -3375,6 +3366,10 @@
         padding: 0.55rem 0.75rem;
     }
 
+    .bb-stage {
+        min-height: calc(100vh - 64px);
+    }
+
     .bb-app-title__icon {
         width: 32px;
         height: 32px;
@@ -3418,24 +3413,6 @@
     .bb-people-group-create input[type="text"],
     .bb-people-group-create input[type="search"] {
         min-height: 44px;
-    }
-
-    .bb-people-search-toggle {
-        width: 44px;
-        height: 44px;
-        flex-basis: 44px;
-    }
-
-    .bb-people-search-toggle::before {
-        top: 12px;
-        left: 12px;
-        width: 12px;
-        height: 12px;
-    }
-
-    .bb-people-search-toggle::after {
-        top: 25px;
-        left: 25px;
     }
 
     .bb-content {

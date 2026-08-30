@@ -57,8 +57,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=search-layout-v1" in html
-    assert "bitbucket_search/bitbucket_search.js?v=people-rail-v1" in html
+    assert "bitbucket_search/bitbucket_search.css?v=people-search-bar-v3" in html
+    assert "bitbucket_search/bitbucket_search.js?v=people-search-bar-v2" in html
 
 
 def test_topbar_and_desktop_rail_omit_verbose_sync_status_navigation(loopback_client):
@@ -88,6 +88,26 @@ def test_topbar_and_desktop_rail_omit_verbose_sync_status_navigation(loopback_cl
     assert "data-sync-summary" not in (static_root / "bitbucket_search.js").read_text(
         encoding="utf-8"
     )
+
+
+def test_desktop_topbar_spans_results_and_people_starts_below_it(loopback_client):
+    response = loopback_client.get(reverse("bitbucket_search:index"))
+    html = response.content.decode()
+    stylesheet = (
+        Path(__file__).parents[1] / "static" / "bitbucket_search" / "bitbucket_search.css"
+    ).read_text(encoding="utf-8")
+
+    topbar_start = html.index('<header class="bb-topbar">')
+    topbar_end = html.index("</header>", topbar_start)
+    stage_start = html.index('<section class="bb-stage"')
+    people_start = html.index('<aside class="bb-people-rail"')
+
+    assert response.status_code == 200
+    assert topbar_start < topbar_end < stage_start < people_start
+    assert "grid-template-rows: auto minmax(0, 1fr);" in stylesheet
+    assert "grid-column: 2 / -1;" in stylesheet
+    assert "top: 81px;" in stylesheet
+    assert "height: calc(100vh - 81px);" in stylesheet
 
 
 def _workspace_refresh_form(html: str, *, mobile: bool = False) -> str:
@@ -693,8 +713,11 @@ def test_repository_poller_tracks_daily_idle_and_catalog_publication_contract():
     assert "data-repository-catalog-status" not in javascript
     assert 'changed.closest("[data-people-filter-form]")' in javascript
     assert "form.requestSubmit();" in javascript
-    assert 'panel.querySelector("[data-people-search-toggle]")' in javascript
-    assert 'searchToggle.setAttribute("aria-expanded", "true")' in javascript
+    assert 'panel.querySelector("[data-people-filter-search]")' in javascript
+    assert 'search?.addEventListener("input", applyPeopleSearch);' in javascript
+    assert 'search.value = "";' in javascript
+    assert "data-people-search-toggle" not in javascript
+    assert "closePeopleSearch" not in javascript
     assert '.normalize("NFKD")' in javascript
     assert "Apply people" not in javascript
 
