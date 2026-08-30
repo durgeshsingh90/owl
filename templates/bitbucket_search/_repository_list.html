@@ -10,8 +10,10 @@
                 <svg class="bb-state-icon bb-state-icon--idle" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 7.5h6l1.7 2h9.3v9.5h-17V7.5Z"/></svg>
             </span>
             <span class="bb-repository-card__copy">
-                <strong data-repository-name>{{ repository.display_name }}</strong>
+                <strong data-repository-name title="{{ repository.display_name }}">{{ repository.display_name }}</strong>
                 <small data-repository-documents>{{ repository.pdf_count }} PDF · {{ repository.vsdx_count }} VSDX</small>
+                <small class="bb-repository-exclusion" data-repository-exclusion{% if not repository.exclude_from_refresh %} hidden{% endif %} title="Skipped by Refresh all and scheduled refreshes; manual refresh is still available">Refresh excluded</small>
+                <a class="bb-repository-removal-retry" data-repository-removal-retry href="{% url 'bitbucket_search:repository_remove' repository.pk %}"{% if not repository.has_removal_pending %} hidden{% endif %}>Removal incomplete · Retry removal</a>
                 <small
                     class="bb-repository-worker-timer"
                     data-repository-worker-timer
@@ -26,11 +28,37 @@
             </span>
             <form method="post" action="{% url 'bitbucket_search:repository_refresh' repository.pk %}" data-repository-refresh-form>
                 {% csrf_token %}
-                <button type="submit" title="Refresh repository" aria-label="Refresh {{ repository.display_name }} in the background"{% if repository.has_active_sync %} disabled{% endif %}>
+                <button type="submit" title="Refresh repository" aria-label="Refresh {{ repository.display_name }} in the background"{% if repository.has_active_sync or repository.has_removal_pending %} disabled{% endif %}>
                     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19 8a8 8 0 1 0 1 6M19 4v4h-4"/></svg>
                 </button>
             </form>
         </div>
+        <details class="bb-repository-menu" data-repository-menu>
+            <summary title="Repository actions" aria-label="Actions for {{ repository.display_name }}">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
+            </summary>
+            <div class="bb-repository-menu__body">
+                <form method="post" action="{% url 'bitbucket_search:repository_exclude' repository.pk %}" data-repository-exclusion-form>
+                    {% csrf_token %}
+                    <input type="hidden" name="excluded" value="{% if repository.exclude_from_refresh %}no{% else %}yes{% endif %}">
+                    <button type="submit" data-repository-exclusion-button{% if repository.has_removal_pending %} disabled{% endif %}>{% if repository.exclude_from_refresh %}Include in refresh{% else %}Exclude from refresh{% endif %}</button>
+                </form>
+                <form method="get" action="{% url 'bitbucket_search:repository_remove' repository.pk %}" data-repository-remove-form>
+                    <button type="submit" class="bb-repository-menu__remove" data-repository-remove-button{% if repository.has_active_work or repository.has_removal_pending %} disabled title="{% if repository.has_removal_pending %}Retry the incomplete removal below{% else %}Wait for Git and PDF workers to finish{% endif %}"{% endif %}>Remove repository</button>
+                </form>
+            </div>
+        </details>
+    </li>
+    {% endfor %}
+</ul>
+{% endif %}
+{% if repository_removal_recoveries %}
+<ul class="bb-repository-list bb-repository-recoveries" aria-label="Incomplete repository removals">
+    {% for recovery in repository_removal_recoveries %}
+    <li class="bb-repository-card bb-repository-recovery">
+        <strong title="{{ recovery.display_name }}">{{ recovery.display_name }}</strong>
+        <small>Removal incomplete</small>
+        <a href="{% url 'bitbucket_search:repository_remove' recovery.repository_id %}">Retry removal</a>
     </li>
     {% endfor %}
 </ul>

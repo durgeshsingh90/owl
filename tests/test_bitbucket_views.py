@@ -57,8 +57,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=repository-worker-timers-v1" in html
-    assert "bitbucket_search/bitbucket_search.js?v=stable-background-indexing-v1" in html
+    assert "bitbucket_search/bitbucket_search.css?v=repository-lifecycle-v1" in html
+    assert "bitbucket_search/bitbucket_search.js?v=repository-lifecycle-v1" in html
 
 
 def test_topbar_and_desktop_rail_omit_verbose_sync_status_navigation(loopback_client):
@@ -130,7 +130,7 @@ def test_bitbucket_topbar_omits_settings_icon_and_preserves_other_controls(
     assert "data-repositories-refresh-all" in topbar_html
     assert "data-refresh-all-button" in topbar_html
     assert f'action="{reverse("bitbucket_search:repositories_refresh_all")}"' in topbar_html
-    assert "Queue a background refresh for all 1 enabled repository" in topbar_html
+    assert "Queue a background refresh for all 1 included repository" in topbar_html
 
 
 def test_desktop_topbar_spans_results_and_people_starts_below_it(loopback_client):
@@ -201,9 +201,9 @@ def test_refresh_all_controls_are_accessible_and_truthful_when_unavailable(loopb
     disabled_html = disabled_response.content.decode()
 
     assert disabled_response.context["enabled_repository_count"] == 0
-    assert disabled_html.count("No enabled repositories to queue") == 2
-    assert "no repositories are enabled" in _workspace_refresh_form(disabled_html)
-    assert "no repositories are enabled" in _workspace_refresh_form(
+    assert disabled_html.count("No repositories included in refresh") == 2
+    assert "no repositories are included" in _workspace_refresh_form(disabled_html)
+    assert "no repositories are included" in _workspace_refresh_form(
         disabled_html,
         mobile=True,
     )
@@ -245,7 +245,7 @@ def test_refresh_all_controls_enable_only_when_all_repositories_are_idle(loopbac
     assert idle_response.context["enabled_repository_count"] == 1
     assert idle_response.context["active_repository_count"] == 0
     assert 'data-enabled-repository-count="1"' in idle_html
-    assert "Queue a background refresh for all 1 enabled repository" in idle_html
+    assert "Queue a background refresh for all 1 included repository" in idle_html
     assert "disabled" not in _workspace_refresh_form(idle_html)
     assert "disabled" not in _workspace_refresh_form(idle_html, mobile=True)
 
@@ -532,14 +532,14 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_page_navigation(
         f'action="{reverse("bitbucket_search:document_reveal", args=(network_plan.pk,))}"'
         in network_row
     )
-    assert network_row.count('name="csrfmiddlewaretoken"') == 3
-    assert network_row.count('name="return_page" value="1"') == 4
+    assert network_row.count('name="csrfmiddlewaretoken"') == 2
+    assert network_row.count('name="return_page" value="1"') == 3
     assert 'type="submit" disabled' not in network_row
     assert "bb-index-health" not in network_row
     archived_row_start = html.index(f'data-document-id="{archived_plan.pk}"')
     archived_row = html[archived_row_start : html.index("</tr>", archived_row_start)]
     assert archived_row.count("Unavailable") == 2
-    assert archived_row.count('method="post"') == 3
+    assert archived_row.count('method="post"') == 2
     assert "bb-index-health" not in archived_row
     assert html.count('data-tooltip="Open file"') == 2
     assert html.count('data-tooltip="Open folder"') == 2
@@ -594,7 +594,7 @@ def test_pdf_timeline_fragment_preserves_boundary_group_key(loopback_client):
     assert payload["nextPageUrl"] == ""
     assert f'data-document-id="{older_document.pk}"' in payload["html"]
     assert 'data-timeline-group-key="repo-date-unavailable"' in payload["html"]
-    assert payload["html"].count('name="return_page" value="2"') == 4
+    assert payload["html"].count('name="return_page" value="2"') == 3
     assert 'data-tooltip="Open file"' in payload["html"]
     assert 'data-tooltip="Open folder"' in payload["html"]
 
@@ -607,7 +607,7 @@ def test_pdf_timeline_fragment_preserves_boundary_group_key(loopback_client):
     assert "Page <strong data-pdf-current-page>2</strong> of 2" in fallback_html
     assert f'href="{previous_page_url}" rel="prev"' in fallback_html
     assert f'id="pdf-document-{older_document.pk}"' in fallback_html
-    assert fallback_html.count('name="return_page" value="2"') == 4
+    assert fallback_html.count('name="return_page" value="2"') == 3
 
 
 @override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
@@ -870,7 +870,9 @@ def test_repository_poller_tracks_daily_idle_and_catalog_publication_contract():
     assert "catalogPublicationChanged" in javascript
     assert "`${repository.name}: ${repository.stateLabel}`" in javascript
     assert "`${repository.pdfCount} PDF · ${repository.vsdxCount} VSDX`" in javascript
-    assert "refreshButton.disabled = repository.active;" in javascript
+    assert (
+        "refreshButton.disabled = repository.active || repository.hasRemovalPending;" in javascript
+    )
     assert "card.dataset.repositorySearchValue || card.textContent" in javascript
     assert "repository.automatic || {}" not in javascript
     assert "data-repository-catalog-status" not in javascript
@@ -908,7 +910,7 @@ def test_ready_repository_renders_green_tick_counts_and_refresh_action(loopback_
         assert 'data-repository-state="ready"' in card
         assert "bb-repository-state--ready" in card
         assert 'role="img" aria-label="networking: Ready"' in card
-        assert "<strong data-repository-name>networking</strong>" in card
+        assert '<strong data-repository-name title="networking">networking</strong>' in card
         assert "<small data-repository-documents>12 PDF · 3 VSDX</small>" in card
         assert f'action="/pdfs/repositories/{repository.pk}/refresh/"' in card
         assert 'title="Refresh repository"' in card
@@ -958,7 +960,7 @@ def test_failed_daily_refresh_uses_compact_failure_card_and_keeps_status_detail(
         assert 'data-repository-state="failed"' in card
         assert "bb-repository-state--failed" in card
         assert 'role="img" aria-label="retrying: Failed"' in card
-        assert "<strong data-repository-name>retrying</strong>" in card
+        assert '<strong data-repository-name title="retrying">retrying</strong>' in card
         assert "<small data-repository-documents>5 PDF · 0 VSDX</small>" in card
         assert f'action="/pdfs/repositories/{repository.pk}/refresh/"' in card
         assert "The remote was temporarily unavailable." not in card
@@ -1528,7 +1530,7 @@ def test_refresh_all_reports_when_no_enabled_repositories_exist(loopback_client)
     assert response.status_code == 409
     assert response.json() == {
         "state": "empty",
-        "detail": "No enabled repositories are available to refresh.",
+        "detail": "No repositories are included in refresh.",
         "eligible": 0,
         "queued": 0,
         "alreadyActive": 0,

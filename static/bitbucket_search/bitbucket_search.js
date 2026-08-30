@@ -25,7 +25,7 @@
         if (repositories) {
             repositoryCount = repositories.length;
             enabledRepositoryCount = repositories.filter(
-                (repository) => repository.enabled,
+                (repository) => repository.enabled && !repository.refreshExcluded && !repository.hasRemovalPending,
             ).length;
             activeRepositoryCount = repositories.filter(
                 (repository) => repository.active,
@@ -47,10 +47,10 @@
                 repositoryStatusPending ||
                 activeRepositoryCount > 0;
             let label = "Refresh all repositories";
-            let detail = `Queue ${enabledRepositoryCount} enabled ${repositoryNoun(enabledRepositoryCount)} in the background`;
-            let ariaLabel = `Queue a background refresh for all ${enabledRepositoryCount} enabled ${repositoryNoun(enabledRepositoryCount)}`;
+            let detail = `Queue ${enabledRepositoryCount} included ${repositoryNoun(enabledRepositoryCount)} in the background`;
+            let ariaLabel = `Queue a background refresh for all ${enabledRepositoryCount} included ${repositoryNoun(enabledRepositoryCount)}`;
             let title =
-                "Queue Git refresh jobs for every enabled repository; workers run them in the background";
+                "Queue Git refresh jobs for every included repository; excluded repositories are skipped";
 
             if (repositorySubmissionPending) {
                 label = "Repository sync in progress";
@@ -69,9 +69,9 @@
                     ariaLabel = "Refresh all repositories unavailable: no repositories are connected";
                     title = "Add a repository before queuing a workspace refresh";
                 } else if (!enabledRepositoryCount) {
-                    detail = "No enabled repositories to queue";
-                    ariaLabel = "Refresh all repositories unavailable: no repositories are enabled";
-                    title = "Enable at least one repository before queuing a workspace refresh";
+                    detail = "No repositories included in refresh";
+                    ariaLabel = "Refresh all repositories unavailable: no repositories are included";
+                    title = "Include at least one repository in refresh before refreshing all";
                 } else {
                     detail = "Workspace refresh endpoint unavailable";
                     ariaLabel = "Refresh all repositories unavailable";
@@ -115,7 +115,7 @@
         if (
             event.defaultPrevented ||
             !form.matches(
-                "[data-repositories-refresh-all], [data-repository-add-form], [data-repository-refresh-form], [data-pdf-resume-form]",
+                "[data-repositories-refresh-all], [data-repository-add-form], [data-repository-refresh-form], [data-repository-exclusion-form]",
             )
         ) {
             return;
@@ -157,11 +157,52 @@
                 documents.textContent = `${repository.pdfCount} PDF · ${repository.vsdxCount} VSDX`;
             }
             const refreshButton = card.querySelector("[data-repository-refresh-form] button");
+            const busy = Boolean(repository.hasActiveWork || repository.active);
             if (refreshButton) {
-                refreshButton.disabled = repository.active;
+                refreshButton.disabled = repository.active || repository.hasRemovalPending;
+            }
+            const exclusionBadge = card.querySelector("[data-repository-exclusion]");
+            if (exclusionBadge) {
+                exclusionBadge.hidden = !repository.refreshExcluded;
+            }
+            const retryRemoval = card.querySelector("[data-repository-removal-retry]");
+            if (retryRemoval) {
+                retryRemoval.hidden = !repository.hasRemovalPending;
+            }
+            const exclusionForm = card.querySelector("[data-repository-exclusion-form]");
+            if (exclusionForm) {
+                exclusionForm.querySelector('input[name="excluded"]').value =
+                    repository.refreshExcluded ? "no" : "yes";
+                const exclusionButton = exclusionForm.querySelector("button");
+                exclusionButton.textContent = repository.refreshExcluded
+                    ? "Include in refresh" : "Exclude from refresh";
+                exclusionButton.disabled = repository.hasRemovalPending;
+            }
+            const removeButton = card.querySelector("[data-repository-remove-button]");
+            if (removeButton) {
+                removeButton.disabled = busy || repository.hasRemovalPending;
+                removeButton.title = repository.hasRemovalPending
+                    ? "Retry the incomplete removal below"
+                    : busy ? "Wait for Git and PDF workers to finish" : "Remove repository";
             }
         });
     };
+
+    workspace.addEventListener("click", (event) => {
+        const menu = event.target.closest?.("[data-repository-menu]");
+        workspace.querySelectorAll("[data-repository-menu][open]").forEach((other) => {
+            if (other !== menu) other.open = false;
+        });
+    });
+
+    workspace.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        const menu = event.target.closest?.("[data-repository-menu][open]");
+        if (menu) {
+            menu.open = false;
+            menu.querySelector("summary").focus();
+        }
+    });
 
     const updateTotals = (totals, repositories, automation) => {
         document.querySelectorAll("[data-total-repositories]").forEach((element) => {

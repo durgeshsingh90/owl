@@ -46,6 +46,7 @@ from bitbucket_search.models import (
     PDFTextPage,
     PDFTextRevision,
     PDFTextRevisionState,
+    RepositoryRemovalRecovery,
     RepositorySyncJob,
     RepositorySyncJobStatus,
     RepositorySyncState,
@@ -164,6 +165,10 @@ class PDFExtractionExcluded(RuntimeError):
     """A local PDF policy supersedes extraction without changing saved text."""
 
 
+class _PDFRevisionCacheMiss(RuntimeError):
+    """A reusable revision was pruned after its unlocked cache lookup."""
+
+
 @dataclass(frozen=True, slots=True)
 class StagedPDFPage:
     page_number: int
@@ -253,6 +258,12 @@ def _batches[T](
         yield values[start : start + size]
 
 
+def _removal_repository_ids():
+    """Keep pending removal journals out of every worker recovery path."""
+
+    return RepositoryRemovalRecovery.objects.values("repository_id")
+
+
 @_logged_indexing_errors("extraction_queue")
 @transaction.atomic
 def queue_repository_pdf_extractions(
@@ -271,7 +282,14 @@ def queue_repository_pdf_extractions(
     # the PDF file gate: catalogue publication may already own a DB write lock.
     _reserve_sqlite_write()
     repository_id = repository.pk if isinstance(repository, BitbucketRepository) else repository
-    locked_repository = BitbucketRepository.objects.select_for_update().get(pk=repository_id)
+    locked_repository = (
+        BitbucketRepository.objects.select_for_update()
+        .exclude(pk__in=_removal_repository_ids())
+        .filter(pk=repository_id)
+        .first()
+    )
+    if locked_repository is None:
+        return ExtractionQueueResult((), (), ())
     observed_at = timezone.now()
     sync_job_id = (
         repository_sync_job.pk
@@ -619,7 +637,9 @@ def mark_index_worker_launch_failed(job_ids: Sequence[int]) -> tuple[int, ...]:
 def extraction_status_snapshot() -> ExtractionStatusSnapshot:
     """Return compact local-only queue/index counts for polling and status pages."""
 
-    current_jobs = PDFExtractionJob.objects.filter(
+    current_jobs = PDFExtractionJob.objects.exclude(
+        document__repository_id__in=_removal_repository_ids()
+    ).filter(
         target_git_blob_id=F("document__git_blob_id"),
         target_relative_path=F("document__relative_path"),
         target_file_size=F("document__file_size"),
@@ -634,7 +654,9 @@ def extraction_status_snapshot() -> ExtractionStatusSnapshot:
         .values("status")
         .annotate(total=Count("id"))
     }
-    active_documents = PDFDocument.objects.filter(
+    active_documents = PDFDocument.objects.exclude(
+        repository_id__in=_removal_repository_ids()
+    ).filter(
         lifecycle_state=PDFDocumentLifecycle.ACTIVE,
         repository__enabled=True,
     )
@@ -679,7 +701,9 @@ def extraction_status_snapshot() -> ExtractionStatusSnapshot:
 def _interrupt_stale_extraction_jobs(*, observed_at=None, force: bool = False) -> None:
     now = observed_at or timezone.now()
     cutoff = now - STALE_EXTRACTION_AFTER
-    candidates = PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING)
+    candidates = PDFExtractionJob.objects.exclude(
+        document__repository_id__in=_removal_repository_ids()
+    ).filter(status=PDFExtractionJobStatus.RUNNING)
     if not force:
         candidates = candidates.filter(
             Q(heartbeat_at__lt=cutoff) | Q(heartbeat_at__isnull=True, started_at__lt=cutoff)
@@ -786,7 +810,8 @@ def sweep_pdf_extraction_queue(
         ),
     ).order_by("-requested_at", "-id")
     repository_ids = tuple(
-        PDFDocument.objects.filter(
+        PDFDocument.objects.exclude(repository_id__in=_removal_repository_ids())
+        .filter(
             lifecycle_state=PDFDocumentLifecycle.ACTIVE,
             repository__enabled=True,
             local_policy__isnull=True,
@@ -852,7 +877,8 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
     with pdf_extraction_claim_lock(), transaction.atomic():
         _reserve_sqlite_write()
         running_by_repository = tuple(
-            PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING)
+            PDFExtractionJob.objects.exclude(document__repository_id__in=_removal_repository_ids())
+            .filter(status=PDFExtractionJobStatus.RUNNING)
             .order_by()
             .values("document__repository_id")
             .annotate(total=Count("id"))
@@ -878,7 +904,8 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
             default=Value(0),
         )
         candidate_id = (
-            PDFExtractionJob.objects.filter(
+            PDFExtractionJob.objects.exclude(document__repository_id__in=_removal_repository_ids())
+            .filter(
                 status=PDFExtractionJobStatus.QUEUED,
                 document__lifecycle_state=PDFDocumentLifecycle.ACTIVE,
                 document__repository__enabled=True,
@@ -982,9 +1009,14 @@ def _update_job_progress(job_id: int, phase: str, progress: int) -> None:
 
 def _raise_if_repository_sync_active(*, job_id: int) -> None:
     repository_id = PDFExtractionJob.objects.filter(pk=job_id).values("document__repository_id")[:1]
-    if RepositorySyncJob.objects.filter(
-        repository_id=Subquery(repository_id), status__in=_ACTIVE_REPOSITORY_JOB_STATUSES
-    ).exists():
+    if (
+        BitbucketRepository.objects.filter(pk=Subquery(repository_id))
+        .filter(
+            Q(pk__in=_removal_repository_ids())
+            | Q(sync_jobs__status__in=_ACTIVE_REPOSITORY_JOB_STATUSES)
+        )
+        .exists()
+    ):
         raise PDFExtractionDeferred
 
 
@@ -1486,7 +1518,13 @@ def _attach_revision(
 
         revision = existing_revision
         if revision is not None:
-            revision = PDFTextRevision.objects.select_for_update().get(pk=revision.pk)
+            try:
+                revision = PDFTextRevision.objects.select_for_update().get(pk=revision.pk)
+            except PDFTextRevision.DoesNotExist as exc:
+                # Repository removal may prune its last reference while a
+                # different repository is hashing the same PDF. The source PDF
+                # remains valid; release this short write gate and parse it.
+                raise _PDFRevisionCacheMiss from exc
             if (
                 revision.content_sha256 != content_sha256
                 or revision.extractor_version != PDF_EXTRACTOR_VERSION
@@ -1748,13 +1786,23 @@ def _execute_claimed_extraction_job(
                     "The PDF changed while OWL was validating reusable text.",
                 )
             _update_job_progress(job.pk, PDFExtractionJobPhase.PUBLISHING, 95)
-            _attach_revision(
-                job.pk,
-                content_sha256=content_sha256,
-                staged=None,
-                existing_revision=reusable,
-            )
-        else:
+            try:
+                _attach_revision(
+                    job.pk,
+                    content_sha256=content_sha256,
+                    staged=None,
+                    existing_revision=reusable,
+                )
+            except _PDFRevisionCacheMiss:
+                reusable = None
+                log_event(
+                    logger,
+                    logging.DEBUG,
+                    "pdf_text_revision_cache_miss",
+                    document_id=job.document_id,
+                    job_id=job.pk,
+                )
+        if reusable is None:
             _update_job_progress(job.pk, PDFExtractionJobPhase.EXTRACTING, 20)
             expected_content_sha256 = content_sha256
             staged = extraction_runner(path, extraction_heartbeat)

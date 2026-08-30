@@ -15,8 +15,8 @@ from datetime import time as datetime_time
 from pathlib import Path
 
 from django.conf import settings
-from django.db import IntegrityError, OperationalError, transaction
-from django.db.models import Count, Exists, OuterRef, Prefetch, Q, Sum
+from django.db import IntegrityError, OperationalError, connection, transaction
+from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q, Sum
 from django.utils import timezone
 
 from bitbucket_search.models import (
@@ -24,6 +24,7 @@ from bitbucket_search.models import (
     PDFDocument,
     PDFDocumentLifecycle,
     PDFLocalPolicyState,
+    RepositoryRemovalRecovery,
     RepositorySyncJob,
     RepositorySyncJobStatus,
     RepositorySyncOperation,
@@ -186,6 +187,23 @@ def _notification_text(*parts: object) -> str:
     return " ".join(" ".join(str(part or "").split()) for part in parts if part)[:500]
 
 
+def _publish_repository_notification(job: RepositorySyncJob, **payload) -> bool:
+    """Do not resurrect a removed repository through a late worker callback."""
+
+    with transaction.atomic():
+        reserve_repository_write()
+        repository = (
+            BitbucketRepository.objects.select_for_update()
+            .filter(pk=job.repository_id)
+            .exclude(pk__in=RepositoryRemovalRecovery.objects.values("repository_id"))
+            .first()
+        )
+        if repository is None:
+            return False
+        publish_notification(**payload)
+    return True
+
+
 def _publish_automatic_refresh_failure(
     job: RepositorySyncJob,
     *,
@@ -212,7 +230,8 @@ def _publish_automatic_refresh_failure(
             "No automatic retries remain for this daily cycle. Select Refresh to try again now."
         )
     try:
-        publish_notification(
+        published = _publish_repository_notification(
+            job,
             event_key=event_key,
             kind=NotificationKind.BITBUCKET_REFRESH,
             state=state,
@@ -227,6 +246,8 @@ def _publish_automatic_refresh_failure(
             # Make that new failure visible again without creating another card.
             mark_unread=True,
         )
+        if not published:
+            return
         log_event(
             logger,
             logging.WARNING if retries_remaining else logging.ERROR,
@@ -261,7 +282,8 @@ def _publish_manual_connection_status(
     try:
         if not failure_summary and not Notification.objects.filter(event_key=event_key).exists():
             return
-        publish_notification(
+        _publish_repository_notification(
+            job,
             event_key=event_key,
             kind=NotificationKind.BITBUCKET_REFRESH,
             state=NotificationState.ERROR if failure_summary else NotificationState.SUCCESS,
@@ -302,7 +324,8 @@ def _publish_automatic_refresh_recovery(
     try:
         if not Notification.objects.filter(event_key=event_key).exists():
             return
-        publish_notification(
+        published = _publish_repository_notification(
+            job,
             event_key=event_key,
             kind=NotificationKind.BITBUCKET_REFRESH,
             state=NotificationState.SUCCESS,
@@ -315,6 +338,8 @@ def _publish_automatic_refresh_recovery(
             occurred_at=occurred_at,
             mark_unread=True,
         )
+        if not published:
+            return
         log_event(
             logger,
             logging.WARNING,
@@ -471,6 +496,33 @@ def _repository_automation_status(
         if latest_job is not None or repository.last_sync_completed_at is not None
         else None
     )
+
+    if getattr(repository, "_has_removal_pending", False):
+        return _status_value(
+            state="removal_pending",
+            label="Removal incomplete",
+            detail="Refresh is paused while local removal is incomplete. Use Retry removal to finish.",
+            next_action_at=None,
+            retry_count=0,
+            max_retries=0,
+            scheduled_day=None,
+            trigger=latest_job.trigger if latest_job else None,
+            last_attempt_at=latest_attempt_at,
+        )
+
+    if repository.exclude_from_refresh:
+        return _status_value(
+            state="excluded",
+            label="Excluded from refresh",
+            detail="Refresh all, daily checks, and automatic retries skip this repository. "
+            "You can still refresh it individually.",
+            next_action_at=None,
+            retry_count=0,
+            max_retries=0,
+            scheduled_day=None,
+            trigger=latest_job.trigger if latest_job else None,
+            last_attempt_at=latest_attempt_at,
+        )
 
     if not settings.BITBUCKET_DAILY_REFRESH_ENABLED or not repository.enabled:
         detail = (
@@ -729,6 +781,11 @@ def _queue_job(
     scheduled_day: date | None = None,
     automatic_retry_number: int = 0,
 ) -> tuple[RepositorySyncJob, bool]:
+    if RepositoryRemovalRecovery.objects.filter(repository_id=repository.pk).exists():
+        raise RepositorySyncError(
+            "repository_removal_pending",
+            "Repository removal is incomplete. Use Retry removal before adding or refreshing it.",
+        )
     active = repository.sync_jobs.filter(status__in=ACTIVE_JOB_STATUSES).first()
     if active is not None:
         log_event(
@@ -816,12 +873,20 @@ def _queue_job(
     return job, True
 
 
+def reserve_repository_write() -> None:
+    """Take SQLite's writer reservation before reading repository queue state."""
+
+    if connection.vendor == "sqlite":
+        BitbucketRepository.objects.filter(pk=-1).update(enabled=F("enabled"))
+
+
 def register_and_queue_repository(remote_url: object) -> QueueResult:
     """Register a canonical repository once and queue clone/refresh idempotently."""
 
     normalized = normalize_repository_url(remote_url)
     _interrupt_stale_jobs()
     with transaction.atomic():
+        reserve_repository_write()
         repository, repository_created = BitbucketRepository.objects.get_or_create(
             canonical_remote_key=normalized.canonical_remote_key,
             defaults={
@@ -832,6 +897,8 @@ def register_and_queue_repository(remote_url: object) -> QueueResult:
         if repository_created:
             repository.local_path = str(managed_repository_path(repository))
             repository.save(update_fields=("local_path", "updated_at"))
+        else:
+            repository = BitbucketRepository.objects.select_for_update().get(pk=repository.pk)
         job, job_created = _queue_job(repository)
     return QueueResult(repository, job, repository_created, job_created)
 
@@ -843,9 +910,12 @@ def _queue_repository_refresh(
 ) -> QueueResult:
     _interrupt_stale_jobs()
     with transaction.atomic():
+        reserve_repository_write()
         repositories = BitbucketRepository.objects.select_for_update()
         if enabled_only:
-            repositories = repositories.filter(enabled=True)
+            repositories = repositories.filter(enabled=True, exclude_from_refresh=False).exclude(
+                pk__in=RepositoryRemovalRecovery.objects.values("repository_id")
+            )
         repository = repositories.get(pk=repository_id)
         job, job_created = _queue_job(repository)
     return QueueResult(repository, job, False, job_created)
@@ -871,6 +941,7 @@ def queue_all_repository_refreshes(*, require_idle: bool = False) -> QueueAllRep
     a partially scheduled bulk refresh behind.
     """
 
+    reserve_repository_write()
     if require_idle:
         _interrupt_stale_jobs()
         if BitbucketRepository.objects.filter(
@@ -893,7 +964,10 @@ def queue_all_repository_refreshes(*, require_idle: bool = False) -> QueueAllRep
             raise RepositoryRefreshInProgress
 
     repository_ids = tuple(
-        BitbucketRepository.objects.filter(enabled=True).order_by("id").values_list("id", flat=True)
+        BitbucketRepository.objects.filter(enabled=True, exclude_from_refresh=False)
+        .exclude(pk__in=RepositoryRemovalRecovery.objects.values("repository_id"))
+        .order_by("id")
+        .values_list("id", flat=True)
     )
     results: list[QueueResult] = []
     fallback_worker_jobs: dict[int, RepositorySyncJob] = {}
@@ -943,7 +1017,9 @@ def queue_due_daily_repository_refreshes(*, at=None) -> tuple[QueueResult, ...]:
     repository_ids = tuple(
         BitbucketRepository.objects.filter(
             enabled=True,
+            exclude_from_refresh=False,
         )
+        .exclude(pk__in=RepositoryRemovalRecovery.objects.values("repository_id"))
         .filter(
             Q(last_sync_successful_at__isnull=True)
             | Q(last_sync_successful_at__lt=success_boundary)
@@ -957,9 +1033,11 @@ def queue_due_daily_repository_refreshes(*, at=None) -> tuple[QueueResult, ...]:
 
     for repository_id in repository_ids:
         with transaction.atomic():
+            reserve_repository_write()
             repository = (
                 BitbucketRepository.objects.select_for_update()
-                .filter(pk=repository_id, enabled=True)
+                .filter(pk=repository_id, enabled=True, exclude_from_refresh=False)
+                .exclude(pk__in=RepositoryRemovalRecovery.objects.values("repository_id"))
                 .first()
             )
             if repository is None:
@@ -1221,6 +1299,7 @@ def claim_next_job() -> RepositorySyncJob | None:
 
     _interrupt_stale_jobs()
     with transaction.atomic():
+        reserve_repository_write()
         if (
             RepositorySyncJob.objects.filter(status=RepositorySyncJobStatus.RUNNING).count()
             >= settings.BITBUCKET_MAX_REPO_WORKERS
@@ -1228,6 +1307,7 @@ def claim_next_job() -> RepositorySyncJob | None:
             return None
         candidate_id = (
             RepositorySyncJob.objects.filter(status=RepositorySyncJobStatus.QUEUED)
+            .exclude(repository_id__in=RepositoryRemovalRecovery.objects.values("repository_id"))
             .order_by("requested_at", "id")
             .values_list("id", flat=True)
             .first()
@@ -1690,7 +1770,10 @@ def repository_status_snapshot(*, at=None) -> tuple[BitbucketRepository, ...]:
                     repository_id=OuterRef("pk"),
                     status__in=ACTIVE_JOB_STATUSES,
                 )
-            )
+            ),
+            _has_removal_pending=Exists(
+                RepositoryRemovalRecovery.objects.filter(repository_id=OuterRef("pk"))
+            ),
         )
         .prefetch_related(
             Prefetch(

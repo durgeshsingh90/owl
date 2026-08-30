@@ -323,10 +323,19 @@ def _name_has_suffix(name: str, suffixes: set[str]) -> bool:
     return name in suffixes or any(name.endswith(f"_{suffix}") for suffix in suffixes)
 
 
-def _literal_value(raw_value: str, *, quoted_key: bool = False) -> str | None:
+def _literal_value(
+    raw_value: str, *, quoted_key: bool = False, javascript_source: bool = False
+) -> str | None:
     """Parse a simple assignment literal; expressions and empty values return None."""
 
     value = raw_value.strip()
+    if javascript_source:
+        value = value.removesuffix(";").rstrip()
+        # In JavaScript a bare identifier/member is a runtime lookup, not a
+        # hostname or credential literal. Keep dotenv/YAML unquoted values on
+        # the conservative literal path instead of weakening those formats.
+        if re.fullmatch(r"[$A-Za-z_][$A-Za-z0-9_]*(?:\.[$A-Za-z_][$A-Za-z0-9_]*)*", value):
+            return None
     if value.endswith(","):
         value = value[:-1].rstrip()
     if not value:
@@ -426,11 +435,12 @@ def _contains_source_expression(value: str) -> bool:
     return bool("{" in value or "}" in value or re.search(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", value))
 
 
-def _assignment_problems(match: re.Match[str]) -> list[str]:
+def _assignment_problems(match: re.Match[str], *, javascript_source: bool = False) -> list[str]:
     name = _assignment_name(match)
     literal = _literal_value(
         match.group("value"),
         quoted_key=bool(match.groupdict().get("quote")),
+        javascript_source=javascript_source,
     )
     if literal is None:
         return []
@@ -598,6 +608,7 @@ def content_problems(text: str, *, path: PurePosixPath | None = None) -> list[tu
         else None
     )
     python_source = python_problems is not None
+    javascript_source = path is not None and path.suffix.casefold() in {".js", ".mjs", ".cjs"}
     for line_number, line in enumerate(text.splitlines(), start=1):
         line_problems: set[str] = set()
         if PRIVATE_KEY_PATTERN.search(line):
@@ -618,9 +629,13 @@ def content_problems(text: str, *, path: PurePosixPath | None = None) -> list[tu
         if not python_source:
             direct_assignment = DIRECT_ASSIGNMENT_PATTERN.match(line)
             if direct_assignment:
-                line_problems.update(_assignment_problems(direct_assignment))
+                line_problems.update(
+                    _assignment_problems(direct_assignment, javascript_source=javascript_source)
+                )
             for json_assignment in JSON_ASSIGNMENT_PATTERN.finditer(line):
-                line_problems.update(_assignment_problems(json_assignment))
+                line_problems.update(
+                    _assignment_problems(json_assignment, javascript_source=javascript_source)
+                )
 
         problems.extend((line_number, problem) for problem in sorted(line_problems))
     if python_problems:

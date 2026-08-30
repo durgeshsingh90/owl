@@ -19,11 +19,6 @@
                 <span class="bb-document-name__icon" aria-hidden="true">PDF</span>
                 <span>
                     <strong data-pdf-filename>{{ document.filename }}</strong>
-                    {% if row.local_policy_state == "excluded" %}
-                    <span class="bb-pdf-policy-badge">Excluded</span>
-                    {% elif row.local_policy_state == "resuming" %}
-                    <span class="bb-pdf-policy-badge">Awaiting refresh</span>
-                    {% endif %}
                 </span>
             </span>
         </td>
@@ -94,31 +89,6 @@
                         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 7.5h6l1.7 2h9.3v9.5h-17V7.5Z"/><path d="M5 7.5V5h5l1.5 2.5"/></svg>
                     </button>
                 </form>
-                {% if row.local_policy_state == "excluded" or row.local_policy_state == "resuming" %}
-                <form method="post" action="{% url 'bitbucket_search:document_resume' document.pk %}" data-pdf-resume-form>
-                    {% csrf_token %}
-                    {% if search_return_to %}
-                    <input type="hidden" name="return_to" value="{{ search_return_to }}">
-                    {% else %}
-                    <input type="hidden" name="return_page" value="{{ timeline_page_number }}">
-                    {% endif %}
-                    <button type="submit" data-tooltip="{% if row.local_policy_state == 'resuming' %}Awaiting refresh{% else %}Include in refresh{% endif %}" aria-label="Include in refresh: {{ document.filename }}"{% if row.local_policy_state == "resuming" %} disabled aria-busy="true"{% endif %}>
-                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="m10 8 6 4-6 4V8Z"/></svg>
-                    </button>
-                </form>
-                {% else %}
-                <form method="post" action="{% url 'bitbucket_search:document_exclude' document.pk %}">
-                    {% csrf_token %}
-                    {% if search_return_to %}
-                    <input type="hidden" name="return_to" value="{{ search_return_to }}">
-                    {% else %}
-                    <input type="hidden" name="return_page" value="{{ timeline_page_number }}">
-                    {% endif %}
-                    <button type="submit" data-tooltip="Exclude from refresh" aria-label="Exclude from refresh: {{ document.filename }}">
-                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="M9 8v8M15 8v8"/></svg>
-                    </button>
-                </form>
-                {% endif %}
                 <form method="get" action="{% url 'bitbucket_search:document_delete' document.pk %}">
                     {% if search_return_to %}
                     <input type="hidden" name="return_to" value="{{ search_return_to }}">

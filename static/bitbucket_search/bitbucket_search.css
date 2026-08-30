@@ -478,6 +478,7 @@
 }
 
 .bb-repository-card {
+    position: relative;
     display: grid;
     gap: 0.38rem;
     padding: 0.62rem;
@@ -495,6 +496,7 @@
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 0.5rem;
+    padding-right: 2.1rem;
 }
 
 .bb-repository-state {
@@ -619,6 +621,108 @@
 
 .bb-repository-worker-timer[hidden] {
     display: none;
+}
+
+.bb-repository-card__copy .bb-repository-exclusion {
+    color: var(--bb-amber);
+}
+
+.bb-repository-exclusion[hidden] {
+    display: none;
+}
+
+.bb-repository-removal-retry {
+    display: block;
+    margin-top: 0.15rem;
+    color: var(--bb-danger);
+    font-size: 0.65rem;
+}
+
+.bb-repository-removal-retry[hidden] {
+    display: none;
+}
+
+.bb-repository-menu > summary {
+    position: absolute;
+    top: 0.62rem;
+    right: 0.62rem;
+    display: grid;
+    width: 28px;
+    height: 32px;
+    place-items: center;
+    border: 1px solid var(--bb-line);
+    border-radius: 6px;
+    color: var(--bb-muted);
+    cursor: pointer;
+    list-style: none;
+}
+
+.bb-repository-menu > summary::-webkit-details-marker {
+    display: none;
+}
+
+.bb-repository-menu > summary svg {
+    width: 19px;
+    height: 19px;
+    fill: currentColor;
+    stroke: currentColor;
+}
+
+.bb-repository-menu__body {
+    display: grid;
+    gap: 0.25rem;
+    padding-top: 0.4rem;
+    border-top: 1px solid var(--bb-line);
+}
+
+.bb-repository-menu__body form {
+    margin: 0;
+}
+
+.bb-repository-menu__body button {
+    width: 100%;
+    min-height: 32px;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: var(--bb-text-soft);
+    background: transparent;
+    font: inherit;
+    font-size: 0.72rem;
+    text-align: left;
+    cursor: pointer;
+}
+
+.bb-repository-menu__body button:hover:not(:disabled),
+.bb-repository-menu > summary:hover {
+    background: var(--bb-amber-soft);
+    border-color: var(--bb-amber);
+}
+
+.bb-repository-menu__body .bb-repository-menu__remove {
+    color: var(--bb-danger);
+}
+
+.bb-repository-menu__body button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.bb-repository-recoveries {
+    margin-top: 0.5rem;
+}
+
+.bb-repository-recovery strong {
+    overflow: hidden;
+    font-size: 0.72rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.bb-repository-recovery small,
+.bb-repository-recovery a {
+    color: var(--bb-danger);
+    font-size: 0.7rem;
 }
 
 .bb-repository-card__main form {
@@ -2555,6 +2659,11 @@
 
 .bb-delete-confirmation__actions .button--danger:hover {
     background: #942626;
+}
+
+.bb-delete-confirmation__actions .button--danger:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
 }
 
 .bb-document-actions button:disabled {

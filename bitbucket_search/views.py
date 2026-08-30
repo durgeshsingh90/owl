@@ -34,8 +34,10 @@ from bitbucket_search.models import (
     PDFDocument,
     PDFDocumentAddedEvidence,
     PDFDocumentLifecycle,
+    PDFExtractionJob,
+    PDFExtractionJobStatus,
     PDFIndexState,
-    PDFLocalPolicyState,
+    RepositoryRemovalRecovery,
     RepositorySyncJob,
     RepositorySyncJobStatus,
     RepositorySyncState,
@@ -57,9 +59,7 @@ from bitbucket_search.services.pdf_indexing import (
 )
 from bitbucket_search.services.pdf_local_policy import (
     delete_registered_pdf,
-    exclude_registered_pdf,
     frozen_pdf_path,
-    resume_registered_pdf,
 )
 from bitbucket_search.services.pdf_search import (
     PDFSearchHit,
@@ -81,6 +81,11 @@ from bitbucket_search.services.people import (
     PeopleGroupValidationError,
     create_people_group,
     git_people_summaries,
+)
+from bitbucket_search.services.repository_lifecycle import (
+    RepositoryLifecycleError,
+    remove_repository,
+    set_repository_refresh_excluded,
 )
 from bitbucket_search.services.repository_sync import (
     RepositoryRefreshInProgress,
@@ -686,7 +691,7 @@ def _display_timestamp(value: object) -> str:
 def _automatic_refresh_payload(repository: BitbucketRepository) -> dict[str, object]:
     automatic = getattr(repository, "automatic_refresh", None)
     globally_enabled = bool(getattr(settings, "BITBUCKET_DAILY_REFRESH_ENABLED", True))
-    repository_enabled = bool(repository.enabled)
+    repository_enabled = bool(repository.enabled and not repository.exclude_from_refresh)
     state = str(
         _automatic_value(
             automatic,
@@ -970,7 +975,7 @@ def _index_context(
     people_group_form_name: str = "",
     people_group_form_members: tuple[str, ...] = (),
 ):
-    repositories = repository_status_snapshot()
+    repositories = _with_repository_work_status(repository_status_snapshot())
     automation_payload = _automation_payload(repositories)
     catalog_publication_signature = _catalog_publication_signature(repositories)
     extraction_status = extraction_status_snapshot()
@@ -1141,8 +1146,14 @@ def _index_context(
             f"{extraction_status.pending_documents} pending"
         ),
         "repositories": repositories,
+        "repository_removal_recoveries": RepositoryRemovalRecovery.objects.exclude(
+            repository_id__in=(repository.pk for repository in repositories)
+        ).order_by("display_name", "id"),
         "repository_count": len(repositories),
-        "enabled_repository_count": sum(item.enabled for item in repositories),
+        "enabled_repository_count": sum(
+            item.enabled and not item.exclude_from_refresh and not item.has_removal_pending
+            for item in repositories
+        ),
         "active_repository_count": sum(item.has_active_sync for item in repositories),
         "active_enabled_repository_count": sum(
             item.enabled and item.has_active_sync for item in repositories
@@ -1206,7 +1217,41 @@ def _index_context(
     return context
 
 
+def _with_repository_work_status(
+    repositories: tuple[BitbucketRepository, ...],
+) -> tuple[BitbucketRepository, ...]:
+    """Keep lifecycle controls locked while either Git or PDF workers own a repo."""
+
+    repository_ids = tuple(repository.pk for repository in repositories)
+    if not repository_ids:
+        return repositories
+    busy_ids = set(
+        RepositorySyncJob.objects.filter(
+            repository_id__in=repository_ids,
+            status__in=(RepositorySyncJobStatus.QUEUED, RepositorySyncJobStatus.RUNNING),
+        ).values_list("repository_id", flat=True)
+    )
+    busy_ids.update(
+        PDFExtractionJob.objects.filter(
+            document__repository_id__in=repository_ids,
+            status__in=(PDFExtractionJobStatus.QUEUED, PDFExtractionJobStatus.RUNNING),
+        ).values_list("document__repository_id", flat=True)
+    )
+    for repository in repositories:
+        repository.has_active_work = repository.has_active_sync or repository.pk in busy_ids
+    removal_ids = set(
+        RepositoryRemovalRecovery.objects.filter(repository_id__in=repository_ids).values_list(
+            "repository_id", flat=True
+        )
+    )
+    for repository in repositories:
+        repository.has_removal_pending = repository.pk in removal_ids
+    return repositories
+
+
 def _repository_payload(repository: BitbucketRepository) -> dict[str, object]:
+    if not hasattr(repository, "has_active_work"):
+        _with_repository_work_status((repository,))
     automatic = _automatic_refresh_payload(repository)
     last_attempt_at = automatic["lastAttemptAt"] or (
         repository.last_sync_completed_at.isoformat() if repository.last_sync_completed_at else None
@@ -1229,6 +1274,9 @@ def _repository_payload(repository: BitbucketRepository) -> dict[str, object]:
         "documentBytesLabel": _format_bytes(repository.document_bytes),
         "branch": repository.default_branch,
         "enabled": repository.enabled,
+        "refreshExcluded": repository.exclude_from_refresh,
+        "hasActiveWork": repository.has_active_work,
+        "hasRemovalPending": repository.has_removal_pending,
         "lastAttemptAt": last_attempt_at,
         "lastSuccessfulAt": (
             repository.last_sync_successful_at.isoformat()
@@ -1244,6 +1292,12 @@ def _repository_payload(repository: BitbucketRepository) -> dict[str, object]:
         "automatic": automatic,
         "refreshUrl": reverse(
             "bitbucket_search:repository_refresh", kwargs={"repository_id": repository.pk}
+        ),
+        "exclusionUrl": reverse(
+            "bitbucket_search:repository_exclude", kwargs={"repository_id": repository.pk}
+        ),
+        "removeUrl": reverse(
+            "bitbucket_search:repository_remove", kwargs={"repository_id": repository.pk}
         ),
     }
 
@@ -1630,26 +1684,9 @@ def reveal_document(request: HttpRequest, document_id: int) -> HttpResponse:
 @never_cache
 @_logged_web_action("pdf_exclude")
 def exclude_document(request: HttpRequest, document_id: int) -> HttpResponse:
-    """Keep a saved PDF and its indexed text unchanged by future Git refreshes."""
+    """Old per-file controls must not create new exclusions after the repo-level move."""
 
-    local_error = _require_strict_loopback_action(request)
-    if local_error:
-        return local_error
-    get_object_or_404(PDFDocument, pk=document_id)
-    try:
-        document = exclude_registered_pdf(document_id)
-    except DocumentActionError as exc:
-        return _document_action_failure(request, exc, document_id=document_id)
-    detail = (
-        f"Excluded {document.filename} from refresh. "
-        "Its saved local copy and indexed text are kept."
-    )
-    if _is_async_request(request):
-        return JsonResponse(
-            {"state": PDFLocalPolicyState.EXCLUDED, "documentId": document.pk, "detail": detail}
-        )
-    messages.success(request, detail)
-    return redirect(_document_action_return_url(request, document_id=document.pk))
+    return _retired_pdf_refresh_control(request, document_id)
 
 
 @require_POST
@@ -1657,65 +1694,26 @@ def exclude_document(request: HttpRequest, document_id: int) -> HttpResponse:
 @never_cache
 @_logged_web_action("pdf_resume")
 def resume_document(request: HttpRequest, document_id: int) -> HttpResponse:
-    """Reinclude a saved PDF, then queue the next background repository refresh."""
+    """Retain a safe response for forms left open before repository-level controls."""
+
+    return _retired_pdf_refresh_control(request, document_id)
+
+
+def _retired_pdf_refresh_control(request: HttpRequest, document_id: int) -> HttpResponse:
 
     local_error = _require_strict_loopback_action(request)
     if local_error:
         return local_error
     get_object_or_404(PDFDocument, pk=document_id)
-    try:
-        document = resume_registered_pdf(document_id)
-    except DocumentActionError as exc:
-        return _document_action_failure(request, exc, document_id=document_id)
-
-    worker_unavailable = False
-    try:
-        queued = queue_repository_refresh(document.repository_id)
-        if queued.job.status == RepositorySyncJobStatus.QUEUED:
-            _workers_started, launch_failed = _wake_queued_repository_workers(
-                job_ids=(queued.job.pk,),
-            )
-            if launch_failed:
-                mark_worker_launch_failed(queued.job.pk)
-                worker_unavailable = True
-    except OperationalError as error:
-        log_event(
-            logger,
-            logging.ERROR,
-            "pdf_resume_queue_failed",
-            error=error,
-            document_id=document_id,
-            repository_id=document.repository_id,
-            stage="queue_refresh",
-        )
-        worker_unavailable = True
-
-    if worker_unavailable:
-        detail = (
-            f"{document.filename} is awaiting refresh, but OWL could not start its "
-            "background refresh. Retry the repository refresh to finish including it."
-        )
-    else:
-        detail = (
-            f"{document.filename} is included for the next refresh. "
-            "A background repository refresh is queued; the saved copy remains available until then."
-        )
+    detail = (
+        "Refresh exclusions are now managed for the whole repository. Use its menu in the sidebar."
+    )
     if _is_async_request(request):
         return JsonResponse(
-            {
-                "state": "worker_unavailable"
-                if worker_unavailable
-                else PDFLocalPolicyState.RESUMING,
-                "documentId": document.pk,
-                "detail": detail,
-            },
-            status=503 if worker_unavailable else 202,
+            {"state": "gone", "code": "repository_refresh_controls", "detail": detail},
+            status=410,
         )
-    if worker_unavailable:
-        messages.warning(request, detail)
-    else:
-        messages.success(request, detail)
-    return redirect(_document_action_return_url(request, document_id=document.pk))
+    return HttpResponse(detail, status=410, content_type="text/plain; charset=utf-8")
 
 
 @require_http_methods(["GET", "POST"])
@@ -1756,7 +1754,7 @@ def delete_document(request: HttpRequest, document_id: int) -> HttpResponse:
         return _document_action_failure(request, exc, document_id=document_id)
     detail = (
         f"Deleted {document.filename} from local storage and the PDF index. "
-        "It will stay excluded from future refreshes. The remote repository was not changed."
+        "Future refreshes will keep this PDF deleted. The remote repository was not changed."
     )
     if _is_async_request(request):
         return JsonResponse({"state": "deleted", "documentId": document_id, "detail": detail})
@@ -1776,6 +1774,8 @@ def add_repository(request: HttpRequest) -> HttpResponse:
         return local_error
     try:
         queued = register_and_queue_repository(request.POST.get("repository_url"))
+    except RepositorySyncError as error:
+        return _repository_lifecycle_failure(request, error)
     except RepositoryURLValidationError as exc:
         log_event(
             logger,
@@ -1838,6 +1838,114 @@ def add_repository(request: HttpRequest) -> HttpResponse:
 @require_POST
 @csrf_protect
 @never_cache
+@_logged_web_action("repository_exclude")
+def exclude_repository(request: HttpRequest, repository_id: int) -> HttpResponse:
+    """Change future automatic/global refresh eligibility without hiding saved PDFs."""
+
+    local_error = _require_strict_loopback_action(request)
+    if local_error:
+        return local_error
+    get_object_or_404(BitbucketRepository, pk=repository_id)
+    value = request.POST.get("excluded")
+    if value not in {"yes", "no"}:
+        return JsonResponse(
+            {"state": "invalid", "detail": "Choose whether to exclude this repository."},
+            status=400,
+        )
+    try:
+        repository = set_repository_refresh_excluded(repository_id, excluded=value == "yes")
+    except RepositoryLifecycleError as error:
+        return _repository_lifecycle_failure(request, error)
+    detail = (
+        f"{repository.display_name} is excluded from Refresh all and scheduled refreshes. "
+        "Its PDFs remain available, and you can still refresh this repository manually."
+        if repository.exclude_from_refresh
+        else f"{repository.display_name} is included in Refresh all and scheduled refreshes."
+    )
+    if _is_async_request(request):
+        return JsonResponse(
+            {"state": "updated", "detail": detail, "repository": _repository_payload(repository)}
+        )
+    messages.success(request, detail)
+    return redirect(reverse("bitbucket_search:index"))
+
+
+def _repository_lifecycle_failure(
+    request: HttpRequest, error: RepositoryLifecycleError | RepositorySyncError
+) -> HttpResponse:
+    status = 404 if error.code == "repository_unavailable" else 409
+    if _is_async_request(request):
+        return JsonResponse(
+            {"state": "blocked", "code": error.code, "detail": error.summary}, status=status
+        )
+    return HttpResponse(error.summary, status=status, content_type="text/plain; charset=utf-8")
+
+
+@require_http_methods(["GET", "POST"])
+@csrf_protect
+@never_cache
+@_logged_web_action("repository_remove")
+def remove_repository_view(request: HttpRequest, repository_id: int) -> HttpResponse:
+    """Confirm local checkout/index deletion; never mutate a remote Git repository."""
+
+    local_error = _require_strict_loopback_action(request)
+    if local_error:
+        return local_error
+    repository = BitbucketRepository.objects.filter(pk=repository_id).first()
+    recovery = RepositoryRemovalRecovery.objects.filter(repository_id=repository_id).first()
+    if repository is None and recovery is None:
+        raise Http404("Repository not found.")
+    if repository:
+        _with_repository_work_status((repository,))
+    context = {
+        "active_app": "bitbucket",
+        "page_title": "Remove local repository",
+        "repository_id": repository_id,
+        "repository_name": repository.display_name if repository else recovery.display_name,
+        "repository_path": "",
+        "repository_busy": bool(repository and repository.has_active_work),
+        "removal_incomplete": recovery is not None,
+        "removal_database_deleted": bool(recovery and recovery.database_deleted),
+        "cancel_url": reverse("bitbucket_search:index"),
+        "confirmation_required": request.method == "POST"
+        and request.POST.get("confirmed") != "yes",
+    }
+    if repository:
+        try:
+            context["repository_path"] = str(managed_repository_path(repository))
+        except RepositorySyncError:
+            # The lifecycle service will reject unsafe paths before deletion.
+            context["repository_path"] = "Managed checkout path unavailable"
+    if request.method == "GET" or request.POST.get("confirmed") != "yes":
+        return render(
+            request,
+            "bitbucket_search/repository_remove.html",
+            context,
+            status=400 if request.method == "POST" else 200,
+        )
+    try:
+        remove_repository(repository_id, confirmed=True)
+    except RepositoryLifecycleError as error:
+        if _is_async_request(request):
+            return _repository_lifecycle_failure(request, error)
+        recovery = RepositoryRemovalRecovery.objects.filter(repository_id=repository_id).first()
+        context["removal_incomplete"] = recovery is not None
+        context["removal_database_deleted"] = bool(recovery and recovery.database_deleted)
+        context["removal_error"] = error.summary
+        return render(request, "bitbucket_search/repository_remove.html", context, status=409)
+    detail = (
+        f"Removed {context['repository_name']} and its downloaded files and indexed data "
+        "from this computer. The remote repository was not changed."
+    )
+    if _is_async_request(request):
+        return JsonResponse({"state": "removed", "repositoryId": repository_id, "detail": detail})
+    messages.success(request, detail)
+    return redirect(reverse("bitbucket_search:index"))
+
+
+@require_POST
+@csrf_protect
+@never_cache
 @_logged_web_action("repository_refresh")
 def refresh_repository(request: HttpRequest, repository_id: int) -> HttpResponse:
     """Queue a safe background fetch/fast-forward for one managed repository."""
@@ -1846,7 +1954,10 @@ def refresh_repository(request: HttpRequest, repository_id: int) -> HttpResponse
     if local_error:
         return local_error
     get_object_or_404(BitbucketRepository, pk=repository_id)
-    queued = queue_repository_refresh(repository_id)
+    try:
+        queued = queue_repository_refresh(repository_id)
+    except RepositorySyncError as error:
+        return _repository_lifecycle_failure(request, error)
     # The short reservation deduplicates this explicit wakeup against the
     # automatic schedule tick that runs as soon as the redirected page opens.
     if queued.job.status == RepositorySyncJobStatus.QUEUED:
@@ -1921,7 +2032,7 @@ def refresh_all_repositories(request: HttpRequest) -> HttpResponse:
             "repository_refresh_all_skipped",
             reason="no_enabled_repositories",
         )
-        detail = "No enabled repositories are available to refresh."
+        detail = "No repositories are included in refresh."
         if _is_async_request(request):
             return JsonResponse(
                 {
@@ -2104,7 +2215,7 @@ def repository_status(request: HttpRequest) -> JsonResponse:
     local_error = _require_local_action(request)
     if local_error:
         return local_error
-    repositories = repository_status_snapshot()
+    repositories = _with_repository_work_status(repository_status_snapshot())
     extraction_status = extraction_status_snapshot()
     automation = _automation_payload(repositories)
     return JsonResponse(

@@ -346,21 +346,32 @@ delay and cap are configured with `BITBUCKET_DAILY_REFRESH_RETRY_SECONDS` (defau
 `BITBUCKET_DAILY_REFRESH_LOCAL_HOUR` to choose the local hour (`11` by default); OWL interprets it in
 `OWL_TIME_ZONE` (`Europe/Dublin` by default).
 
-### Exclude or delete a Bitbucket PDF locally
+### Exclude or remove a Bitbucket repository
 
-Each PDF row has **Exclude from refresh** and **Delete PDF** actions. Exclusion keeps a
-private snapshot and its existing searchable text unchanged while other repository files
-continue refreshing. Use **Include in refresh** to queue a repository refresh and replace
-that snapshot with the current repository version. Excluded snapshots live beneath
-`var/media/bitbucket/excluded/<repository-id>/` by default; Open, Open folder, and Copy path
-use that retained copy.
+Open the repository's **Actions** menu in the left sidebar. **Exclude from refresh** skips
+that repository during **Refresh all**, daily refreshes, and automatic retries. Its existing
+PDFs, searchable text, and People information remain available. A refresh already queued or
+running finishes normally; the exclusion applies to future work. You can still use its own
+**Refresh** button, or choose **Include in refresh** to restore bulk and scheduled refreshes.
 
-Deletion requires confirmation. It removes the local working file, retained snapshot (if any),
-PDF database record, extraction jobs, and unshared indexed text. A minimal repository/path
-exclusion rule remains so later pulls do not recreate the deleted PDF. No remote commits or
-files are changed. This is not a secure erase of Git's historical object cache, database
-backups, or text still shared by another PDF. Exclusion and deletion wait until repository
-synchronization and PDF extraction are idle; local modifications are never overwritten.
+**Remove repository** asks for confirmation before deleting its managed local checkout,
+retained PDF copies, repository records, commit history, document records, jobs, and indexed
+text that no other PDF uses. The remote repository is never changed. Removal is blocked while
+that repository has queued or running sync or extraction work. If local cleanup fails, OWL
+keeps a recovery record and offers **Retry removal** instead of claiming that deletion finished.
+This is ordinary local deletion, not a secure erase of backups, application logs, or disk history.
+
+Run migrations and restart OWL/workers after upgrading. Existing per-PDF exclusions migrate
+to their parent repository. Their frozen copies stay readable until a successful explicit
+refresh (or a refresh after re-including the repository) replaces them with the current Git
+version. Previously deleted PDFs remain deleted. New per-file refresh exclusions are no longer
+available.
+
+**Delete PDF** remains available on individual PDFs. After confirmation it removes the local
+working file, retained snapshot (if any), PDF record, extraction jobs, and unshared indexed
+text. A minimal repository/path deletion rule prevents later pulls from recreating that PDF.
+It does not remove historical Git objects; removing the repository also removes its checkout
+and Git object cache. Individual PDF deletion requires idle workers and preserves local edits.
 
 ### Bitbucket backend logs
 

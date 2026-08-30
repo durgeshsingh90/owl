@@ -283,6 +283,46 @@ def test_javascript_password_ternary_is_not_mistaken_for_a_json_assignment():
     assert scanner.content_problems(source, path=PurePosixPath("controls.js")) == []
 
 
+@pytest.mark.parametrize("suffix", [".js", ".mjs", ".cjs"])
+@pytest.mark.parametrize("expression", ["logsUrl", "current.url", "$runtimeUrl", "_url"])
+@pytest.mark.parametrize("terminator", ["", ";"])
+def test_javascript_dynamic_endpoint_assignment_is_not_a_hostname(
+    suffix: str, expression: str, terminator: str
+):
+    source = f"logState.url = {expression}{terminator}"
+
+    assert scanner.content_problems(source, path=PurePosixPath(f"status{suffix}")) == []
+
+
+@pytest.mark.parametrize(
+    "value", ["https://wiki.intranet.company", "https://10.12.0.5/api", "buildhost"]
+)
+@pytest.mark.parametrize("terminator", ["", ";"])
+def test_javascript_literal_private_endpoint_remains_rejected(value: str, terminator: str):
+    source = f"logState.url = {json.dumps(value)}{terminator}"
+
+    assert scanner.content_problems(source, path=PurePosixPath("status.js")) == [
+        (1, "literal internal/private endpoint assigned to LOGSTATE_URL")
+    ]
+
+
+def test_javascript_literal_credential_with_statement_terminator_is_rejected():
+    source = 'config.token = "live-private-credential-4f91c8d2a730";'
+
+    assert scanner.content_problems(source, path=PurePosixPath("status.js")) == [
+        (1, "non-placeholder value assigned to CONFIG_TOKEN")
+    ]
+
+
+@pytest.mark.parametrize(
+    "path", [None, PurePosixPath("settings.env"), PurePosixPath("config.yaml")]
+)
+def test_unquoted_config_endpoint_still_means_a_literal_hostname(path):
+    assert scanner.content_problems("URL=buildhost", path=path) == [
+        (1, "literal internal/private endpoint assigned to URL")
+    ]
+
+
 def test_javascript_object_literal_with_hard_coded_secret_remains_rejected():
     source = 'const config = {"token":"live-private-credential-4f91c8d2a730"};'
 

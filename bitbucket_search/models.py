@@ -177,6 +177,7 @@ class BitbucketRepository(models.Model):
     local_path = models.CharField(max_length=1024, blank=True)
     default_branch = models.CharField(max_length=255, blank=True)
     enabled = models.BooleanField(default=True, db_index=True)
+    exclude_from_refresh = models.BooleanField(default=False, db_index=True)
     sync_state = models.CharField(
         max_length=32,
         choices=RepositorySyncState,
@@ -225,6 +226,22 @@ class BitbucketRepository(models.Model):
             RepositorySyncState.FETCHING,
             RepositorySyncState.UPDATING,
         }
+
+
+class RepositoryRemovalRecovery(models.Model):
+    """Durable ownership of quarantined local data until removal fully completes."""
+
+    repository_id = models.PositiveBigIntegerField(unique=True)
+    display_name = models.CharField(max_length=200)
+    quarantine_manifest = models.JSONField(default=list)
+    database_deleted = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["display_name", "id"]
+
+    def __str__(self) -> str:
+        return f"{self.display_name} — removal pending"
 
 
 class GitCommit(models.Model):

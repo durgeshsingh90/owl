@@ -5,7 +5,6 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-from django.db import OperationalError
 from django.test import Client
 from django.urls import reverse
 
@@ -15,10 +14,8 @@ from bitbucket_search.models import (
     PDFDocument,
     PDFLocalPolicy,
     PDFLocalPolicyState,
-    RepositorySyncJob,
     RepositorySyncState,
 )
-from bitbucket_search.services.document_actions import DocumentActionError
 from bitbucket_search.services.git_sync import managed_repository_path
 from bitbucket_search.services.pdf_local_policy import exclude_registered_pdf, frozen_pdf_path
 
@@ -97,7 +94,7 @@ def test_delete_confirmation_get_is_read_only_and_explains_scope(
     assert "Remove its database record and any indexed text not shared with another PDF" in html
     assert 'class="app-main"' in html
     assert 'class="app-layout"' not in html
-    assert "minimal exclusion rule" in html
+    assert "minimal deletion record" in html
     assert "remote repository and Git history are not changed" in html
     assert 'name="csrfmiddlewaretoken"' in html
     assert 'name="confirmed" value="yes"' in html
@@ -193,16 +190,10 @@ def test_policy_routes_reject_missing_documents(action, local_client):
     assert response.status_code == 404
 
 
-def test_exclude_retains_a_saved_copy_and_renders_include_action(local_client, policy_pdf):
+def test_legacy_saved_copy_stays_accessible_without_file_refresh_controls(local_client, policy_pdf):
     document, original_path = policy_pdf
     original_bytes = original_path.read_bytes()
-    response = local_client.post(
-        reverse("bitbucket_search:document_exclude", args=(document.pk,)),
-        {"return_to": "/pdfs/?chip=architecture"},
-    )
-
-    assert response.status_code == 302
-    assert response.url == f"/pdfs/?chip=architecture#pdf-document-{document.pk}"
+    exclude_registered_pdf(document.pk)
     document.refresh_from_db()
     assert document.local_policy.state == PDFLocalPolicyState.EXCLUDED
     saved_path = frozen_pdf_path(document)
@@ -213,56 +204,36 @@ def test_exclude_retains_a_saved_copy_and_renders_include_action(local_client, p
 
     page = local_client.get(reverse("bitbucket_search:index"))
     html = page.content.decode()
-    assert '<span class="bb-pdf-policy-badge">Excluded</span>' in html
-    assert 'data-tooltip="Include in refresh"' in html
+    assert '<span class="bb-pdf-policy-badge">Excluded</span>' not in html
+    assert 'data-tooltip="Include in refresh"' not in html
+    assert 'data-tooltip="Exclude from refresh"' not in html
     assert 'data-tooltip="Delete PDF"' in html
     assert f'data-pdf-local-path="{saved_path}"' in html
 
 
-def test_include_queues_worker_and_renders_awaiting_refresh(local_client, policy_pdf, monkeypatch):
+@pytest.mark.parametrize("action", ["document_exclude", "document_resume"])
+def test_old_refresh_controls_return_gone_without_mutating_saved_copy(
+    action, local_client, policy_pdf, monkeypatch
+):
     document, _path = policy_pdf
     exclude_registered_pdf(document.pk)
     wake = Mock(return_value=(1, False))
     monkeypatch.setattr(views, "_wake_queued_repository_workers", wake)
 
     response = local_client.post(
-        reverse("bitbucket_search:document_resume", args=(document.pk,)),
+        reverse(f"bitbucket_search:{action}", args=(document.pk,)),
         HTTP_X_REQUESTED_WITH="XMLHttpRequest",
     )
 
-    assert response.status_code == 202
-    assert response.json()["state"] == PDFLocalPolicyState.RESUMING
+    assert response.status_code == 410
+    assert response.json()["code"] == "repository_refresh_controls"
+    assert "whole repository" in response.json()["detail"]
     document.refresh_from_db()
-    assert document.local_policy.state == PDFLocalPolicyState.RESUMING
-    job = RepositorySyncJob.objects.get(repository=document.repository)
-    wake.assert_called_once_with(job_ids=(job.pk,))
+    assert document.local_policy.state == PDFLocalPolicyState.EXCLUDED
+    wake.assert_not_called()
     html = local_client.get(reverse("bitbucket_search:index")).content.decode()
-    assert '<span class="bb-pdf-policy-badge">Awaiting refresh</span>' in html
-    assert 'data-tooltip="Awaiting refresh"' in html
-    assert 'aria-label="Include in refresh: Architecture.pdf" disabled aria-busy="true"' in html
-
-
-@pytest.mark.parametrize("failure", ["database", "worker"])
-def test_include_queue_failure_is_reported_as_pending(
-    failure, local_client, policy_pdf, monkeypatch
-):
-    document, _path = policy_pdf
-    exclude_registered_pdf(document.pk)
-    if failure == "database":
-        monkeypatch.setattr(views, "queue_repository_refresh", Mock(side_effect=OperationalError))
-    else:
-        monkeypatch.setattr(views, "_wake_queued_repository_workers", Mock(return_value=(0, True)))
-
-    response = local_client.post(
-        reverse("bitbucket_search:document_resume", args=(document.pk,)),
-        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
-    )
-
-    assert response.status_code == 503
-    assert response.json()["state"] == "worker_unavailable"
-    assert "awaiting refresh" in response.json()["detail"]
-    document.refresh_from_db()
-    assert document.local_policy.state == PDFLocalPolicyState.RESUMING
+    assert 'data-tooltip="Awaiting refresh"' not in html
+    assert f"/documents/{document.pk}/include/" not in html
 
 
 def test_delete_removes_local_copies_and_document_but_keeps_tombstone(local_client, policy_pdf):
@@ -289,23 +260,14 @@ def test_delete_removes_local_copies_and_document_but_keeps_tombstone(local_clie
     assert (managed_repository_path(document.repository) / ".git").is_dir()
 
 
-def test_exclude_failure_is_honest_and_does_not_redirect_off_site(
-    local_client, policy_pdf, monkeypatch
-):
+def test_retired_file_exclusion_does_not_redirect_off_site(local_client, policy_pdf):
     document, _path = policy_pdf
-    monkeypatch.setattr(
-        views,
-        "exclude_registered_pdf",
-        Mock(
-            side_effect=DocumentActionError("repository_refresh_in_progress", "Wait for refresh.")
-        ),
-    )
     response = local_client.post(
         reverse("bitbucket_search:document_exclude", args=(document.pk,)),
         HTTP_X_REQUESTED_WITH="XMLHttpRequest",
     )
-    assert response.status_code == 409
-    assert response.json()["detail"] == "Wait for refresh."
+    assert response.status_code == 410
+    assert "whole repository" in response.json()["detail"]
 
     confirmation = local_client.get(
         reverse("bitbucket_search:document_delete", args=(document.pk,)),
@@ -328,7 +290,7 @@ def test_timeline_eager_loads_local_policy_without_per_pdf_queries(
     assert sum(len(group.rows) for group in groups) == 2
 
 
-def test_loaded_timeline_rows_keep_policy_forms_and_no_javascript_delete_confirmation(
+def test_loaded_timeline_rows_keep_delete_but_remove_file_refresh_controls(
     local_client, policy_pdf
 ):
     document, _path = policy_pdf
@@ -340,7 +302,7 @@ def test_loaded_timeline_rows_keep_policy_forms_and_no_javascript_delete_confirm
 
     assert response.status_code == 200
     html = response.json()["html"]
-    assert f'method="post" action="/pdfs/documents/{document.pk}/exclude/"' in html
+    assert f'method="post" action="/pdfs/documents/{document.pk}/exclude/"' not in html
     assert f'method="get" action="/pdfs/documents/{document.pk}/delete/"' in html
-    assert html.count('name="csrfmiddlewaretoken"') == 3
-    assert html.count('name="return_page" value="1"') == 4
+    assert html.count('name="csrfmiddlewaretoken"') == 2
+    assert html.count('name="return_page" value="1"') == 3

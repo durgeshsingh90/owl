@@ -43,6 +43,16 @@ urlpatterns = [
     path("repositories/", views.repositories, name="repositories"),
     path("repositories/add/", views.add_repository, name="repository_add"),
     path(
+        "repositories/<int:repository_id>/exclude/",
+        views.exclude_repository,
+        name="repository_exclude",
+    ),
+    path(
+        "repositories/<int:repository_id>/remove/",
+        views.remove_repository_view,
+        name="repository_remove",
+    ),
+    path(
         "repositories/refresh/",
         views.refresh_all_repositories,
         name="repositories_refresh_all",
