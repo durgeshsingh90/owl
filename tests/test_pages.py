@@ -350,7 +350,7 @@ def test_bitbucket_search_uses_the_repository_workspace_shell(loopback_client):
     assert 'aria-label="System status"' in html
     assert "System status and help" not in html
     assert 'placeholder="Search repositories…" disabled' in html
-    assert 'placeholder="Type a phrase, then press Enter…"' in html
+    assert 'placeholder="Search extracted text, filenames or repo paths…"' in html
     assert "data-pdf-search-input disabled" not in html
     assert "No repositories connected" in html
     assert "Showing <strong>0 PDFs</strong>" in html
@@ -479,7 +479,7 @@ def test_pdf_search_page_exposes_active_indexing_and_phrase_controls(loopback_cl
 
     assert response.status_code == 200
     assert "data-pdf-search-form" in html
-    assert 'placeholder="Type a phrase, then press Enter…"' in html
+    assert 'placeholder="Search extracted text, filenames or repo paths…"' in html
     assert "<legend>Phrase matching</legend>" in html
     assert "<legend>Search in</legend>" in html
     assert 'value="content" checked' in html

@@ -1,7 +1,7 @@
 {% if repositories %}
 <ul class="bb-repository-list" data-repository-list>
     {% for repository in repositories %}
-    <li class="bb-repository-card" data-repository-id="{{ repository.pk }}" data-repository-state="{{ repository.sync_state }}" data-repository-search-value="{{ repository.display_name }} {{ repository.canonical_remote_key }} {{ repository.default_branch }}">
+    <li class="bb-repository-card" data-repository-id="{{ repository.pk }}" data-repository-state="{{ repository.sync_state }}" data-repository-active-work="{{ repository.has_active_work|yesno:'true,false' }}" data-repository-active-sync="{{ repository.has_active_sync|yesno:'true,false' }}" data-repository-refresh-excluded="{{ repository.exclude_from_refresh|yesno:'true,false' }}" data-repository-removal-pending="{{ repository.has_removal_pending|yesno:'true,false' }}" data-repository-search-value="{{ repository.display_name }} {{ repository.canonical_remote_key }} {{ repository.default_branch }}">
         <div class="bb-repository-card__main">
             <span class="bb-repository-state bb-repository-state--{{ repository.sync_state }}" data-repository-state-icon role="img" aria-label="{{ repository.display_name }}: {{ repository.get_sync_state_display }}">
                 <svg class="bb-state-icon bb-state-icon--ready" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="m8.5 12 2.2 2.2 4.8-5"/></svg>
@@ -26,28 +26,10 @@
                     hidden
                 ></small>
             </span>
-            <form method="post" action="{% url 'bitbucket_search:repository_refresh' repository.pk %}" data-repository-refresh-form>
-                {% csrf_token %}
-                <button type="submit" title="Refresh repository" aria-label="Refresh {{ repository.display_name }} in the background"{% if repository.has_active_sync or repository.has_removal_pending %} disabled{% endif %}>
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19 8a8 8 0 1 0 1 6M19 4v4h-4"/></svg>
-                </button>
-            </form>
+            <label class="bb-repository-select" title="Select {{ repository.display_name }}">
+                <input type="checkbox" name="repository_ids" value="{{ repository.pk }}" form="bb-repository-selection-form" data-repository-select aria-label="Select {{ repository.display_name }}">
+            </label>
         </div>
-        <details class="bb-repository-menu" data-repository-menu>
-            <summary title="Repository actions" aria-label="Actions for {{ repository.display_name }}">
-                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
-            </summary>
-            <div class="bb-repository-menu__body">
-                <form method="post" action="{% url 'bitbucket_search:repository_exclude' repository.pk %}" data-repository-exclusion-form>
-                    {% csrf_token %}
-                    <input type="hidden" name="excluded" value="{% if repository.exclude_from_refresh %}no{% else %}yes{% endif %}">
-                    <button type="submit" data-repository-exclusion-button{% if repository.has_removal_pending %} disabled{% endif %}>{% if repository.exclude_from_refresh %}Include in refresh{% else %}Exclude from refresh{% endif %}</button>
-                </form>
-                <form method="get" action="{% url 'bitbucket_search:repository_remove' repository.pk %}" data-repository-remove-form>
-                    <button type="submit" class="bb-repository-menu__remove" data-repository-remove-button{% if repository.has_active_work or repository.has_removal_pending %} disabled title="{% if repository.has_removal_pending %}Retry the incomplete removal below{% else %}Wait for Git and PDF workers to finish{% endif %}"{% endif %}>Remove repository</button>
-                </form>
-            </div>
-        </details>
     </li>
     {% endfor %}
 </ul>

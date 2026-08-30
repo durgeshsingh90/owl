@@ -10,7 +10,11 @@ import pytest
 
 @pytest.mark.parametrize(
     "script",
-    ["bitbucket_repository_polling.test.js", "theme_bootstrap.test.js"],
+    [
+        "bitbucket_repository_polling.test.js",
+        "theme_bootstrap.test.js",
+        "bitbucket_repository_selection.test.js",
+    ],
 )
 def test_background_completion_polling_and_early_theme_bootstrap(script):
     node = shutil.which("node")

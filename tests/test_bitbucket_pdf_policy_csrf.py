@@ -5,7 +5,6 @@ from django.test import Client
 from django.urls import reverse
 
 from bitbucket_search.models import BitbucketRepository, PDFDocument
-from bitbucket_search.services.document_actions import DocumentActionError
 
 pytestmark = pytest.mark.django_db
 
@@ -34,8 +33,8 @@ def test_local_pdf_controls_preserve_csrf_for_opaque_browser_origins(
     document = PDFDocument.objects.create(
         repository=repository, filename="Sample.pdf", relative_path="Sample.pdf"
     )
-    action = Mock(side_effect=DocumentActionError("repository_busy", "Synthetic busy repository"))
-    monkeypatch.setattr("bitbucket_search.views.delete_registered_pdf", action)
+    action = Mock(side_effect=AssertionError("A read-only PDF endpoint must not call deletion"))
+    monkeypatch.setattr("bitbucket_search.services.pdf_local_policy.delete_registered_pdf", action)
     client = Client(enforce_csrf_checks=True, HTTP_HOST="localhost", REMOTE_ADDR=remote_addr)
     page = client.get(reverse("bitbucket_search:index"))
     data = {"confirmed": "yes"}
@@ -49,10 +48,7 @@ def test_local_pdf_controls_preserve_csrf_for_opaque_browser_origins(
         HTTP_X_REQUESTED_WITH="XMLHttpRequest",
     )
 
-    if allowed and route == "document_delete":
-        assert response.status_code != 403
-        action.assert_called_once()
-    elif allowed:
+    if allowed:
         assert response.status_code == 410
         action.assert_not_called()
     else:

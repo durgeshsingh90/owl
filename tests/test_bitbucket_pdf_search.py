@@ -158,6 +158,89 @@ def test_metadata_fts_tracks_document_and_repository_renames():
     assert [hit.document.pk for hit in renamed.results] == [document.pk]
 
 
+def test_default_search_unions_extracted_text_filename_and_repo_path_without_reading_files(
+    monkeypatch,
+):
+    repository = _repository("Search sources")
+    content_match = _indexed_document(
+        repository,
+        filename="Overview.pdf",
+        path="docs/Overview.pdf",
+        pages=("The aurora deployment uses redundant gateways.",),
+        digest="a",
+    )
+    filename_match = _indexed_document(
+        repository,
+        filename="Aurora Guide.pdf",
+        path="docs/Aurora Guide.pdf",
+        pages=("Unrelated body",),
+        digest="b",
+    )
+    path_match = _indexed_document(
+        repository,
+        filename="Design.pdf",
+        path="services/aurora/Design.pdf",
+        pages=("Unrelated description",),
+        digest="c",
+    )
+    _indexed_document(
+        repository,
+        filename="Other.pdf",
+        path="docs/Other.pdf",
+        pages=("No matching term",),
+        digest="d",
+    )
+
+    def no_pdf_read(*args, **kwargs):
+        pytest.fail("Search must use published database text, not read local PDF files")
+
+    monkeypatch.setattr(Path, "open", no_pdf_read)
+    result = search_documents(PDFSearchQuery(chips=("AURORA",)))
+    hits = {hit.document.pk: hit for hit in result.results}
+
+    assert result.total == 3
+    assert set(hits) == {content_match.pk, filename_match.pk, path_match.pk}
+    assert hits[content_match.pk].explanations[0].scopes == ("PDF content",)
+    assert hits[filename_match.pk].explanations[0].scopes == ("Filename", "Path")
+    assert hits[path_match.pk].explanations[0].scopes == ("Path",)
+
+
+def test_default_all_chips_can_match_different_sources_on_the_same_pdf():
+    repository = _repository("Cross-field search")
+    expected = _indexed_document(
+        repository,
+        filename="Gateway Guide.pdf",
+        path="platform/payments/Gateway Guide.pdf",
+        pages=("Fencing prevents split brain.", "Quorum controls failover."),
+        digest="a",
+    )
+    _indexed_document(
+        repository,
+        filename="Other.pdf",
+        path="platform/payments/Other.pdf",
+        pages=("Fencing prevents split brain.",),
+        digest="b",
+    )
+    result = search_documents(
+        PDFSearchQuery(chips=("gateway", "platform/payments", "split brain", "quorum"))
+    )
+    assert [hit.document.pk for hit in result.results] == [expected.pk]
+
+
+@pytest.mark.parametrize("state", [PDFIndexState.PENDING, PDFIndexState.FAILED])
+def test_filename_and_repo_path_remain_searchable_before_text_is_available(state):
+    repository = _repository("Unindexed inventory")
+    document = PDFDocument.objects.create(
+        repository=repository,
+        filename="Gateway Guide.pdf",
+        relative_path="platform/payments/Gateway Guide.pdf",
+        index_state=state,
+    )
+    result = search_documents(PDFSearchQuery(chips=("gateway", "platform/payments")))
+    assert [hit.document.pk for hit in result.results] == [document.pk]
+    assert result.results[0].best_page_number is None
+
+
 def test_exact_phrase_all_any_and_scopes_are_document_level():
     repository = _repository("Cloud Platform")
     first = _indexed_document(

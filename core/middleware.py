@@ -24,6 +24,7 @@ _LOCAL_BITBUCKET_MUTATIONS = frozenset(
         "bitbucket_search:repository_add",
         "bitbucket_search:repository_exclude",
         "bitbucket_search:repository_remove",
+        "bitbucket_search:repositories_selected",
         "bitbucket_search:repository_refresh",
         "bitbucket_search:repository_schedule_tick",
         "bitbucket_search:repositories_refresh_all",

@@ -19,16 +19,28 @@
     );
     let repositorySubmissionPending = false;
     let repositoryStatusPending = false;
+    let extractionWorkActive = workspace.dataset.extractionActive === "true";
     const repositoryNoun = (count) => (count === 1 ? "repository" : "repositories");
+    const setRefreshIconBusy = (icon, busy) => {
+        if (!icon) return;
+        // SVG elements do not reflect the HTML hidden property into attributes.
+        // Toggle the attribute explicitly so idle/live transitions affect CSS.
+        icon.hidden = busy;
+        if (busy) icon.setAttribute("hidden", "");
+        else icon.removeAttribute("hidden");
+    };
 
-    const updateRefreshAllButtons = (repositories) => {
+    const updateRefreshAllButtons = (repositories, extraction) => {
+        if (extraction) {
+            extractionWorkActive = Boolean(extraction.active || extraction.queuedJobs > 0 || extraction.runningJobs > 0);
+        }
         if (repositories) {
             repositoryCount = repositories.length;
             enabledRepositoryCount = repositories.filter(
                 (repository) => repository.enabled && !repository.refreshExcluded && !repository.hasRemovalPending,
             ).length;
             activeRepositoryCount = repositories.filter(
-                (repository) => repository.active,
+                (repository) => repository.active || repository.hasActiveWork,
             ).length;
         }
         refreshAllForms.forEach((form) => {
@@ -45,12 +57,11 @@
             const busy =
                 repositorySubmissionPending ||
                 repositoryStatusPending ||
-                activeRepositoryCount > 0;
+                activeRepositoryCount > 0 || extractionWorkActive;
             let label = "Refresh all repositories";
             let detail = `Queue ${enabledRepositoryCount} included ${repositoryNoun(enabledRepositoryCount)} in the background`;
-            let ariaLabel = `Queue a background refresh for all ${enabledRepositoryCount} included ${repositoryNoun(enabledRepositoryCount)}`;
-            let title =
-                "Queue Git refresh jobs for every included repository; excluded repositories are skipped";
+            let ariaLabel = "Refresh all repositories";
+            let title = "Refresh all repositories";
 
             if (repositorySubmissionPending) {
                 label = "Repository sync in progress";
@@ -62,6 +73,13 @@
                 detail = "Waiting for the latest repository activity";
                 ariaLabel = "Refresh all repositories unavailable: checking repository status";
                 title = "Wait for the latest repository status before refreshing all";
+            } else if (activeRepositoryCount > 0 || extractionWorkActive) {
+                label = "Repository work in progress";
+                detail = activeRepositoryCount > 0
+                    ? `${activeRepositoryCount} ${repositoryNoun(activeRepositoryCount)} working in the background`
+                    : "PDF indexing in progress";
+                ariaLabel = `Refresh all repositories unavailable: ${detail}`;
+                title = "Repository work in progress — wait for Git and PDF workers to finish";
             } else if (unavailable) {
                 label = "Refresh all unavailable";
                 if (!repositoryCount) {
@@ -77,11 +95,6 @@
                     ariaLabel = "Refresh all repositories unavailable";
                     title = "The workspace refresh endpoint is unavailable";
                 }
-            } else if (busy) {
-                label = "Repository sync in progress";
-                detail = `${activeRepositoryCount} ${repositoryNoun(activeRepositoryCount)} adding or refreshing in the background`;
-                ariaLabel = `Refresh all repositories unavailable: ${activeRepositoryCount} ${repositoryNoun(activeRepositoryCount)} adding or refreshing`;
-                title = "Wait for all repositories to finish adding or refreshing before refreshing all";
             }
 
             form.dataset.repositoryCount = String(repositoryCount);
@@ -90,12 +103,12 @@
             const classPrefix = form.hasAttribute("data-repositories-refresh-all-mobile")
                 ? "bb-mobile-refresh-all"
                 : "bb-refresh-all";
-            form.classList.toggle(`${classPrefix}--disabled`, unavailable);
-            form.classList.toggle(`${classPrefix}--active`, busy && !unavailable);
+            form.classList.toggle(`${classPrefix}--disabled`, unavailable && !busy);
+            form.classList.toggle(`${classPrefix}--active`, busy);
             button.disabled = unavailable || busy;
             button.setAttribute("aria-label", ariaLabel);
             button.title = title;
-            if (busy && !unavailable) {
+            if (busy) {
                 button.setAttribute("aria-busy", "true");
             } else {
                 button.removeAttribute("aria-busy");
@@ -103,15 +116,130 @@
             const labelElement = form.querySelector("[data-refresh-all-label]");
             const detailElement = form.querySelector("[data-refresh-all-detail]");
             const spinner = form.querySelector("[data-refresh-all-spinner]");
+            const icon = form.querySelector("[data-refresh-all-icon]");
             if (labelElement) labelElement.textContent = label;
             if (detailElement) detailElement.textContent = detail;
-            if (spinner) spinner.hidden = !busy || unavailable;
+            if (spinner) spinner.hidden = !busy;
+            setRefreshIconBusy(icon, busy);
         });
     };
 
     updateRefreshAllButtons();
+
+    const selectionForm = workspace.querySelector("[data-repository-selection-form]");
+    let deletionUnlocked = false;
+    const repositoryCheckboxes = () =>
+        Array.from(workspace.querySelectorAll("[data-repository-select]"));
+    const selectedRepositoryCards = () => {
+        const selected = new Map();
+        repositoryCheckboxes().forEach((checkbox) => {
+            if (!checkbox.checked || checkbox.disabled) return;
+            const card = checkbox.closest("[data-repository-id]");
+            if (card) selected.set(checkbox.value, card);
+        });
+        return Array.from(selected.values());
+    };
+    const updateSelectedRepositoryActions = () => {
+        if (!selectionForm) return;
+        const selected = selectedRepositoryCards();
+        const count = selected.length;
+        const busy = selected.some((card) =>
+            card.dataset.repositoryActiveWork === "true" ||
+            card.dataset.repositoryActiveSync === "true",
+        );
+        const removalPending = selected.some((card) =>
+            card.dataset.repositoryRemovalPending === "true",
+        );
+        const unavailable = !count || repositorySubmissionPending || repositoryStatusPending;
+        const allExcluded = count > 0 && selected.every((card) =>
+            card.dataset.repositoryRefreshExcluded === "true",
+        );
+        if (unavailable || busy || removalPending) deletionUnlocked = false;
+        const disable = (selector, disabled, title) => {
+            workspace.querySelectorAll(selector).forEach((button) => {
+                button.disabled = disabled;
+                button.title = title;
+                button.setAttribute("aria-label", title);
+            });
+        };
+        const suffix = `${count} selected ${repositoryNoun(count)}`;
+        disable("[data-selected-refresh]", unavailable || busy || removalPending,
+            busy ? "Selected repository work in progress" : `Refresh ${suffix}`);
+        disable("[data-selected-exclude]", unavailable || removalPending,
+            `${allExcluded ? "Include" : "Exclude"} ${suffix} ${allExcluded ? "in" : "from"} refresh`);
+        disable("[data-selected-unlock]", unavailable || busy || removalPending,
+            `${deletionUnlocked ? "Lock" : "Unlock"} deletion for ${suffix}`);
+        disable("[data-selected-remove]", unavailable || busy || removalPending || !deletionUnlocked,
+            deletionUnlocked ? `Delete ${suffix} from this computer` : "Unlock repository deletion first");
+        workspace.querySelectorAll("[data-selected-unlock]").forEach((button) => {
+            button.setAttribute("aria-pressed", String(deletionUnlocked));
+        });
+        workspace.querySelectorAll("[data-selected-exclude]").forEach((button) => {
+            button.setAttribute("aria-pressed", String(allExcluded));
+        });
+        workspace.querySelectorAll("[data-selected-excluded-value]").forEach((input) => {
+            input.value = allExcluded ? "no" : "yes";
+        });
+        workspace.querySelectorAll("[data-repository-selection-count]").forEach((element) => {
+            element.textContent = `${count} selected`;
+        });
+        workspace.querySelectorAll("[data-selected-refresh-spinner]").forEach((element) => {
+            element.hidden = !busy;
+        });
+        workspace.querySelectorAll("[data-selected-refresh-icon]").forEach((element) => {
+            setRefreshIconBusy(element, busy);
+        });
+        workspace.querySelectorAll("[data-selected-refresh]").forEach((button) => {
+            button.setAttribute("aria-busy", String(busy));
+        });
+        repositoryCheckboxes().forEach((checkbox) => {
+            checkbox.closest("[data-repository-id]")?.classList.toggle("is-selected", checkbox.checked);
+        });
+    };
+
+    workspace.addEventListener("change", (event) => {
+        if (!event.target.matches("[data-repository-select]")) return;
+        const selected = event.target;
+        repositoryCheckboxes().forEach((checkbox) => {
+            if (checkbox.value === selected.value) checkbox.checked = selected.checked;
+        });
+        deletionUnlocked = false;
+        updateSelectedRepositoryActions();
+    });
+    workspace.addEventListener("click", (event) => {
+        const unlock = event.target.closest?.("[data-selected-unlock]");
+        if (!unlock || unlock.disabled) return;
+        deletionUnlocked = !deletionUnlocked;
+        updateSelectedRepositoryActions();
+    });
+    updateSelectedRepositoryActions();
+
     workspace.addEventListener("submit", (event) => {
         const form = event.target;
+        if (form === selectionForm) {
+            const submitter = event.submitter;
+            const operation = submitter?.value;
+            if (event.defaultPrevented) return;
+            if (!submitter || submitter.disabled || repositorySubmissionPending ||
+                repositoryStatusPending || !selectedRepositoryCards().length ||
+                !["refresh", "exclude", "remove"].includes(operation) ||
+                (operation === "remove" && !deletionUnlocked)) {
+                event.preventDefault();
+                return;
+            }
+            // Disabling the submitter removes its name/value from a native POST.
+            // Preserve the validated intent before locking both toolbar copies.
+            const intent = document.createElement("input");
+            intent.type = "hidden";
+            intent.name = "operation";
+            intent.value = operation;
+            form.appendChild(intent);
+            repositorySubmissionPending = true;
+            deletionUnlocked = false;
+            updateSelectedRepositoryActions();
+            updateRefreshAllButtons();
+            return;
+        }
         if (
             event.defaultPrevented ||
             !form.matches(
@@ -132,6 +260,8 @@
         }
         // Keep the native POST and CSRF handling, but lock both buttons before navigation.
         repositorySubmissionPending = true;
+        deletionUnlocked = false;
+        updateSelectedRepositoryActions();
         updateRefreshAllButtons();
     });
 
@@ -144,6 +274,10 @@
                 card.querySelector("[data-repository-worker-timer]"), repository.workerTiming,
             );
             card.dataset.repositoryState = repository.state;
+            card.dataset.repositoryActiveWork = String(Boolean(repository.hasActiveWork || repository.active));
+            card.dataset.repositoryActiveSync = String(Boolean(repository.active));
+            card.dataset.repositoryRefreshExcluded = String(Boolean(repository.refreshExcluded));
+            card.dataset.repositoryRemovalPending = String(Boolean(repository.hasRemovalPending));
             const stateIcon = card.querySelector("[data-repository-state-icon]");
             if (stateIcon) {
                 stateIcon.className = `bb-repository-state bb-repository-state--${repository.state}`;
@@ -156,11 +290,6 @@
             if (documents) {
                 documents.textContent = `${repository.pdfCount} PDF · ${repository.vsdxCount} VSDX`;
             }
-            const refreshButton = card.querySelector("[data-repository-refresh-form] button");
-            const busy = Boolean(repository.hasActiveWork || repository.active);
-            if (refreshButton) {
-                refreshButton.disabled = repository.active || repository.hasRemovalPending;
-            }
             const exclusionBadge = card.querySelector("[data-repository-exclusion]");
             if (exclusionBadge) {
                 exclusionBadge.hidden = !repository.refreshExcluded;
@@ -169,40 +298,8 @@
             if (retryRemoval) {
                 retryRemoval.hidden = !repository.hasRemovalPending;
             }
-            const exclusionForm = card.querySelector("[data-repository-exclusion-form]");
-            if (exclusionForm) {
-                exclusionForm.querySelector('input[name="excluded"]').value =
-                    repository.refreshExcluded ? "no" : "yes";
-                const exclusionButton = exclusionForm.querySelector("button");
-                exclusionButton.textContent = repository.refreshExcluded
-                    ? "Include in refresh" : "Exclude from refresh";
-                exclusionButton.disabled = repository.hasRemovalPending;
-            }
-            const removeButton = card.querySelector("[data-repository-remove-button]");
-            if (removeButton) {
-                removeButton.disabled = busy || repository.hasRemovalPending;
-                removeButton.title = repository.hasRemovalPending
-                    ? "Retry the incomplete removal below"
-                    : busy ? "Wait for Git and PDF workers to finish" : "Remove repository";
-            }
         });
     };
-
-    workspace.addEventListener("click", (event) => {
-        const menu = event.target.closest?.("[data-repository-menu]");
-        workspace.querySelectorAll("[data-repository-menu][open]").forEach((other) => {
-            if (other !== menu) other.open = false;
-        });
-    });
-
-    workspace.addEventListener("keydown", (event) => {
-        if (event.key !== "Escape") return;
-        const menu = event.target.closest?.("[data-repository-menu][open]");
-        if (menu) {
-            menu.open = false;
-            menu.querySelector("summary").focus();
-        }
-    });
 
     const updateTotals = (totals, repositories, automation) => {
         document.querySelectorAll("[data-total-repositories]").forEach((element) => {
@@ -299,7 +396,16 @@
             const payload = await response.json();
             payload.repositories.forEach(updateRepository);
             repositoryStatusPending = false;
-            updateRefreshAllButtons(payload.repositories);
+            updateRefreshAllButtons(payload.repositories, payload.extraction);
+            const knownRepositoryIds = new Set(payload.repositories.map((repository) => String(repository.id)));
+            repositoryCheckboxes().forEach((checkbox) => {
+                if (!knownRepositoryIds.has(checkbox.value)) {
+                    checkbox.checked = false;
+                    checkbox.disabled = true;
+                    deletionUnlocked = false;
+                }
+            });
+            updateSelectedRepositoryActions();
             updateTotals(payload.totals, payload.repositories, payload.automation);
             const repositoryCompleted = payload.repositories.some(
                 (repository) =>
@@ -365,6 +471,10 @@
         } catch (_error) {
             // A failed status request cannot confirm that all workers are idle.
             settledPolls = 0;
+            repositoryStatusPending = true;
+            deletionUnlocked = false;
+            updateRefreshAllButtons();
+            updateSelectedRepositoryActions();
             document.querySelectorAll("[data-repository-id] [data-repository-worker-timer]").forEach((timer) => {
                 window.OWLRepositoryTimers?.stale(timer);
             });
@@ -383,6 +493,9 @@
         // A restored page may predate a submitted job. Recheck before unlocking it.
         repositorySubmissionPending = false;
         repositoryStatusPending = true;
+        deletionUnlocked = false;
+        selectionForm?.querySelectorAll('input[name="operation"]').forEach((input) => input.remove());
+        updateSelectedRepositoryActions();
         updateRefreshAllButtons();
         window.clearTimeout(pollTimer);
         void poll();
@@ -396,7 +509,13 @@
                     card.dataset.repositorySearchValue || card.textContent
                 ).toLocaleLowerCase();
                 card.hidden = Boolean(query) && !searchable.includes(query);
+                if (card.hidden) {
+                    const checkbox = card.querySelector("[data-repository-select]");
+                    if (checkbox) checkbox.checked = false;
+                }
             });
+            deletionUnlocked = false;
+            updateSelectedRepositoryActions();
         });
     });
 

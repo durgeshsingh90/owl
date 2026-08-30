@@ -183,9 +183,16 @@ def test_remove_controls_and_status_include_git_and_pdf_worker_activity(
             else PDFExtractionJobStatus.RUNNING,
         )
     html = local_client.get(reverse("bitbucket_search:index")).content.decode()
-    assert re.search(r"data-repository-remove-button\s+disabled", html)
-    exclusion = re.search(r"<button[^>]+data-repository-exclusion-button[^>]*>", html)
-    assert exclusion and "disabled" not in exclusion.group()
+    assert 'data-repository-active-work="true"' in html
+    assert re.search(r"<button[^>]+data-selected-remove[^>]+disabled", html)
+    assert re.search(r"<button[^>]+data-selected-exclude[^>]+disabled", html)
+    assert "data-repository-remove-button" not in html
+    refresh_form = re.search(r'<form\s+class="bb-refresh-all[^\"]*".*?</form>', html, re.DOTALL)
+    assert refresh_form
+    assert 'disabled aria-busy="true"' in refresh_form.group()
+    assert "data-refresh-all-icon hidden" in refresh_form.group()
+    assert "data-refresh-all-spinner hidden" not in refresh_form.group()
+    assert "data-repository-worker-timer" in html
     confirmation = local_client.get(
         reverse("bitbucket_search:repository_remove", args=(repository.pk,))
     )
@@ -194,7 +201,9 @@ def test_remove_controls_and_status_include_git_and_pdf_worker_activity(
     assert status.json()["repositories"][0]["hasActiveWork"]
 
 
-def test_excluded_sidebar_repository_has_menu_badge_and_manual_refresh(local_client, repository):
+def test_excluded_sidebar_repository_has_selection_badge_and_shared_refresh(
+    local_client, repository
+):
     repository.exclude_from_refresh = True
     repository.save()
     document = PDFDocument.objects.create(
@@ -202,17 +211,20 @@ def test_excluded_sidebar_repository_has_menu_badge_and_manual_refresh(local_cli
     )
     page = local_client.get(reverse("bitbucket_search:index"))
     html = page.content.decode()
-    assert f'aria-label="Actions for {repository.display_name}"' in html
-    assert "Include in refresh" in html
+    assert f'aria-label="Select {repository.display_name}"' in html
+    assert 'data-repository-refresh-excluded="true"' in html
+    assert 'form="bb-repository-selection-form"' in html
+    assert "data-repository-menu" not in html
     assert "Refresh excluded" in html
     assert page.context["enabled_repository_count"] == 0
-    assert html.count("no repositories are included") == 2
-    refresh_button = re.search(r'<button[^>]+title="Refresh repository"[^>]*>', html)
-    assert refresh_button and "disabled" not in refresh_button.group()
+    assert html.count("no repositories are included") == 1
+    refresh_button = re.search(r"<button[^>]+data-selected-refresh[^>]*>", html)
+    assert refresh_button and "disabled" in refresh_button.group()
     assert "Guide.pdf" in html
     assert f"/documents/{document.pk}/exclude/" not in html
     assert f"/documents/{document.pk}/include/" not in html
-    assert f"/documents/{document.pk}/delete/" in html
+    assert f"/documents/{document.pk}/delete/" not in html
+    assert f"/repositories/{repository.pk}/remove/" in html
 
 
 def test_incomplete_removal_is_visible_and_can_retry_without_live_repository(
@@ -252,9 +264,10 @@ def test_interrupted_removal_locks_regular_actions_and_describes_pending_databas
     page = local_client.get(reverse("bitbucket_search:index"))
     html = page.content.decode()
     assert page.context["enabled_repository_count"] == 0
-    assert re.search(r"data-repository-remove-button\s+disabled", html)
-    assert re.search(r"data-repository-exclusion-button\s+disabled", html)
-    refresh_button = re.search(r'<button[^>]+title="Refresh repository"[^>]*>', html)
+    assert 'data-repository-removal-pending="true"' in html
+    assert re.search(r"<button[^>]+data-selected-remove[^>]+disabled", html)
+    assert re.search(r"<button[^>]+data-selected-exclude[^>]+disabled", html)
+    refresh_button = re.search(r"<button[^>]+data-selected-refresh[^>]*>", html)
     assert refresh_button and "disabled" in refresh_button.group()
     confirmation = local_client.get(
         reverse("bitbucket_search:repository_remove", args=(repository.pk,))

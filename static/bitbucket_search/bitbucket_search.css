@@ -199,11 +199,83 @@
 .bb-section-heading {
     position: relative;
     display: flex;
-    min-height: 38px;
+    min-height: 24px;
     align-items: center;
     justify-content: space-between;
     gap: 0.6rem;
     padding-inline: 0.45rem 0.1rem;
+}
+
+.bb-repository-selection-count {
+    color: var(--bb-muted-low);
+    font-size: 0.61rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.bb-repository-tools {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4rem;
+}
+
+.bb-repository-selection-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.bb-repository-tool {
+    display: grid;
+    width: 32px;
+    height: 32px;
+    flex: 0 0 auto;
+    place-items: center;
+    padding: 0;
+    border: 1px solid var(--bb-line-strong);
+    border-radius: 6px;
+    color: var(--bb-muted);
+    background: rgb(255 255 255 / 2%);
+    cursor: pointer;
+}
+
+.bb-repository-tool svg {
+    width: 17px;
+    height: 17px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.7;
+}
+
+.bb-repository-tool:hover:not(:disabled),
+.bb-repository-tool[aria-pressed="true"] {
+    border-color: var(--bb-amber);
+    color: var(--bb-amber);
+    background: var(--bb-amber-soft);
+}
+
+.bb-repository-tool--danger:not(:disabled) {
+    border-color: var(--bb-danger);
+    color: var(--bb-danger);
+    background: var(--bb-danger-soft);
+}
+
+.bb-repository-tool[aria-pressed="true"] .bb-repository-lock-shackle {
+    transform: translateX(4px);
+}
+
+.bb-repository-tool:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
+.bb-repository-tool[aria-busy="true"] {
+    color: var(--bb-amber);
+    cursor: wait;
+    opacity: 1;
 }
 
 .bb-section-heading h2 {
@@ -259,7 +331,7 @@
 .bb-add-repository-panel__body {
     position: absolute;
     top: calc(100% + 0.55rem);
-    right: -0.1rem;
+    left: 0;
     z-index: 35;
     width: min(278px, calc(100vw - 2rem));
     padding: 0.7rem;
@@ -496,7 +568,27 @@
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
     gap: 0.5rem;
-    padding-right: 2.1rem;
+}
+
+.bb-repository-card:has([data-repository-select]:checked) {
+    border-color: var(--bb-amber);
+    background: var(--bb-amber-soft);
+}
+
+.bb-repository-select {
+    display: grid;
+    width: 32px;
+    min-height: 32px;
+    place-items: center;
+    cursor: pointer;
+}
+
+.bb-repository-select input {
+    width: 17px;
+    height: 17px;
+    margin: 0;
+    accent-color: var(--bb-amber);
+    cursor: pointer;
 }
 
 .bb-repository-state {
@@ -642,72 +734,6 @@
     display: none;
 }
 
-.bb-repository-menu > summary {
-    position: absolute;
-    top: 0.62rem;
-    right: 0.62rem;
-    display: grid;
-    width: 28px;
-    height: 32px;
-    place-items: center;
-    border: 1px solid var(--bb-line);
-    border-radius: 6px;
-    color: var(--bb-muted);
-    cursor: pointer;
-    list-style: none;
-}
-
-.bb-repository-menu > summary::-webkit-details-marker {
-    display: none;
-}
-
-.bb-repository-menu > summary svg {
-    width: 19px;
-    height: 19px;
-    fill: currentColor;
-    stroke: currentColor;
-}
-
-.bb-repository-menu__body {
-    display: grid;
-    gap: 0.25rem;
-    padding-top: 0.4rem;
-    border-top: 1px solid var(--bb-line);
-}
-
-.bb-repository-menu__body form {
-    margin: 0;
-}
-
-.bb-repository-menu__body button {
-    width: 100%;
-    min-height: 32px;
-    padding: 0.3rem 0.5rem;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    color: var(--bb-text-soft);
-    background: transparent;
-    font: inherit;
-    font-size: 0.72rem;
-    text-align: left;
-    cursor: pointer;
-}
-
-.bb-repository-menu__body button:hover:not(:disabled),
-.bb-repository-menu > summary:hover {
-    background: var(--bb-amber-soft);
-    border-color: var(--bb-amber);
-}
-
-.bb-repository-menu__body .bb-repository-menu__remove {
-    color: var(--bb-danger);
-}
-
-.bb-repository-menu__body button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
 .bb-repository-recoveries {
     margin-top: 0.5rem;
 }
@@ -723,39 +749,6 @@
 .bb-repository-recovery a {
     color: var(--bb-danger);
     font-size: 0.7rem;
-}
-
-.bb-repository-card__main form {
-    margin: 0;
-}
-
-.bb-repository-card__main button {
-    display: grid;
-    width: 32px;
-    height: 32px;
-    place-items: center;
-    padding: 0;
-    border: 1px solid var(--bb-line);
-    border-radius: 6px;
-    color: var(--bb-muted);
-    background: transparent;
-    cursor: pointer;
-}
-
-.bb-repository-card__main button:hover:not(:disabled) {
-    color: var(--bb-amber);
-    border-color: var(--bb-amber);
-    background: var(--bb-amber-soft);
-}
-
-.bb-repository-card__main button svg {
-    width: 16px;
-    height: 16px;
-    fill: none;
-    stroke: currentColor;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    stroke-width: 1.6;
 }
 
 .bb-rail-footer {
@@ -935,7 +928,7 @@
 
 .bb-refresh-all {
     display: flex;
-    min-width: 205px;
+    min-width: 0;
     align-items: center;
     gap: 0.42rem;
     margin: 0;
@@ -970,23 +963,32 @@
 }
 
 .bb-refresh-all__spinner {
-    position: absolute;
-    right: 1px;
-    bottom: 1px;
-    width: 10px;
-    height: 10px;
+    display: block;
+    width: 19px;
+    height: 19px;
     border: 2px solid var(--bb-line-strong);
     border-top-color: var(--bb-amber);
     border-radius: 50%;
-    background: var(--bb-stage-bg);
+    background: transparent;
     animation: bb-refresh-all-spin 0.8s linear infinite;
 }
 
+.bb-refresh-all__spinner[hidden],
+.bb-refresh-all__button svg[hidden],
+.bb-repository-tool svg[hidden] {
+    display: none;
+}
+
 .bb-refresh-all__meta {
-    display: grid;
-    width: 160px;
-    min-width: 0;
-    gap: 0.08rem;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
 }
 
 .bb-refresh-all__meta strong,
@@ -1018,25 +1020,9 @@
     color: var(--bb-muted);
 }
 
-.bb-mobile-refresh-all {
-    display: none;
-}
-
 @keyframes bb-refresh-all-spin {
     to {
         transform: rotate(360deg);
-    }
-}
-
-/* The People rail stays visible on wide desktop layouts. Keep the refresh
-   action as an accessible icon there so the app title is not squeezed out. */
-@media (min-width: 1281px) and (max-width: 1700px) {
-    .bb-refresh-all {
-        min-width: 0;
-    }
-
-    .bb-refresh-all__meta {
-        display: none;
     }
 }
 
@@ -1792,36 +1778,6 @@
     padding: 0.5rem;
     border: 1px dashed var(--bb-line);
     border-radius: 6px;
-}
-
-.bb-mobile-add-repository {
-    width: fit-content;
-    margin-top: 0.7rem;
-    border: 1px solid var(--bb-line);
-    border-radius: 6px;
-}
-
-.bb-mobile-add-repository[open] {
-    width: 100%;
-}
-
-.bb-mobile-add-repository > summary {
-    min-height: 42px;
-    padding: 0.55rem 0.65rem;
-    color: var(--bb-amber);
-    cursor: pointer;
-    font-size: 0.68rem;
-    font-weight: 680;
-    list-style: none;
-}
-
-.bb-mobile-add-repository > summary::-webkit-details-marker {
-    display: none;
-}
-
-.bb-mobile-add-repository .bb-repository-form {
-    padding: 0.65rem;
-    border-top: 1px solid var(--bb-line);
 }
 
 .bb-mobile-repositories__body > .bb-repository-list {
@@ -2622,12 +2578,6 @@
     background: var(--bb-amber-soft);
 }
 
-.bb-document-actions .bb-document-delete:hover:not(:disabled) {
-    border-color: var(--bb-danger);
-    color: var(--bb-danger);
-    background: var(--bb-danger-soft);
-}
-
 .bb-delete-confirmation {
     width: 100%;
     max-width: 720px;
@@ -3085,14 +3035,6 @@
         grid-template-columns: 260px minmax(0, 1fr);
     }
 
-    .bb-refresh-all {
-        min-width: 0;
-    }
-
-    .bb-refresh-all__meta {
-        display: none;
-    }
-
     .bb-brand {
         padding-inline: 1rem;
     }
@@ -3169,100 +3111,30 @@
         min-height: calc(100vh - 81px);
     }
 
-    .bb-refresh-all--desktop {
-        display: none;
-    }
-
-    .bb-mobile-refresh-all {
-        display: block;
-        min-width: 0;
-        margin: 0.7rem 0.9rem 0;
-    }
-
-    .bb-mobile-refresh-all button {
-        display: grid;
-        width: 100%;
-        min-width: 0;
-        min-height: 52px;
-        grid-template-columns: auto minmax(0, 1fr);
-        align-items: center;
-        gap: 0.7rem;
-        padding: 0.55rem 0.7rem;
-        border: 1px solid rgb(240 173 69 / 42%);
-        border-radius: 7px;
-        color: var(--bb-text-soft);
-        background: var(--bb-amber-soft);
-        cursor: pointer;
-        text-align: left;
-    }
-
-    .bb-mobile-refresh-all button:hover:not(:disabled) {
-        border-color: var(--bb-amber);
-        background: rgb(240 173 69 / 18%);
-    }
-
-    .bb-mobile-refresh-all button:disabled {
-        opacity: 1;
-    }
-
-    .bb-mobile-refresh-all--active button:disabled {
-        cursor: wait;
-    }
-
-    .bb-mobile-refresh-all--disabled button:disabled {
-        border-color: var(--bb-line);
-        color: var(--bb-muted);
-        background: var(--bb-surface-soft);
-        cursor: not-allowed;
-    }
-
-    .bb-mobile-refresh-all__icon {
+    .bb-repository-tools--mobile {
         position: relative;
-        display: grid;
-        width: 34px;
-        height: 34px;
-        place-items: center;
-        border: 1px solid var(--bb-line-strong);
-        border-radius: 7px;
-        color: var(--bb-amber);
-        background: var(--bb-stage-bg);
+        justify-content: flex-start;
+        margin-top: 0.7rem;
+        margin-bottom: 0.45rem;
     }
 
-    .bb-mobile-refresh-all--disabled .bb-mobile-refresh-all__icon {
-        color: var(--bb-muted-low);
+    .bb-repository-tools--mobile .bb-add-repository {
+        min-height: 44px;
     }
 
-    .bb-mobile-refresh-all__icon > svg {
-        width: 19px;
-        height: 19px;
-        fill: none;
-        stroke: currentColor;
-        stroke-linecap: round;
-        stroke-linejoin: round;
-        stroke-width: 1.55;
+    .bb-repository-tools--mobile .bb-add-repository-panel {
+        position: static;
     }
 
-    .bb-mobile-refresh-all button > span:last-child {
-        min-width: 0;
+    .bb-repository-tools--mobile .bb-add-repository-panel__body {
+        top: calc(100% + 0.5rem);
+        width: min(320px, calc(100vw - 3.5rem));
     }
 
-    .bb-mobile-refresh-all strong,
-    .bb-mobile-refresh-all small {
-        display: block;
-        min-width: 0;
-        overflow-wrap: anywhere;
-    }
-
-    .bb-mobile-refresh-all strong {
-        font-size: 0.71rem;
-        font-weight: 700;
-    }
-
-    .bb-mobile-refresh-all small {
-        margin-top: 0.14rem;
-        color: var(--bb-muted);
-        font-size: 0.62rem;
-        line-height: 1.3;
+    .bb-repository-tool,
+    .bb-repository-select {
+        width: 44px;
+        min-height: 44px;
     }
 
     .bb-mobile-repositories {
@@ -3579,6 +3451,7 @@
 
     .bb-topbar {
         min-height: 64px;
+        flex-wrap: wrap;
         padding: 0.55rem 0.75rem;
     }
 
@@ -3601,6 +3474,8 @@
     }
 
     .bb-topbar__actions {
+        width: 100%;
+        justify-content: flex-end;
         gap: 0.15rem;
     }
 
@@ -3610,8 +3485,7 @@
     }
 
     .bb-mobile-repositories,
-    .bb-mobile-people,
-    .bb-mobile-refresh-all {
+    .bb-mobile-people {
         margin-inline: 0.7rem;
     }
 

@@ -164,6 +164,12 @@ Bitbucket Search now provides repository registration and durable background syn
   and one reload shows the final changes after all repository/PDF jobs settle. An open status
   or notification panel defers that reload until it is closed.
 
+The main PDF search checks **saved extracted text, filenames, and repo-relative paths** by
+default (repository names are also included). Filename/path matches are available as soon as
+the PDF is catalogued, even before text extraction finishes. Content matches use the published
+text in OWL's database; searching does not reopen PDF files or contact Git. Add separate chips
+to match terms across different fields or pages, or use **Search in** filters to narrow the scope.
+
 Repository URLs are canonicalized and deduplicated. Credentials embedded in URLs are rejected;
 Git uses the existing SSH agent or external credential manager. Django's `owl/settings.py`
 approves `bitbucket.org`, `github.com`, and `scm.mastercard.int` by default. Leave
@@ -348,18 +354,26 @@ delay and cap are configured with `BITBUCKET_DAILY_REFRESH_RETRY_SECONDS` (defau
 
 ### Exclude or remove a Bitbucket repository
 
-Open the repository's **Actions** menu in the left sidebar. **Exclude from refresh** skips
-that repository during **Refresh all**, daily refreshes, and automatic retries. Its existing
+Select repositories using their sidebar checkboxes, then use the action icons beside **New**.
+**Refresh selected** queues those repositories in the background. **Exclude from refresh** skips
+the selected repositories during **Refresh all**, daily refreshes, and automatic retries. Their existing
 PDFs, searchable text, and People information remain available. A refresh already queued or
-running finishes normally; the exclusion applies to future work. You can still use its own
-**Refresh** button, or choose **Include in refresh** to restore bulk and scheduled refreshes.
+running finishes normally; the exclusion applies to future work. You can still select an excluded
+repository and use **Refresh selected**, or select only excluded repositories and use
+**Include in refresh** to restore bulk and scheduled refreshes.
 
-**Remove repository** asks for confirmation before deleting its managed local checkout,
+Deletion starts locked. Select the repositories, click the **Unlock deletion** icon, then the
+**Delete** icon. Changing the selection or starting background work locks deletion again.
+The confirmation page lists exactly which repositories will be removed before deleting their managed local checkouts,
 retained PDF copies, repository records, commit history, document records, jobs, and indexed
 text that no other PDF uses. The remote repository is never changed. Removal is blocked while
 that repository has queued or running sync or extraction work. If local cleanup fails, OWL
 keeps a recovery record and offers **Retry removal** instead of claiming that deletion finished.
 This is ordinary local deletion, not a secure erase of backups, application logs, or disk history.
+
+The top-bar **Refresh all repositories** control is icon-only, with its name on hover. While Git
+or PDF workers are active, it becomes a loading indicator and cannot queue another global refresh.
+Running repositories continue to show their elapsed worker timers in the sidebar.
 
 Run migrations and restart OWL/workers after upgrading. Existing per-PDF exclusions migrate
 to their parent repository. Their frozen copies stay readable until a successful explicit
@@ -367,11 +381,11 @@ refresh (or a refresh after re-including the repository) replaces them with the 
 version. Previously deleted PDFs remain deleted. New per-file refresh exclusions are no longer
 available.
 
-**Delete PDF** remains available on individual PDFs. After confirmation it removes the local
-working file, retained snapshot (if any), PDF record, extraction jobs, and unshared indexed
-text. A minimal repository/path deletion rule prevents later pulls from recreating that PDF.
-It does not remove historical Git objects; removing the repository also removes its checkout
-and Git object cache. Individual PDF deletion requires idle workers and preserves local edits.
+PDF controls are read-only: open a file, reveal its folder, copy its path, or search its text.
+There is no individual **Delete PDF** action; requests from old deletion forms are rejected
+without changing files or database records. Previously deleted PDFs are not restored by this
+UI change. Repository-level **Remove repository** remains a separate confirmed action that
+removes its entire local checkout and indexed data, without changing the remote repository.
 
 ### Bitbucket backend logs
 

@@ -40,10 +40,11 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
 
     assert response.status_code == 200
     assert '<summary class="bb-add-repository" aria-label="Add a new repository">' in html
-    assert (
-        '<summary aria-label="Add a new repository"><span aria-hidden="true">+</span> New</summary>'
-        in html
-    )
+    assert html.count('aria-label="Add a new repository"') == 2
+    assert html.count("data-selected-refresh disabled") == 2
+    assert html.count("data-selected-unlock disabled") == 2
+    assert html.count("data-selected-remove disabled") == 2
+    assert 'id="bb-repository-selection-form"' in html
     assert 'action="/pdfs/repositories/add/"' in html
     assert "Add &amp; clone in background" in html
     assert "Allowed host:" in html
@@ -57,8 +58,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=repository-lifecycle-v1" in html
-    assert "bitbucket_search/bitbucket_search.js?v=repository-lifecycle-v1" in html
+    assert "bitbucket_search/bitbucket_search.css?v=repository-selection-v1" in html
+    assert "bitbucket_search/bitbucket_search.js?v=repository-selection-v1" in html
 
 
 def test_topbar_and_desktop_rail_omit_verbose_sync_status_navigation(loopback_client):
@@ -130,7 +131,9 @@ def test_bitbucket_topbar_omits_settings_icon_and_preserves_other_controls(
     assert "data-repositories-refresh-all" in topbar_html
     assert "data-refresh-all-button" in topbar_html
     assert f'action="{reverse("bitbucket_search:repositories_refresh_all")}"' in topbar_html
-    assert "Queue a background refresh for all 1 included repository" in topbar_html
+    assert 'aria-label="Refresh all repositories"' in topbar_html
+    assert "data-refresh-all-icon" in topbar_html
+    assert "data-refresh-all-spinner hidden" in topbar_html
 
 
 def test_desktop_topbar_spans_results_and_people_starts_below_it(loopback_client):
@@ -153,10 +156,9 @@ def test_desktop_topbar_spans_results_and_people_starts_below_it(loopback_client
     assert "height: calc(100vh - 81px);" in stylesheet
 
 
-def _workspace_refresh_form(html: str, *, mobile: bool = False) -> str:
-    class_name = "bb-mobile-refresh-all" if mobile else "bb-refresh-all"
+def _workspace_refresh_form(html: str) -> str:
     match = re.search(
-        rf'<form\s+class="{class_name}[^\"]*".*?</form>',
+        r'<form\s+class="bb-refresh-all[^\"]*".*?</form>',
         html,
         flags=re.DOTALL,
     )
@@ -178,17 +180,13 @@ def test_refresh_all_controls_are_accessible_and_truthful_when_unavailable(loopb
     empty_response = loopback_client.get(reverse("bitbucket_search:index"))
     empty_html = empty_response.content.decode()
     desktop_empty = _workspace_refresh_form(empty_html)
-    mobile_empty = _workspace_refresh_form(empty_html, mobile=True)
 
     assert empty_response.status_code == 200
-    assert empty_html.count('action="/pdfs/repositories/refresh/"') == 2
+    assert empty_html.count('action="/pdfs/repositories/refresh/"') == 1
     assert "bb-refresh-all--disabled" in desktop_empty
-    assert "bb-mobile-refresh-all--disabled" in mobile_empty
     assert "Refresh all repositories unavailable: no repositories are connected" in desktop_empty
-    assert "Refresh all repositories unavailable: no repositories are connected" in mobile_empty
     assert "disabled" in desktop_empty
-    assert "disabled" in mobile_empty
-    assert empty_html.count("No repositories connected yet") >= 1
+    assert "No repositories connected" in empty_html
 
     disabled_repository = BitbucketRepository.objects.create(
         display_name="archived",
@@ -201,12 +199,8 @@ def test_refresh_all_controls_are_accessible_and_truthful_when_unavailable(loopb
     disabled_html = disabled_response.content.decode()
 
     assert disabled_response.context["enabled_repository_count"] == 0
-    assert disabled_html.count("No repositories included in refresh") == 2
+    assert disabled_html.count("No repositories included in refresh") == 1
     assert "no repositories are included" in _workspace_refresh_form(disabled_html)
-    assert "no repositories are included" in _workspace_refresh_form(
-        disabled_html,
-        mobile=True,
-    )
 
     disabled_repository.sync_state = RepositorySyncState.QUEUED
     disabled_repository.save(update_fields={"sync_state"})
@@ -229,7 +223,6 @@ def test_refresh_all_controls_are_accessible_and_truthful_when_unavailable(loopb
     assert 'data-active-repository-count="1"' in mixed_html
     assert "bb-refresh-all--active" in _workspace_refresh_form(mixed_html)
     assert 'disabled aria-busy="true"' in _workspace_refresh_form(mixed_html)
-    assert 'disabled aria-busy="true"' in _workspace_refresh_form(mixed_html, mobile=True)
 
 
 def test_refresh_all_controls_enable_only_when_all_repositories_are_idle(loopback_client):
@@ -245,9 +238,8 @@ def test_refresh_all_controls_enable_only_when_all_repositories_are_idle(loopbac
     assert idle_response.context["enabled_repository_count"] == 1
     assert idle_response.context["active_repository_count"] == 0
     assert 'data-enabled-repository-count="1"' in idle_html
-    assert "Queue a background refresh for all 1 included repository" in idle_html
+    assert 'aria-label="Refresh all repositories"' in idle_html
     assert "disabled" not in _workspace_refresh_form(idle_html)
-    assert "disabled" not in _workspace_refresh_form(idle_html, mobile=True)
 
     active = BitbucketRepository.objects.create(
         display_name="networking",
@@ -262,17 +254,14 @@ def test_refresh_all_controls_enable_only_when_all_repositories_are_idle(loopbac
     partial_response = loopback_client.get(reverse("bitbucket_search:index"))
     partial_html = partial_response.content.decode()
     partial_desktop = _workspace_refresh_form(partial_html)
-    partial_mobile = _workspace_refresh_form(partial_html, mobile=True)
 
     assert partial_response.context["enabled_repository_count"] == 2
     assert partial_response.context["active_repository_count"] == 1
     assert "bb-refresh-all--active" in partial_desktop
-    assert "bb-mobile-refresh-all--active" in partial_mobile
-    assert partial_html.count("Repository sync in progress") == 2
-    assert "1 repository adding or refreshing" in partial_desktop
+    assert partial_html.count("Repository work in progress") == 1
+    assert "1 repository working in the background" in partial_desktop
     assert "Refresh remaining repositories" not in partial_html
     assert 'disabled aria-busy="true"' in partial_desktop
-    assert 'disabled aria-busy="true"' in partial_mobile
 
     idle.sync_state = RepositorySyncState.QUEUED
     idle.save(update_fields={"sync_state"})
@@ -283,14 +272,11 @@ def test_refresh_all_controls_enable_only_when_all_repositories_are_idle(loopbac
     active_response = loopback_client.get(reverse("bitbucket_search:index"))
     active_html = active_response.content.decode()
     active_desktop = _workspace_refresh_form(active_html)
-    active_mobile = _workspace_refresh_form(active_html, mobile=True)
 
     assert active_response.context["active_repository_count"] == 2
     assert "bb-refresh-all--active" in active_desktop
-    assert "bb-mobile-refresh-all--active" in active_mobile
-    assert active_html.count("Repository sync in progress") == 2
+    assert active_html.count("Repository work in progress") == 1
     assert 'disabled aria-busy="true"' in active_desktop
-    assert 'disabled aria-busy="true"' in active_mobile
 
 
 @pytest.mark.parametrize(
@@ -330,11 +316,12 @@ def test_refresh_all_controls_stay_disabled_through_add_and_refresh_phases(
 
     assert response.context["active_repository_count"] == 1
     assert status.json()["repositories"][0]["active"] is True
-    for mobile in (False, True):
-        form = _workspace_refresh_form(html, mobile=mobile)
-        assert 'disabled aria-busy="true"' in form
-        assert 'data-active-repository-count="1"' in form
-        assert "Repository sync in progress" in form
+    form = _workspace_refresh_form(html)
+    assert 'disabled aria-busy="true"' in form
+    assert 'data-active-repository-count="1"' in form
+    assert "Repository work in progress" in form
+    assert "data-refresh-all-icon hidden" in form
+    assert "data-refresh-all-spinner hidden" not in form
 
 
 @pytest.mark.parametrize(
@@ -374,11 +361,12 @@ def test_refresh_all_controls_reenable_after_jobs_finish(loopback_client, sync_s
 
     assert response.context["active_repository_count"] == 0
     assert status.json()["repositories"][0]["active"] is False
-    for mobile in (False, True):
-        form = _workspace_refresh_form(html, mobile=mobile)
-        assert "disabled" not in form
-        assert 'data-active-repository-count="0"' in form
-        assert "Repository sync in progress" not in form
+    form = _workspace_refresh_form(html)
+    assert "disabled" not in form
+    assert 'data-active-repository-count="0"' in form
+    assert "Repository work in progress" not in form
+    assert "data-refresh-all-icon hidden" not in form
+    assert "data-refresh-all-spinner hidden" in form
 
 
 def test_empty_pdf_timeline_keeps_search_available_and_explains_the_zero_state(
@@ -390,7 +378,7 @@ def test_empty_pdf_timeline_keeps_search_available_and_explains_the_zero_state(
     assert response.status_code == 200
     assert "Showing <strong>0 PDFs</strong>" in html
     assert "No PDFs are in the local inventory yet" in html
-    assert 'placeholder="Type a phrase, then press Enter…"' in html
+    assert 'placeholder="Search extracted text, filenames or repo paths…"' in html
     assert "data-pdf-search-form" in html
     assert "data-pdf-search-input" in html
     assert "bb-search-submit" not in html
@@ -407,10 +395,10 @@ def test_responsive_pdf_rows_override_the_generic_block_row_rule():
     responsive_end = css.index("@media (max-width: 620px)", responsive_start)
     responsive_css = css[responsive_start:responsive_end]
 
-    assert ".bb-mobile-refresh-all {\n    display: none;" in css[:responsive_start]
-    assert "@media (min-width: 1281px) and (max-width: 1700px)" in css[:responsive_start]
-    assert ".bb-refresh-all--desktop {\n        display: none;" in responsive_css
-    assert ".bb-mobile-refresh-all {\n        display: block;" in responsive_css
+    assert "@media (max-width: 1280px)" in css[:responsive_start]
+    assert ".bb-refresh-all--desktop {\n        display: none;" not in responsive_css
+    assert ".bb-repository-selection-toolbar" in css
+    assert ".bb-refresh-all__meta {\n    position: absolute;" in css
     assert ".bb-results-table tr," in responsive_css
     assert ".bb-results-table .bb-document-row {\n        display: grid;" in responsive_css
     assert ".bb-document-row td.bb-document-cell--actions {\n    overflow: visible;" in css
@@ -533,7 +521,7 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_page_navigation(
         in network_row
     )
     assert network_row.count('name="csrfmiddlewaretoken"') == 2
-    assert network_row.count('name="return_page" value="1"') == 3
+    assert network_row.count('name="return_page" value="1"') == 2
     assert 'type="submit" disabled' not in network_row
     assert "bb-index-health" not in network_row
     archived_row_start = html.index(f'data-document-id="{archived_plan.pk}"')
@@ -594,7 +582,7 @@ def test_pdf_timeline_fragment_preserves_boundary_group_key(loopback_client):
     assert payload["nextPageUrl"] == ""
     assert f'data-document-id="{older_document.pk}"' in payload["html"]
     assert 'data-timeline-group-key="repo-date-unavailable"' in payload["html"]
-    assert payload["html"].count('name="return_page" value="2"') == 3
+    assert payload["html"].count('name="return_page" value="2"') == 2
     assert 'data-tooltip="Open file"' in payload["html"]
     assert 'data-tooltip="Open folder"' in payload["html"]
 
@@ -607,7 +595,7 @@ def test_pdf_timeline_fragment_preserves_boundary_group_key(loopback_client):
     assert "Page <strong data-pdf-current-page>2</strong> of 2" in fallback_html
     assert f'href="{previous_page_url}" rel="prev"' in fallback_html
     assert f'id="pdf-document-{older_document.pk}"' in fallback_html
-    assert fallback_html.count('name="return_page" value="2"') == 3
+    assert fallback_html.count('name="return_page" value="2"') == 2
 
 
 @override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
@@ -618,7 +606,10 @@ def test_repository_destination_expands_desktop_and_mobile_add_panels(loopback_c
     assert response.status_code == 200
     assert 'id="bb-add-repository" open' in html
     assert '<details class="bb-mobile-repositories" open>' in html
-    assert 'class="bb-mobile-add-repository" open' in html
+    assert re.search(
+        r'bb-repository-tools--mobile">\s*<details class="bb-add-repository-panel" open>',
+        html,
+    )
 
 
 @override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
@@ -871,8 +862,14 @@ def test_repository_poller_tracks_daily_idle_and_catalog_publication_contract():
     assert "`${repository.name}: ${repository.stateLabel}`" in javascript
     assert "`${repository.pdfCount} PDF · ${repository.vsdxCount} VSDX`" in javascript
     assert (
-        "refreshButton.disabled = repository.active || repository.hasRemovalPending;" in javascript
+        "card.dataset.repositoryActiveWork = String(Boolean(repository.hasActiveWork || repository.active));"
+        in javascript
     )
+    assert (
+        "card.dataset.repositoryRemovalPending = String(Boolean(repository.hasRemovalPending));"
+        in javascript
+    )
+    assert "updateSelectedRepositoryActions" in javascript
     assert "card.dataset.repositorySearchValue || card.textContent" in javascript
     assert "repository.automatic || {}" not in javascript
     assert "data-repository-catalog-status" not in javascript
@@ -887,7 +884,7 @@ def test_repository_poller_tracks_daily_idle_and_catalog_publication_contract():
     assert "Apply people" not in javascript
 
 
-def test_ready_repository_renders_green_tick_counts_and_refresh_action(loopback_client):
+def test_ready_repository_renders_green_tick_counts_and_shared_action_selection(loopback_client):
     repository = BitbucketRepository.objects.create(
         display_name="networking",
         canonical_remote_key="bitbucket.org/workspace/networking",
@@ -912,9 +909,13 @@ def test_ready_repository_renders_green_tick_counts_and_refresh_action(loopback_
         assert 'role="img" aria-label="networking: Ready"' in card
         assert '<strong data-repository-name title="networking">networking</strong>' in card
         assert "<small data-repository-documents>12 PDF · 3 VSDX</small>" in card
-        assert f'action="/pdfs/repositories/{repository.pk}/refresh/"' in card
-        assert 'title="Refresh repository"' in card
-        assert 'aria-label="Refresh networking in the background"' in card
+        assert 'name="repository_ids"' in card
+        assert f'value="{repository.pk}" form="bb-repository-selection-form"' in card
+        assert 'aria-label="Select networking"' in card
+        assert "data-repository-select" in card
+        assert "data-repository-refresh-form" not in card
+        assert "data-repository-menu" not in card
+        assert "data-repository-worker-timer" in card
         assert "Repository is ready." not in card
         assert "Daily refresh due" not in card
         assert "data-repository-state-label" not in card
@@ -962,7 +963,9 @@ def test_failed_daily_refresh_uses_compact_failure_card_and_keeps_status_detail(
         assert 'role="img" aria-label="retrying: Failed"' in card
         assert '<strong data-repository-name title="retrying">retrying</strong>' in card
         assert "<small data-repository-documents>5 PDF · 0 VSDX</small>" in card
-        assert f'action="/pdfs/repositories/{repository.pk}/refresh/"' in card
+        assert 'name="repository_ids"' in card
+        assert 'aria-label="Select retrying"' in card
+        assert "data-repository-refresh-form" not in card
         assert "The remote was temporarily unavailable." not in card
         assert "Retry scheduled" not in card
         assert "Automatic retry 1 of 3" not in card

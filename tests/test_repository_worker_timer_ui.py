@@ -58,7 +58,8 @@ def test_repository_timer_carries_worker_clock_data_but_waits_for_javascript(kin
     assert re.search(r">\s*</small>$", timer)
     assert "<svg" not in timer
     assert html.index("data-repository-documents") < html.index("data-repository-worker-timer")
-    assert html.index("data-repository-worker-timer") < html.index("data-repository-refresh-form")
+    assert html.index("data-repository-worker-timer") < html.index("data-repository-select")
+    assert "data-repository-refresh-form" not in html
     assert "12 PDF · 3 VSDX" in html
 
 

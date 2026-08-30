@@ -5,7 +5,7 @@
 {% block theme_default %}dark{% endblock %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=repository-lifecycle-v1">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=repository-selection-v1">
 {% endblock %}
 
 {% block app_header %}{% endblock %}
@@ -14,7 +14,7 @@
 
 {% block main_wrapper %}
 {% url 'bitbucket_search:repositories_refresh_all' as repositories_refresh_all_url %}
-{% with refresh_all_enabled_count=enabled_repository_count|default:0 refresh_all_active_count=active_repository_count|default:0 %}
+{% with refresh_all_enabled_count=enabled_repository_count|default:0 refresh_all_active_count=active_work_repository_count|default:0 %}
 <div
     class="bitbucket-workspace"
     data-bitbucket-workspace
@@ -24,6 +24,10 @@
     data-catalog-publication-signature="{{ catalog_publication_signature }}"
     data-daily-refresh-enabled="{{ automation_payload.enabled|yesno:'true,false' }}"
 >
+    <form id="bb-repository-selection-form" method="post" action="{% url 'bitbucket_search:repositories_selected' %}" data-repository-selection-form hidden>
+        {% csrf_token %}
+        <input type="hidden" name="excluded" value="yes" data-selected-excluded-value>
+    </form>
     <aside class="bb-repository-rail" aria-labelledby="bb-repositories-heading">
         <a class="bb-brand" href="{% url 'core:dashboard' %}" aria-label="OWL Home">
             <span class="bb-brand__mark" aria-hidden="true">
@@ -38,6 +42,9 @@
         <section class="bb-repositories" aria-labelledby="bb-repositories-heading">
             <div class="bb-section-heading">
                 <h2 id="bb-repositories-heading">Repositories</h2>
+                <span class="bb-repository-selection-count" data-repository-selection-count aria-live="polite">0 selected</span>
+            </div>
+            <div class="bb-repository-tools">
                 <details class="bb-add-repository-panel" id="bb-add-repository"{% if open_repository_form %} open{% endif %}>
                     <summary class="bb-add-repository" aria-label="Add a new repository">
                         <span aria-hidden="true">+</span>
@@ -47,6 +54,7 @@
                         {% include "bitbucket_search/_repository_form.html" with form_id="bb-repository-url-desktop" %}
                     </div>
                 </details>
+                {% include "bitbucket_search/_repository_selection_toolbar.html" %}
             </div>
 
             <label class="bb-repository-search">
@@ -106,7 +114,7 @@
 
             <div class="bb-topbar__actions">
                 <form
-                    class="bb-refresh-all bb-refresh-all--desktop{% if not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %} bb-refresh-all--disabled{% elif refresh_all_active_count %} bb-refresh-all--active{% endif %}"
+                    class="bb-refresh-all bb-refresh-all--desktop{% if refresh_all_active_count %} bb-refresh-all--active{% elif not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %} bb-refresh-all--disabled{% endif %}"
                     method="post"
                     action="{{ repositories_refresh_all_url }}"
                     data-repositories-refresh-all
@@ -118,7 +126,11 @@
                     <button
                         class="bb-icon-button bb-refresh-all__button"
                         type="submit"
-                        {% if not repository_count %}
+                        {% if refresh_all_active_count %}
+                        aria-label="{{ refresh_all_active_count }} repositor{{ refresh_all_active_count|pluralize:'y,ies' }} working in the background"
+                        title="Repositories are working; wait for Git and PDF workers to finish"
+                        disabled aria-busy="true"
+                        {% elif not repository_count %}
                         aria-label="Refresh all repositories unavailable: no repositories are connected"
                         title="Add a repository before queuing a workspace refresh"
                         disabled
@@ -130,32 +142,28 @@
                         aria-label="Refresh all repositories unavailable"
                         title="The workspace refresh endpoint is unavailable"
                         disabled
-                        {% elif refresh_all_active_count %}
-                        aria-label="Refresh all repositories unavailable: {{ refresh_all_active_count }} repositor{{ refresh_all_active_count|pluralize:'y,ies' }} adding or refreshing"
-                        title="Wait for all repositories to finish adding or refreshing before refreshing all"
-                        disabled aria-busy="true"
                         {% else %}
-                        aria-label="Queue a background refresh for all {{ refresh_all_enabled_count }} included repositor{{ refresh_all_enabled_count|pluralize:'y,ies' }}"
-                        title="Queue Git refresh jobs for every included repository; excluded repositories are skipped"
+                        aria-label="Refresh all repositories"
+                        title="Refresh all repositories"
                         {% endif %}
                         data-refresh-all-button
                     >
-                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19 8a7.5 7.5 0 1 0 1 7"/><path d="M19 3v5h-5"/></svg>
-                        <span class="bb-refresh-all__spinner" aria-hidden="true" data-refresh-all-spinner{% if not refresh_all_active_count or not refresh_all_enabled_count %} hidden{% endif %}></span>
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-icon{% if refresh_all_active_count %} hidden{% endif %}><path d="M19 8a7.5 7.5 0 1 0 1 7"/><path d="M19 3v5h-5"/></svg>
+                        <span class="bb-refresh-all__spinner" aria-hidden="true" data-refresh-all-spinner{% if not refresh_all_active_count %} hidden{% endif %}></span>
                     </button>
                     <span class="bb-refresh-all__meta" role="status" aria-live="polite" aria-atomic="true">
                         <strong data-refresh-all-label>
-                            {% if not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %}Refresh all unavailable{% elif refresh_all_active_count %}Repository sync in progress{% else %}Refresh all repositories{% endif %}
+                            {% if refresh_all_active_count %}Repository work in progress{% elif not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %}Refresh all unavailable{% else %}Refresh all repositories{% endif %}
                         </strong>
                         <small data-refresh-all-detail>
-                            {% if not repository_count %}
+                            {% if refresh_all_active_count %}
+                            {{ refresh_all_active_count }} repositor{{ refresh_all_active_count|pluralize:'y,ies' }} working in the background
+                            {% elif not repository_count %}
                             Add a repository to enable workspace refresh
                             {% elif not refresh_all_enabled_count %}
                             No repositories included in refresh
                             {% elif not repositories_refresh_all_url %}
                             Workspace refresh endpoint unavailable
-                            {% elif refresh_all_active_count %}
-                            {{ refresh_all_active_count }} repositor{{ refresh_all_active_count|pluralize:'y,ies' }} adding or refreshing in the background
                             {% else %}
                             Queue {{ refresh_all_enabled_count }} included repositor{{ refresh_all_enabled_count|pluralize:'y,ies' }} in the background
                             {% endif %}
@@ -187,64 +195,6 @@
 
     <section class="bb-stage" aria-label="Bitbucket Search workspace">
 
-        <form
-            class="bb-mobile-refresh-all{% if not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %} bb-mobile-refresh-all--disabled{% elif refresh_all_active_count %} bb-mobile-refresh-all--active{% endif %}"
-            method="post"
-            action="{{ repositories_refresh_all_url }}"
-            data-repositories-refresh-all
-            data-repositories-refresh-all-mobile
-            data-repository-count="{{ repository_count|default:0 }}"
-            data-enabled-repository-count="{{ refresh_all_enabled_count }}"
-            data-active-repository-count="{{ refresh_all_active_count }}"
-        >
-            {% csrf_token %}
-            <button
-                type="submit"
-                {% if not repository_count %}
-                aria-label="Refresh all repositories unavailable: no repositories are connected"
-                title="Add a repository before queuing a workspace refresh"
-                disabled
-                {% elif not refresh_all_enabled_count %}
-                aria-label="Refresh all repositories unavailable: no repositories are included"
-                title="Include at least one repository in refresh before refreshing all"
-                disabled
-                {% elif not repositories_refresh_all_url %}
-                aria-label="Refresh all repositories unavailable"
-                title="The workspace refresh endpoint is unavailable"
-                disabled
-                {% elif refresh_all_active_count %}
-                aria-label="Refresh all repositories unavailable: {{ refresh_all_active_count }} repositor{{ refresh_all_active_count|pluralize:'y,ies' }} adding or refreshing"
-                title="Wait for all repositories to finish adding or refreshing before refreshing all"
-                disabled aria-busy="true"
-                {% else %}
-                aria-label="Queue a background refresh for all {{ refresh_all_enabled_count }} included repositor{{ refresh_all_enabled_count|pluralize:'y,ies' }}"
-                title="Queue Git refresh jobs for every included repository; excluded repositories are skipped"
-                {% endif %}
-                data-refresh-all-button
-            >
-                <span class="bb-mobile-refresh-all__icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" focusable="false"><path d="M19 8a7.5 7.5 0 1 0 1 7"/><path d="M19 3v5h-5"/></svg>
-                    <span class="bb-refresh-all__spinner" data-refresh-all-spinner{% if not refresh_all_active_count or not refresh_all_enabled_count %} hidden{% endif %}></span>
-                </span>
-                <span>
-                    <strong data-refresh-all-label>{% if not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %}Refresh all unavailable{% elif refresh_all_active_count %}Repository sync in progress{% else %}Refresh all repositories{% endif %}</strong>
-                    <small data-refresh-all-detail>
-                        {% if not repository_count %}
-                        No repositories connected yet
-                        {% elif not refresh_all_enabled_count %}
-                        No repositories included in refresh
-                        {% elif not repositories_refresh_all_url %}
-                        Workspace refresh endpoint unavailable
-                        {% elif refresh_all_active_count %}
-                        {{ refresh_all_active_count }} repositor{{ refresh_all_active_count|pluralize:'y,ies' }} adding or refreshing in the background
-                        {% else %}
-                        Queue {{ refresh_all_enabled_count }} included repositor{{ refresh_all_enabled_count|pluralize:'y,ies' }} for background workers
-                        {% endif %}
-                    </small>
-                </span>
-            </button>
-        </form>
-
         <details class="bb-mobile-repositories"{% if active_section == "repositories" %} open{% endif %}>
             <summary>
                 <span>
@@ -257,10 +207,16 @@
                 </span>
             </summary>
             <div class="bb-mobile-repositories__body">
-                <details class="bb-mobile-add-repository"{% if open_repository_form or not repositories %} open{% endif %}>
-                    <summary aria-label="Add a new repository"><span aria-hidden="true">+</span> New</summary>
-                    {% include "bitbucket_search/_repository_form.html" with form_id="bb-repository-url-mobile" %}
-                </details>
+                <div class="bb-repository-tools bb-repository-tools--mobile">
+                    <details class="bb-add-repository-panel"{% if open_repository_form or not repositories %} open{% endif %}>
+                        <summary class="bb-add-repository" aria-label="Add a new repository"><span aria-hidden="true">+</span> New</summary>
+                        <div class="bb-add-repository-panel__body">
+                            {% include "bitbucket_search/_repository_form.html" with form_id="bb-repository-url-mobile" %}
+                        </div>
+                    </details>
+                    {% include "bitbucket_search/_repository_selection_toolbar.html" %}
+                </div>
+                <span class="bb-repository-selection-count" data-repository-selection-count aria-live="polite">0 selected</span>
                 {% include "bitbucket_search/_repository_list.html" %}
                 {% if not repositories %}<p>No repositories are connected yet.</p>{% endif %}
                 <nav aria-label="Bitbucket Search mobile functions">
@@ -314,7 +270,7 @@
                             id="bb-pdf-search-input"
                             name="q"
                             value="{{ search_input_value }}"
-                            placeholder="Type a phrase, then press Enter…"
+                            placeholder="Search extracted text, filenames or repo paths…"
                             maxlength="4096"
                             aria-describedby="bb-search-note"
                             autocomplete="off"
@@ -374,11 +330,11 @@
                 {% elif search_active and search_query.has_query and not search_index_available %}
                 <p class="bb-search-note bb-search-note--error" id="bb-search-note">The local full-text index is unavailable. Your repository inventory is safe; retry after PDF indexing is repaired.</p>
                 {% elif search_active and search_query.has_query %}
-                <p class="bb-search-note" id="bb-search-note">Each chip is an exact phrase. Results explain which metadata fields or PDF pages matched.</p>
+                <p class="bb-search-note" id="bb-search-note">Each chip is an exact phrase. Search uses saved extracted text, filenames and repo paths, subject to your Search in filters.</p>
                 {% elif search_active %}
                 <p class="bb-search-note" id="bb-search-note">Browsing PDFs with the selected repository, People, index-health, or sort controls. Add phrase chips to search within this result set.</p>
                 {% else %}
-                <p class="bb-search-note" id="bb-search-note">Press Enter to turn text into a removable exact-phrase chip. Search remains available while repositories download and PDFs index.</p>
+                <p class="bb-search-note" id="bb-search-note">Search extracted PDF text, filenames and paths within the repo. Press Enter to add an exact-phrase chip.</p>
                 {% endif %}
             </form>
 
@@ -602,5 +558,5 @@
 {% block global_status %}{% endblock %}
 
 {% block scripts %}
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-lifecycle-v1" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-selection-v1" defer></script>
 {% endblock %}

@@ -57,10 +57,7 @@ from bitbucket_search.services.pdf_indexing import (
     ExtractionStatusSnapshot,
     extraction_status_snapshot,
 )
-from bitbucket_search.services.pdf_local_policy import (
-    delete_registered_pdf,
-    frozen_pdf_path,
-)
+from bitbucket_search.services.pdf_local_policy import frozen_pdf_path
 from bitbucket_search.services.pdf_search import (
     PDFSearchHit,
     PDFSearchPage,
@@ -143,6 +140,7 @@ class PeopleGroupSummary:
 
 
 MAX_PEOPLE_GROUP_FILTERS = 50
+MAX_SELECTED_REPOSITORIES = 100
 logger = get_logger("web")
 
 
@@ -1155,6 +1153,7 @@ def _index_context(
             for item in repositories
         ),
         "active_repository_count": sum(item.has_active_sync for item in repositories),
+        "active_work_repository_count": sum(item.has_active_work for item in repositories),
         "active_enabled_repository_count": sum(
             item.enabled and item.has_active_sync for item in repositories
         ),
@@ -1721,45 +1720,18 @@ def _retired_pdf_refresh_control(request: HttpRequest, document_id: int) -> Http
 @never_cache
 @_logged_web_action("pdf_delete")
 def delete_document(request: HttpRequest, document_id: int) -> HttpResponse:
-    """Show local-deletion scope before accepting an explicit, CSRF-protected POST."""
+    """Reject old delete links and forms: individual repository PDFs are read-only."""
 
     local_error = _require_strict_loopback_action(request)
     if local_error:
         return local_error
-    document = get_object_or_404(
-        PDFDocument.objects.select_related("repository", "local_policy"),
-        pk=document_id,
-    )
-    if request.method == "GET" or request.POST.get("confirmed") != "yes":
-        navigation = request.GET if request.method == "GET" else request.POST
-        return render(
-            request,
-            "bitbucket_search/document_delete.html",
-            {
-                "active_app": "bitbucket",
-                "page_title": "Delete local PDF",
-                "document": document,
-                "full_path": _display_full_path(document),
-                "cancel_url": _document_action_return_url(request, document_id=document.pk),
-                "return_to": navigation.get("return_to", ""),
-                "return_page": navigation.get("return_page", ""),
-                "confirmation_required": request.method == "POST",
-            },
-            status=400 if request.method == "POST" else 200,
-        )
-
-    try:
-        delete_registered_pdf(document_id, confirmed=True)
-    except DocumentActionError as exc:
-        return _document_action_failure(request, exc, document_id=document_id)
-    detail = (
-        f"Deleted {document.filename} from local storage and the PDF index. "
-        "Future refreshes will keep this PDF deleted. The remote repository was not changed."
-    )
+    get_object_or_404(PDFDocument, pk=document_id)
+    detail = "PDFs are read-only. Individual file deletion is unavailable."
     if _is_async_request(request):
-        return JsonResponse({"state": "deleted", "documentId": document_id, "detail": detail})
-    messages.success(request, detail)
-    return redirect(_document_action_return_url(request))
+        return JsonResponse(
+            {"state": "gone", "code": "pdf_read_only", "detail": detail}, status=410
+        )
+    return HttpResponse(detail, status=410, content_type="text/plain; charset=utf-8")
 
 
 @require_POST
@@ -1879,6 +1851,280 @@ def _repository_lifecycle_failure(
             {"state": "blocked", "code": error.code, "detail": error.summary}, status=status
         )
     return HttpResponse(error.summary, status=status, content_type="text/plain; charset=utf-8")
+
+
+def _selected_repository_ids(request: HttpRequest) -> tuple[int, ...]:
+    """Validate the entire bounded selection before touching any repository."""
+
+    values = request.POST.getlist("repository_ids")
+    if not values or len(values) > MAX_SELECTED_REPOSITORIES * 2:
+        raise RepositoryLifecycleError(
+            "invalid_repository_selection",
+            f"Select between 1 and {MAX_SELECTED_REPOSITORIES} repositories.",
+        )
+    ids = []
+    for value in values:
+        if (
+            not value
+            or len(value) > 19
+            or not value.isascii()
+            or not value.isdecimal()
+            or not 0 < int(value) <= 2**63 - 1
+        ):
+            raise RepositoryLifecycleError(
+                "invalid_repository_selection", "The selected repository list is not valid."
+            )
+        ids.append(int(value))
+    unique_ids = tuple(dict.fromkeys(ids))
+    if len(unique_ids) > MAX_SELECTED_REPOSITORIES:
+        raise RepositoryLifecycleError(
+            "invalid_repository_selection",
+            f"Select at most {MAX_SELECTED_REPOSITORIES} repositories.",
+        )
+    return unique_ids
+
+
+def _selected_repository_error(
+    request: HttpRequest, error: RepositoryLifecycleError
+) -> HttpResponse:
+    status = {
+        "invalid_repository_selection": 400,
+        "invalid_repository_operation": 400,
+        "invalid_refresh_policy": 400,
+        "repository_unavailable": 404,
+    }.get(error.code, 409)
+    if _is_async_request(request):
+        return JsonResponse(
+            {"state": "blocked", "code": error.code, "detail": error.summary}, status=status
+        )
+    return HttpResponse(error.summary, status=status, content_type="text/plain; charset=utf-8")
+
+
+def _selected_removal_context(repository_ids: tuple[int, ...]) -> dict[str, object]:
+    repositories = BitbucketRepository.objects.in_bulk(repository_ids)
+    _with_repository_work_status(tuple(repositories.values()))
+    recoveries = {
+        recovery.repository_id: recovery
+        for recovery in RepositoryRemovalRecovery.objects.filter(repository_id__in=repository_ids)
+    }
+    rows = []
+    for repository_id in repository_ids:
+        repository = repositories.get(repository_id)
+        recovery = recoveries.get(repository_id)
+        path = ""
+        if repository:
+            try:
+                path = str(managed_repository_path(repository))
+            except RepositorySyncError:
+                path = "Managed checkout path unavailable"
+        rows.append(
+            {
+                "id": repository_id,
+                "name": (
+                    repository.display_name
+                    if repository
+                    else recovery.display_name
+                    if recovery
+                    else f"Repository {repository_id} (unavailable)"
+                ),
+                "path": path,
+                "pdf_count": repository.pdf_count if repository else 0,
+                "vsdx_count": repository.vsdx_count if repository else 0,
+                "busy": bool(repository and repository.has_active_work),
+                "removal_incomplete": recovery is not None,
+            }
+        )
+    return {
+        "active_app": "bitbucket",
+        "page_title": "Remove selected repositories",
+        "selected_repositories": rows,
+        "repository_count": len(rows),
+        "repository_busy": any(row["busy"] for row in rows),
+        "cancel_url": reverse("bitbucket_search:index"),
+    }
+
+
+def _remove_selected_repositories(
+    request: HttpRequest, repository_ids: tuple[int, ...]
+) -> HttpResponse:
+    context = _selected_removal_context(repository_ids)
+    if request.POST.get("confirmed") != "yes":
+        return render(request, "bitbucket_search/repositories_remove.html", context)
+    if context["repository_busy"]:
+        return _selected_repository_error(
+            request,
+            RepositoryLifecycleError(
+                "repository_busy",
+                "Wait for the selected repositories' Git and PDF workers to finish before removing them.",
+            ),
+        )
+
+    removed_ids = []
+    failures = []
+    for repository_id in repository_ids:
+        try:
+            remove_repository(repository_id, confirmed=True)
+        except RepositoryLifecycleError as error:
+            failures.append(
+                {"repositoryId": repository_id, "code": error.code, "detail": error.summary}
+            )
+        else:
+            removed_ids.append(repository_id)
+    remaining_ids = tuple(failure["repositoryId"] for failure in failures)
+    detail = (
+        f"Removed {len(removed_ids)} of {len(repository_ids)} selected repositories and their "
+        "downloaded files and indexed data from this computer. Remote repositories were not changed."
+    )
+    if failures:
+        detail += f" {len(failures)} removals are unfinished; retry only the remaining selection."
+    if _is_async_request(request):
+        return JsonResponse(
+            {
+                "state": "partially_removed" if failures else "removed",
+                "detail": detail,
+                "removedIds": removed_ids,
+                "remainingIds": remaining_ids,
+                "removedCount": len(removed_ids),
+                "failures": failures,
+            },
+            status=409 if failures else 200,
+        )
+    if failures:
+        context = _selected_removal_context(remaining_ids)
+        context.update({"removal_errors": failures, "removal_result": detail})
+        return render(request, "bitbucket_search/repositories_remove.html", context, status=409)
+    messages.success(request, detail)
+    return redirect(reverse("bitbucket_search:index"))
+
+
+@require_POST
+@csrf_protect
+@never_cache
+@_logged_web_action("repositories_selected")
+def selected_repositories(request: HttpRequest) -> HttpResponse:
+    """Apply a toolbar action only to an explicitly validated repository selection."""
+
+    local_error = _require_strict_loopback_action(request)
+    if local_error:
+        return local_error
+    operation = request.POST.get("operation")
+    excluded = request.POST.get("excluded")
+    try:
+        if operation not in {"refresh", "exclude", "remove"}:
+            raise RepositoryLifecycleError(
+                "invalid_repository_operation", "Choose a valid repository action."
+            )
+        if operation == "exclude" and excluded not in {"yes", "no"}:
+            raise RepositoryLifecycleError(
+                "invalid_refresh_policy", "Choose whether to exclude the selected repositories."
+            )
+        repository_ids = _selected_repository_ids(request)
+        repositories = BitbucketRepository.objects.in_bulk(repository_ids)
+        recovery_ids = set(
+            RepositoryRemovalRecovery.objects.filter(repository_id__in=repository_ids).values_list(
+                "repository_id", flat=True
+            )
+        )
+        known_ids = set(repositories) | (recovery_ids if operation == "remove" else set())
+        if set(repository_ids) != known_ids:
+            raise RepositoryLifecycleError(
+                "repository_unavailable",
+                "One or more selected repositories no longer exist. Reload and select again.",
+            )
+        if operation != "remove" and recovery_ids:
+            raise RepositoryLifecycleError(
+                "repository_removal_pending",
+                "A selected repository has an incomplete removal. Use Retry removal first.",
+            )
+        _with_repository_work_status(tuple(repositories.values()))
+        if operation == "refresh" and any(
+            repository.has_active_work or not repository.enabled
+            for repository in repositories.values()
+        ):
+            raise RepositoryLifecycleError(
+                "repository_busy",
+                "Select enabled repositories whose Git and PDF workers have finished before refreshing.",
+            )
+    except RepositoryLifecycleError as error:
+        return _selected_repository_error(request, error)
+
+    if operation == "remove":
+        return _remove_selected_repositories(request, repository_ids)
+
+    completed_ids = []
+    jobs = []
+    failures = []
+    for repository_id in repository_ids:
+        try:
+            if operation == "exclude":
+                set_repository_refresh_excluded(repository_id, excluded=excluded == "yes")
+            else:
+                queued = queue_repository_refresh(repository_id)
+                if queued.job.status == RepositorySyncJobStatus.QUEUED:
+                    jobs.append(queued.job.pk)
+        except (RepositoryLifecycleError, RepositorySyncError) as error:
+            failures.append(
+                {"repositoryId": repository_id, "code": error.code, "detail": error.summary}
+            )
+        except BitbucketRepository.DoesNotExist:
+            failures.append(
+                {
+                    "repositoryId": repository_id,
+                    "code": "repository_unavailable",
+                    "detail": "This repository no longer exists. Reload and select again.",
+                }
+            )
+        except OperationalError as error:
+            log_event(
+                logger,
+                logging.ERROR,
+                "repository_selected_action_failed",
+                error=error,
+                repository_id=repository_id,
+                operation=operation,
+            )
+            failures.append(
+                {
+                    "repositoryId": repository_id,
+                    "code": "repository_database_busy",
+                    "detail": "OWL could not save this repository action. Reload and try again.",
+                }
+            )
+        else:
+            completed_ids.append(repository_id)
+    workers_started, launch_failed = (
+        _wake_queued_repository_workers(job_ids=tuple(jobs)) if jobs else (0, False)
+    )
+    action = (
+        "Queued background refresh for" if operation == "refresh" else "Updated refresh policy for"
+    )
+    detail = f"{action} {len(completed_ids)} of {len(repository_ids)} selected repositories."
+    if failures:
+        detail += f" {len(failures)} could not be updated; reload before trying them again."
+    if launch_failed:
+        detail += " Some helper workers could not start; durable refresh jobs remain queued."
+    if _is_async_request(request):
+        updated = BitbucketRepository.objects.filter(pk__in=completed_ids)
+        return JsonResponse(
+            {
+                "state": "partial"
+                if failures
+                else ("queued" if operation == "refresh" else "updated"),
+                "detail": detail,
+                "completedIds": completed_ids,
+                "completedCount": len(completed_ids),
+                "workersStarted": workers_started,
+                "workerWakeupFailed": launch_failed,
+                "failures": failures,
+                "repositories": [_repository_payload(repository) for repository in updated],
+            },
+            status=409 if failures else (202 if operation == "refresh" else 200),
+        )
+    if failures or launch_failed:
+        messages.warning(request, detail)
+    else:
+        messages.success(request, detail)
+    return redirect(reverse("bitbucket_search:index"))
 
 
 @require_http_methods(["GET", "POST"])

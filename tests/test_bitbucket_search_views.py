@@ -284,6 +284,9 @@ def test_search_input_is_full_width_enter_first_and_submits_scope_sentinel(clien
     assert 'id="bb-pdf-search-input"' in html
     assert 'name="scope_present" value="1"' in html
     assert 'name="page_size" value="100"' in html
+    assert 'placeholder="Search extracted text, filenames or repo paths…"' in html
+    for scope in ("content", "filename", "path"):
+        assert f'name="scope" value="{scope}" checked' in html
     assert "bb-search-submit" not in html
 
     stylesheet = (
@@ -292,6 +295,38 @@ def test_search_input_is_full_width_enter_first_and_submits_scope_sentinel(clien
     assert "grid-template-columns: minmax(0, 1fr) auto;" in stylesheet
     assert "minmax(0, 670px)" not in stylesheet
     assert ".bb-search-submit" not in stylesheet
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"q": "aurora"},
+        {"chip": ["aurora"], "scope_present": "1", "scope": ["content", "filename", "path"]},
+    ],
+)
+def test_search_form_finds_saved_text_filename_and_repo_path_together(client, query):
+    repository = _repository("Search sources")
+    content_match = _indexed_pdf(
+        repository, filename="Overview.pdf", page_text="Aurora deployment notes", digest="a"
+    )
+    filename_match = _indexed_pdf(
+        repository, filename="Aurora Guide.pdf", page_text="Unrelated body", digest="b"
+    )
+    path_match = _indexed_pdf(
+        repository, filename="Design.pdf", page_text="Unrelated description", digest="c"
+    )
+    path_match.relative_path = "services/aurora/Design.pdf"
+    path_match.save(update_fields=("relative_path",))
+    other = _indexed_pdf(repository, filename="Other.pdf", page_text="No matching term", digest="d")
+
+    response = client.get(reverse("bitbucket_search:index"), query)
+    html = response.content.decode()
+
+    assert response.status_code == 200
+    assert response.context["search_page"].total == 3
+    for document in (content_match, filename_match, path_match):
+        assert f'data-document-id="{document.pk}"' in html
+    assert f'data-document-id="{other.pk}"' not in html
 
 
 def test_empty_input_backspace_removes_the_last_chip_and_submits():
