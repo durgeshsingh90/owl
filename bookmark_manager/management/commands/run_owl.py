@@ -20,6 +20,8 @@ from bitbucket_search.services.pdf_indexing import sweep_pdf_extraction_queue
 from bitbucket_search.services.repository_sync import (
     queue_due_daily_repository_refreshes,
     repository_status_snapshot,
+    resident_repository_workers_active,
+    set_resident_repository_workers_active,
 )
 from bookmark_manager.models import NotificationKind, NotificationState
 from bookmark_manager.services.bookmark_refresh import queue_due_scheduled_refresh
@@ -160,6 +162,26 @@ def _bitbucket_queue_loop(stop_event: threading.Event, *, poll_seconds: int) -> 
 
     workers: dict[str, subprocess.Popen[bytes]] = {}
     startup_sweep_pending = True
+    repository_workers_active = resident_repository_workers_active()
+
+    def publish_repository_worker_state(active: bool) -> None:
+        nonlocal repository_workers_active
+        if active == repository_workers_active:
+            return
+        set_resident_repository_workers_active(active)
+        repository_workers_active = active
+
+    def reconcile_repository_worker_state() -> None:
+        publish_repository_worker_state(
+            any(
+                role.startswith("repository-sync-") and worker.poll() is None
+                for role, worker in workers.items()
+            )
+        )
+
+    # Clear a stale process-local marker before this supervisor owns a live
+    # repository controller. It will be raised only after a successful launch.
+    publish_repository_worker_state(False)
     try:
         while not stop_event.is_set():
             try:
@@ -180,11 +202,17 @@ def _bitbucket_queue_loop(stop_event: threading.Event, *, poll_seconds: int) -> 
             except Exception:
                 bitbucket_logger.exception("The resident Bitbucket/PDF queue supervisor failed")
             finally:
-                close_old_connections()
+                try:
+                    reconcile_repository_worker_state()
+                finally:
+                    close_old_connections()
             stop_event.wait(poll_seconds)
     finally:
-        for worker in workers.values():
-            _stop_resident_bitbucket_worker(worker)
+        try:
+            for worker in workers.values():
+                _stop_resident_bitbucket_worker(worker)
+        finally:
+            publish_repository_worker_state(False)
 
 
 class Command(BaseCommand):

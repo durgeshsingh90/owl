@@ -13,6 +13,7 @@ from django.db.models.functions import Lower
 
 from bitbucket_search.models import PDFDocument, PDFDocumentLifecycle
 from bitbucket_search.services.pdf_search_query import (
+    MAX_SEARCH_PAGE_SIZE,
     PDFSearchMatchMode,
     PDFSearchQuery,
     PDFSearchScope,
@@ -28,7 +29,7 @@ MAX_SNIPPET_SOURCE_CHARACTERS = MAX_SNIPPET_CHARACTERS * 2
 # exact phrases inside one marked span before the hard character window below.
 FTS_SNIPPET_TOKEN_LIMIT = 64
 MAX_EXPLAINED_PAGES = 8
-MAX_RESULT_PAGE_SIZE = 50
+MAX_RESULT_PAGE_SIZE = MAX_SEARCH_PAGE_SIZE
 
 _METADATA_COLUMNS = {
     PDFSearchScope.FILENAME: "filename",

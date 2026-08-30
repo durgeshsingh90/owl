@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -21,7 +23,7 @@ from bitbucket_search.models import (
     RepositorySyncPhase,
     RepositorySyncState,
 )
-from bitbucket_search.services import git_sync
+from bitbucket_search.services import git_sync, repository_sync
 from bitbucket_search.services.git_sync import managed_repository_path
 from bitbucket_search.services.repository_sync import (
     claim_next_job,
@@ -441,6 +443,42 @@ def test_repository_registration_requires_an_explicit_host_allowlist():
         normalize_repository_url("git@bitbucket.org:workspace/repository.git")
 
     assert captured.value.code == "allowed_hosts_not_configured"
+
+
+def test_worker_wakeup_capacity_is_reserved_while_cross_process_lock_is_held(
+    monkeypatch,
+    settings,
+):
+    settings.BITBUCKET_MAX_REPO_WORKERS = 1
+    repository = BitbucketRepository.objects.create(
+        display_name="serialized-wakeup",
+        canonical_remote_key="bitbucket.org/workspace/serialized-wakeup",
+        remote_url="ssh://git@bitbucket.org/workspace/serialized-wakeup.git",
+        sync_state=RepositorySyncState.QUEUED,
+    )
+    job = RepositorySyncJob.objects.create(
+        repository=repository,
+        operation=RepositorySyncOperation.CLONE,
+    )
+    events: list[object] = []
+
+    @contextmanager
+    def serialized_wakeup():
+        events.append("lock")
+        yield
+        events.append(
+            (
+                "unlock",
+                RepositorySyncJob.objects.get(pk=job.pk).worker_pid,
+            )
+        )
+
+    monkeypatch.setattr(repository_sync, "repository_worker_wakeup_lock", serialized_wakeup)
+
+    reservation = repository_sync.reserve_queued_repository_worker_wakeups()
+
+    assert reservation.job_ids == (job.pk,)
+    assert events == ["lock", ("unlock", os.getpid())]
 
 
 def test_worker_once_processes_at_most_one_queued_job(monkeypatch):

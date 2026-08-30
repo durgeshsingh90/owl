@@ -14,6 +14,16 @@ def test_default_runtime_is_loopback_only():
     assert settings.OWL_ALLOW_NON_LOOPBACK is False
 
 
+def test_default_daily_repository_refresh_uses_eleven_in_owl_timezone():
+    assert settings.BITBUCKET_DAILY_REFRESH_LOCAL_HOUR == 11
+    assert settings.TIME_ZONE == "Europe/Dublin"
+
+
+def test_default_bitbucket_inventory_and_search_pages_hold_two_hundred_results():
+    assert settings.BITBUCKET_PDF_PAGE_SIZE == 200
+    assert settings.BITBUCKET_SEARCH_PAGE_SIZE == 200
+
+
 def test_test_database_and_runtime_data_are_isolated_outside_repository():
     data_root = Path(settings.OWL_DATA_ROOT).resolve()
     repository_root = Path(settings.BASE_DIR).resolve()

@@ -72,9 +72,10 @@ Bitbucket Search now provides repository registration and durable background syn
 
 - add an approved SSH or HTTPS repository URL from the left repository rail;
 - clone it once in a detached background worker, then use fetch plus fast-forward refreshes;
-- refresh every enabled repository once per local calendar day with a bounded parallel repository
-  worker pool. A failed daily attempt retries after two hours, up to three retries after the initial
-  attempt during that day's cycle; a success stops that repository's remaining retries;
+- refresh every enabled repository at 11:00 in `OWL_TIME_ZONE` (Europe/Dublin by default) with a
+  bounded parallel repository worker pool. A failed daily attempt retries after two hours, up to
+  three retries after the initial attempt during that day's cycle; a success stops that
+  repository's remaining retries;
 - show queued/downloading/updating progress, a green ready tick, and safe failure states;
 - keep managed checkouts under `var/media/bitbucket/repositories/` by default;
 - use partial clone and sparse checkout to materialize case-insensitive PDF and VSDX files. If a
@@ -205,16 +206,17 @@ in Terminal when you want to stop OWL.
 
 `run_owl` starts the local website, its resident weekly Confluence scheduler, a bounded parallel
 Bitbucket repository-worker pool, and a separate bounded PDF-worker pool. The Bitbucket supervisor
-queues every enabled repository once per local calendar day. Each failed daily attempt waits two
-hours before retrying, with one initial attempt and at most three retries during that day's cycle.
-Repository and PDF worker limits are configured independently with `BITBUCKET_MAX_REPO_WORKERS` and
-`PDF_MAX_EXTRACTION_WORKERS`.
+queues every enabled repository at 11:00 in `OWL_TIME_ZONE` (Europe/Dublin by default). Each failed
+daily attempt waits two hours before retrying, with one initial attempt and at most three retries
+during that day's cycle. Repository and PDF worker limits are configured independently with
+`BITBUCKET_MAX_REPO_WORKERS` and `PDF_MAX_EXTRACTION_WORKERS`.
 
 Keep `run_owl` running for automatic Bitbucket refreshes to start at their due time. OWL cannot run
 Git while the application is stopped, but its schedule and jobs are durable: after a restart,
-`run_owl` catches up the current local day's missing or due retry work without duplicating active
-repository jobs. On startup the supervisor also retires inherited PDF worker leases, applies bounded
-PDF retries, and queues active PDFs from an upgraded database that have not been indexed yet.
+`run_owl` immediately catches up the latest missed 11:00 local slot and any due retry without
+replaying a backlog of older daily slots or duplicating active repository jobs. On startup the
+supervisor also retires inherited PDF worker leases, applies bounded PDF retries, and queues active
+PDFs from an upgraded database that have not been indexed yet.
 
 The Bookmark Manager's global refresh button and every due Confluence schedule start a separate
 local worker process automatically. That worker retrieves saved Confluence pages with up to five
@@ -228,8 +230,10 @@ a second terminal so weekly work can begin even when no OWL browser page is open
 python manage.py bookmark_refresh_scheduler
 ```
 
-Opening any OWL page also performs a lightweight due-schedule check once per minute as a catch-up;
-it does not run the page downloads inside the browser request.
+Opening any OWL page also performs lightweight Confluence and Bitbucket due-schedule checks once per
+minute as a catch-up. The Bitbucket check queues only the latest missed 11:00 local slot or due
+retry. These checks only queue durable background work; they do not download Confluence pages or run
+Git inside the browser request.
 
 For diagnostics or recovery, a queued run can also be processed directly with:
 
@@ -256,7 +260,9 @@ watching the repository queue and then the PDF queue until it is stopped. `run_o
 separate repository-only and PDF controllers so both configured concurrency limits remain explicit.
 Automatic daily refresh can be disabled with `BITBUCKET_DAILY_REFRESH_ENABLED=false`; its retry
 delay and cap are configured with `BITBUCKET_DAILY_REFRESH_RETRY_SECONDS` (default `7200`) and
-`BITBUCKET_DAILY_REFRESH_MAX_RETRIES` (default `3`).
+`BITBUCKET_DAILY_REFRESH_MAX_RETRIES` (default `3`). Set
+`BITBUCKET_DAILY_REFRESH_LOCAL_HOUR` to choose the local hour (`11` by default); OWL interprets it in
+`OWL_TIME_ZONE` (`Europe/Dublin` by default).
 
 ## Connect Confluence and save a bookmark
 

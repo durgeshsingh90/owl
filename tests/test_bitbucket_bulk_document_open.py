@@ -56,7 +56,7 @@ def test_bulk_open_is_post_only_csrf_protected_and_strictly_loopback(client):
         ({}, "invalid_document_selection"),
         ({"document_id": "not-an-id"}, "invalid_document_selection"),
         ({"document_id": "0"}, "invalid_document_selection"),
-        ({"document_id": [str(number) for number in range(1, 52)]}, "too_many_documents"),
+        ({"document_id": [str(number) for number in range(1, 202)]}, "too_many_documents"),
     ),
 )
 def test_bulk_open_rejects_invalid_or_oversized_result_page_selections(

@@ -421,7 +421,7 @@ def test_bulk_open_rejects_empty_invalid_missing_and_oversized_selections(regist
         ([], "invalid_document_selection"),
         ([0], "invalid_document_selection"),
         ([document.pk, document.pk + 1], "document_not_found"),
-        ([document.pk] * 51, "too_many_documents"),
+        ([document.pk] * 201, "too_many_documents"),
     ):
         with pytest.raises(DocumentActionError) as captured:
             open_registered_pdfs(selection)

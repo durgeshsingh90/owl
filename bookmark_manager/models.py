@@ -238,6 +238,7 @@ class NotificationKind(models.TextChoices):
     BOOKMARK_IMPORT = "bookmark_import", "Bookmark import"
     BOOKMARK_EXPORT = "bookmark_export", "Bookmark export"
     CONFLUENCE_REFRESH = "confluence_refresh", "Confluence refresh"
+    BITBUCKET_REFRESH = "bitbucket_refresh", "Bitbucket refresh"
 
 
 class NotificationState(models.TextChoices):

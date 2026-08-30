@@ -9,108 +9,25 @@
     const cardsFor = (repositoryId) =>
         document.querySelectorAll(`[data-repository-id="${repositoryId}"]`);
 
-    const formatTimestamp = (value) => {
-        if (!value) {
-            return "";
-        }
-        const parsed = new Date(value);
-        if (Number.isNaN(parsed.getTime())) {
-            return "";
-        }
-        return new Intl.DateTimeFormat(undefined, {
-            dateStyle: "medium",
-            timeStyle: "short",
-        }).format(parsed);
-    };
-
     const updateRepository = (repository) => {
         cardsFor(repository.id).forEach((card) => {
             card.dataset.repositoryState = repository.state;
             const stateIcon = card.querySelector("[data-repository-state-icon]");
             if (stateIcon) {
                 stateIcon.className = `bb-repository-state bb-repository-state--${repository.state}`;
-            }
-            const stateLabel = card.querySelector("[data-repository-state-label]");
-            if (stateLabel) {
-                stateLabel.textContent = repository.stateLabel;
-            }
-            const progressLabel = card.querySelector("[data-repository-progress-label]");
-            if (progressLabel) {
-                progressLabel.textContent = repository.active ? `${repository.progress}%` : "";
-            }
-            const progress = card.querySelector("[data-repository-progress]");
-            if (progress) {
-                progress.hidden = !repository.active;
-                progress.setAttribute("aria-valuenow", String(repository.progress));
-            }
-            const progressBar = card.querySelector("[data-repository-progress-bar]");
-            if (progressBar) {
-                progressBar.style.width = `${repository.progress}%`;
-            }
-            const message = card.querySelector("[data-repository-message]");
-            if (message) {
-                message.textContent = repository.message || repository.stateLabel;
-            }
-            const automatic = repository.automatic || {};
-            const automaticContainer = card.querySelector("[data-repository-automatic]");
-            if (automaticContainer) {
-                automaticContainer.className =
-                    `bb-repository-card__automatic bb-repository-card__automatic--${automatic.state || "due"}`;
-                automaticContainer.dataset.automaticState = automatic.state || "due";
-            }
-            const automaticLabel = card.querySelector(
-                "[data-repository-automatic-label]",
-            );
-            if (automaticLabel) {
-                automaticLabel.textContent = automatic.label || "Daily refresh";
-            }
-            const automaticDetail = card.querySelector(
-                "[data-repository-automatic-detail]",
-            );
-            if (automaticDetail) {
-                const automaticTime = formatTimestamp(automatic.nextActionAt);
-                const detail =
-                    automatic.detail || "Waiting for the daily refresh scheduler.";
-                automaticDetail.textContent = automaticTime
-                    ? `${detail} Next: ${automaticTime}.`
-                    : detail;
+                stateIcon.setAttribute(
+                    "aria-label",
+                    `${repository.name}: ${repository.stateLabel}`,
+                );
             }
             const documents = card.querySelector("[data-repository-documents]");
             if (documents) {
                 documents.textContent = `${repository.pdfCount} PDF · ${repository.vsdxCount} VSDX`;
             }
-            const catalogStatus = card.querySelector("[data-repository-catalog-status]");
-            if (catalogStatus) {
-                const publishedAt = formatTimestamp(repository.catalogPublishedAt);
-                catalogStatus.textContent = publishedAt
-                    ? `${repository.catalogStale ? "Catalogue retained from" : "Catalogue updated"} ${publishedAt}`
-                    : "No PDF catalogue published yet";
-            }
             const refreshButton = card.querySelector("[data-repository-refresh-form] button");
             if (refreshButton) {
                 refreshButton.disabled = repository.active;
             }
-        });
-    };
-
-    const updateSummary = (summary) => {
-        const container = document.querySelector("[data-sync-summary]");
-        if (container) {
-            container.classList.remove(
-                "bb-sync-status--empty",
-                "bb-sync-status--ready",
-                "bb-sync-status--active",
-                "bb-sync-status--scheduled",
-                "bb-sync-status--attention",
-            );
-            container.classList.add(`bb-sync-status--${summary.state}`);
-            container.setAttribute("aria-label", `Sync status: ${summary.label.toLowerCase()}`);
-        }
-        document.querySelectorAll("[data-sync-summary-label]").forEach((element) => {
-            element.textContent = summary.label;
-        });
-        document.querySelectorAll("[data-sync-summary-detail]").forEach((element) => {
-            element.textContent = summary.detail;
         });
     };
 
@@ -186,7 +103,6 @@
             }
             const payload = await response.json();
             payload.repositories.forEach(updateRepository);
-            updateSummary(payload.summary);
             updateTotals(payload.totals, payload.repositories, payload.automation);
             const repositoryCompleted = payload.repositories.some(
                 (repository) =>
@@ -247,7 +163,9 @@
         input.addEventListener("input", () => {
             const query = input.value.trim().toLocaleLowerCase();
             document.querySelectorAll("[data-repository-id]").forEach((card) => {
-                const searchable = card.textContent.toLocaleLowerCase();
+                const searchable = (
+                    card.dataset.repositorySearchValue || card.textContent
+                ).toLocaleLowerCase();
                 card.hidden = Boolean(query) && !searchable.includes(query);
             });
         });
@@ -257,7 +175,11 @@
         workspace.querySelectorAll("[data-people-panel]"),
     );
     const normalizedPeopleQuery = (value) =>
-        value.normalize("NFKC").trim().toLocaleLowerCase();
+        String(value || "")
+            .normalize("NFKD")
+            .replace(/[\u0300-\u036f]/gu, "")
+            .trim()
+            .toLocaleLowerCase();
 
     const updatePeopleSelection = (panel) => {
         const selectedPeople = panel.querySelectorAll(
@@ -267,19 +189,6 @@
             "[data-people-group-select]:checked",
         ).length;
         const selectedTotal = selectedPeople + selectedGroups;
-        const status = panel.querySelector("[data-people-selection-status]");
-        const submit = panel.querySelector("[data-people-filter-submit]");
-
-        if (status) {
-            status.textContent =
-                `${selectedPeople} committer${selectedPeople === 1 ? "" : "s"} · ` +
-                `${selectedGroups} group${selectedGroups === 1 ? "" : "s"} selected`;
-        }
-        if (submit) {
-            submit.textContent = selectedTotal
-                ? `Apply people (${selectedTotal})`
-                : "Apply people";
-        }
         panel.querySelectorAll(".bb-people-option").forEach((option) => {
             const checkbox = option.querySelector(
                 "[data-committer-select], [data-people-group-select]",
@@ -302,6 +211,8 @@
     };
 
     peoplePanels.forEach((panel) => {
+        const searchToggle = panel.querySelector("[data-people-search-toggle]");
+        const searchPanel = panel.querySelector("[data-people-search-panel]");
         const search = panel.querySelector("[data-people-filter-search]");
         const searchStatus = panel.querySelector(
             "[data-people-filter-search-status]",
@@ -312,7 +223,9 @@
         );
 
         const applyPeopleSearch = () => {
-            const query = normalizedPeopleQuery(search?.value || "");
+            const terms = normalizedPeopleQuery(search?.value)
+                .split(/\s+/u)
+                .filter(Boolean);
             let visiblePeople = 0;
             let visibleGroups = 0;
             filterEntries.forEach((entry) => {
@@ -320,7 +233,10 @@
                     entry.dataset.peopleSearchValue || "",
                 );
                 const isRealEntry = Boolean(searchable);
-                const visible = !query || (isRealEntry && searchable.includes(query));
+                const visible =
+                    terms.length === 0 ||
+                    (isRealEntry &&
+                        terms.every((term) => searchable.includes(term)));
                 entry.hidden = !visible;
                 if (visible && isRealEntry) {
                     if (entry.dataset.peopleEntryKind === "group") {
@@ -331,17 +247,53 @@
                 }
             });
             if (searchStatus) {
-                const qualifier = query ? "shown" : "available";
-                searchStatus.textContent =
-                    `${visiblePeople} committer${visiblePeople === 1 ? "" : "s"} · ` +
-                    `${visibleGroups} group${visibleGroups === 1 ? "" : "s"} ${qualifier}`;
+                if (terms.length && visiblePeople + visibleGroups === 0) {
+                    searchStatus.textContent = "No people or groups found";
+                } else {
+                    const qualifier = terms.length ? "found" : "available";
+                    searchStatus.textContent =
+                        `${visiblePeople} committer${visiblePeople === 1 ? "" : "s"} · ` +
+                        `${visibleGroups} group${visibleGroups === 1 ? "" : "s"} ${qualifier}`;
+                }
             }
             if (noResults) {
-                noResults.hidden = !query || visiblePeople + visibleGroups > 0;
+                noResults.hidden =
+                    terms.length === 0 || visiblePeople + visibleGroups > 0;
             }
         };
 
+        const closePeopleSearch = () => {
+            if (!searchPanel || !searchToggle) {
+                return;
+            }
+            searchPanel.hidden = true;
+            searchToggle.setAttribute("aria-expanded", "false");
+            if (search) {
+                search.value = "";
+            }
+            applyPeopleSearch();
+            searchToggle.focus();
+        };
+
+        searchToggle?.addEventListener("click", () => {
+            if (!searchPanel) {
+                return;
+            }
+            if (!searchPanel.hidden) {
+                closePeopleSearch();
+                return;
+            }
+            searchPanel.hidden = false;
+            searchToggle.setAttribute("aria-expanded", "true");
+            search?.focus();
+        });
         search?.addEventListener("input", applyPeopleSearch);
+        search?.addEventListener("keydown", (event) => {
+            if (event.key === "Escape") {
+                event.preventDefault();
+                closePeopleSearch();
+            }
+        });
         applyPeopleSearch();
 
         const memberSearch = panel.querySelector("[data-group-member-search]");
@@ -390,6 +342,7 @@
         updatePeopleSelection(panel);
     });
 
+    let peopleFilterSubmitTimer;
     workspace.addEventListener("change", (event) => {
         const changed = event.target.closest?.(
             "[data-committer-select], [data-people-group-select]",
@@ -416,6 +369,18 @@
             : 0;
         peoplePanels.slice(1).forEach(updatePeopleSelection);
         updateMobilePeopleSummary(selectedTotal);
+
+        const form = changed.closest("[data-people-filter-form]");
+        if (form) {
+            window.clearTimeout(peopleFilterSubmitTimer);
+            peopleFilterSubmitTimer = window.setTimeout(() => {
+                if (typeof form.requestSubmit === "function") {
+                    form.requestSubmit();
+                } else {
+                    form.submit();
+                }
+            }, 350);
+        }
     });
 
     const searchForm = workspace.querySelector("[data-pdf-search-form]");

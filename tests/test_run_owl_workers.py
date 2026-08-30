@@ -16,9 +16,10 @@ pytestmark = pytest.mark.django_db
 class _ResidentProcess:
     def __init__(self, role: str) -> None:
         self.role = role
+        self.returncode = None
 
     def poll(self):
-        return None
+        return self.returncode
 
 
 def test_resident_worker_specs_preserve_configured_pdf_concurrency(settings):
@@ -46,7 +47,14 @@ def test_resident_supervisor_recovers_leases_before_launch_and_stops_owned_worke
     events: list[tuple[str, object]] = []
     launched: list[_ResidentProcess] = []
     stopped: list[_ResidentProcess] = []
+    resident_states: list[bool] = []
     extraction_sweeps = 0
+
+    monkeypatch.setattr(
+        run_owl,
+        "set_resident_repository_workers_active",
+        resident_states.append,
+    )
 
     monkeypatch.setattr(
         run_owl,
@@ -104,6 +112,79 @@ def test_resident_supervisor_recovers_leases_before_launch_and_stops_owned_worke
         ("daily-schedule", None),
     ]
     assert stopped == launched
+    assert resident_states == [True, False]
+
+
+def test_resident_supervisor_clears_stale_marker_when_sweep_fails_before_launch(
+    monkeypatch,
+):
+    stop_event = threading.Event()
+    resident_states: list[bool] = []
+    launch = Mock()
+
+    monkeypatch.setattr(
+        run_owl,
+        "resident_repository_workers_active",
+        Mock(return_value=True),
+    )
+    monkeypatch.setattr(
+        run_owl,
+        "set_resident_repository_workers_active",
+        resident_states.append,
+    )
+
+    def fail_schedule():
+        stop_event.set()
+        raise RuntimeError("synthetic schedule failure")
+
+    monkeypatch.setattr(run_owl, "queue_due_daily_repository_refreshes", fail_schedule)
+    monkeypatch.setattr(run_owl, "_launch_resident_bitbucket_worker", launch)
+
+    run_owl._bitbucket_queue_loop(stop_event, poll_seconds=0)
+
+    assert resident_states == [False]
+    launch.assert_not_called()
+
+
+def test_resident_supervisor_clears_marker_when_live_worker_dies_during_exception(
+    monkeypatch,
+    settings,
+):
+    settings.BITBUCKET_MAX_REPO_WORKERS = 1
+    settings.PDF_MAX_EXTRACTION_WORKERS = 1
+    stop_event = threading.Event()
+    resident_states: list[bool] = []
+    repository_worker = _ResidentProcess("bitbucket_sync_worker")
+    schedule_checks = 0
+
+    monkeypatch.setattr(
+        run_owl,
+        "set_resident_repository_workers_active",
+        resident_states.append,
+    )
+    monkeypatch.setattr(run_owl, "repository_status_snapshot", Mock())
+    monkeypatch.setattr(run_owl, "sweep_pdf_extraction_queue", Mock())
+
+    def check_schedule():
+        nonlocal schedule_checks
+        schedule_checks += 1
+        if schedule_checks == 2:
+            repository_worker.returncode = 1
+            stop_event.set()
+            raise RuntimeError("synthetic supervisor failure")
+
+    def launch(command):
+        if command == "bitbucket_sync_worker":
+            return repository_worker
+        return _ResidentProcess(command)
+
+    monkeypatch.setattr(run_owl, "queue_due_daily_repository_refreshes", check_schedule)
+    monkeypatch.setattr(run_owl, "_launch_resident_bitbucket_worker", launch)
+    monkeypatch.setattr(run_owl, "_stop_resident_bitbucket_worker", Mock())
+
+    run_owl._bitbucket_queue_loop(stop_event, poll_seconds=0)
+
+    assert resident_states == [True, False]
 
 
 def test_resident_launcher_disables_detached_helpers_only_for_sync_worker(

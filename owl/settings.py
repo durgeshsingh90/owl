@@ -258,6 +258,13 @@ BITBUCKET_MAX_REPO_WORKERS = _env_int("BITBUCKET_MAX_REPO_WORKERS", 5, minimum=1
 BITBUCKET_GIT_TIMEOUT_SECONDS = _env_int("BITBUCKET_GIT_TIMEOUT_SECONDS", 3_600, minimum=60)
 BITBUCKET_WORKER_IDLE_SECONDS = _env_int("BITBUCKET_WORKER_IDLE_SECONDS", 15, minimum=1)
 BITBUCKET_DAILY_REFRESH_ENABLED = _env_bool("BITBUCKET_DAILY_REFRESH_ENABLED", True)
+BITBUCKET_DAILY_REFRESH_LOCAL_HOUR = _env_int(
+    "BITBUCKET_DAILY_REFRESH_LOCAL_HOUR",
+    11,
+    minimum=0,
+)
+if BITBUCKET_DAILY_REFRESH_LOCAL_HOUR > 23:
+    raise ImproperlyConfigured("BITBUCKET_DAILY_REFRESH_LOCAL_HOUR must be between 0 and 23.")
 BITBUCKET_DAILY_REFRESH_RETRY_SECONDS = _env_int(
     "BITBUCKET_DAILY_REFRESH_RETRY_SECONDS",
     7_200,
@@ -268,10 +275,13 @@ BITBUCKET_DAILY_REFRESH_MAX_RETRIES = _env_int(
     3,
     minimum=0,
 )
-BITBUCKET_PDF_PAGE_SIZE = _env_int("BITBUCKET_PDF_PAGE_SIZE", 100, minimum=10)
+BITBUCKET_PDF_PAGE_SIZE = min(
+    _env_int("BITBUCKET_PDF_PAGE_SIZE", 200, minimum=10),
+    200,
+)
 BITBUCKET_SEARCH_PAGE_SIZE = min(
-    _env_int("BITBUCKET_SEARCH_PAGE_SIZE", 50, minimum=10),
-    50,
+    _env_int("BITBUCKET_SEARCH_PAGE_SIZE", 200, minimum=10),
+    200,
 )
 PDF_MAX_EXTRACTION_WORKERS = _env_int(
     "PDF_MAX_EXTRACTION_WORKERS",
@@ -349,7 +359,7 @@ MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
-    "django.middleware.csrf.CsrfViewMiddleware",
+    "core.middleware.LoopbackOpaqueOriginCsrfMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",

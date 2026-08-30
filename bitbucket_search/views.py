@@ -14,6 +14,7 @@ from urllib.parse import urlencode, urlsplit
 from django.conf import settings
 from django.contrib import messages
 from django.core.paginator import EmptyPage, Page, PageNotAnInteger, Paginator
+from django.db import OperationalError
 from django.http import HttpRequest, HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
@@ -74,9 +75,13 @@ from bitbucket_search.services.repository_sync import (
     launch_sync_worker,
     mark_worker_launch_failed,
     queue_all_repository_refreshes,
+    queue_due_daily_repository_refreshes,
     queue_repository_refresh,
     register_and_queue_repository,
+    release_repository_worker_wakeups,
     repository_status_snapshot,
+    reserve_queued_repository_worker_wakeups,
+    resident_repository_workers_active,
 )
 from bitbucket_search.services.repository_urls import RepositoryURLValidationError
 
@@ -679,7 +684,8 @@ def _automation_payload(
         label = "Needs attention"
         count = len(exhausted_rows)
         detail = (
-            f"{count} repositor{'y has' if count == 1 else 'ies have'} exhausted today's retries"
+            f"{count} repositor{'y has' if count == 1 else 'ies have'} exhausted "
+            "the current daily cycle's retries"
         )
     elif retry_rows:
         state = "retry_wait"
@@ -829,9 +835,6 @@ def _index_context(
     people_group_form_members: tuple[str, ...] = (),
 ):
     repositories = repository_status_snapshot()
-    for repository in repositories:
-        repository.automatic_refresh_ui = _automatic_refresh_payload(repository)
-        repository.catalog_is_stale = _repository_catalog_is_stale(repository)
     automation_payload = _automation_payload(repositories)
     catalog_publication_signature = _catalog_publication_signature(repositories)
     extraction_status = extraction_status_snapshot()
@@ -1465,13 +1468,13 @@ def add_repository(request: HttpRequest) -> HttpResponse:
         messages.error(request, str(exc))
         return redirect(f"{reverse('bitbucket_search:repositories')}#bb-add-repository")
 
-    # A prior worker can exit before claiming a durable queued job. Re-launch for
-    # every explicit request while the existing job is still queued; atomic job
-    # claiming keeps duplicate worker processes from executing it twice.
+    # Reserve the queued job before launching so the redirected page's automatic
+    # schedule tick cannot start a second helper for the same work.
     if queued.job.status == RepositorySyncJobStatus.QUEUED:
-        try:
-            launch_sync_worker()
-        except OSError:
+        _workers_started, launch_failed = _wake_queued_repository_workers(
+            job_ids=(queued.job.pk,),
+        )
+        if launch_failed:
             mark_worker_launch_failed(queued.job.pk)
             queued.repository.refresh_from_db()
             detail = "OWL could not start the background repository worker."
@@ -1519,12 +1522,13 @@ def refresh_repository(request: HttpRequest, repository_id: int) -> HttpResponse
         return local_error
     get_object_or_404(BitbucketRepository, pk=repository_id)
     queued = queue_repository_refresh(repository_id)
-    # Re-launching is intentional for an existing queued job: the process started
-    # by the original request may have stopped before it could claim the work.
+    # The short reservation deduplicates this explicit wakeup against the
+    # automatic schedule tick that runs as soon as the redirected page opens.
     if queued.job.status == RepositorySyncJobStatus.QUEUED:
-        try:
-            launch_sync_worker()
-        except OSError:
+        _workers_started, launch_failed = _wake_queued_repository_workers(
+            job_ids=(queued.job.pk,),
+        )
+        if launch_failed:
             mark_worker_launch_failed(queued.job.pk)
             queued.repository.refresh_from_db()
             if _is_async_request(request):
@@ -1586,31 +1590,9 @@ def refresh_all_repositories(request: HttpRequest) -> HttpResponse:
         messages.warning(request, detail)
         return redirect(reverse("bitbucket_search:index"))
 
-    # The normal ``run_owl`` process already owns a bounded resident worker
-    # pool. Short-lived helpers also make the explicit action progress when
-    # Django is run directly. Only fill currently unused Git-operation capacity;
-    # idle resident processes may also exist, but atomic claiming prevents them
-    # from exceeding BITBUCKET_MAX_REPO_WORKERS active Git operations.
-    running_job_count = RepositorySyncJob.objects.filter(
-        status=RepositorySyncJobStatus.RUNNING,
-    ).count()
-    remaining_worker_capacity = max(
-        0,
-        settings.BITBUCKET_MAX_REPO_WORKERS - running_job_count,
+    workers_started, launch_failed = _wake_queued_repository_workers(
+        job_ids=tuple(job.pk for job in queued.fallback_worker_jobs),
     )
-    workers_to_start = min(
-        len(queued.fallback_worker_jobs),
-        remaining_worker_capacity,
-    )
-    workers_started = 0
-    launch_failed = False
-    for _worker_number in range(workers_to_start):
-        try:
-            launch_sync_worker()
-        except OSError:
-            launch_failed = True
-            break
-        workers_started += 1
 
     newly_queued_count = queued.newly_queued_count
     already_queued_count = queued.already_queued_count
@@ -1665,6 +1647,68 @@ def refresh_all_repositories(request: HttpRequest) -> HttpResponse:
     else:
         messages.success(request, detail)
     return redirect(reverse("bitbucket_search:index"))
+
+
+def _wake_queued_repository_workers(
+    *,
+    job_ids: tuple[int, ...] | None = None,
+) -> tuple[int, bool]:
+    """Wake bounded helpers for direct runserver sessions without losing jobs."""
+
+    if resident_repository_workers_active():
+        return 0, False
+    reservation = reserve_queued_repository_worker_wakeups(job_ids=job_ids)
+    workers_started = 0
+    for worker_number, _job_id in enumerate(reservation.job_ids):
+        try:
+            launch_sync_worker()
+        except OSError:
+            release_repository_worker_wakeups(
+                reservation,
+                job_ids=reservation.job_ids[worker_number:],
+            )
+            return workers_started, True
+        workers_started += 1
+    return workers_started, False
+
+
+@require_POST
+@csrf_protect
+@never_cache
+def tick_repository_schedule(request: HttpRequest) -> JsonResponse:
+    """Catch up the latest configured daily slot when any OWL page is open."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    queued = ()
+    try:
+        queued = queue_due_daily_repository_refreshes()
+        workers_started, launch_failed = _wake_queued_repository_workers()
+    except OperationalError:
+        # Another short SQLite writer can temporarily own the database. The
+        # browser retries this idempotent tick, and any jobs already committed
+        # remain durable for the resident worker pool.
+        return JsonResponse(
+            {
+                "state": "busy",
+                "queued": len(queued),
+                "workersStarted": 0,
+            },
+            status=202,
+        )
+    return JsonResponse(
+        {
+            "state": (
+                "worker_wakeup_failed"
+                if launch_failed
+                else ("queued" if queued else ("worker_started" if workers_started else "waiting"))
+            ),
+            "queued": len(queued),
+            "workersStarted": workers_started,
+        },
+        status=202 if queued or workers_started or launch_failed else 200,
+    )
 
 
 @require_GET

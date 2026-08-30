@@ -181,11 +181,11 @@ def test_every_declared_sort_is_accepted(sort):
     assert PDFSearchQuery(sort=sort).sort is sort
 
 
-def test_page_and_page_size_are_positive_and_page_size_is_capped_at_fifty():
+def test_page_and_page_size_are_positive_and_page_size_is_capped_at_two_hundred():
     query = PDFSearchQuery(page=9, page_size=MAX_SEARCH_PAGE_SIZE)
-    assert (query.page, query.page_size) == (9, 50)
+    assert (query.page, query.page_size) == (9, 200)
 
-    for values in ({"page": 0}, {"page_size": 0}, {"page_size": 51}):
+    for values in ({"page": 0}, {"page_size": 0}, {"page_size": 201}):
         with pytest.raises(InvalidPDFSearchQuery):
             PDFSearchQuery(**values)
     with pytest.raises(InvalidPDFSearchQuery, match="Unknown PDF search sort"):
@@ -223,7 +223,7 @@ def test_querydict_parser_uses_q_only_as_the_no_chip_fallback():
     assert [chip.display for chip in query.chips] == ["Private Link"]
     assert query.scopes == DEFAULT_PDF_SEARCH_SCOPES
     assert query.page == 1
-    assert query.page_size == 50
+    assert query.page_size == 200
 
 
 def test_querydict_parser_rejects_explicit_empty_scopes_and_malformed_numbers():
@@ -235,8 +235,8 @@ def test_querydict_parser_rejects_explicit_empty_scopes_and_malformed_numbers():
         parse_pdf_search_query(QueryDict("repository=-1"))
     with pytest.raises(InvalidPDFSearchQuery, match="page must be a positive number"):
         parse_pdf_search_query(QueryDict("page=1.5"))
-    with pytest.raises(InvalidPDFSearchQuery, match="cannot exceed 50"):
-        parse_pdf_search_query(QueryDict("page_size=51"))
+    with pytest.raises(InvalidPDFSearchQuery, match="cannot exceed 200"):
+        parse_pdf_search_query(QueryDict("page_size=201"))
 
 
 def test_bare_get_defaults_scopes_but_submitted_scope_sentinel_preserves_checked_values():

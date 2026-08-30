@@ -94,6 +94,17 @@ def test_people_context_and_multi_committer_filter_use_or_semantics(loopback_cli
     html = response.content.decode()
     assert "Latest Git commit by" in html
     assert "Committers from available history" in html
+    assert "Apply people" not in html
+    assert "Choose any combination" not in html
+    assert "No saved groups" not in html
+    assert "Create one from committers found in available history" not in html
+    assert "data-committer-select" in html
+    assert html.count("data-people-search-toggle") == 2
+    assert 'aria-controls="bb-people-desktop-search-panel"' in html
+    assert 'id="bb-people-desktop-search-panel" hidden data-people-search-panel' in html
+    assert "Clear selection" not in html
+    assert ">Clear</a>" in html
+    assert "Create group" in html
     assert "Pushed by" not in html
 
 
@@ -151,6 +162,10 @@ def test_people_group_can_be_created_then_filters_to_any_member(loopback_client)
     assert group_summary.selected is True
     assert group_summary.member_count == 2
     assert group_summary.pdf_count == 2
+    html = response.content.decode()
+    assert 'name="people_group"' in html
+    assert "data-people-group-select checked" in html
+    assert "Architecture Reviewers" in html
 
     combined = loopback_client.get(
         reverse("bitbucket_search:index"),
@@ -207,11 +222,11 @@ def test_group_filter_pagination_keeps_group_identity_without_expanding_url(loop
         [
             PDFDocument(
                 repository=repository,
-                filename=f"Guide {number:02d}.pdf",
-                relative_path=f"docs/Guide {number:02d}.pdf",
+                filename=f"Guide {number:03d}.pdf",
+                relative_path=f"docs/Guide {number:03d}.pdf",
                 last_commit=commit,
             )
-            for number in range(51)
+            for number in range(201)
         ]
     )
     created = loopback_client.post(
@@ -230,6 +245,6 @@ def test_group_filter_pagination_keeps_group_identity_without_expanding_url(loop
         {"people_group": group.pk},
     )
 
-    assert response.context["search_page"].total == 51
+    assert response.context["search_page"].total == 201
     assert f"people_group={group.pk}" in response.context["next_search_page_url"]
     assert "committer=" not in response.context["next_search_page_url"]

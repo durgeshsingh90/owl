@@ -37,6 +37,11 @@ urlpatterns = [
         views.refresh_repository,
         name="repository_refresh",
     ),
+    path(
+        "repositories/schedule/tick/",
+        views.tick_repository_schedule,
+        name="repository_schedule_tick",
+    ),
     path("repositories/status/", views.repository_status, name="repository_status"),
     path("status/", views.index_status, name="index_status"),
 ]

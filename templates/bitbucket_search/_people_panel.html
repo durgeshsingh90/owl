@@ -1,30 +1,50 @@
 <div class="bb-people-panel" data-people-panel>
     {% if people_panel_compact %}
     <div class="bb-people-panel__intro">
-        <strong>Latest Git commit by</strong>
-        <span>Committers from available history</span>
+        <div>
+            <strong>Latest Git commit by</strong>
+            <span>Committers from available history</span>
+        </div>
+        <button
+            class="bb-people-search-toggle"
+            type="button"
+            aria-label="Search people and groups"
+            aria-controls="{{ people_panel_id }}-search-panel"
+            aria-expanded="false"
+            title="Search people and groups"
+            data-people-search-toggle
+            {% if not git_people and not people_groups %}disabled{% endif %}
+        ></button>
     </div>
     {% else %}
     <header class="bb-people-panel__heading">
-        <div>
-            <span>Latest Git commit by</span>
-            <h2 id="{{ people_panel_id }}-heading">People</h2>
+        <div class="bb-people-panel__title">
+            <div class="bb-people-panel__label">
+                <h2 id="{{ people_panel_id }}-heading">People</h2>
+                <span
+                    class="bb-people-total"
+                    aria-label="{{ git_people_total }} committer{{ git_people_total|pluralize }} from available history"
+                    title="{{ git_people_total }} committer{{ git_people_total|pluralize }} from available history"
+                >{{ git_people_total }}</span>
+            </div>
+            <button
+                class="bb-people-search-toggle"
+                type="button"
+                aria-label="Search people and groups"
+                aria-controls="{{ people_panel_id }}-search-panel"
+                aria-expanded="false"
+                title="Search people and groups"
+                data-people-search-toggle
+                {% if not git_people and not people_groups %}disabled{% endif %}
+            ></button>
         </div>
-        <span
-            class="bb-people-total"
-            aria-label="{{ git_people_total }} committer{{ git_people_total|pluralize }} from available history"
-            title="{{ git_people_total }} committer{{ git_people_total|pluralize }} from available history"
-        >{{ git_people_total }}</span>
         <p>Committers from available history</p>
     </header>
     {% endif %}
 
     {% if git_people or people_groups %}
-    <div class="bb-people-search">
+    <div class="bb-people-search" id="{{ people_panel_id }}-search-panel" hidden data-people-search-panel>
         <label class="visually-hidden" for="{{ people_panel_id }}-search">Search committers and groups</label>
-        <span aria-hidden="true">
-            <svg viewBox="0 0 24 24" focusable="false"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4.5 4.5"/></svg>
-        </span>
         <input
             id="{{ people_panel_id }}-search"
             type="search"
@@ -33,20 +53,14 @@
             spellcheck="false"
             data-people-filter-search
         >
-        <p role="status" aria-live="polite" data-people-filter-search-status>{{ git_people_total }} committer{{ git_people_total|pluralize }} · {{ people_groups|length }} group{{ people_groups|length|pluralize }}</p>
+        <p role="status" aria-live="polite" data-people-filter-search-status>{{ git_people_total }} committer{{ git_people_total|pluralize }} · {{ people_groups|length }} group{{ people_groups|length|pluralize }} available</p>
     </div>
 
     <form class="bb-people-filter-form" method="get" action="{% url 'bitbucket_search:index' %}" data-people-filter-form>
         {% for name, value in people_filter_hidden_fields %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
         {% with selected_total=selected_people_count|add:selected_group_count %}
-        <div class="bb-people-filter-actions">
-            <span role="status" aria-live="polite" data-people-selection-status>{{ selected_people_count }} committer{{ selected_people_count|pluralize }} · {{ selected_group_count }} group{{ selected_group_count|pluralize }} selected</span>
-            <button type="submit" data-people-filter-submit>Apply people{% if selected_total %} ({{ selected_total }}){% endif %}</button>
-            {% if selected_total %}<a href="{{ people_filter_clear_href }}">Clear</a>{% endif %}
-        </div>
+        {% if selected_total %}<div class="bb-people-filter-clear"><a href="{{ people_filter_clear_href }}">Clear</a></div>{% endif %}
         {% endwith %}
-
-        <p class="bb-people-filter-rule">Choose any combination. A PDF matches when its latest Git commit is by any selected person or any member of a selected group.</p>
 
         {% if people_groups %}
         <section class="bb-people-filter-section" aria-labelledby="{{ people_panel_id }}-groups-heading">
@@ -54,7 +68,6 @@
                 <h3 id="{{ people_panel_id }}-groups-heading">Groups</h3>
                 <span>{{ people_groups|length }}</span>
             </div>
-            <p class="bb-people-group-note">Each group shows PDFs for any member.</p>
             <ul class="bb-people-list" data-people-groups-list>
                 {% for group in people_groups %}
                 <li data-people-filter-entry data-people-entry-kind="group" data-people-search-value="{{ group.name }} {{ group.member_names|join:' ' }}">
@@ -74,11 +87,6 @@
                 {% endfor %}
             </ul>
         </section>
-        {% else %}
-        <div class="bb-people-inline-empty" data-people-filter-entry data-people-entry-kind="group" data-people-search-value="">
-            <strong>No saved groups</strong>
-            <span>Create one from committers found in available history.</span>
-        </div>
         {% endif %}
 
         {% if git_people %}

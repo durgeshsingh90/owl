@@ -168,7 +168,7 @@ def test_bookmark_manager_workspace_uses_minimal_edges_and_fills_page_height():
             "/pdfs/repositories/",
             "bitbucket",
             "Bitbucket Search functions",
-            "Repositories",
+            None,
         ),
         (
             "/pdfs/status/",
@@ -231,15 +231,29 @@ def test_each_app_route_uses_its_own_left_sidebar(
 def test_bitbucket_search_uses_the_repository_workspace_shell(loopback_client):
     response = loopback_client.get("/pdfs/")
     html = response.content.decode()
+    desktop_functions = re.search(
+        r'<nav class="bb-rail-links" aria-label="Bitbucket Search functions">(.*?)</nav>',
+        html,
+        re.DOTALL,
+    )
 
     assert response.status_code == 200
     assert '<body class="bitbucket-shell" data-theme="dark">' in html
     assert 'class="bb-repository-rail" aria-labelledby="bb-repositories-heading"' in html
     assert 'class="bb-stage" aria-label="Bitbucket Search workspace"' in html
     assert 'class="bb-rail-links" aria-label="Bitbucket Search functions"' in html
+    assert desktop_functions is not None
+    assert "Search PDFs" in desktop_functions.group(1)
+    assert "Repositories" not in desktop_functions.group(1)
+    assert "Index &amp; refresh status" not in desktop_functions.group(1)
     assert 'href="/pdfs/" aria-current="page"' in html
     assert 'role="status" aria-live="polite" aria-atomic="true"' in html
-    assert "Add Repository" in html
+    assert re.search(
+        r'<summary class="bb-add-repository" aria-label="Add a new repository">.*?New.*?</summary>',
+        html,
+        re.DOTALL,
+    )
+    assert "Filter the repositories managed by this OWL workspace." not in html
     assert 'aria-label="System status"' in html
     assert "System status and help" not in html
     assert 'placeholder="Search repositories…" disabled' in html
@@ -254,15 +268,20 @@ def test_bitbucket_search_uses_the_repository_workspace_shell(loopback_client):
     assert "18,420 PDFs" not in html
     assert "Up to date" not in html
     assert "networking" not in html
-    assert (
-        '<button class="bb-control-button bb-search-submit" type="submit">Search</button>' in html
-    )
+    assert "bb-search-submit" not in html
+    assert 'name="page_size" value="200"' in html
     assert '<details class="bb-search-filter-menu">' in html
-    assert re.search(r'<button type="button" disabled>.*?Copy all \(0\)', html, re.DOTALL)
-    assert re.search(r'<button type="button" disabled>.*?Open all \(0\)', html, re.DOTALL)
-    assert re.search(r'<button type="button" disabled>.*?Export list', html, re.DOTALL)
-    assert '<button type="button" disabled aria-label="List view">' in html
-    assert '<button type="button" disabled aria-label="Grid view">' in html
+    assert re.search(
+        r'<button type="button" data-tooltip="Copy paths".*?Copy all \(0\)', html, re.DOTALL
+    )
+    assert re.search(
+        r'<button type="button" data-tooltip="Open files".*?Open all \(0\)', html, re.DOTALL
+    )
+    assert re.search(
+        r'<button type="button" data-tooltip="Export list".*?Export list', html, re.DOTALL
+    )
+    assert 'data-tooltip="List view" disabled aria-label="List view"' in html
+    assert 'data-tooltip="Grid view" disabled aria-label="Grid view"' in html
     assert "Rows per page" not in html
     assert 'aria-label="PDF result pages"' not in html
 

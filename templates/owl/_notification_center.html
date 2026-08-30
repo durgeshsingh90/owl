@@ -9,6 +9,10 @@
     <form class="notification-center__csrf" hidden aria-hidden="true">
         {% csrf_token %}
     </form>
+    <iframe name="owl-bitbucket-schedule-tick" title="Bitbucket schedule check" tabindex="-1" hidden aria-hidden="true"></iframe>
+    <form method="post" action="{% url 'bitbucket_search:repository_schedule_tick' %}" target="owl-bitbucket-schedule-tick" hidden aria-hidden="true" data-bitbucket-schedule-tick-form>
+        {% csrf_token %}
+    </form>
     <button
         class="notification-center__toggle"
         type="button"
@@ -75,7 +79,7 @@
         <div class="notification-center__empty" data-notification-empty hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6.5 9.8a5.5 5.5 0 0 1 11 0c0 6.1 2.5 6.7 2.5 6.7H4s2.5-.6 2.5-6.7Z"/><path d="M9.5 19a2.8 2.8 0 0 0 5 0"/></svg>
             <strong>No notifications yet</strong>
-            <small>Import, export, and Confluence refresh updates will appear here.</small>
+            <small>Import, export, Confluence, and Bitbucket refresh updates will appear here.</small>
         </div>
     </section>
 </div>

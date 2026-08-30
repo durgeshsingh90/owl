@@ -145,6 +145,9 @@
         const lastSuccess = center.querySelector("[data-notification-last-success]");
         const retryRow = center.querySelector("[data-notification-retry-row]");
         const retry = center.querySelector("[data-notification-retry]");
+        const bitbucketScheduleTickForm = center.querySelector(
+            "[data-bitbucket-schedule-tick-form]",
+        );
         const csrfToken = center.querySelector("input[name='csrfmiddlewaretoken']")?.value || "";
 
         if (!toggle || !panel || !list) {
@@ -487,8 +490,23 @@
             }
         };
 
+        const tickBitbucketSchedule = () => {
+            if (!bitbucketScheduleTickForm) {
+                return;
+            }
+            if (typeof bitbucketScheduleTickForm.requestSubmit === "function") {
+                bitbucketScheduleTickForm.requestSubmit();
+            } else {
+                bitbucketScheduleTickForm.submit();
+            }
+        };
+
         load();
         tickSchedule();
-        window.setInterval(tickSchedule, 60000);
+        tickBitbucketSchedule();
+        window.setInterval(() => {
+            tickSchedule();
+            tickBitbucketSchedule();
+        }, 60000);
     });
 })();

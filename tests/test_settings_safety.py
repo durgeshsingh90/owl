@@ -47,6 +47,48 @@ def test_trackable_repository_data_root_is_rejected_before_any_write(tmp_path):
         shutil.rmtree(unsafe_root, ignore_errors=True)
 
 
+def test_daily_repository_refresh_hour_above_twenty_three_is_rejected(tmp_path):
+    environment = _isolated_subprocess_environment(tmp_path)
+    environment["BITBUCKET_DAILY_REFRESH_LOCAL_HOUR"] = "24"
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import owl.settings"],
+        cwd=settings.BASE_DIR,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "BITBUCKET_DAILY_REFRESH_LOCAL_HOUR must be between 0 and 23" in result.stderr
+
+
+def test_bitbucket_inventory_and_search_page_sizes_are_capped_at_two_hundred(tmp_path):
+    environment = _isolated_subprocess_environment(tmp_path)
+    environment["BITBUCKET_PDF_PAGE_SIZE"] = "500"
+    environment["BITBUCKET_SEARCH_PAGE_SIZE"] = "500"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from owl import settings; "
+                "print(settings.BITBUCKET_PDF_PAGE_SIZE, settings.BITBUCKET_SEARCH_PAGE_SIZE)"
+            ),
+        ],
+        cwd=settings.BASE_DIR,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "200 200"
+
+
 def test_test_settings_ignore_an_environment_file_with_external_values(tmp_path):
     marker = "synthetic-env-pat-never-valid-7b18e3f2"
     environment_file = tmp_path / "private.env"

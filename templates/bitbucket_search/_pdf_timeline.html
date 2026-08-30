@@ -20,10 +20,6 @@
                 <span>
                     <strong data-pdf-filename>{{ document.filename }}</strong>
                     {% if row.history_label %}<small>{{ row.history_label }}</small>{% endif %}
-                    <small class="bb-index-health bb-index-health--{{ document.index_state }}">
-                        {{ document.get_index_state_display }}
-                        {% if document.last_indexed_at %} · {{ document.last_indexed_at|date:"j M Y, H:i" }}{% endif %}
-                    </small>
                 </span>
             </span>
         </td>
@@ -73,9 +69,8 @@
                     {% else %}
                     <input type="hidden" name="return_page" value="{{ timeline_page_number }}">
                     {% endif %}
-                    <button type="submit"{% if not document_open_url %} disabled{% endif %} aria-label="Open {{ document.filename }}">
+                    <button type="submit" data-tooltip="Open file"{% if not document_open_url %} disabled{% endif %} aria-label="Open file: {{ document.filename }}">
                         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 3.5h8l4 4v13H6v-17Z"/><path d="M14 3.5v4h4M9 12h6M12 9v6"/></svg>
-                        <span class="visually-hidden">Open PDF</span>
                     </button>
                 </form>
                 {% url 'bitbucket_search:document_reveal' document.pk as document_reveal_url %}
@@ -86,9 +81,8 @@
                     {% else %}
                     <input type="hidden" name="return_page" value="{{ timeline_page_number }}">
                     {% endif %}
-                    <button type="submit"{% if not document_reveal_url %} disabled{% endif %} aria-label="Open folder containing {{ document.filename }}">
+                    <button type="submit" data-tooltip="Open folder"{% if not document_reveal_url %} disabled{% endif %} aria-label="Open folder containing {{ document.filename }}">
                         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 7.5h6l1.7 2h9.3v9.5h-17V7.5Z"/><path d="M5 7.5V5h5l1.5 2.5"/></svg>
-                        <span class="visually-hidden">Open folder</span>
                     </button>
                 </form>
             </div>

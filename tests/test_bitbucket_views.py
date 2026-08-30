@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from django.db import OperationalError
 from django.test import Client, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -38,16 +39,55 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     html = response.content.decode()
 
     assert response.status_code == 200
-    assert ">Add Repository<" in html
+    assert '<summary class="bb-add-repository" aria-label="Add a new repository">' in html
+    assert (
+        '<summary aria-label="Add a new repository"><span aria-hidden="true">+</span> New</summary>'
+        in html
+    )
     assert 'action="/pdfs/repositories/add/"' in html
     assert "Add &amp; clone in background" in html
     assert "Allowed host:" in html
     assert "bitbucket.org" in html
     assert 'placeholder="Search repositories…" disabled' in html
+    assert "Filter the repositories managed by this OWL workspace." not in html
+    assert 'aria-describedby="bb-repository-search-note"' not in html
     assert 'data-repository-status-url="/pdfs/repositories/status/"' in html
     assert 'data-daily-refresh-enabled="true"' in html
     assert 'data-catalog-publication-signature="' in html
-    assert "bitbucket_search/bitbucket_search.js?v=people-groups-v1" in html
+    assert "data-bitbucket-schedule-tick-form" in html
+    assert 'action="/pdfs/repositories/schedule/tick/"' in html
+    assert 'target="owl-bitbucket-schedule-tick"' in html
+    assert "bitbucket_search/bitbucket_search.css?v=search-layout-v1" in html
+    assert "bitbucket_search/bitbucket_search.js?v=people-rail-v1" in html
+
+
+def test_topbar_and_desktop_rail_omit_verbose_sync_status_navigation(loopback_client):
+    response = loopback_client.get(reverse("bitbucket_search:index"))
+    html = response.content.decode()
+    topbar = re.search(r'<header class="bb-topbar">(?P<body>.*?)</header>', html, re.DOTALL)
+    rail = re.search(
+        r'<nav class="bb-rail-links" aria-label="Bitbucket Search functions">(?P<body>.*?)</nav>',
+        html,
+        re.DOTALL,
+    )
+
+    assert response.status_code == 200
+    assert topbar is not None
+    assert rail is not None
+    assert "Sync status" not in topbar.group("body")
+    assert "bb-sync-status" not in topbar.group("body")
+    assert "data-sync-summary" not in topbar.group("body")
+    assert "Search PDFs" in rail.group("body")
+    assert "Repositories" not in rail.group("body")
+    assert "Index &amp; refresh status" not in rail.group("body")
+
+    static_root = Path(__file__).parents[1] / "static" / "bitbucket_search"
+    assert "bb-sync-status" not in (static_root / "bitbucket_search.css").read_text(
+        encoding="utf-8"
+    )
+    assert "data-sync-summary" not in (static_root / "bitbucket_search.js").read_text(
+        encoding="utf-8"
+    )
 
 
 def _workspace_refresh_form(html: str, *, mobile: bool = False) -> str:
@@ -59,6 +99,16 @@ def _workspace_refresh_form(html: str, *, mobile: bool = False) -> str:
     )
     assert match is not None
     return match.group(0)
+
+
+def _repository_cards(html: str, repository_id: int) -> tuple[str, ...]:
+    return tuple(
+        re.findall(
+            rf'<li class="bb-repository-card" data-repository-id="{repository_id}".*?</li>',
+            html,
+            flags=re.DOTALL,
+        )
+    )
 
 
 def test_refresh_all_controls_are_accessible_and_truthful_when_unavailable(loopback_client):
@@ -189,6 +239,8 @@ def test_empty_pdf_timeline_keeps_search_available_and_explains_the_zero_state(
     assert 'placeholder="Type a phrase, then press Enter…"' in html
     assert "data-pdf-search-form" in html
     assert "data-pdf-search-input" in html
+    assert "bb-search-submit" not in html
+    assert 'name="page_size" value="200"' in html
     assert 'data-pdf-timeline data-next-page-url=""' in html
     assert 'class="bb-load-older" hidden data-load-older-container' in html
     assert "data-pdf-row" not in html
@@ -207,6 +259,9 @@ def test_responsive_pdf_rows_override_the_generic_block_row_rule():
     assert ".bb-mobile-refresh-all {\n        display: block;" in responsive_css
     assert ".bb-results-table tr," in responsive_css
     assert ".bb-results-table .bb-document-row {\n        display: grid;" in responsive_css
+    assert ".bb-document-row td.bb-document-cell--actions {\n    overflow: visible;" in css
+    assert ".bb-document-actions button[data-tooltip]:hover::after," in css
+    assert ".bb-document-actions button[data-tooltip]:focus-visible::after" in css
 
     compact_start = responsive_end
     compact_end = css.index("@media (max-width: 390px)", compact_start)
@@ -325,12 +380,15 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_load_older_fallback(
     assert network_row.count('name="csrfmiddlewaretoken"') == 2
     assert network_row.count('name="return_page" value="1"') == 2
     assert 'type="submit" disabled' not in network_row
+    assert "bb-index-health" not in network_row
     archived_row_start = html.index(f'data-document-id="{archived_plan.pk}"')
     archived_row = html[archived_row_start : html.index("</tr>", archived_row_start)]
     assert archived_row.count("Unavailable") == 2
     assert archived_row.count('method="post"') == 2
-    assert html.count("Open PDF") == 2
-    assert html.count('<span class="visually-hidden">Open folder</span>') == 2
+    assert "bb-index-health" not in archived_row
+    assert html.count('data-tooltip="Open file"') == 2
+    assert html.count('data-tooltip="Open folder"') == 2
+    assert 'aria-label="Open file: Archive.pdf"' in archived_row
     assert 'aria-label="Open folder containing Archive.pdf"' in archived_row
     assert f'data-next-page-url="{next_page_url}"' in html
     assert f'href="{next_page_url}" data-load-older' in html
@@ -383,6 +441,8 @@ def test_pdf_timeline_fragment_preserves_boundary_group_key(loopback_client):
     assert f'data-document-id="{older_document.pk}"' in payload["html"]
     assert 'data-timeline-group-key="today"' in payload["html"]
     assert payload["html"].count('name="return_page" value="2"') == 2
+    assert 'data-tooltip="Open file"' in payload["html"]
+    assert 'data-tooltip="Open folder"' in payload["html"]
 
     fallback_page = loopback_client.get(next_page_url)
     fallback_html = fallback_page.content.decode()
@@ -408,7 +468,7 @@ def test_repository_destination_expands_desktop_and_mobile_add_panels(loopback_c
 
 
 @override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
-def test_add_repository_returns_immediately_and_deduplicates_active_job(
+def test_add_repository_returns_immediately_and_deduplicates_active_job_and_page_tick(
     loopback_client,
     monkeypatch,
 ):
@@ -426,18 +486,55 @@ def test_add_repository_returns_immediately_and_deduplicates_active_job(
         {"repository_url": "https://bitbucket.org/workspace/architecture.git"},
         HTTP_X_REQUESTED_WITH="XMLHttpRequest",
     )
+    immediate_tick = loopback_client.post(
+        reverse("bitbucket_search:repository_schedule_tick"),
+    )
 
     assert first.status_code == 202
     assert first.json()["state"] == "queued"
     assert second.status_code == 202
     assert second.json()["state"] == "already_running"
+    assert immediate_tick.status_code == 200
+    assert immediate_tick.json() == {
+        "state": "waiting",
+        "queued": 0,
+        "workersStarted": 0,
+    }
     assert BitbucketRepository.objects.count() == 1
     assert RepositorySyncJob.objects.count() == 1
     repository = BitbucketRepository.objects.get()
     assert repository.sync_state == RepositorySyncState.QUEUED
     assert repository.remote_url == "ssh://git@bitbucket.org/workspace/architecture.git"
-    assert launched.call_count == 2
-    launched.assert_called_with()
+    launched.assert_called_once_with()
+
+
+@override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
+def test_manual_repository_wakeup_is_left_to_the_run_owl_resident_pool(
+    loopback_client,
+    monkeypatch,
+):
+    launched = Mock()
+    monkeypatch.setattr(
+        "bitbucket_search.views.resident_repository_workers_active",
+        Mock(return_value=True),
+    )
+    monkeypatch.setattr("bitbucket_search.views.launch_sync_worker", launched)
+
+    response = loopback_client.post(
+        reverse("bitbucket_search:repository_add"),
+        {"repository_url": "git@bitbucket.org:workspace/resident.git"},
+        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+    )
+    immediate_tick = loopback_client.post(
+        reverse("bitbucket_search:repository_schedule_tick"),
+    )
+
+    assert response.status_code == 202
+    assert response.json()["state"] == "queued"
+    assert immediate_tick.status_code == 200
+    assert immediate_tick.json()["state"] == "waiting"
+    assert RepositorySyncJob.objects.filter(status=RepositorySyncJobStatus.QUEUED).count() == 1
+    launched.assert_not_called()
 
 
 def test_queued_repository_job_does_not_expire_while_waiting_for_a_worker():
@@ -588,8 +685,18 @@ def test_repository_poller_tracks_daily_idle_and_catalog_publication_contract():
     assert "workspace.dataset.dailyRefreshEnabled" in javascript
     assert "workspace.dataset.catalogPublicationSignature" in javascript
     assert "catalogPublicationChanged" in javascript
-    assert "repository.automatic || {}" in javascript
-    assert "bb-repository-card__automatic--${automatic.state" in javascript
+    assert "`${repository.name}: ${repository.stateLabel}`" in javascript
+    assert "`${repository.pdfCount} PDF · ${repository.vsdxCount} VSDX`" in javascript
+    assert "refreshButton.disabled = repository.active;" in javascript
+    assert "card.dataset.repositorySearchValue || card.textContent" in javascript
+    assert "repository.automatic || {}" not in javascript
+    assert "data-repository-catalog-status" not in javascript
+    assert 'changed.closest("[data-people-filter-form]")' in javascript
+    assert "form.requestSubmit();" in javascript
+    assert 'panel.querySelector("[data-people-search-toggle]")' in javascript
+    assert 'searchToggle.setAttribute("aria-expanded", "true")' in javascript
+    assert '.normalize("NFKD")' in javascript
+    assert "Apply people" not in javascript
 
 
 def test_ready_repository_renders_green_tick_counts_and_refresh_action(loopback_client):
@@ -607,19 +714,32 @@ def test_ready_repository_renders_green_tick_counts_and_refresh_action(loopback_
 
     response = loopback_client.get(reverse("bitbucket_search:index"))
     html = response.content.decode()
+    cards = _repository_cards(html, repository.pk)
 
     assert response.status_code == 200
-    assert 'data-repository-state="ready"' in html
-    assert "bb-repository-state--ready" in html
-    assert "12 PDF · 3 VSDX" in html
-    assert f'action="/pdfs/repositories/{repository.pk}/refresh/"' in html
-    assert "Daily refresh due" in html
-    assert "data-repository-automatic" in html
-    assert "No PDF catalogue published yet" in html
+    assert len(cards) == 2
+    for card in cards:
+        assert 'data-repository-state="ready"' in card
+        assert "bb-repository-state--ready" in card
+        assert 'role="img" aria-label="networking: Ready"' in card
+        assert "<strong data-repository-name>networking</strong>" in card
+        assert "<small data-repository-documents>12 PDF · 3 VSDX</small>" in card
+        assert f'action="/pdfs/repositories/{repository.pk}/refresh/"' in card
+        assert 'title="Refresh repository"' in card
+        assert 'aria-label="Refresh networking in the background"' in card
+        assert "Repository is ready." not in card
+        assert "Daily refresh due" not in card
+        assert "data-repository-state-label" not in card
+        assert "data-repository-message" not in card
+        assert "data-repository-automatic" not in card
+        assert "data-repository-catalog-status" not in card
+        assert "No PDF catalogue published yet" not in card
     assert "<dd data-total-repositories>1</dd>" in html
 
 
-def test_failed_daily_refresh_shows_retry_time_and_retained_pdf_catalogue(loopback_client):
+def test_failed_daily_refresh_uses_compact_failure_card_and_keeps_status_detail(
+    loopback_client,
+):
     failed_at = timezone.now() - timedelta(hours=1)
     repository = BitbucketRepository.objects.create(
         display_name="retrying",
@@ -644,14 +764,306 @@ def test_failed_daily_refresh_shows_retry_time_and_retained_pdf_catalogue(loopba
 
     response = loopback_client.get(reverse("bitbucket_search:index"))
     html = response.content.decode()
+    cards = _repository_cards(html, repository.pk)
 
     assert response.status_code == 200
-    assert 'data-repository-state="failed"' in html
-    assert "bb-repository-state--failed" in html
-    assert "bb-repository-card__automatic--retry_wait" in html
-    assert "Retry scheduled" in html
-    assert "Automatic retry 1 of 3" in html
-    assert "Catalogue retained from" in html
+    assert len(cards) == 2
+    for card in cards:
+        assert 'data-repository-state="failed"' in card
+        assert "bb-repository-state--failed" in card
+        assert 'role="img" aria-label="retrying: Failed"' in card
+        assert "<strong data-repository-name>retrying</strong>" in card
+        assert "<small data-repository-documents>5 PDF · 0 VSDX</small>" in card
+        assert f'action="/pdfs/repositories/{repository.pk}/refresh/"' in card
+        assert "The remote was temporarily unavailable." not in card
+        assert "Retry scheduled" not in card
+        assert "Automatic retry 1 of 3" not in card
+        assert "Catalogue retained from" not in card
+        assert "data-repository-automatic" not in card
+        assert "data-repository-catalog-status" not in card
+
+    status_response = loopback_client.get(reverse("bitbucket_search:index_status"))
+    status_html = status_response.content.decode()
+
+    assert status_response.status_code == 200
+    assert "The remote was temporarily unavailable." in status_html
+    assert "Retained from" in status_html
+
+
+def test_repository_schedule_tick_is_post_only_csrf_protected_and_loopback_only(
+    loopback_client,
+):
+    path = reverse("bitbucket_search:repository_schedule_tick")
+
+    assert loopback_client.get(path).status_code == 405
+
+    csrf_client = Client(
+        enforce_csrf_checks=True,
+        HTTP_HOST="127.0.0.1",
+        REMOTE_ADDR="127.0.0.1",
+    )
+    assert csrf_client.post(path).status_code == 403
+
+    page = csrf_client.get(reverse("bitbucket_search:index"))
+    token = page.cookies["csrftoken"].value
+    accepted = csrf_client.post(
+        path,
+        {"csrfmiddlewaretoken": token},
+        HTTP_ORIGIN="http://127.0.0.1",
+    )
+    assert accepted.status_code == 200
+    assert accepted.json() == {
+        "state": "waiting",
+        "queued": 0,
+        "workersStarted": 0,
+    }
+
+    remote_client = Client(HTTP_HOST="127.0.0.1", REMOTE_ADDR="192.0.2.20")
+    assert remote_client.post(path).status_code == 403
+
+
+def test_repository_schedule_tick_uses_hidden_form_navigation_for_opaque_origins():
+    javascript_path = Path(__file__).parents[1] / "static" / "owl" / "owl.js"
+    javascript = javascript_path.read_text(encoding="utf-8")
+
+    assert '"[data-bitbucket-schedule-tick-form]"' in javascript
+    assert "bitbucketScheduleTickForm.requestSubmit();" in javascript
+    assert "bitbucketScheduleTickForm.submit();" in javascript
+    assert "center.dataset.bitbucketScheduleTickUrl" not in javascript
+
+
+def test_repository_schedule_tick_returns_busy_when_daily_queue_hits_sqlite_lock(
+    loopback_client,
+    monkeypatch,
+):
+    queue = Mock(side_effect=OperationalError("database is locked"))
+    wake = Mock()
+    monkeypatch.setattr("bitbucket_search.views.queue_due_daily_repository_refreshes", queue)
+    monkeypatch.setattr("bitbucket_search.views._wake_queued_repository_workers", wake)
+
+    response = loopback_client.post(reverse("bitbucket_search:repository_schedule_tick"))
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "state": "busy",
+        "queued": 0,
+        "workersStarted": 0,
+    }
+    queue.assert_called_once_with()
+    wake.assert_not_called()
+
+
+def test_repository_schedule_tick_returns_busy_when_wakeup_reservation_hits_sqlite_lock(
+    loopback_client,
+    monkeypatch,
+):
+    queued = (Mock(),)
+    queue = Mock(return_value=queued)
+    wake = Mock(side_effect=OperationalError("database is locked"))
+    monkeypatch.setattr("bitbucket_search.views.queue_due_daily_repository_refreshes", queue)
+    monkeypatch.setattr("bitbucket_search.views._wake_queued_repository_workers", wake)
+
+    response = loopback_client.post(reverse("bitbucket_search:repository_schedule_tick"))
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "state": "busy",
+        "queued": 1,
+        "workersStarted": 0,
+    }
+    queue.assert_called_once_with()
+    wake.assert_called_once_with()
+
+
+def test_repository_schedule_tick_queues_due_work_wakes_worker_and_is_idempotent(
+    loopback_client,
+    monkeypatch,
+    settings,
+):
+    settings.BITBUCKET_DAILY_REFRESH_ENABLED = True
+    settings.BITBUCKET_DAILY_REFRESH_LOCAL_HOUR = 11
+    settings.BITBUCKET_MAX_REPO_WORKERS = 2
+    observed_at = datetime(2026, 8, 30, 11, tzinfo=UTC)
+    repository = BitbucketRepository.objects.create(
+        display_name="daily-tick",
+        canonical_remote_key="bitbucket.org/workspace/daily-tick",
+        remote_url="ssh://git@bitbucket.org/workspace/daily-tick.git",
+    )
+    launched = Mock()
+    monkeypatch.setattr(repository_sync.timezone, "now", Mock(return_value=observed_at))
+    monkeypatch.setattr("bitbucket_search.views.launch_sync_worker", launched)
+    path = reverse("bitbucket_search:repository_schedule_tick")
+
+    with timezone.override("UTC"):
+        response = loopback_client.post(path)
+        repeated = loopback_client.post(path)
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "state": "queued",
+        "queued": 1,
+        "workersStarted": 1,
+    }
+    assert repeated.status_code == 200
+    assert repeated.json() == {
+        "state": "waiting",
+        "queued": 0,
+        "workersStarted": 0,
+    }
+    assert launched.call_count == 1
+    job = RepositorySyncJob.objects.get(repository=repository)
+    repository.refresh_from_db()
+    assert job.operation == RepositorySyncOperation.CLONE
+    assert job.trigger == RepositorySyncTrigger.DAILY
+    assert job.scheduled_day == observed_at.date()
+    assert job.automatic_retry_number == 0
+    assert job.status == RepositorySyncJobStatus.QUEUED
+    assert repository.sync_state == RepositorySyncState.QUEUED
+
+
+def test_repository_schedule_tick_reports_preexisting_worker_wakeup_once(
+    loopback_client,
+    monkeypatch,
+):
+    repository = BitbucketRepository.objects.create(
+        display_name="preexisting-queue",
+        canonical_remote_key="bitbucket.org/workspace/preexisting-queue",
+        remote_url="ssh://git@bitbucket.org/workspace/preexisting-queue.git",
+        sync_state=RepositorySyncState.QUEUED,
+    )
+    RepositorySyncJob.objects.create(
+        repository=repository,
+        operation=RepositorySyncOperation.CLONE,
+    )
+    launched = Mock()
+    monkeypatch.setattr("bitbucket_search.views.launch_sync_worker", launched)
+    path = reverse("bitbucket_search:repository_schedule_tick")
+
+    response = loopback_client.post(path)
+    repeated = loopback_client.post(path)
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "state": "worker_started",
+        "queued": 0,
+        "workersStarted": 1,
+    }
+    assert repeated.status_code == 200
+    assert repeated.json() == {
+        "state": "waiting",
+        "queued": 0,
+        "workersStarted": 0,
+    }
+    launched.assert_called_once_with()
+
+
+def test_repository_schedule_tick_retries_a_stale_unclaimed_worker_wakeup(
+    loopback_client,
+    monkeypatch,
+):
+    repository = BitbucketRepository.objects.create(
+        display_name="stale-worker-wakeup",
+        canonical_remote_key="bitbucket.org/workspace/stale-worker-wakeup",
+        remote_url="ssh://git@bitbucket.org/workspace/stale-worker-wakeup.git",
+        sync_state=RepositorySyncState.QUEUED,
+    )
+    RepositorySyncJob.objects.create(
+        repository=repository,
+        operation=RepositorySyncOperation.CLONE,
+    )
+    observed_at = datetime(2026, 8, 30, 11, tzinfo=UTC)
+    clock = Mock(return_value=observed_at)
+    launched = Mock()
+    monkeypatch.setattr(repository_sync.timezone, "now", clock)
+    monkeypatch.setattr("bitbucket_search.views.launch_sync_worker", launched)
+    path = reverse("bitbucket_search:repository_schedule_tick")
+
+    with timezone.override("UTC"):
+        first = loopback_client.post(path)
+        clock.return_value = observed_at + timedelta(seconds=29)
+        still_reserved = loopback_client.post(path)
+        clock.return_value = observed_at + timedelta(seconds=31)
+        retried = loopback_client.post(path)
+
+    assert first.json()["state"] == "worker_started"
+    assert still_reserved.json()["state"] == "waiting"
+    assert retried.json()["state"] == "worker_started"
+    assert launched.call_count == 2
+
+
+def test_repository_schedule_tick_leaves_work_for_the_run_owl_resident_pool(
+    loopback_client,
+    monkeypatch,
+):
+    repository = BitbucketRepository.objects.create(
+        display_name="resident-pool",
+        canonical_remote_key="bitbucket.org/workspace/resident-pool",
+        remote_url="ssh://git@bitbucket.org/workspace/resident-pool.git",
+        sync_state=RepositorySyncState.QUEUED,
+    )
+    RepositorySyncJob.objects.create(
+        repository=repository,
+        operation=RepositorySyncOperation.CLONE,
+    )
+    launched = Mock()
+    monkeypatch.setattr(
+        "bitbucket_search.views.resident_repository_workers_active",
+        Mock(return_value=True),
+    )
+    monkeypatch.setattr("bitbucket_search.views.launch_sync_worker", launched)
+
+    response = loopback_client.post(reverse("bitbucket_search:repository_schedule_tick"))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "state": "waiting",
+        "queued": 0,
+        "workersStarted": 0,
+    }
+    launched.assert_not_called()
+
+
+def test_repository_schedule_tick_keeps_durable_job_when_worker_wakeup_fails(
+    loopback_client,
+    monkeypatch,
+    settings,
+):
+    settings.BITBUCKET_DAILY_REFRESH_ENABLED = True
+    settings.BITBUCKET_DAILY_REFRESH_LOCAL_HOUR = 11
+    observed_at = datetime(2026, 8, 30, 11, tzinfo=UTC)
+    repository = BitbucketRepository.objects.create(
+        display_name="durable-daily-tick",
+        canonical_remote_key="bitbucket.org/workspace/durable-daily-tick",
+        remote_url="ssh://git@bitbucket.org/workspace/durable-daily-tick.git",
+    )
+    launched = Mock(side_effect=OSError("synthetic launch failure"))
+    monkeypatch.setattr(repository_sync.timezone, "now", Mock(return_value=observed_at))
+    monkeypatch.setattr("bitbucket_search.views.launch_sync_worker", launched)
+    path = reverse("bitbucket_search:repository_schedule_tick")
+
+    with timezone.override("UTC"):
+        response = loopback_client.post(path)
+        repeated = loopback_client.post(path)
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "state": "worker_wakeup_failed",
+        "queued": 1,
+        "workersStarted": 0,
+    }
+    assert repeated.status_code == 202
+    assert repeated.json() == {
+        "state": "worker_wakeup_failed",
+        "queued": 0,
+        "workersStarted": 0,
+    }
+    assert launched.call_count == 2
+    assert RepositorySyncJob.objects.filter(repository=repository).count() == 1
+    job = RepositorySyncJob.objects.get(repository=repository)
+    repository.refresh_from_db()
+    assert job.status == RepositorySyncJobStatus.QUEUED
+    assert job.error_code == ""
+    assert repository.sync_state == RepositorySyncState.QUEUED
 
 
 def test_refresh_is_post_only_deduplicated_and_loopback_only(loopback_client, monkeypatch):
@@ -672,8 +1084,17 @@ def test_refresh_is_post_only_deduplicated_and_loopback_only(loopback_client, mo
 
     assert loopback_client.get(path).status_code == 405
     response = loopback_client.post(path, HTTP_X_REQUESTED_WITH="XMLHttpRequest")
+    immediate_tick = loopback_client.post(
+        reverse("bitbucket_search:repository_schedule_tick"),
+    )
     assert response.status_code == 202
     assert response.json()["state"] == "already_running"
+    assert immediate_tick.status_code == 200
+    assert immediate_tick.json() == {
+        "state": "waiting",
+        "queued": 0,
+        "workersStarted": 0,
+    }
     launched.assert_called_once_with()
 
     RepositorySyncJob.objects.update(
@@ -747,6 +1168,9 @@ def test_refresh_all_queues_every_enabled_repository_and_starts_bounded_workers(
 
     assert loopback_client.get(path).status_code == 405
     response = loopback_client.post(path, HTTP_X_REQUESTED_WITH="XMLHttpRequest")
+    immediate_tick = loopback_client.post(
+        reverse("bitbucket_search:repository_schedule_tick"),
+    )
 
     assert response.status_code == 202
     assert response.json() == {
@@ -760,6 +1184,12 @@ def test_refresh_all_queues_every_enabled_repository_and_starts_bounded_workers(
         "alreadyQueued": 1,
         "alreadyRunning": 1,
         "workersStarted": 1,
+    }
+    assert immediate_tick.status_code == 200
+    assert immediate_tick.json() == {
+        "state": "waiting",
+        "queued": 0,
+        "workersStarted": 0,
     }
     assert launched.call_count == 1
     assert RepositorySyncJob.objects.filter(repository=ready).count() == 1

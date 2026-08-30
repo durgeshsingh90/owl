@@ -21,6 +21,12 @@ def _lock_path(repository_id: int) -> Path:
     return lock_root / f"repository-{repository_id}.lock"
 
 
+def _worker_wakeup_lock_path() -> Path:
+    lock_root = Path(settings.BITBUCKET_TEMP_ROOT) / "service-locks"
+    lock_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return lock_root / "repository-worker-wakeup-reservations.lock"
+
+
 def _acquire(handle, *, blocking: bool) -> None:
     if os.name == "nt":
         import msvcrt
@@ -59,17 +65,7 @@ def _release(handle) -> None:
 
 
 @contextmanager
-def repository_checkout_lock(
-    repository_id: int,
-    *,
-    blocking: bool,
-) -> Iterator[None]:
-    """Hold OWL's exclusive mutation/read gate for one managed checkout."""
-
-    if isinstance(repository_id, bool) or not isinstance(repository_id, int) or repository_id <= 0:
-        raise ValueError("repository_id must be a positive integer")
-
-    lock_path = _lock_path(repository_id)
+def _exclusive_file_lock(lock_path: Path, *, blocking: bool) -> Iterator[None]:
     with lock_path.open("a+b") as handle:
         if handle.seek(0, os.SEEK_END) == 0:
             handle.write(b"\0")
@@ -87,6 +83,29 @@ def repository_checkout_lock(
             yield
         finally:
             _release(handle)
+
+
+@contextmanager
+def repository_checkout_lock(
+    repository_id: int,
+    *,
+    blocking: bool,
+) -> Iterator[None]:
+    """Hold OWL's exclusive mutation/read gate for one managed checkout."""
+
+    if isinstance(repository_id, bool) or not isinstance(repository_id, int) or repository_id <= 0:
+        raise ValueError("repository_id must be a positive integer")
+
+    with _exclusive_file_lock(_lock_path(repository_id), blocking=blocking):
+        yield
+
+
+@contextmanager
+def repository_worker_wakeup_lock() -> Iterator[None]:
+    """Serialize queued-worker launch reservations across OWL web processes."""
+
+    with _exclusive_file_lock(_worker_wakeup_lock_path(), blocking=True):
+        yield
 
 
 @contextmanager

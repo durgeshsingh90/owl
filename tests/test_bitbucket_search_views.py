@@ -119,7 +119,7 @@ def test_repository_and_index_filters_are_search_mode_without_phrase_chips(clien
     assert "data-pdf-timeline" not in html
 
 
-def test_search_html_paginates_at_fifty_and_preserves_canonical_query(client):
+def test_search_html_paginates_at_two_hundred_and_preserves_canonical_query(client):
     repository = _repository("Guides")
     PDFDocument.objects.bulk_create(
         [
@@ -128,7 +128,7 @@ def test_search_html_paginates_at_fifty_and_preserves_canonical_query(client):
                 filename=f"Guide {number:02d}.pdf",
                 relative_path=f"docs/Guide {number:02d}.pdf",
             )
-            for number in range(51)
+            for number in range(201)
         ]
     )
 
@@ -136,15 +136,15 @@ def test_search_html_paginates_at_fifty_and_preserves_canonical_query(client):
     html = response.content.decode()
 
     assert response.status_code == 200
-    assert html.count("data-pdf-row") == 50
-    assert "1–50 of 51 matching PDFs" in html
-    assert "up to 50 results per page" in html
+    assert html.count("data-pdf-row") == 200
+    assert "1–200 of 201 matching PDFs" in html
+    assert "up to 200 results per page" in html
     assert "chip=Guide" in html
     assert "page=2" in html
-    assert "page_size=50" in html
-    assert "Copy page paths (50)" in html
-    assert "Open page PDFs (50)" in html
-    assert "Open 50 PDFs?" in html
+    assert "page_size=200" in html
+    assert "Copy page paths (200)" in html
+    assert "Open page PDFs (200)" in html
+    assert "Open 200 PDFs?" in html
     assert 'data-confirm-threshold="10"' in html
 
     second_page = client.get(
@@ -245,7 +245,7 @@ def test_invalid_search_state_is_explained_without_disabling_search(client):
     assert "data-pdf-search-input disabled" not in html
 
 
-def test_search_input_label_does_not_wrap_chip_remove_buttons_and_submits_scope_sentinel(client):
+def test_search_input_is_full_width_enter_first_and_submits_scope_sentinel(client):
     response = client.get(reverse("bitbucket_search:index"), {"q": "needle"})
     html = response.content.decode()
 
@@ -254,6 +254,15 @@ def test_search_input_label_does_not_wrap_chip_remove_buttons_and_submits_scope_
     assert 'for="bb-pdf-search-input"' in html
     assert 'id="bb-pdf-search-input"' in html
     assert 'name="scope_present" value="1"' in html
+    assert 'name="page_size" value="200"' in html
+    assert "bb-search-submit" not in html
+
+    stylesheet = (
+        Path(__file__).parents[1] / "static" / "bitbucket_search" / "bitbucket_search.css"
+    ).read_text(encoding="utf-8")
+    assert "grid-template-columns: minmax(0, 1fr) auto;" in stylesheet
+    assert "minmax(0, 670px)" not in stylesheet
+    assert ".bb-search-submit" not in stylesheet
 
 
 def test_empty_input_backspace_removes_the_last_chip_and_submits():
@@ -262,6 +271,7 @@ def test_empty_input_backspace_removes_the_last_chip_and_submits():
     ).read_text(encoding="utf-8")
 
     assert 'event.key === "Backspace"' in javascript
+    assert 'event.key !== "Enter"' in javascript
     assert '"[data-pdf-search-chip]:last-of-type"' in javascript
     assert "lastChip.remove();" in javascript
     assert "searchForm.submit();" in javascript
