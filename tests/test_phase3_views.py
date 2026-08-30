@@ -2256,6 +2256,7 @@ def test_selected_live_bookmarks_expose_only_safe_local_open_endpoints(loopback_
 
     assert "data-open-url" not in checkbox(deleted)
     assert "data-open-selected" in html
+    assert "data-open-selected-button" in html
     assert "data-details-open-form" in html
     assert "data-details-open-button" in html
     assert Bookmark.objects.get(pk=first.pk).open_count == 1
@@ -2349,11 +2350,19 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert "data-tree-collapse-all" in html
     assert "data-tree-select-all" in html
     assert 'aria-label="Select all bookmarks shown in the tree"' in html
+    open_selected_button = re.search(
+        r"<button\b(?=[^>]*\bdata-open-selected-button)(?=[^>]*\bdisabled)[^>]*>",
+        html,
+        re.DOTALL,
+    )
+    assert open_selected_button is not None
+    assert 'aria-label="Open selected bookmarks"' in open_selected_button.group(0)
+    assert 'title="Select bookmarks to open"' in open_selected_button.group(0)
     assert 'id="bulk-delete-bookmarks"' in html
     assert "data-delete-selected" in html
     assert 'data-delete-locked="true"' in html
     assert "🔒" in html
-    assert "bookmarks.js?v=workspace-ui-v22" in html
+    assert "bookmarks.js?v=workspace-ui-v23" in html
     assert f'name="bookmark_ids" value="{bookmark.pk}"' in html
     assert 'form="bulk-delete-bookmarks"' in html
     assert "data-productivity-form" in html
@@ -2421,6 +2430,10 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
         "window.clearTimeout(searchTimer)",
         "element.textContent = payload.notes",
         "data-external-open-form",
+        'document.querySelector("[data-open-selected-button]")',
+        'openSelectedButton?.addEventListener("click"',
+        "selectedOpenRequests(checkedBookmarks)",
+        "selectedCount - requests.length",
         'form.matches("[data-details-open-form]")',
         "selectedBookmarkChecks()",
         'window.open("about:blank", "_blank")',

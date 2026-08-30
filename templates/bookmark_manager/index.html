@@ -2,7 +2,7 @@
 {% load static bookmark_display %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bookmark_manager/bookmarks.css' %}?v=workspace-ui-v22">
+<link rel="stylesheet" href="{% static 'bookmark_manager/bookmarks.css' %}?v=workspace-ui-v23">
 {% endblock %}
 
 {% block body_class %}bookmark-manager-shell{% endblock %}
@@ -278,6 +278,20 @@
                         <span>Select all</span>
                     </label>
                     <span class="tree-selection-count" role="status" aria-live="polite" data-tree-selection-count>0 selected</span>
+                    <button
+                        class="tree-open-selected"
+                        type="button"
+                        aria-label="Open selected bookmarks"
+                        title="Select bookmarks to open"
+                        disabled
+                        data-open-selected-button
+                    >
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                            <path d="M8 4h12v12H8z"></path>
+                            <path d="M4 8v12h12"></path>
+                            <path d="M12 12l5-5M13 7h4v4"></path>
+                        </svg>
+                    </button>
                     <form
                         id="bulk-delete-bookmarks"
                         method="post"
@@ -513,4 +527,4 @@
 {% endblock %}
 
 {% block global_status %}{% endblock %}
-{% block scripts %}<script src="{% static 'bookmark_manager/bookmarks.js' %}?v=workspace-ui-v22" defer></script>{% endblock %}
+{% block scripts %}<script src="{% static 'bookmark_manager/bookmarks.js' %}?v=workspace-ui-v23" defer></script>{% endblock %}

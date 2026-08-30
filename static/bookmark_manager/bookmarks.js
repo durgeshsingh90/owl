@@ -853,6 +853,7 @@
     const selectAllCheckbox = document.querySelector("[data-tree-select-all]");
     const selectionCount = document.querySelector("[data-tree-selection-count]");
     const deleteSelectedButton = document.querySelector("[data-delete-selected]");
+    const openSelectedButton = document.querySelector("[data-open-selected-button]");
     const detailsOpenButton = document.querySelector("[data-details-open-button]");
     let deleteRelockTimer = null;
 
@@ -962,7 +963,11 @@
 
     const refreshSelectionControls = () => {
         const bookmarkChecks = bookmarkTreeChecks();
-        const count = selectedBookmarkChecks().length;
+        const selectedChecks = selectedBookmarkChecks();
+        const count = selectedChecks.length;
+        const openableCount = selectedChecks.filter(
+            (checkbox) => checkbox.dataset.openUrl,
+        ).length;
         if (selectAllCheckbox) {
             selectAllCheckbox.disabled = bookmarkChecks.length === 0;
             selectAllCheckbox.checked =
@@ -976,10 +981,17 @@
             deleteSelectedButton.disabled = count === 0;
             lockDeleteSelected();
         }
+        if (openSelectedButton) {
+            const openSelectedLabel = count
+                ? openableCount === 1
+                    ? "Open 1 selected live bookmark in a new tab"
+                    : `Open ${openableCount} selected live bookmarks in separate tabs`
+                : "Select bookmarks to open";
+            openSelectedButton.disabled = openableCount === 0;
+            openSelectedButton.setAttribute("aria-label", openSelectedLabel);
+            openSelectedButton.title = openSelectedLabel;
+        }
         if (detailsOpenButton) {
-            const openableCount = selectedBookmarkChecks().filter(
-                (checkbox) => checkbox.dataset.openUrl,
-            ).length;
             const defaultLabel =
                 detailsOpenButton.dataset.defaultAriaLabel || "Open saved bookmark";
             if (count > 1) {
@@ -1554,6 +1566,113 @@
         });
     });
 
+    const selectedOpenRequests = (checkedBookmarks = selectedBookmarkChecks()) =>
+        checkedBookmarks
+            .filter((checkbox) => checkbox.dataset.openUrl)
+            .map((checkbox) => ({
+                action: checkbox.dataset.openUrl,
+                title: checkbox.dataset.bookmarkTitle || "Saved bookmark",
+            }));
+
+    const openBookmarkRequests = async ({
+        requests,
+        button,
+        selectedCount = requests.length,
+        openSelected = false,
+    }) => {
+        if (!requests.length) {
+            announce("None of the selected bookmarks can be opened.");
+            return;
+        }
+        const openedWindows = requests.map(() => {
+            const externalWindow = window.open("about:blank", "_blank");
+            if (externalWindow) {
+                externalWindow.opener = null;
+            }
+            return externalWindow;
+        });
+        button?.setAttribute("aria-busy", "true");
+        if (button) {
+            button.disabled = true;
+        }
+        try {
+            const results = await Promise.all(
+                requests.map(async (request, index) => {
+                    const requestData = new FormData();
+                    requestData.set("csrfmiddlewaretoken", csrfToken());
+                    try {
+                        const response = await fetch(request.action, {
+                            method: "POST",
+                            body: requestData,
+                            credentials: "same-origin",
+                            headers: {
+                                Accept: "application/json",
+                                "X-Requested-With": "XMLHttpRequest",
+                            },
+                        });
+                        const payload = await response.json();
+                        if (!response.ok || !payload.url) {
+                            throw new Error(
+                                payload.detail || "The page could not be opened safely.",
+                            );
+                        }
+                        if (openedWindows[index]) {
+                            openedWindows[index].location.replace(payload.url);
+                        } else {
+                            window.open(payload.url, "_blank", "noopener,noreferrer");
+                        }
+                        return { opened: true, title: request.title, detail: payload.detail };
+                    } catch (error) {
+                        openedWindows[index]?.close();
+                        return {
+                            opened: false,
+                            title: request.title,
+                            detail:
+                                error instanceof Error
+                                    ? error.message
+                                    : "The page could not be opened safely.",
+                        };
+                    }
+                }),
+            );
+            const openedCount = results.filter((result) => result.opened).length;
+            const failedResults = results.filter((result) => !result.opened);
+            const unavailableCount = openSelected ? selectedCount - requests.length : 0;
+            if (failedResults.length || unavailableCount) {
+                const failedCount = failedResults.length + unavailableCount;
+                announce(
+                    `${openedCount} bookmark${
+                        openedCount === 1 ? "" : "s"
+                    } opened; ${failedCount} could not be opened.`,
+                );
+            } else {
+                announce(
+                    openSelected
+                        ? openedCount === 1
+                            ? "1 selected bookmark opened in a new tab."
+                            : `${openedCount} selected bookmarks opened in separate tabs.`
+                        : results[0]?.detail || "Opened saved bookmark",
+                );
+            }
+        } finally {
+            button?.removeAttribute("aria-busy");
+            if (button) {
+                button.disabled = false;
+            }
+            refreshSelectionControls();
+        }
+    };
+
+    openSelectedButton?.addEventListener("click", async () => {
+        const checkedBookmarks = selectedBookmarkChecks();
+        await openBookmarkRequests({
+            requests: selectedOpenRequests(checkedBookmarks),
+            button: openSelectedButton,
+            selectedCount: checkedBookmarks.length,
+            openSelected: true,
+        });
+    });
+
     document.querySelectorAll("[data-external-open-form]").forEach((form) => {
         form.addEventListener("submit", async (event) => {
             event.preventDefault();
@@ -1561,96 +1680,14 @@
             const checkedBookmarks = selectedBookmarkChecks();
             const openSelected =
                 form.matches("[data-details-open-form]") && checkedBookmarks.length > 1;
-            const requests = openSelected
-                ? checkedBookmarks
-                      .filter((checkbox) => checkbox.dataset.openUrl)
-                      .map((checkbox) => ({
-                          action: checkbox.dataset.openUrl,
-                          title: checkbox.dataset.bookmarkTitle || "Saved bookmark",
-                      }))
-                : [{ action: form.action, title: "Saved bookmark" }];
-            if (!requests.length) {
-                announce("None of the selected bookmarks can be opened.");
-                return;
-            }
-            const openedWindows = requests.map(() => {
-                const externalWindow = window.open("about:blank", "_blank");
-                if (externalWindow) {
-                    externalWindow.opener = null;
-                }
-                return externalWindow;
+            await openBookmarkRequests({
+                requests: openSelected
+                    ? selectedOpenRequests(checkedBookmarks)
+                    : [{ action: form.action, title: "Saved bookmark" }],
+                button,
+                selectedCount: checkedBookmarks.length,
+                openSelected,
             });
-            button?.setAttribute("aria-busy", "true");
-            if (button) {
-                button.disabled = true;
-            }
-            try {
-                const results = await Promise.all(
-                    requests.map(async (request, index) => {
-                        const requestData = new FormData();
-                        requestData.set("csrfmiddlewaretoken", csrfToken());
-                        try {
-                            const response = await fetch(request.action, {
-                                method: "POST",
-                                body: requestData,
-                                credentials: "same-origin",
-                                headers: {
-                                    Accept: "application/json",
-                                    "X-Requested-With": "XMLHttpRequest",
-                                },
-                            });
-                            const payload = await response.json();
-                            if (!response.ok || !payload.url) {
-                                throw new Error(
-                                    payload.detail || "The page could not be opened safely.",
-                                );
-                            }
-                            if (openedWindows[index]) {
-                                openedWindows[index].location.replace(payload.url);
-                            } else {
-                                window.open(payload.url, "_blank", "noopener,noreferrer");
-                            }
-                            return { opened: true, title: request.title, detail: payload.detail };
-                        } catch (error) {
-                            openedWindows[index]?.close();
-                            return {
-                                opened: false,
-                                title: request.title,
-                                detail:
-                                    error instanceof Error
-                                        ? error.message
-                                        : "The page could not be opened safely.",
-                            };
-                        }
-                    }),
-                );
-                const openedCount = results.filter((result) => result.opened).length;
-                const failedResults = results.filter((result) => !result.opened);
-                const unavailableCount = openSelected
-                    ? checkedBookmarks.length - requests.length
-                    : 0;
-                if (failedResults.length || unavailableCount) {
-                    const failedCount = failedResults.length + unavailableCount;
-                    announce(
-                        `${openedCount} bookmark${
-                            openedCount === 1 ? "" : "s"
-                        } opened; ${failedCount} could not be opened.`,
-                    );
-                } else {
-                    announce(
-                        openSelected
-                            ? `${openedCount} selected bookmark${
-                                  openedCount === 1 ? "" : "s"
-                              } opened in separate tabs.`
-                            : results[0]?.detail || "Opened saved bookmark",
-                    );
-                }
-            } finally {
-                button?.removeAttribute("aria-busy");
-                if (button) {
-                    button.disabled = false;
-                }
-            }
         });
     });
 

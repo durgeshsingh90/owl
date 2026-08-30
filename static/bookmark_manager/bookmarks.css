@@ -2648,7 +2648,8 @@
     justify-content: flex-end;
 }
 
-.bookmark-manager-shell .tree-create-folder {
+.bookmark-manager-shell .tree-create-folder,
+.bookmark-manager-shell .tree-open-selected {
     display: inline-grid;
     width: 32px;
     height: 32px;
@@ -2663,6 +2664,8 @@
 
 .bookmark-manager-shell .tree-create-folder:hover,
 .bookmark-manager-shell .tree-create-folder:focus-visible,
+.bookmark-manager-shell .tree-open-selected:not(:disabled):hover,
+.bookmark-manager-shell .tree-open-selected:not(:disabled):focus-visible,
 .bookmark-manager-shell .tree-create-folder[aria-expanded="true"] {
     border-color: var(--bookmark-accent);
     color: var(--bookmark-accent);
@@ -2671,6 +2674,7 @@
 }
 
 .bookmark-manager-shell .tree-create-folder svg,
+.bookmark-manager-shell .tree-open-selected svg,
 .bookmark-manager-shell .source-hierarchy-drop-zone svg {
     width: 18px;
     height: 18px;
@@ -2679,6 +2683,15 @@
     stroke-linecap: round;
     stroke-linejoin: round;
     stroke-width: 1.6;
+}
+
+.bookmark-manager-shell .tree-open-selected:disabled {
+    cursor: not-allowed;
+    opacity: 0.48;
+}
+
+.bookmark-manager-shell .tree-open-selected[aria-busy="true"] {
+    cursor: progress;
 }
 
 .bookmark-manager-shell .folder-create-panel {
@@ -3382,6 +3395,7 @@
 }
 
 .bookmark-manager-shell[data-theme="dark"] .tree-create-folder,
+.bookmark-manager-shell[data-theme="dark"] .tree-open-selected,
 .bookmark-manager-shell[data-theme="dark"] .source-hierarchy-drop-zone,
 .bookmark-manager-shell[data-theme="dark"] .folder-create-panel {
     border-color: #49677e;
@@ -3391,6 +3405,8 @@
 
 .bookmark-manager-shell[data-theme="dark"] .tree-create-folder:hover,
 .bookmark-manager-shell[data-theme="dark"] .tree-create-folder:focus-visible,
+.bookmark-manager-shell[data-theme="dark"] .tree-open-selected:not(:disabled):hover,
+.bookmark-manager-shell[data-theme="dark"] .tree-open-selected:not(:disabled):focus-visible,
 .bookmark-manager-shell[data-theme="dark"] .tree-create-folder[aria-expanded="true"],
 .bookmark-manager-shell[data-theme="dark"] [data-folder-drop-target].is-drop-target {
     border-color: #e4a84b;
