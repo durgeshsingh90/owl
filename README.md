@@ -92,12 +92,15 @@ Bookmark Manager is the main implemented app. It can:
   deleted pages remain visible as references without causing an endless retry loop.
 
 The notification bell shared by every OWL app shows unread import, export, Confluence, and
-Bitbucket refresh cards. A compact, scrollable repository section shows the current status of
-every repository, including running work and failed or successful syncs. Expand a repository row
-for safe diagnostics and exact timestamps; older notification cards remain separate history and
-do not override the latest status. Confluence's weekly schedule and retry details are collapsed
-by default. Reading notification status never starts or recovers repository jobs. Notifications
-are stored locally and contain sanitized status text rather than credentials or page bodies.
+Bitbucket refresh cards. A separate **Background status** icon beside the bell opens a compact,
+scrollable panel for the current status of every repository, including running work and failed
+or successful syncs. Expand a repository row for safe diagnostics and exact timestamps; older
+notification cards remain in the bell and do not override the latest status. Confluence's weekly
+schedule and retry details are collapsed by default in Background status. The status indicator
+shows active work, attention needed, or all repositories up to date; the bell badge counts unread
+notifications only. Both panels share one read-only status poll, without duplicating scheduler
+checks. Reading status never starts or recovers repository jobs. Notifications are stored locally
+and contain sanitized status text rather than credentials or page bodies.
 
 All searching and organization happen against OWL's local SQLite database. Confluence is contacted
 only for an explicit connection test, a save/import that retrieves a Confluence page, or a refresh
@@ -272,7 +275,7 @@ PDFs from an upgraded database that have not been indexed yet.
 The Bookmark Manager's global refresh button and every due Confluence schedule start a separate
 local worker process automatically. That worker retrieves saved Confluence pages with up to five
 concurrent read-only requests while the web app remains available. Progress and the exact
-last-completed timestamp appear beside the refresh icon and in the notification centre.
+last-completed timestamp appear beside the refresh icon and in Background status.
 
 If you deliberately use Django's plain `runserver` command instead, keep this scheduler running in
 a second terminal so weekly work can begin even when no OWL browser page is open:

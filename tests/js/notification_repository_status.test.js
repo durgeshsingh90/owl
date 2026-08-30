@@ -52,7 +52,11 @@ class Element {
     addEventListener(name, listener) { this.listeners.set(name, listener); }
     querySelector() { return null; }
     querySelectorAll() { return []; }
-    focus() { this.focused = true; }
+    closest() { return null; }
+    contains(element) {
+        return element === this || this.children.some((child) => child.contains(element));
+    }
+    focus() { this.focused = true; this.focusCount = (this.focusCount || 0) + 1; }
 }
 
 const payload = (items, overrides = {}) => ({
@@ -88,33 +92,64 @@ const repository = (id, overrides = {}) => ({
 async function boot(...responses) {
     const center = new Element();
     center.dataset.notificationsUrl = "/bookmarks/notifications/";
+    const statusCenter = new Element();
     const hooks = new Map();
-    [
-        "toggle", "panel", "badge", "activity", "list", "empty", "live", "read-all",
-        "unread-label", "background-state", "progress-card", "progress-label",
+    const notificationHooks = [
+        "toggle", "panel", "badge", "list", "empty", "live", "read-all", "unread-label",
+    ];
+    const statusHooks = [
+        "background-state", "progress-card", "progress-label",
         "progress-detail", "progress", "schedule", "next-run", "last-attempt",
         "last-success", "retry-row", "retry", "repository-list", "repository-count",
         "repository-message",
-    ].forEach((name) => hooks.set(name, new Element()));
-    center.querySelector = (selector) => hooks.get(selector.replace("[data-notification-", "").replace("]", "")) || null;
+    ];
+    [...notificationHooks, ...statusHooks, "status-toggle", "status-panel", "status-indicator", "status-live"]
+        .forEach((name) => hooks.set(name, new Element()));
+    notificationHooks.forEach((name) => center.append(hooks.get(name)));
+    [...statusHooks, "status-toggle", "status-panel", "status-indicator", "status-live"]
+        .forEach((name) => statusCenter.append(hooks.get(name)));
+    hooks.get("panel").hidden = true;
+    hooks.get("status-panel").hidden = true;
+    center.querySelector = (selector) => {
+        const name = selector.replace("[data-notification-", "").replace("]", "");
+        return notificationHooks.includes(name) ? hooks.get(name) : null;
+    };
+    statusCenter.querySelector = (selector) => {
+        const name = selector.startsWith("[data-repository-status-")
+            ? selector.replace("[data-repository-status-", "status-").replace("]", "")
+            : selector.replace("[data-notification-", "").replace("]", "");
+        return notificationHooks.includes(name) ? null : hooks.get(name) || null;
+    };
     const timers = [];
+    const intervals = [];
+    const requests = [];
+    const documentListeners = new Map();
     const document = {
         body: new Element("body"),
+        querySelector: (selector) => selector === "[data-repository-status-center]" ? statusCenter : null,
         querySelectorAll: (selector) => selector === "[data-notification-center]" ? [center] : [],
-        addEventListener() {},
+        addEventListener(name, fn) {
+            documentListeners.set(name, [...(documentListeners.get(name) || []), fn]);
+        },
         createElement: (tag) => new Element(tag),
     };
+    let lastResponse;
     const window = {
         localStorage: { getItem() { return null; }, setItem() {} },
         matchMedia: () => ({ matches: false }),
         setTimeout(fn) { timers.push(fn); return timers.length; },
         clearTimeout() {},
-        setInterval() {},
+        setInterval(fn) { intervals.push(fn); },
         addEventListener() {},
         dispatchEvent() {},
-        async fetch() {
-            const response = responses.shift();
+        async fetch(url, options) {
+            requests.push({ url, options });
+            if (options.method === "POST") {
+                return { ok: true, async json() { return {}; } };
+            }
+            const response = responses.length ? responses.shift() : lastResponse;
             if (response instanceof Error) { throw response; }
+            lastResponse = response;
             return { ok: true, async json() { return response; } };
         },
     };
@@ -123,6 +158,23 @@ async function boot(...responses) {
     await flush();
     return {
         hooks,
+        center,
+        statusCenter,
+        requests,
+        intervals,
+        async click(name) {
+            const target = hooks.get(name);
+            await target.listeners.get("click")?.({ target });
+            documentListeners.get("click")?.forEach((fn) => fn({ target }));
+            await flush();
+        },
+        escape() {
+            documentListeners.get("keydown")?.forEach((fn) => fn({ key: "Escape", preventDefault() {} }));
+        },
+        outsideClick() {
+            const target = new Element("button");
+            documentListeners.get("click")?.forEach((fn) => fn({ target }));
+        },
         async poll() {
             const load = timers.findLast((fn) => fn.name === "load");
             assert.ok(load, "A status poll is scheduled");
@@ -201,4 +253,90 @@ test("repository names stay text and unsafe navigation targets are disabled", as
     const body = details.children[1];
     assert.equal(body.children.at(-2).hidden, true);
     assert.equal(body.children.at(-1).hidden, true);
+});
+
+test("status opens separately from notifications and switching panels never marks alerts read", async () => {
+    const page = await boot(payload([repository(1)], { unread_count: 3 }));
+    const { hooks } = page;
+    assert.equal(page.center.contains(hooks.get("repository-list")), false);
+    assert.equal(page.statusCenter.contains(hooks.get("repository-list")), true);
+    assert.equal(page.statusCenter.contains(hooks.get("list")), false);
+    await page.click("status-toggle");
+    assert.equal(hooks.get("status-panel").hidden, false);
+    assert.equal(hooks.get("panel").hidden, true);
+    assert.match(hooks.get("status-toggle").getAttribute("aria-label"), /^Close background status/);
+    assert.equal(hooks.get("badge").textContent, "3");
+    await page.click("toggle");
+    assert.equal(hooks.get("status-panel").hidden, true);
+    assert.equal(hooks.get("panel").hidden, false);
+    assert.equal(hooks.get("status-toggle").focusCount || 0, 0);
+    await page.click("status-toggle");
+    assert.equal(hooks.get("panel").hidden, true);
+    assert.equal(hooks.get("status-panel").hidden, false);
+    assert.equal(hooks.get("toggle").focusCount || 0, 0);
+    assert.equal(page.requests.length, 4, "Initial shared poll plus one GET per opened panel");
+    assert.ok(page.requests.every(({ options }) => options.method === "GET"));
+    assert.equal(page.intervals.length, 1, "Only one existing scheduler timer is installed");
+});
+
+test("Escape restores the correct icon focus, outside clicks do not steal focus", async () => {
+    const page = await boot(payload([repository(1)]));
+    await page.click("status-toggle");
+    page.escape();
+    assert.equal(page.hooks.get("status-panel").hidden, true);
+    assert.equal(page.hooks.get("status-toggle").focusCount, 1);
+    await page.click("toggle");
+    page.escape();
+    assert.equal(page.hooks.get("panel").hidden, true);
+    assert.equal(page.hooks.get("toggle").focusCount, 1);
+    await page.click("status-toggle");
+    page.outsideClick();
+    assert.equal(page.hooks.get("status-panel").hidden, true);
+    assert.equal(page.hooks.get("status-toggle").focusCount, 1);
+});
+
+test("background indicator tracks current status independently of unread alerts and old failures", async () => {
+    const page = await boot(
+        payload([repository(1, { status: "cloning", statusTone: "progress" })]),
+        payload([repository(1, { status: "failed", statusTone: "error" })]),
+        payload([repository(1)]),
+        new Error("offline"),
+        payload([]),
+    );
+    assert.equal(page.statusCenter.dataset.state, "active");
+    assert.equal(page.hooks.get("badge").hidden, true);
+    assert.equal(page.hooks.get("toggle").getAttribute("aria-label"), "Open notifications");
+    assert.match(page.hooks.get("status-toggle").title, /1 repository active/);
+    await page.poll();
+    assert.equal(page.statusCenter.dataset.state, "error");
+    await page.poll();
+    assert.equal(page.statusCenter.dataset.state, "ready");
+    assert.match(page.hooks.get("list").textContent, /Earlier failed sync/);
+    await page.poll();
+    assert.equal(page.statusCenter.dataset.state, "unknown");
+    await page.poll();
+    assert.equal(page.statusCenter.dataset.state, "neutral");
+});
+
+test("Confluence activity and retries belong to status, not the notification badge", async () => {
+    const page = await boot(
+        payload([], { refresh: { active: true, processed: 2, total: 4 } }),
+        payload([], { schedule: { retrying: true }, refresh: { status: "failed" } }),
+    );
+    assert.equal(page.statusCenter.dataset.state, "active");
+    assert.equal(page.hooks.get("progress-card").hidden, false);
+    assert.match(page.hooks.get("progress-detail").textContent, /2 of 4 pages/);
+    assert.equal(page.hooks.get("badge").hidden, true);
+    await page.poll();
+    assert.equal(page.statusCenter.dataset.state, "error");
+    assert.equal(page.hooks.get("retry-row").hidden, false);
+});
+
+test("mark all read changes only notification state, not repository attention", async () => {
+    const page = await boot(payload([repository(1, { status: "failed", statusTone: "error" })], { unread_count: 2 }));
+    page.center.dataset.readAllUrl = "/bookmarks/notifications/read-all/";
+    await page.click("read-all");
+    assert.equal(page.hooks.get("badge").hidden, true);
+    assert.equal(page.statusCenter.dataset.state, "error");
+    assert.equal(page.requests.filter(({ options }) => options.method === "POST").length, 1);
 });

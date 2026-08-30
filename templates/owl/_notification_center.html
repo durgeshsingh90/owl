@@ -16,6 +16,7 @@
     <button
         class="notification-center__toggle"
         type="button"
+        title="Notifications"
         aria-label="Open notifications"
         aria-haspopup="dialog"
         aria-expanded="false"
@@ -26,7 +27,6 @@
             <path d="M6.5 9.8a5.5 5.5 0 0 1 11 0c0 6.1 2.5 6.7 2.5 6.7H4s2.5-.6 2.5-6.7Z"/>
             <path d="M9.5 19a2.8 2.8 0 0 0 5 0"/>
         </svg>
-        <span class="notification-center__activity" aria-hidden="true" data-notification-activity hidden></span>
         <span class="notification-center__badge" data-notification-badge hidden>0</span>
     </button>
 
@@ -50,39 +50,8 @@
 
         <div class="notification-center__live visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-notification-live></div>
 
-        <section class="notification-center__repositories" aria-labelledby="owl-repository-status-heading" data-notification-repositories>
-            <div class="notification-center__section-heading">
-                <h3 id="owl-repository-status-heading">Repository status</h3>
-                <span data-notification-repository-count>Current status</span>
-            </div>
-            <p class="notification-center__repository-message" data-notification-repository-message>Loading repository status…</p>
-            <ul class="notification-center__repository-list" aria-label="Current status of all repositories" aria-busy="true" data-notification-repository-list hidden></ul>
-            <noscript><p class="notification-center__repository-message">Enable JavaScript to load current repository statuses.</p></noscript>
-        </section>
-
-        <details class="notification-center__background" data-notification-background>
-            <summary class="notification-center__section-heading notification-center__background-toggle">
-                <span class="notification-center__background-label">Confluence schedule</span>
-                <span data-notification-background-state>Checking…</span>
-            </summary>
-            <div class="notification-center__progress-card" data-notification-progress-card hidden>
-                <span class="notification-center__spinner" aria-hidden="true"></span>
-                <div>
-                    <strong data-notification-progress-label>Refreshing Confluence</strong>
-                    <small data-notification-progress-detail>Starting…</small>
-                    <span class="notification-center__progress" aria-hidden="true"><span data-notification-progress></span></span>
-                </div>
-            </div>
-            <dl class="notification-center__schedule" data-notification-schedule hidden>
-                <div><dt>Next weekly refresh</dt><dd data-notification-next-run>Not scheduled</dd></div>
-                <div><dt>Last attempted</dt><dd data-notification-last-attempt>Not yet</dd></div>
-                <div><dt>Last successful</dt><dd data-notification-last-success>Not yet</dd></div>
-                <div data-notification-retry-row hidden><dt>Automatic retry</dt><dd data-notification-retry>Waiting</dd></div>
-            </dl>
-        </details>
-
         <div class="notification-center__section-heading notification-center__section-heading--updates">
-            <h3 title="Past events; the current status of each repository is shown above.">Notification history</h3>
+            <h3 title="Current repository status is available from Background status.">Notification history</h3>
             <span data-notification-unread-label>No unread</span>
         </div>
         <div class="notification-center__list" data-notification-list aria-busy="true"></div>

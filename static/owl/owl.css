@@ -3089,8 +3089,9 @@ svg {
     .knowledge-stats > div:nth-child(n + 3) { border-top: 1px solid var(--knowledge-line); }
 }
 
-/* Shared notification centre: import, export, and background refresh updates. */
-.notification-center {
+/* Shared alert history and independent background status controls. */
+.notification-center,
+.repository-status-center {
     --notification-bg: #fffefa;
     --notification-surface: #f4f6f7;
     --notification-surface-strong: #e8eef1;
@@ -3108,7 +3109,8 @@ svg {
     line-height: 1.4;
 }
 
-body[data-theme="dark"] .notification-center {
+body[data-theme="dark"] .notification-center,
+body[data-theme="dark"] .repository-status-center {
     --notification-bg: #0b1d2d;
     --notification-surface: #10283d;
     --notification-surface-strong: #153148;
@@ -3141,6 +3143,11 @@ body[data-theme="dark"] .notification-center {
     border-color: rgb(240 198 101 / 70%);
     color: #fff;
     background: rgb(255 255 255 / 10%);
+}
+
+.notification-center__toggle:focus-visible {
+    outline: 2px solid var(--notification-accent);
+    outline-offset: 3px;
 }
 
 .notification-center__toggle > svg {
@@ -3195,16 +3202,36 @@ body[data-theme="dark"] .notification-center {
     border-color: #f4f8fa;
 }
 
-.notification-center__activity {
+.repository-status__indicator {
     position: absolute;
-    right: 2px;
-    bottom: 2px;
+    right: 1px;
+    bottom: 1px;
     width: 10px;
     height: 10px;
-    border: 2px solid rgb(255 255 255 / 35%);
-    border-top-color: #7de0b5;
+    border: 2px solid var(--notification-bg);
     border-radius: 50%;
-    animation: notification-spin 0.75s linear infinite;
+    background: var(--notification-muted);
+}
+
+.repository-status-center[data-state="active"] .repository-status__indicator {
+    background: var(--notification-accent);
+}
+
+.repository-status-center[data-state="error"] .repository-status__indicator {
+    background: var(--notification-danger);
+}
+
+.repository-status-center[data-state="ready"] .repository-status__indicator {
+    background: var(--notification-success);
+}
+
+.repository-status-center[data-state="neutral"] .repository-status__indicator {
+    background: var(--notification-muted);
+}
+
+.repository-status-center[data-state="unknown"] .repository-status__indicator {
+    border-color: var(--notification-muted);
+    background: var(--notification-bg);
 }
 
 .notification-center__panel {
@@ -3226,6 +3253,11 @@ body[data-theme="dark"] .notification-center {
 
 .notification-center__panel[hidden] {
     display: none;
+}
+
+.repository-status__panel {
+    width: min(390px, calc(100vw - 24px));
+    max-height: min(70vh, 600px);
 }
 
 .notification-center__header {
@@ -3262,6 +3294,19 @@ body[data-theme="dark"] .notification-center {
     color: var(--notification-ink);
     font-size: 18px;
     letter-spacing: -0.01em;
+}
+
+.repository-status__header {
+    min-height: 66px;
+    padding: 0.8rem 1rem;
+}
+
+.repository-status__header h2 {
+    font-size: 17px;
+}
+
+.repository-status__panel > .notification-center__background:last-child {
+    border-bottom: 0;
 }
 
 .notification-center__mark-all,
@@ -3802,7 +3847,8 @@ a.notification-card__title:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .notification-repository[data-tone="progress"] .notification-repository__icon {
+    .notification-repository[data-tone="progress"] .notification-repository__icon,
+    .repository-status-center .notification-center__spinner {
         animation: none;
     }
 }

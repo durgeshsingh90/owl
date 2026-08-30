@@ -63,6 +63,7 @@
                     <span class="global-refresh-control__track" aria-hidden="true"><span data-global-refresh-progress style="width: {{ refresh_status.progress }}%"></span></span>
                 </span>
             </form>
+            {% include "owl/_repository_status.html" %}
             {% include "owl/_notification_center.html" %}
             <details class="bookmark-app-switcher">
                 <summary class="bookmark-icon-button" aria-label="Applications">

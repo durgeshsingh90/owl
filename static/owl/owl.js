@@ -143,30 +143,106 @@
         return path.startsWith("/") && !path.startsWith("//") && !/[\\\u0000-\u001f\u007f]/.test(path) ? path : "";
     };
 
+    const headerPanels = [];
+    const createHeaderPanel = (container, toggle, panel, label, onOpen) => {
+        if (!container || !toggle || !panel) {
+            return null;
+        }
+        let isOpen = false;
+        let summary = "";
+        const updateLabel = () => {
+            toggle.setAttribute("aria-label", `${isOpen ? "Close" : "Open"} ${label}${summary ? `, ${summary}` : ""}`);
+            toggle.setAttribute("aria-expanded", String(isOpen));
+        };
+        const close = ({ restoreFocus = true } = {}) => {
+            if (!isOpen) {
+                return;
+            }
+            isOpen = false;
+            panel.hidden = true;
+            updateLabel();
+            if (restoreFocus) {
+                toggle.focus();
+            }
+        };
+        const position = () => {
+            if (!window.matchMedia("(max-width: 620px)").matches) {
+                panel.style.removeProperty("--notification-mobile-top");
+                return;
+            }
+            const bounds = toggle.getBoundingClientRect();
+            const availableHeight = window.innerHeight || document.documentElement.clientHeight;
+            const top = Math.max(8, Math.min(bounds.bottom + 8, availableHeight - 220));
+            panel.style.setProperty("--notification-mobile-top", `${Math.round(top)}px`);
+        };
+        const controller = {
+            close,
+            setSummary(value) {
+                summary = value;
+                updateLabel();
+            },
+        };
+        headerPanels.push(controller);
+        toggle.addEventListener("click", () => {
+            if (isOpen) {
+                close();
+                return;
+            }
+            headerPanels.forEach((other) => other.close({ restoreFocus: false }));
+            isOpen = true;
+            panel.hidden = false;
+            position();
+            updateLabel();
+            panel.focus();
+            onOpen();
+        });
+        document.addEventListener("click", (event) => {
+            if (isOpen && !container.contains(event.target)) {
+                close({ restoreFocus: false });
+            }
+        });
+        document.addEventListener("keydown", (event) => {
+            if (isOpen && event.key === "Escape") {
+                event.preventDefault();
+                close();
+            }
+        });
+        window.addEventListener("resize", () => {
+            if (isOpen) {
+                position();
+            }
+        });
+        return controller;
+    };
+
     document.querySelectorAll("[data-notification-center]").forEach((center) => {
         const toggle = center.querySelector("[data-notification-toggle]");
         const panel = center.querySelector("[data-notification-panel]");
         const badge = center.querySelector("[data-notification-badge]");
-        const activity = center.querySelector("[data-notification-activity]");
         const list = center.querySelector("[data-notification-list]");
         const empty = center.querySelector("[data-notification-empty]");
         const live = center.querySelector("[data-notification-live]");
         const readAll = center.querySelector("[data-notification-read-all]");
         const unreadLabel = center.querySelector("[data-notification-unread-label]");
-        const backgroundState = center.querySelector("[data-notification-background-state]");
-        const progressCard = center.querySelector("[data-notification-progress-card]");
-        const progressLabel = center.querySelector("[data-notification-progress-label]");
-        const progressDetail = center.querySelector("[data-notification-progress-detail]");
-        const progress = center.querySelector("[data-notification-progress]");
-        const scheduleCard = center.querySelector("[data-notification-schedule]");
-        const nextRun = center.querySelector("[data-notification-next-run]");
-        const lastAttempt = center.querySelector("[data-notification-last-attempt]");
-        const lastSuccess = center.querySelector("[data-notification-last-success]");
-        const retryRow = center.querySelector("[data-notification-retry-row]");
-        const retry = center.querySelector("[data-notification-retry]");
-        const repositoryList = center.querySelector("[data-notification-repository-list]");
-        const repositoryCount = center.querySelector("[data-notification-repository-count]");
-        const repositoryMessage = center.querySelector("[data-notification-repository-message]");
+        const statusCenter = document.querySelector("[data-repository-status-center]");
+        const statusToggle = statusCenter?.querySelector("[data-repository-status-toggle]");
+        const statusPanel = statusCenter?.querySelector("[data-repository-status-panel]");
+        const statusIndicator = statusCenter?.querySelector("[data-repository-status-indicator]");
+        const statusLive = statusCenter?.querySelector("[data-repository-status-live]");
+        const backgroundState = statusCenter?.querySelector("[data-notification-background-state]");
+        const progressCard = statusCenter?.querySelector("[data-notification-progress-card]");
+        const progressLabel = statusCenter?.querySelector("[data-notification-progress-label]");
+        const progressDetail = statusCenter?.querySelector("[data-notification-progress-detail]");
+        const progress = statusCenter?.querySelector("[data-notification-progress]");
+        const scheduleCard = statusCenter?.querySelector("[data-notification-schedule]");
+        const nextRun = statusCenter?.querySelector("[data-notification-next-run]");
+        const lastAttempt = statusCenter?.querySelector("[data-notification-last-attempt]");
+        const lastSuccess = statusCenter?.querySelector("[data-notification-last-success]");
+        const retryRow = statusCenter?.querySelector("[data-notification-retry-row]");
+        const retry = statusCenter?.querySelector("[data-notification-retry]");
+        const repositoryList = statusCenter?.querySelector("[data-notification-repository-list]");
+        const repositoryCount = statusCenter?.querySelector("[data-notification-repository-count]");
+        const repositoryMessage = statusCenter?.querySelector("[data-notification-repository-message]");
         const bitbucketScheduleTickForm = center.querySelector(
             "[data-bitbucket-schedule-tick-form]",
         );
@@ -176,7 +252,6 @@
             return;
         }
 
-        let isOpen = false;
         let isActive = false;
         let hasLoaded = false;
         let unreadCount = 0;
@@ -185,6 +260,10 @@
         let repositoriesActive = false;
         let notificationSignature = null;
         const repositoryRows = new Map();
+        // One read-only snapshot feeds two independent panels; do not duplicate
+        // polling requests or the hidden daily-scheduler submissions.
+        const notificationPanel = createHeaderPanel(center, toggle, panel, "notifications", () => void load());
+        const backgroundPanel = createHeaderPanel(statusCenter, statusToggle, statusPanel, "background status", () => void load());
 
         const announce = (message) => {
             if (!live) {
@@ -194,40 +273,6 @@
             window.setTimeout(() => {
                 live.textContent = message;
             }, 20);
-        };
-
-        const closePanel = ({ restoreFocus = true } = {}) => {
-            if (!isOpen) {
-                return;
-            }
-            isOpen = false;
-            panel.hidden = true;
-            toggle.setAttribute("aria-expanded", "false");
-            toggle.setAttribute("aria-label", "Open notifications");
-            if (restoreFocus) {
-                toggle.focus();
-            }
-        };
-
-        const positionPanel = () => {
-            if (!window.matchMedia("(max-width: 620px)").matches) {
-                panel.style.removeProperty("--notification-mobile-top");
-                return;
-            }
-            const toggleBounds = toggle.getBoundingClientRect();
-            const availableHeight = window.innerHeight || document.documentElement.clientHeight;
-            const top = Math.max(8, Math.min(toggleBounds.bottom + 8, availableHeight - 220));
-            panel.style.setProperty("--notification-mobile-top", `${Math.round(top)}px`);
-        };
-
-        const openPanel = () => {
-            isOpen = true;
-            panel.hidden = false;
-            positionPanel();
-            toggle.setAttribute("aria-expanded", "true");
-            toggle.setAttribute("aria-label", "Close notifications");
-            panel.focus();
-            void load();
         };
 
         const post = async (url, values = {}) => {
@@ -253,7 +298,7 @@
             return response;
         };
 
-        const refreshBadge = (nextUnreadCount, active) => {
+        const refreshBadge = (nextUnreadCount) => {
             const nextCount = Math.max(0, Number.parseInt(nextUnreadCount, 10) || 0);
             if (badge) {
                 badge.textContent = nextCount > 99 ? "99+" : String(nextCount);
@@ -266,21 +311,7 @@
             if (unreadLabel) {
                 unreadLabel.textContent = nextCount === 0 ? "No unread" : `${nextCount} unread`;
             }
-            if (activity) {
-                activity.hidden = !active;
-            }
-            center.classList.toggle("has-background-activity", active);
-
-            const parts = ["Open notifications"];
-            if (nextCount) {
-                parts.push(`${nextCount} unread`);
-            }
-            if (active) {
-                parts.push("background refresh in progress");
-            }
-            if (!isOpen) {
-                toggle.setAttribute("aria-label", parts.join(", "));
-            }
+            notificationPanel.setSummary(nextCount ? `${nextCount} unread` : "");
 
             if (hasLoaded && nextCount > unreadCount) {
                 const added = nextCount - unreadCount;
@@ -339,7 +370,7 @@
                         await post(center.dataset.readUrl, { notification_id: item.id });
                         article.classList.remove("is-unread");
                         readButton.remove();
-                        refreshBadge(unreadCount - 1, isActive);
+                        refreshBadge(unreadCount - 1);
                         announce("Notification marked as read.");
                     } catch (error) {
                         readButton.disabled = false;
@@ -525,6 +556,47 @@
             }
         };
 
+        const renderBackgroundIndicator = (snapshot, refresh = {}, schedule = {}) => {
+            if (!statusCenter || !backgroundPanel) {
+                return;
+            }
+            const known = snapshot && Array.isArray(snapshot.items);
+            const failed = known ? Math.max(0, Number(snapshot.failedCount) || 0) : 0;
+            const active = known ? Math.max(0, Number(snapshot.activeCount) || 0) : 0;
+            const confluenceFailed = Boolean(schedule.retrying)
+                || ["failed", "interrupted", "succeeded_with_errors"].includes(refresh.status);
+            const parts = [];
+            if (failed) {
+                parts.push(`${failed} ${failed === 1 ? "repository needs" : "repositories need"} attention`);
+            }
+            if (active) {
+                parts.push(`${active} ${active === 1 ? "repository" : "repositories"} active`);
+            }
+            if (refresh.active) {
+                parts.push("Confluence refresh in progress");
+            } else if (confluenceFailed) {
+                parts.push("Confluence needs attention");
+            }
+            if (!known) {
+                parts.push("Repository status unavailable");
+            }
+            const allReady = known && snapshot.items.length > 0
+                && snapshot.items.every((item) => item.status === "ready");
+            const state = failed || confluenceFailed ? "error"
+                : active || refresh.active ? "active"
+                    : !known ? "unknown" : allReady ? "ready" : "neutral";
+            const summary = parts.join("; ") || (allReady ? "All repositories up to date" : "No background work running");
+            statusCenter.dataset.state = state;
+            statusToggle.title = `Background status: ${summary}`;
+            if (statusIndicator) {
+                statusIndicator.hidden = false;
+            }
+            backgroundPanel.setSummary(summary);
+            if (statusLive && statusLive.textContent !== summary) {
+                statusLive.textContent = summary;
+            }
+        };
+
         const render = (payload) => {
             const notifications = Array.isArray(payload.notifications) ? payload.notifications : [];
             const nextSignature = JSON.stringify(notifications);
@@ -540,7 +612,8 @@
             renderRefresh(payload.refresh || {}, payload.schedule || {});
             renderRepositories(payload.repositoryStatuses);
             isActive = isActive || repositoriesActive;
-            refreshBadge(payload.unread_count ?? payload.unreadCount ?? 0, isActive);
+            renderBackgroundIndicator(payload.repositoryStatuses, payload.refresh || {}, payload.schedule || {});
+            refreshBadge(payload.unread_count ?? payload.unreadCount ?? 0);
             window.dispatchEvent(new CustomEvent("owl:refresh-status", {
                 detail: payload.refresh || {},
             }));
@@ -571,6 +644,7 @@
                 render(await response.json());
             } catch (error) {
                 list.setAttribute("aria-busy", "false");
+                renderBackgroundIndicator(null);
                 if (repositoryList) {
                     repositoryList.setAttribute("aria-busy", "false");
                     repositoryList.dataset.stale = "true";
@@ -593,40 +667,13 @@
             }
         };
 
-        toggle.addEventListener("click", () => {
-            if (isOpen) {
-                closePanel();
-            } else {
-                openPanel();
-            }
-        });
-
-        document.addEventListener("click", (event) => {
-            if (isOpen && !center.contains(event.target)) {
-                closePanel();
-            }
-        });
-
-        document.addEventListener("keydown", (event) => {
-            if (isOpen && event.key === "Escape") {
-                event.preventDefault();
-                closePanel();
-            }
-        });
-
-        window.addEventListener("resize", () => {
-            if (isOpen) {
-                positionPanel();
-            }
-        });
-
         readAll?.addEventListener("click", async () => {
             readAll.disabled = true;
             try {
                 await post(center.dataset.readAllUrl);
                 center.querySelectorAll(".notification-card.is-unread").forEach((card) => card.classList.remove("is-unread"));
                 center.querySelectorAll(".notification-card__read").forEach((button) => button.remove());
-                refreshBadge(0, isActive);
+                refreshBadge(0);
                 announce("All notifications marked as read.");
             } catch (error) {
                 readAll.disabled = false;
