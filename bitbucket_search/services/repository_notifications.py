@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from django.db.models import Case, Count, F, IntegerField, Max, OuterRef, Q, Subquery, Value, When
+from django.db.models import Case, Count, IntegerField, Max, Min, OuterRef, Q, Subquery, Value, When
 from django.db.models.functions import Coalesce
 from django.urls import reverse
+from django.utils import timezone
 
 from bitbucket_search.models import (
     BitbucketRepository,
     PDFDocument,
     PDFDocumentLifecycle,
-    PDFExtractionJob,
     PDFExtractionJobStatus,
     PDFIndexState,
     RepositorySyncJob,
@@ -19,11 +19,14 @@ from bitbucket_search.models import (
     RepositorySyncPhase,
     RepositorySyncState,
 )
-from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
+from bitbucket_search.services.repository_worker_timing import (
+    current_pdf_extraction_jobs,
+    running_pdf_start_filter,
+    worker_timing,
+)
 from core.logging import redact_log_text
 
 _ACTIVE_SYNC = (RepositorySyncJobStatus.QUEUED, RepositorySyncJobStatus.RUNNING)
-_ACTIVE_EXTRACTION = (PDFExtractionJobStatus.QUEUED, PDFExtractionJobStatus.RUNNING)
 _FAILED_SYNC = (RepositorySyncJobStatus.FAILED, RepositorySyncJobStatus.INTERRUPTED)
 _TERMINAL_SYNC = (
     RepositorySyncJobStatus.SUCCEEDED,
@@ -157,23 +160,16 @@ def _document_states():
     }
 
 
-def _extraction_states():
+def _extraction_states(*, observed_at):
     # An old revision's queued job must not keep a newly published catalogue busy.
-    current = PDFExtractionJob.objects.filter(
-        status__in=_ACTIVE_EXTRACTION,
-        document__lifecycle_state=PDFDocumentLifecycle.ACTIVE,
-        document__local_policy__isnull=True,
-        target_git_blob_id=F("document__git_blob_id"),
-        target_relative_path=F("document__relative_path"),
-        target_file_size=F("document__file_size"),
-        target_extractor_version=PDF_EXTRACTOR_VERSION,
-    ).filter(Q(document__repository__enabled=True) | Q(status=PDFExtractionJobStatus.RUNNING))
+    current = current_pdf_extraction_jobs()
     return {
         row["document__repository_id"]: row
         for row in current.values("document__repository_id")
         .annotate(
             active_count=Count("pk"),
             running_count=Count("pk", filter=Q(status=PDFExtractionJobStatus.RUNNING)),
+            running_started_at=Min("started_at", filter=running_pdf_start_filter(observed_at)),
             updated_at=Max(Coalesce("heartbeat_at", "started_at", "requested_at")),
         )
         .order_by()
@@ -293,18 +289,19 @@ def _status(repository, documents, extraction):
     )
 
 
-def repository_notification_statuses() -> dict[str, object]:
+def repository_notification_statuses(*, at=None) -> dict[str, object]:
     """Return every repository's latest state in three SELECT-only queries.
 
     Unlike the repository rail's recovery-aware snapshot, this reader neither
     interrupts stale leases nor queues work, initializes schedules, or reads Git.
     """
 
+    observed_at = at or timezone.now()
     repositories = _repository_rows()
     if not repositories:
         return {"total": 0, "activeCount": 0, "failedCount": 0, "items": []}
     document_states = _document_states()
-    extraction_states = _extraction_states()
+    extraction_states = _extraction_states(observed_at=observed_at)
     target = reverse("bitbucket_search:index")
     status_target = reverse("bitbucket_search:index_status")
     items = []
@@ -339,6 +336,14 @@ def repository_notification_statuses() -> dict[str, object]:
                 "status": status,
                 "statusLabel": label,
                 "statusTone": tone,
+                "workerTiming": worker_timing(
+                    observed_at=observed_at,
+                    sync_status=repository["job_status"],
+                    sync_started_at=repository["job_started_at"],
+                    sync_operation=repository["job_operation"],
+                    sync_phase=repository["job_phase"],
+                    indexing_started_at=extraction.get("running_started_at"),
+                ),
                 "updatedAt": _iso(updated_at),
                 "lastSuccessAt": _iso(
                     _latest_time(repository["last_sync_successful_at"], repository["successful_at"])

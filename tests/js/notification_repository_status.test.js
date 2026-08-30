@@ -73,6 +73,139 @@ const payload = (items, overrides = {}) => ({
     ...overrides,
 });
 
+const workerTiming = (overrides = {}) => ({
+    startedAt: "2026-08-30T11:57:55Z",
+    observedAt: "2026-08-30T12:00:00Z",
+    label: "Downloading",
+    kind: "sync",
+    ...overrides,
+});
+
+const timerFor = (page, index = 0) => page.hooks.get("repository-list")
+    .children[index].children[0].children[0].children[4];
+
+test("running workers tick locally and keep elapsed time across polling and phases", async () => {
+    const page = await boot(
+        payload([repository(1, { workerTiming: workerTiming() })]),
+        payload([repository(1, { workerTiming: workerTiming({ label: "Updating catalogue", observedAt: "2026-08-30T12:00:03Z" }) })]),
+    );
+    const timer = timerFor(page);
+    assert.equal(timer.hidden, false);
+    assert.equal(timer.textContent, "Downloading · 02:05");
+    assert.equal(timer.getAttribute("aria-live"), "off");
+    assert.equal(page.hooks.get("repository-list").children[0].children[0].children[0].getAttribute("aria-describedby"), timer.id);
+    assert.equal(page.activeClocks(), 1);
+    const requests = page.requests.length;
+    page.advance(3000);
+    assert.equal(timer.textContent, "Downloading · 02:08");
+    assert.equal(page.requests.length, requests, "Clock ticks never fetch or start jobs");
+    await page.poll();
+    assert.equal(timerFor(page), timer);
+    assert.equal(timer.textContent, "Updating catalogue · 02:08");
+    assert.equal(page.activeClocks(), 1);
+});
+
+test("SSR sidebar and status share one clock and render durable time after reload", async () => {
+    const sidebar = new Element("small");
+    sidebar.hidden = true;
+    const timing = workerTiming();
+    sidebar.dataset = {
+        workerStartedAt: timing.startedAt, workerObservedAt: timing.observedAt,
+        workerLabel: timing.label, workerKind: timing.kind,
+    };
+    const page = await bootWithTimers([sidebar], payload([
+        repository(1, { workerTiming: timing }),
+        repository(2, { workerTiming: workerTiming({ kind: "indexing", label: "Indexing PDFs" }) }),
+    ]));
+    assert.equal(sidebar.textContent, "Downloading · 02:05");
+    assert.equal(sidebar.hidden, false);
+    assert.equal(page.activeClocks(), 1);
+    page.advance(5000);
+    assert.equal(sidebar.textContent, "Downloading · 02:10");
+    assert.equal(timerFor(page).textContent, sidebar.textContent);
+    assert.equal(timerFor(page, 1).textContent, "Indexing PDFs · 02:10");
+    assert.match(timerFor(page, 1).title, /longest-running current PDF indexing worker/);
+});
+
+test("queued, missing, malformed and future worker starts never create timers", async () => {
+    const page = await boot(payload([
+        repository(1, { status: "queued", statusTone: "progress", workerTiming: null }),
+        repository(2),
+        repository(3, { workerTiming: workerTiming({ startedAt: "invalid" }) }),
+        repository(4, { workerTiming: workerTiming({ startedAt: "2026-08-30T12:01:00Z" }) }),
+        repository(5, { workerTiming: workerTiming({ observedAt: null }) }),
+        repository(6, { workerTiming: workerTiming({ kind: "unknown" }) }),
+    ]));
+    for (let index = 0; index < 6; index += 1) {
+        assert.equal(timerFor(page, index).hidden, true);
+        assert.equal(timerFor(page, index).textContent, "");
+    }
+    assert.equal(page.activeClocks(), 0);
+});
+
+test("completion, failure, removal and a new attempt clear or restart the current-worker timer", async () => {
+    const page = await boot(
+        payload([repository(1, { workerTiming: workerTiming() }), repository(2, { workerTiming: workerTiming() })]),
+        payload([repository(1, { workerTiming: null })]),
+        payload([repository(1, { workerTiming: workerTiming({ startedAt: "2026-08-30T11:59:59Z" }) })]),
+        payload([repository(1, { status: "failed", workerTiming: null })]),
+    );
+    const removed = timerFor(page, 1);
+    await page.poll();
+    assert.equal(timerFor(page).hidden, true);
+    assert.equal(page.hooks.get("repository-list").children[0].children[0].children[0].getAttribute("aria-describedby"), undefined);
+    assert.equal(removed.hidden, true);
+    assert.equal(page.activeClocks(), 0);
+    await page.poll();
+    assert.equal(timerFor(page).textContent, "Downloading · 00:01");
+    page.advance(2000);
+    assert.equal(timerFor(page).textContent, "Downloading · 00:03");
+    await page.poll();
+    assert.equal(timerFor(page).hidden, true);
+    assert.equal(page.activeClocks(), 0);
+});
+
+test("polling failures freeze at last confirmed elapsed time and recovery resumes it", async () => {
+    const page = await boot(
+        payload([repository(1, { workerTiming: workerTiming() })]),
+        new Error("offline"),
+        payload([repository(1, { workerTiming: workerTiming({ observedAt: "2026-08-30T12:00:12Z" }) })]),
+    );
+    page.advance(2000);
+    await page.poll();
+    const timer = timerFor(page);
+    assert.equal(timer.textContent, "Downloading · 02:05 (last check)");
+    assert.equal(page.activeClocks(), 0);
+    page.advance(10000);
+    assert.equal(timer.textContent, "Downloading · 02:05 (last check)");
+    await page.poll();
+    assert.equal(timer.textContent, "Downloading · 02:17");
+    assert.equal(page.activeClocks(), 1);
+});
+
+test("missing snapshots and suspended polling mark worker timing as stale", async () => {
+    const page = await boot(
+        payload([repository(1, { workerTiming: workerTiming() })]),
+        payload([], { repositoryStatuses: null }),
+        payload([repository(1, { workerTiming: workerTiming() })]),
+    );
+    await page.poll();
+    assert.match(timerFor(page).textContent, /last check/);
+    await page.poll();
+    page.advance(46000);
+    assert.equal(timerFor(page).textContent, "Downloading · 02:05 (last check)");
+    assert.equal(page.activeClocks(), 0);
+});
+
+test("long-running workers use hours without wrapping after 24 hours", async () => {
+    const page = await boot(payload([
+        repository(1, { workerTiming: workerTiming({ startedAt: "2026-08-30T10:58:59Z" }) }),
+        repository(2, { workerTiming: workerTiming({ startedAt: "2026-08-29T10:00:00Z" }) }),
+    ]));
+    assert.equal(timerFor(page).textContent, "Downloading · 01:01:01");
+    assert.equal(timerFor(page, 1).textContent, "Downloading · 26:00:00");
+});
+
 const repository = (id, overrides = {}) => ({
     id,
     name: `repository-${id}`,
@@ -89,7 +222,9 @@ const repository = (id, overrides = {}) => ({
     ...overrides,
 });
 
-async function boot(...responses) {
+const boot = (...responses) => bootWithTimers([], ...responses);
+
+async function bootWithTimers(initialTimers, ...responses) {
     const center = new Element();
     center.dataset.notificationsUrl = "/bookmarks/notifications/";
     const statusCenter = new Element();
@@ -122,12 +257,16 @@ async function boot(...responses) {
     };
     const timers = [];
     const intervals = [];
+    const intervalDelays = new Map();
+    const activeIntervals = new Set();
+    let clock = 0;
     const requests = [];
     const documentListeners = new Map();
     const document = {
         body: new Element("body"),
         querySelector: (selector) => selector === "[data-repository-status-center]" ? statusCenter : null,
-        querySelectorAll: (selector) => selector === "[data-notification-center]" ? [center] : [],
+        querySelectorAll: (selector) => selector === "[data-notification-center]" ? [center]
+            : selector === "[data-repository-worker-timer]" ? initialTimers : [],
         addEventListener(name, fn) {
             documentListeners.set(name, [...(documentListeners.get(name) || []), fn]);
         },
@@ -139,7 +278,14 @@ async function boot(...responses) {
         matchMedia: () => ({ matches: false }),
         setTimeout(fn) { timers.push(fn); return timers.length; },
         clearTimeout() {},
-        setInterval(fn) { intervals.push(fn); },
+        setInterval(fn, delay) {
+            intervals.push(fn);
+            intervalDelays.set(intervals.length, delay);
+            activeIntervals.add(intervals.length);
+            return intervals.length;
+        },
+        clearInterval(id) { activeIntervals.delete(id); },
+        performance: { now: () => clock },
         addEventListener() {},
         dispatchEvent() {},
         async fetch(url, options) {
@@ -162,6 +308,14 @@ async function boot(...responses) {
         statusCenter,
         requests,
         intervals,
+        workerTimers: window.OWLRepositoryTimers,
+        activeClocks: () => [...activeIntervals].filter((id) => intervalDelays.get(id) === 1000).length,
+        advance(milliseconds) {
+            clock += milliseconds;
+            [...activeIntervals].forEach((id) => {
+                if (intervalDelays.get(id) === 1000) { intervals[id - 1](); }
+            });
+        },
         async click(name) {
             const target = hooks.get(name);
             await target.listeners.get("click")?.({ target });

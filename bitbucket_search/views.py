@@ -1184,6 +1184,7 @@ def _repository_payload(repository: BitbucketRepository) -> dict[str, object]:
         "progress": repository.sync_progress,
         "message": repository.status_message,
         "active": repository.has_active_sync,
+        "workerTiming": getattr(repository, "worker_timing", None),
         "pdfCount": repository.pdf_count,
         "vsdxCount": repository.vsdx_count,
         "documentCount": repository.document_count,

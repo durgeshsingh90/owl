@@ -140,6 +140,9 @@
 
     const updateRepository = (repository) => {
         cardsFor(repository.id).forEach((card) => {
+            window.OWLRepositoryTimers?.update(
+                card.querySelector("[data-repository-worker-timer]"), repository.workerTiming,
+            );
             card.dataset.repositoryState = repository.state;
             const stateIcon = card.querySelector("[data-repository-state-icon]");
             if (stateIcon) {
@@ -293,6 +296,9 @@
                 return;
             }
         } catch (_error) {
+            document.querySelectorAll("[data-repository-id] [data-repository-worker-timer]").forEach((timer) => {
+                window.OWLRepositoryTimers?.stale(timer);
+            });
             // An active or scheduled refresh remains recoverable. Use the same
             // bounded cadence so a temporary status failure never creates a tight loop.
         }

@@ -12,6 +12,17 @@
             <span class="bb-repository-card__copy">
                 <strong data-repository-name>{{ repository.display_name }}</strong>
                 <small data-repository-documents>{{ repository.pdf_count }} PDF · {{ repository.vsdx_count }} VSDX</small>
+                <small
+                    class="bb-repository-worker-timer"
+                    data-repository-worker-timer
+                    data-worker-started-at="{{ repository.worker_timing.startedAt|default:'' }}"
+                    data-worker-observed-at="{{ repository.worker_timing.observedAt|default:'' }}"
+                    data-worker-label="{{ repository.worker_timing.label|default:'' }}"
+                    data-worker-kind="{{ repository.worker_timing.kind|default:'' }}"
+                    title="Elapsed time for the current worker"
+                    aria-live="off"
+                    hidden
+                ></small>
             </span>
             <form method="post" action="{% url 'bitbucket_search:repository_refresh' repository.pk %}" data-repository-refresh-form>
                 {% csrf_token %}

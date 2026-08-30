@@ -44,6 +44,10 @@ from bitbucket_search.services.pdf_catalog import (
 from bitbucket_search.services.pdf_indexing import queue_repository_pdf_extractions
 from bitbucket_search.services.repository_lock import repository_worker_wakeup_lock
 from bitbucket_search.services.repository_urls import normalize_repository_url
+from bitbucket_search.services.repository_worker_timing import (
+    running_pdf_worker_starts,
+    worker_timing,
+)
 from bookmark_manager.models import Notification, NotificationKind, NotificationState
 from bookmark_manager.services.notifications import publish_notification
 
@@ -1637,9 +1641,26 @@ def repository_status_snapshot(*, at=None) -> tuple[BitbucketRepository, ...]:
         )
         .order_by("display_name", "id")
     )
+    indexing_starts = running_pdf_worker_starts(observed_at=observed_at) if repositories else {}
     for repository in repositories:
         repository.automatic_refresh = _repository_automation_status(
             repository,
             at=observed_at,
+        )
+        running_job = next(
+            (
+                job
+                for job in repository._automatic_refresh_jobs
+                if job.status == RepositorySyncJobStatus.RUNNING
+            ),
+            None,
+        )
+        repository.worker_timing = worker_timing(
+            observed_at=observed_at,
+            sync_status=running_job.status if running_job else None,
+            sync_started_at=running_job.started_at if running_job else None,
+            sync_operation=running_job.operation if running_job else None,
+            sync_phase=running_job.phase if running_job else None,
+            indexing_started_at=indexing_starts.get(repository.pk),
         )
     return repositories

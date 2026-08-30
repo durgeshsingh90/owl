@@ -611,6 +611,16 @@
     font-size: 0.61rem;
 }
 
+.bb-repository-card__copy .bb-repository-worker-timer {
+    color: var(--bb-muted);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.4;
+}
+
+.bb-repository-worker-timer[hidden] {
+    display: none;
+}
+
 .bb-repository-card__main form {
     margin: 0;
 }

@@ -7,7 +7,7 @@
     <meta name="referrer" content="no-referrer">
     <title>{% block title %}{{ page_title|default:"Dashboard" }} · OWL{% endblock %}</title>
     <link rel="stylesheet" href="{% static 'vendor/bootstrap/bootstrap.min.css' %}">
-    <link rel="stylesheet" href="{% static 'owl/owl.css' %}?v=separate-background-status-v1">
+    <link rel="stylesheet" href="{% static 'owl/owl.css' %}?v=repository-worker-timers-v1">
     {% block extra_head %}{% endblock %}
 </head>
 <body class="{% block body_class %}{% endblock %}" data-theme="{% block theme_default %}light{% endblock %}">
@@ -74,7 +74,7 @@
         <a href="{% url 'core:system_status' %}">View system status</a>
     </footer>
     {% endblock %}
-    <script src="{% static 'owl/owl.js' %}?v=separate-background-status-v1" defer></script>
+    <script src="{% static 'owl/owl.js' %}?v=repository-worker-timers-v1" defer></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

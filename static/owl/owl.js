@@ -1,6 +1,107 @@
 (() => {
     "use strict";
 
+    // One local clock serves the repository rail and the separate status panel.
+    // Only server-confirmed running jobs register a timer; ticking never polls or queues work.
+    const workerTimers = new Map();
+    let workerClock = null;
+    let workerTimerId = 0;
+    const workerNow = () => window.performance?.now() ?? Date.now();
+    const workerElapsed = (milliseconds) => {
+        const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+        const pad = (value) => String(value).padStart(2, "0");
+        const minutes = Math.floor(seconds / 60);
+        return minutes < 60
+            ? `${pad(minutes)}:${pad(seconds % 60)}`
+            : `${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}:${pad(seconds % 60)}`;
+    };
+    const renderWorkerTimer = (element, timer) => {
+        const sinceCheck = Math.max(0, workerNow() - timer.receivedAt);
+        // A suspended tab or lost connection must not imply a worker is still confirmed alive.
+        timer.stale ||= sinceCheck > 45000;
+        const elapsed = timer.elapsed + (timer.stale ? 0 : sinceCheck);
+        element.hidden = false;
+        element.textContent = `${timer.label} · ${workerElapsed(elapsed)}${timer.stale ? " (last check)" : ""}`;
+        element.title = timer.stale
+            ? "Status unavailable. Elapsed time at the last successful check."
+            : timer.kind === "indexing"
+                ? "Elapsed time for the longest-running current PDF indexing worker."
+                : "Elapsed time since this repository worker started.";
+        element.dataset.workerStale = String(timer.stale);
+        element.setAttribute("aria-live", "off");
+    };
+    const stopIdleWorkerClock = () => {
+        if (workerClock !== null && ![...workerTimers.values()].some((timer) => !timer.stale)) {
+            window.clearInterval(workerClock);
+            workerClock = null;
+        }
+    };
+    const tickWorkers = () => {
+        workerTimers.forEach((timer, element) => {
+            if (element.isConnected === false) {
+                workerTimers.delete(element);
+            } else {
+                renderWorkerTimer(element, timer);
+            }
+        });
+        stopIdleWorkerClock();
+    };
+    const repositoryTimers = {
+        update(element, timing) {
+            if (!element) {
+                return;
+            }
+            const startedAt = Date.parse(timing?.startedAt || "");
+            const observedAt = Date.parse(timing?.observedAt || "");
+            if (!Number.isFinite(startedAt) || !Number.isFinite(observedAt) || startedAt > observedAt
+                || !["sync", "indexing"].includes(timing?.kind)) {
+                this.remove(element);
+                return;
+            }
+            const timer = {
+                // Server times avoid a fast/slow browser clock changing the displayed duration.
+                elapsed: observedAt - startedAt,
+                receivedAt: workerNow(),
+                label: String(timing.label || "Running"),
+                kind: timing.kind,
+                stale: false,
+            };
+            workerTimers.set(element, timer);
+            renderWorkerTimer(element, timer);
+            if (workerClock === null) {
+                workerClock = window.setInterval(tickWorkers, 1000);
+            }
+        },
+        stale(element) {
+            const timer = workerTimers.get(element);
+            if (timer) {
+                timer.stale = true;
+                renderWorkerTimer(element, timer);
+                stopIdleWorkerClock();
+            }
+        },
+        remove(element) {
+            if (!element) {
+                return;
+            }
+            workerTimers.delete(element);
+            element.hidden = true;
+            element.textContent = "";
+            element.removeAttribute("title");
+            delete element.dataset.workerStale;
+            stopIdleWorkerClock();
+        },
+    };
+    window.OWLRepositoryTimers = repositoryTimers;
+    document.querySelectorAll("[data-repository-worker-timer]").forEach((element) => {
+        repositoryTimers.update(element, {
+            startedAt: element.dataset.workerStartedAt,
+            observedAt: element.dataset.workerObservedAt,
+            label: element.dataset.workerLabel,
+            kind: element.dataset.workerKind,
+        });
+    });
+
     const themeStorageKey = "owl-theme";
 
     const applyTheme = (theme) => {
@@ -394,7 +495,11 @@
             const name = createNotificationElement("span", "notification-repository__name");
             const status = createNotificationElement("span", "notification-repository__status");
             const time = createNotificationElement("time", "notification-repository__time");
-            summary.append(icon, name, status, time);
+            const timer = createNotificationElement("small", "notification-repository__timer");
+            timer.setAttribute("data-repository-worker-timer", "");
+            timer.id = `owl-repository-worker-timer-${++workerTimerId}`;
+            timer.hidden = true;
+            summary.append(icon, name, status, time, timer);
             const body = createNotificationElement("div", "notification-repository__body");
             const fullName = createNotificationElement("strong", "notification-repository__full-name");
             const detail = createNotificationElement("p", "notification-repository__detail");
@@ -406,7 +511,7 @@
             body.append(fullName, detail, updated, lastOutcome, lastSuccess, link, statusLink);
             details.append(summary, body);
             row.append(details);
-            return { row, details, summary, icon, name, status, time, fullName, detail, updated, lastSuccess, lastOutcome, link, statusLink };
+            return { row, details, summary, icon, name, status, time, timer, fullName, detail, updated, lastSuccess, lastOutcome, link, statusLink };
         };
 
         const renderRepositories = (snapshot) => {
@@ -416,6 +521,7 @@
             repositoryList.setAttribute("aria-busy", "false");
             if (!snapshot || !Array.isArray(snapshot.items)) {
                 repositoryList.dataset.stale = "true";
+                repositoryRows.forEach((elements) => repositoryTimers.stale(elements.timer));
                 if (repositoryMessage) {
                     repositoryMessage.hidden = false;
                     repositoryMessage.textContent = repositoryRows.size
@@ -464,6 +570,12 @@
                 elements.time.textContent = compactRepositoryDate(item.updatedAt);
                 elements.time.dateTime = item.updatedAt || "";
                 elements.time.title = formatNotificationDate(item.updatedAt, "Time unavailable");
+                repositoryTimers.update(elements.timer, item.workerTiming);
+                if (elements.timer.hidden) {
+                    elements.summary.removeAttribute("aria-describedby");
+                } else {
+                    elements.summary.setAttribute("aria-describedby", elements.timer.id);
+                }
                 elements.fullName.textContent = name;
                 elements.detail.textContent = `${status}. ${item.detail || "No additional status details."}`;
                 elements.updated.textContent = `Last update: ${formatNotificationDate(item.updatedAt, "Not yet")}`;
@@ -498,6 +610,7 @@
             });
             repositoryRows.forEach((elements, id) => {
                 if (!currentIds.has(id)) {
+                    repositoryTimers.remove(elements.timer);
                     elements.row.remove();
                     repositoryRows.delete(id);
                 }
@@ -644,6 +757,7 @@
                 render(await response.json());
             } catch (error) {
                 list.setAttribute("aria-busy", "false");
+                repositoryRows.forEach((elements) => repositoryTimers.stale(elements.timer));
                 renderBackgroundIndicator(null);
                 if (repositoryList) {
                     repositoryList.setAttribute("aria-busy", "false");
