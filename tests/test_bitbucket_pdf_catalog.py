@@ -17,6 +17,7 @@ from bitbucket_search.models import (
     PDFDocumentLifecycle,
     PDFDocumentTimelineBasis,
 )
+from bitbucket_search.services.filesystem_paths import display_path
 from bitbucket_search.services.git_sync import RepositorySyncError, managed_repository_path
 from bitbucket_search.services.pdf_catalog import (
     _parse_tree_pdfs,
@@ -49,6 +50,33 @@ def test_catalog_rejects_control_characters_in_pdf_paths(relative_path):
         _validated_relative_path(relative_path)
 
     assert captured.value.code == "invalid_pdf_path"
+
+
+@pytest.mark.parametrize("junction_component", ("docs", "docs/nested"))
+def test_catalog_rejects_simulated_junction_components_even_inside_checkout(
+    tmp_path, monkeypatch, junction_component
+):
+    repository_path = tmp_path.resolve()
+    candidate = repository_path / "docs" / "nested" / "Guide.pdf"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"synthetic PDF")
+    junction_path = repository_path / junction_component
+    assert not junction_path.is_symlink()
+    assert candidate.resolve(strict=True).is_relative_to(repository_path)
+    original_is_junction = Path.is_junction
+
+    def is_junction(path):
+        return display_path(path) == junction_path or original_is_junction(path)
+
+    monkeypatch.setattr(Path, "is_junction", is_junction)
+    record = b"100644 " + b"a" * 40 + b" 0\tdocs/nested/Guide.pdf"
+
+    with pytest.raises(RepositorySyncError) as captured:
+        _parse_tree_pdfs(repository_path, iter((record,)))
+
+    assert captured.value.code == "unsafe_pdf_path"
+    assert str(junction_path) not in captured.value.summary
+    assert candidate.read_bytes() == b"synthetic PDF"
 
 
 @pytest.mark.parametrize("failure_point", ("resolve", "stat"))

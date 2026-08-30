@@ -90,6 +90,49 @@ def test_topbar_and_desktop_rail_omit_verbose_sync_status_navigation(loopback_cl
     )
 
 
+@pytest.mark.parametrize("view_name", ["bitbucket_search:index", "bitbucket_search:repositories"])
+def test_bitbucket_topbar_omits_settings_icon_and_preserves_other_controls(
+    loopback_client, view_name
+):
+    BitbucketRepository.objects.create(
+        display_name="design-notes",
+        canonical_remote_key="bitbucket.org/workspace/design-notes",
+        remote_url="ssh://git@bitbucket.org/workspace/design-notes.git",
+        sync_state=RepositorySyncState.READY,
+    )
+    response = loopback_client.get(reverse(view_name))
+    html = response.content.decode()
+    # The status and notification dialogs each contain a nested header; match the
+    # complete top bar up to the workspace stage rather than its first header end.
+    topbar = re.search(
+        r'<header class="bb-topbar">(?P<body>.*?)</header>\s*<section class="bb-stage"',
+        html,
+        re.DOTALL,
+    )
+
+    assert response.status_code == 200
+    assert topbar is not None
+    topbar_html = topbar.group("body")
+    controls = re.findall(r"<(?:a|button|summary)\b[^>]*>", topbar_html, re.DOTALL)
+    assert "bb-icon-button--repositories" not in topbar_html
+    assert not any(
+        re.search(r'(?:aria-label|title)="[^"]*(?:settings|manage repositories)', control, re.I)
+        for control in controls
+    )
+    assert "data-settings-open" not in topbar_html
+    assert "data-repository-status-toggle" in topbar_html
+    assert 'aria-label="Open background status"' in topbar_html
+    assert "data-notification-toggle" in topbar_html
+    assert 'aria-label="Open notifications"' in topbar_html
+    assert '<summary class="bb-icon-button" aria-label="Applications">' in topbar_html
+    assert f'href="{reverse("core:system_status")}" aria-label="System status"' in topbar_html
+    assert 'data-theme-toggle aria-label="Switch to light mode"' in topbar_html
+    assert "data-repositories-refresh-all" in topbar_html
+    assert "data-refresh-all-button" in topbar_html
+    assert f'action="{reverse("bitbucket_search:repositories_refresh_all")}"' in topbar_html
+    assert "Queue a background refresh for all 1 enabled repository" in topbar_html
+
+
 def test_desktop_topbar_spans_results_and_people_starts_below_it(loopback_client):
     response = loopback_client.get(reverse("bitbucket_search:index"))
     html = response.content.decode()

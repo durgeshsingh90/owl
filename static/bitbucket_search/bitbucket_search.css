@@ -3636,7 +3636,6 @@
 }
 
 @media (max-width: 390px) {
-    .bb-topbar__actions > .bb-icon-button--repositories,
     .bb-topbar__actions > button.bb-icon-button {
         display: none;
     }

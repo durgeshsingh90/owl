@@ -22,6 +22,7 @@ from bitbucket_search.services.document_actions import (
     reveal_registered_pdf,
     validated_pdf_path,
 )
+from bitbucket_search.services.filesystem_paths import display_path
 from bitbucket_search.services.git_sync import managed_repository_path
 from bitbucket_search.services.repository_lock import repository_checkout_lock
 
@@ -135,6 +136,45 @@ def test_validated_pdf_path_rejects_symlink_components_and_final_file(
         validated_pdf_path(document)
 
     assert captured.value.code == "invalid_document_path"
+
+
+@pytest.mark.parametrize("junction_location", ("parent", "root", "git", "component"))
+@pytest.mark.parametrize("allow_missing", (False, True))
+def test_checkout_pdf_validation_rejects_simulated_in_boundary_junctions(
+    registered_pdf, monkeypatch, junction_location, allow_missing
+):
+    document, pdf_path = registered_pdf
+    checkout = pdf_path.parents[1]
+    junction_path = {
+        "parent": checkout.parent,
+        "root": checkout,
+        "git": checkout / ".git",
+        "component": pdf_path.parent,
+    }[junction_location]
+    # Simulate Windows junction detection on a real in-bound directory. The
+    # ordinary symlink and final containment checks would otherwise accept it.
+    assert not junction_path.is_symlink()
+    assert junction_path.resolve(strict=True) == junction_path
+    original_is_junction = Path.is_junction
+
+    def is_junction(candidate):
+        return display_path(candidate) == junction_path or original_is_junction(candidate)
+
+    monkeypatch.setattr(Path, "is_junction", is_junction)
+    if allow_missing:
+        document.relative_path = "docs/Missing.pdf"
+
+    with pytest.raises(DocumentActionError) as captured:
+        document_actions.validated_checkout_pdf_path(document, allow_missing=allow_missing)
+
+    expected_code = (
+        "invalid_document_path"
+        if junction_location == "component"
+        else "invalid_repository_checkout"
+    )
+    assert captured.value.code == expected_code
+    assert str(junction_path) not in captured.value.summary
+    assert pdf_path.read_bytes() == b"synthetic PDF"
 
 
 def test_validated_pdf_path_rejects_missing_non_pdf_and_non_regular_entries(registered_pdf):

@@ -909,16 +909,19 @@ def _sync_summary(
         }
     if repositories:
         if extraction.pending_documents:
-            detail = (
-                f"{extraction.pending_documents} PDF"
-                f"{'s' if extraction.pending_documents != 1 else ''} awaiting indexing"
-            )
-        else:
-            detail = "Repository and PDF workers are idle"
+            return {
+                "state": "attention",
+                "label": "Indexing pending",
+                "detail": (
+                    f"{extraction.pending_documents} PDF"
+                    f"{'s' if extraction.pending_documents != 1 else ''} awaiting indexing"
+                ),
+                "last_completed": max(completed) if completed else None,
+            }
         return {
             "state": "ready",
             "label": "Up to date",
-            "detail": detail,
+            "detail": "Repository and PDF workers are idle",
             "last_completed": max(completed) if completed else None,
         }
     return {

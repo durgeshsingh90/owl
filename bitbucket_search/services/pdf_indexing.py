@@ -51,6 +51,7 @@ from bitbucket_search.models import (
     RepositorySyncState,
 )
 from bitbucket_search.services.document_actions import DocumentActionError, validated_pdf_path
+from bitbucket_search.services.filesystem_paths import filesystem_path
 from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
 from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 from bitbucket_search.services.repository_lock import (
@@ -935,7 +936,7 @@ def _validated_job_path(job: PDFExtractionJob) -> Path:
             "A newer PDF revision replaced this extraction request.",
         )
     try:
-        path = validated_pdf_path(document)
+        path = filesystem_path(validated_pdf_path(document))
     except DocumentActionError as exc:
         raise PDFIndexingError(exc.code, exc.summary) from exc
     try:

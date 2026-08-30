@@ -21,6 +21,7 @@ from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from bitbucket_search.models import PDFDocument, PDFDocumentLifecycle
+from bitbucket_search.services.filesystem_paths import display_path, filesystem_path
 from bitbucket_search.services.git_sync import RepositorySyncError, managed_repository_path
 from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
 from bitbucket_search.services.path_safety import has_disallowed_path_characters
@@ -171,7 +172,7 @@ def validated_pdf_path(document: PDFDocument) -> Path:
 
 
 def validated_checkout_pdf_path(document: PDFDocument, *, allow_missing: bool = False) -> Path:
-    """Return a strictly validated, non-symlink PDF path in its managed checkout."""
+    """Return a validated PDF path without symlinks or junctions in its checkout."""
 
     if document.lifecycle_state != PDFDocumentLifecycle.ACTIVE:
         raise DocumentActionError(
@@ -182,9 +183,12 @@ def validated_checkout_pdf_path(document: PDFDocument, *, allow_missing: bool = 
     repository = document.repository
     try:
         configured_parent = Path(settings.BITBUCKET_REPOSITORIES_ROOT)
-        expected_root = managed_repository_path(repository)
+        expected_root = display_path(managed_repository_path(repository))
         configured_root = Path(repository.local_path)
-        resolved_configured_root = configured_root.resolve(strict=False)
+        parent_io = filesystem_path(configured_parent.absolute())
+        configured_io = filesystem_path(configured_root.absolute())
+        expected_io = filesystem_path(expected_root)
+        resolved_configured_root = display_path(configured_io.resolve(strict=False))
     except (OSError, RepositorySyncError, RuntimeError, TypeError, ValueError) as exc:
         raise DocumentActionError(
             "invalid_repository_checkout",
@@ -193,14 +197,17 @@ def validated_checkout_pdf_path(document: PDFDocument, *, allow_missing: bool = 
 
     if (
         not repository.local_path
-        or configured_parent.is_symlink()
-        or configured_parent.absolute() != configured_parent.resolve(strict=False)
-        or configured_root.is_symlink()
+        or parent_io.is_symlink()
+        or parent_io.is_junction()
+        or configured_parent.absolute() != display_path(parent_io.resolve(strict=False))
+        or configured_io.is_symlink()
+        or configured_io.is_junction()
         or configured_root.absolute() != expected_root
         or resolved_configured_root != expected_root
-        or not expected_root.is_dir()
-        or (expected_root / ".git").is_symlink()
-        or not (expected_root / ".git").is_dir()
+        or not expected_io.is_dir()
+        or (expected_io / ".git").is_symlink()
+        or (expected_io / ".git").is_junction()
+        or not (expected_io / ".git").is_dir()
     ):
         raise DocumentActionError(
             "invalid_repository_checkout",
@@ -208,16 +215,19 @@ def validated_checkout_pdf_path(document: PDFDocument, *, allow_missing: bool = 
         )
 
     relative_path = _validated_relative_pdf_path(document.relative_path)
-    candidate = expected_root.joinpath(*relative_path.parts)
+    # Keep persisted/clipboard paths ordinary; use long-path spelling only for
+    # I/O after validating the managed root and Git-relative components.
+    io_root = expected_io
+    candidate = io_root.joinpath(*relative_path.parts)
 
-    current = expected_root
+    current = io_root
     try:
         for part in relative_path.parts:
             current = current / part
-            if current.is_symlink():
+            if current.is_symlink() or current.is_junction():
                 raise DocumentActionError(
                     "invalid_document_path",
-                    "The registered PDF path contains a symbolic link.",
+                    "The registered PDF path contains a symbolic link or junction.",
                 )
 
         resolved_candidate = candidate.resolve(strict=not allow_missing)
@@ -229,7 +239,7 @@ def validated_checkout_pdf_path(document: PDFDocument, *, allow_missing: bool = 
             "This PDF is missing from the managed repository.",
         ) from exc
 
-    if resolved_candidate == expected_root or not resolved_candidate.is_relative_to(expected_root):
+    if resolved_candidate == io_root or not resolved_candidate.is_relative_to(io_root):
         raise DocumentActionError(
             "invalid_document_path",
             "The registered PDF path is outside its managed repository.",
@@ -244,7 +254,7 @@ def validated_checkout_pdf_path(document: PDFDocument, *, allow_missing: bool = 
         mode = resolved_candidate.stat(follow_symlinks=False).st_mode
     except FileNotFoundError as exc:
         if allow_missing:
-            return resolved_candidate
+            return display_path(resolved_candidate)
         raise DocumentActionError(
             "document_unavailable",
             "This PDF is missing from the managed repository.",
@@ -259,7 +269,7 @@ def validated_checkout_pdf_path(document: PDFDocument, *, allow_missing: bool = 
             "document_unavailable",
             "The registered PDF is not a regular file.",
         )
-    return resolved_candidate
+    return display_path(resolved_candidate)
 
 
 def _run_native_action(arguments: list[str], *, action: str) -> None:

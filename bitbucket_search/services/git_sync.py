@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import queue
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -26,6 +28,7 @@ from bitbucket_search.models import (
     PDFLocalPolicyState,
     RepositorySyncPhase,
 )
+from bitbucket_search.services.filesystem_paths import display_path, filesystem_path
 from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
 from bitbucket_search.services.path_safety import has_disallowed_path_characters
 from bitbucket_search.services.repository_lock import repository_checkout_lock
@@ -40,6 +43,8 @@ _GIT_LFS_POINTER_VERSION = b"version https://git-lfs.github.com/spec/v1"
 _GIT_LFS_POINTER_OID = re.compile(rb"^oid sha256:[0-9a-f]{64}$", re.MULTILINE)
 _GIT_LFS_POINTER_SIZE = re.compile(rb"^size [0-9]+$", re.MULTILINE)
 _GIT_LFS_POINTER_MAX_BYTES = 8_192
+_IS_WINDOWS = os.name == "nt"
+_WINDOWS_PUBLISH_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0, 2.0)
 logger = get_logger("git")
 _GIT_COMMAND_OPERATIONS = frozenset(
     {
@@ -126,7 +131,12 @@ def _validated_existing_path(repository: BitbucketRepository) -> Path:
     configured = (
         Path(repository.local_path).resolve(strict=False) if repository.local_path else None
     )
-    if configured != expected or not expected.is_dir() or not (expected / ".git").is_dir():
+    native_expected = filesystem_path(expected)
+    if (
+        configured != expected
+        or not native_expected.is_dir()
+        or not (native_expected / ".git").is_dir()
+    ):
         raise RepositorySyncError(
             "invalid_local_checkout",
             "The managed repository checkout is missing or is not valid. Retry after repairing it.",
@@ -143,6 +153,21 @@ def _git_environment() -> dict[str, str]:
             "LC_ALL": "C",
         }
     )
+    if _IS_WINDOWS:
+        # Apply this to OWL's child Git processes only, including their helpers.
+        # Never change the user's global Git configuration or Windows registry.
+        try:
+            config_count = int(environment.get("GIT_CONFIG_COUNT", "0"))
+            if config_count < 0:
+                raise ValueError
+        except ValueError as exc:
+            raise RepositorySyncError(
+                "invalid_git_environment",
+                "Git's inherited configuration is invalid. Check GIT_CONFIG_COUNT and retry.",
+            ) from exc
+        environment[f"GIT_CONFIG_KEY_{config_count}"] = "core.longpaths"
+        environment[f"GIT_CONFIG_VALUE_{config_count}"] = "true"
+        environment["GIT_CONFIG_COUNT"] = str(config_count + 1)
     return environment
 
 
@@ -561,12 +586,48 @@ def _is_git_lfs_pointer(candidate: Path, *, size: int) -> bool:
         content = candidate.read_bytes()
     except OSError as exc:
         log_event(logger, logging.ERROR, "git_lfs_pointer_read_failed", error=exc)
-        return False
+        raise _document_scan_error(exc, path=candidate) from exc
     normalized = content.replace(b"\r\n", b"\n")
     return (
         normalized.startswith(_GIT_LFS_POINTER_VERSION + b"\n")
         and _GIT_LFS_POINTER_OID.search(normalized) is not None
         and _GIT_LFS_POINTER_SIZE.search(normalized) is not None
+    )
+
+
+def _document_scan_error(error: OSError, *, path: Path | None = None) -> RepositorySyncError:
+    """Classify local access failures without exposing paths or OS error text."""
+
+    windows_error = getattr(error, "winerror", None)
+    path_length = len(str(display_path(path))) if path is not None else 0
+    if error.errno == errno.ENAMETOOLONG or windows_error == 206:
+        return RepositorySyncError(
+            "document_path_too_long",
+            "A downloaded document path is too long. Use a shorter OWL media location "
+            "or check Windows long-path support, then retry.",
+        )
+    if error.errno in {errno.EACCES, errno.EPERM} or windows_error in {5, 32, 33}:
+        return RepositorySyncError(
+            "document_access_denied",
+            "OWL could not read a downloaded PDF/VSDX file or folder. Check permissions "
+            "or another program locking the checkout, then retry.",
+        )
+    if error.errno in {errno.ENOENT, errno.ENOTDIR} or windows_error in {2, 3}:
+        if windows_error in {2, 3} and path_length >= 260:
+            return RepositorySyncError(
+                "document_path_unavailable",
+                "Windows could not find a downloaded document in a path of "
+                f"{path_length} characters. This may be a long-path handling issue. "
+                "Check Windows long-path support or use a shorter OWL media location, then retry.",
+            )
+        return RepositorySyncError(
+            "document_missing",
+            "A downloaded PDF/VSDX file or folder could not be found during scanning. "
+            "Check storage availability and Windows long-path support, then retry.",
+        )
+    return RepositorySyncError(
+        "document_scan_failed",
+        "OWL could not read the downloaded document checkout. Check storage access and retry.",
     )
 
 
@@ -577,7 +638,7 @@ def _scan_documents(
 ) -> tuple[DocumentStats, int]:
     """Count materialized documents and unresolved LFS pointers without following symlinks."""
 
-    repository_path = repository_path.resolve()
+    repository_path = filesystem_path(repository_path.resolve())
     pdf_count = 0
     vsdx_count = 0
     document_bytes = 0
@@ -593,33 +654,44 @@ def _scan_documents(
             heartbeat_callback()
             last_heartbeat_at = observed_at
 
-    for directory, directory_names, filenames in os.walk(repository_path, followlinks=False):
+    def directory_error(error: OSError) -> None:
+        log_event(logger, logging.ERROR, "git_document_directory_scan_failed", error=error)
+        path = Path(error.filename) if error.filename is not None else repository_path
+        raise _document_scan_error(error, path=path) from error
+
+    for directory, directory_names, filenames in os.walk(
+        repository_path, followlinks=False, onerror=directory_error
+    ):
         heartbeat_if_due()
         current = Path(directory)
         directory_names[:] = [
-            name for name in directory_names if name != ".git" and not (current / name).is_symlink()
+            name
+            for name in directory_names
+            if name != ".git"
+            and not (current / name).is_symlink()
+            and not (current / name).is_junction()
         ]
         for filename in filenames:
             heartbeat_if_due()
             candidate = current / filename
-            if candidate.is_symlink():
-                continue
             suffix = candidate.suffix.casefold()
             if suffix not in {".pdf", ".vsdx"}:
                 continue
             try:
-                stat = candidate.stat(follow_symlinks=False)
+                metadata = candidate.stat(follow_symlinks=False)
             except OSError as exc:
                 log_event(logger, logging.ERROR, "git_document_stat_failed", error=exc)
+                raise _document_scan_error(exc, path=candidate) from exc
+            if not stat.S_ISREG(metadata.st_mode):
                 continue
-            if _is_git_lfs_pointer(candidate, size=stat.st_size):
+            if _is_git_lfs_pointer(candidate, size=metadata.st_size):
                 lfs_pointer_count += 1
                 continue
             if suffix == ".pdf":
                 pdf_count += 1
             else:
                 vsdx_count += 1
-            document_bytes += stat.st_size
+            document_bytes += metadata.st_size
     log_event(
         logger,
         logging.DEBUG,
@@ -756,17 +828,112 @@ def _ahead_behind(
 
 
 def _remove_staging_directory(staging_path: Path) -> None:
-    temp_root = Path(settings.BITBUCKET_TEMP_ROOT).resolve()
-    resolved = staging_path.resolve(strict=False)
-    if resolved.parent == temp_root and resolved.name.startswith("repository-"):
-        shutil.rmtree(resolved, ignore_errors=True)
-        if resolved.exists():
-            log_event(
-                logger,
-                logging.ERROR,
-                "git_staging_cleanup_failed",
-                error_code="staging_cleanup_failed",
+    """Best-effort removal of this clone's private staging tree, never its error."""
+
+    try:
+        temp_root = Path(settings.BITBUCKET_TEMP_ROOT).resolve()
+        if staging_path.is_symlink() or staging_path.is_junction():
+            return
+        resolved = staging_path.resolve(strict=False)
+        if resolved.parent != temp_root or not re.fullmatch(
+            r"repository-[0-9]+-[0-9a-f]{32}", resolved.name
+        ):
+            return
+        native_root = filesystem_path(resolved)
+
+        def remove_readonly(function, path, error):
+            if isinstance(error, FileNotFoundError):
+                return
+            candidate = Path(path)
+            # Git object files can have Windows' read-only bit. Only clear that
+            # bit for deletion of an entry in our own tree; do not follow links,
+            # repair arbitrary ACLs, or retry non-deletion operations.
+            if (
+                not _IS_WINDOWS
+                or not isinstance(error, PermissionError)
+                or function not in {os.unlink, os.remove, os.rmdir}
+                or candidate.is_symlink()
+                or candidate.is_junction()
+                or not candidate.resolve(strict=False).is_relative_to(native_root)
+            ):
+                raise error
+            metadata = candidate.stat(follow_symlinks=False)
+            if metadata.st_mode & stat.S_IWRITE:
+                raise error
+            candidate.chmod(stat.S_IMODE(metadata.st_mode) | stat.S_IWRITE)
+            function(path)
+
+        shutil.rmtree(native_root, onexc=remove_readonly)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        # Cleanup is secondary. In particular, its PermissionError must not
+        # replace a checkout, scan, or publication error reported to the user.
+        log_event(
+            logger,
+            logging.ERROR,
+            "git_staging_cleanup_failed",
+            error=exc,
+            error_code="staging_cleanup_failed",
+        )
+
+
+def _publish_staged_checkout(
+    staging: Path,
+    target: Path,
+    *,
+    heartbeat_callback: HeartbeatCallback,
+) -> None:
+    """Publish a new clone, briefly tolerating Windows sharing/permission locks."""
+
+    native_staging = filesystem_path(staging)
+    native_target = filesystem_path(target)
+    try:
+        native_target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for attempt in range(len(_WINDOWS_PUBLISH_RETRY_DELAYS) + 1):
+            if os.path.lexists(native_target):
+                raise RepositorySyncError(
+                    "destination_exists",
+                    "The managed destination already exists. OWL left it unchanged.",
+                )
+            try:
+                os.replace(native_staging, native_target)
+                return
+            except OSError as exc:
+                if (
+                    not _IS_WINDOWS
+                    or getattr(exc, "winerror", None) not in {5, 32, 33}
+                    or attempt == len(_WINDOWS_PUBLISH_RETRY_DELAYS)
+                ):
+                    raise
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "git_checkout_publish_retry",
+                    error=exc,
+                    retry_number=attempt + 1,
+                )
+                # Keep the lease alive during a short antivirus/indexer lock.
+                remaining = _WINDOWS_PUBLISH_RETRY_DELAYS[attempt]
+                while remaining > 0:
+                    heartbeat_callback()
+                    delay = min(remaining, _HEARTBEAT_INTERVAL_SECONDS)
+                    time.sleep(delay)
+                    remaining -= delay
+                heartbeat_callback()
+    except OSError as exc:
+        log_event(logger, logging.ERROR, "git_checkout_publish_failed", error=exc)
+        if exc.errno == errno.EXDEV:
+            summary = (
+                "The downloaded checkout could not be moved into place because OWL's temporary "
+                "and repository folders are on different drives. Keep them on the same drive."
             )
+        else:
+            summary = (
+                "Git downloaded the checkout, but OWL could not move it into its managed folder. "
+                "Close programs locking that folder and check write/delete permissions, then retry."
+            )
+        raise RepositorySyncError("checkout_publish_failed", summary) from exc
 
 
 def _clone(
@@ -774,13 +941,13 @@ def _clone(
     progress_callback: ProgressCallback,
 ) -> RepositorySyncResult:
     target = managed_repository_path(repository)
-    if target.exists():
+    if os.path.lexists(filesystem_path(target)):
         raise RepositorySyncError(
             "destination_exists",
             "The managed destination already exists but is not a valid completed checkout.",
         )
     temp_root = Path(settings.BITBUCKET_TEMP_ROOT).resolve()
-    temp_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    filesystem_path(temp_root).mkdir(mode=0o700, parents=True, exist_ok=True)
     staging = temp_root / f"repository-{repository.pk}-{uuid.uuid4().hex}"
     shallow_since = timezone.now().date() - timedelta(days=365 * settings.BITBUCKET_HISTORY_YEARS)
     try:
@@ -827,6 +994,10 @@ def _clone(
                 reason="filtered_clone_failed",
             )
             _remove_staging_directory(staging)
+            # A locked failed clone may survive best-effort cleanup on Windows.
+            # Never retry into that partial directory or adopt its contents.
+            staging = temp_root / f"repository-{repository.pk}-{uuid.uuid4().hex}"
+            fallback_clone_arguments = (*fallback_clone_arguments[:-1], str(staging))
             progress_callback(
                 RepositorySyncPhase.CLONING,
                 8,
@@ -911,8 +1082,16 @@ def _clone(
             ),
             progress_callback=progress_callback,
         )
-        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.replace(staging, target)
+        _publish_staged_checkout(
+            staging,
+            target,
+            heartbeat_callback=_progress_heartbeat(
+                progress_callback,
+                phase=RepositorySyncPhase.DISCOVERING,
+                progress=98,
+                status_message="Finishing the downloaded repository checkout…",
+            ),
+        )
         return RepositorySyncResult(
             branch=branch,
             source_commit=source_commit,

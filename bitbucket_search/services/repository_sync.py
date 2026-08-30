@@ -1430,7 +1430,7 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
                 status=RepositorySyncJobStatus.SUCCEEDED,
                 phase=RepositorySyncPhase.COMPLETED,
                 progress=100,
-                status_message="Repository is ready.",
+                status_message="Git update complete. PDF discovery complete.",
                 source_commit=result.source_commit,
                 result_commit=result.result_commit,
                 heartbeat_at=now,
@@ -1461,6 +1461,10 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
                 queue_repository_pdf_extractions(
                     job.repository_id,
                     repository_sync_job=job.pk,
+                    # An explicit Refresh should retry previously failed text
+                    # extraction even when Git reports no changed PDF bytes.
+                    retry_failed=job.trigger == RepositorySyncTrigger.MANUAL,
+                    recover_interrupted=job.trigger != RepositorySyncTrigger.MANUAL,
                 )
                 stage = "repository_state_publish"
                 inventory_totals = (
@@ -1483,7 +1487,7 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
                     default_branch=result.branch,
                     sync_state=RepositorySyncState.READY,
                     sync_progress=100,
-                    status_message="Repository is ready.",
+                    status_message="Git update complete. PDF discovery complete.",
                     last_error_code="",
                     last_error_summary="",
                     pdf_count=inventory_totals["pdf_count"],

@@ -54,6 +54,24 @@ _FAILURE_DETAILS = {
     "worker_error": "The repository worker encountered an unexpected error. Review local diagnostics.",
     "database_busy": "The local database was busy. Try refreshing again after current work finishes.",
     "missing_pdf_file": "A tracked PDF is missing from the managed checkout. Refresh to restore it.",
+    "document_missing": (
+        "A downloaded file or folder could not be read. Check storage availability, then retry."
+    ),
+    "document_path_too_long": (
+        "A document path is too long. Check Windows long-path support or use shorter storage paths."
+    ),
+    "document_path_unavailable": (
+        "Windows could not access a long document path. Check long-path support and storage access."
+    ),
+    "document_access_denied": (
+        "A downloaded file or folder is inaccessible. Check permissions or programs locking it."
+    ),
+    "document_scan_failed": "The downloaded files could not be scanned. Check storage access.",
+    "checkout_publish_failed": (
+        "Git downloaded the repository, but its folder could not be moved into place. "
+        "Check folder locks, permissions, and that temporary storage is on the same drive."
+    ),
+    "invalid_git_environment": "Git's inherited configuration is invalid. Check GIT_CONFIG_COUNT.",
     "pdf_path_too_long": "A tracked PDF path is too long. Review storage and Git long-path support.",
     "pdf_file_access_denied": "A tracked PDF could not be accessed. Check permissions or file locks.",
     "pdf_file_read_failed": "A tracked PDF could not be read. Check storage access and retry.",

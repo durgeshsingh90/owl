@@ -10,6 +10,7 @@ import pytest
 from django.db import OperationalError
 from django.utils import timezone
 
+from bitbucket_search import views as bitbucket_views
 from bitbucket_search.models import (
     BitbucketRepository,
     PDFDocument,
@@ -25,6 +26,7 @@ from bitbucket_search.models import (
     RepositorySyncOperation,
     RepositorySyncPhase,
     RepositorySyncState,
+    RepositorySyncTrigger,
 )
 from bitbucket_search.services import pdf_catalog, pdf_indexing, repository_sync
 from bitbucket_search.services.git_sync import (
@@ -210,6 +212,79 @@ def test_sync_catalogue_publication_and_extraction_are_ordered(monkeypatch, exis
     assert events[-1] == "extract"
     document.refresh_from_db()
     assert document.index_state == PDFIndexState.READY
+
+
+@pytest.mark.parametrize(
+    ("trigger", "automatic_retry_number", "retry_failed", "recover_interrupted"),
+    [
+        (RepositorySyncTrigger.MANUAL, 0, True, False),
+        (RepositorySyncTrigger.DAILY, 0, False, True),
+        (RepositorySyncTrigger.RETRY, 1, False, True),
+    ],
+)
+def test_sync_trigger_selects_explicit_or_bounded_pdf_recovery_policy(
+    monkeypatch, trigger, automatic_retry_number, retry_failed, recover_interrupted
+):
+    repository = _repository()
+    _checkout(repository)
+    # Persist valid trigger metadata rather than modifying only the Python job:
+    # automatic runs require a day, and retry runs require a positive attempt.
+    queued = RepositorySyncJob.objects.create(
+        repository=repository,
+        operation=RepositorySyncOperation.REFRESH,
+        trigger=trigger,
+        scheduled_day=timezone.localdate() if trigger != RepositorySyncTrigger.MANUAL else None,
+        automatic_retry_number=automatic_retry_number,
+    )
+    claimed = repository_sync.claim_next_job()
+    assert claimed is not None and claimed.pk == queued.pk
+    monkeypatch.setattr(repository_sync, "synchronize_repository", lambda *_a, **_k: _result())
+    monkeypatch.setattr(
+        repository_sync, "build_repository_pdf_catalog", lambda *_a, **_k: _catalog()
+    )
+    queue_extractions = Mock(wraps=pdf_indexing.queue_repository_pdf_extractions)
+    monkeypatch.setattr(repository_sync, "queue_repository_pdf_extractions", queue_extractions)
+
+    completed = repository_sync.execute_claimed_job(claimed.pk)
+
+    assert completed.status == RepositorySyncJobStatus.SUCCEEDED
+    queue_extractions.assert_called_once_with(
+        repository.pk,
+        repository_sync_job=completed.pk,
+        retry_failed=retry_failed,
+        recover_interrupted=recover_interrupted,
+    )
+    extraction = PDFExtractionJob.objects.get()
+    assert extraction.repository_sync_job_id == completed.pk
+    assert extraction.status == PDFExtractionJobStatus.QUEUED
+    assert completed.trigger == trigger
+    assert completed.automatic_retry_number == automatic_retry_number
+
+
+@pytest.mark.parametrize("pending_count", (1, 3))
+def test_sync_summary_does_not_call_pending_documents_up_to_date(pending_count):
+    repository = _repository()
+    repository.last_sync_successful_at = timezone.now()
+    extraction = pdf_indexing.ExtractionStatusSnapshot(
+        queued_jobs=0,
+        running_jobs=0,
+        failed_jobs=0,
+        interrupted_jobs=0,
+        pending_documents=pending_count,
+        indexed_documents=0,
+        stale_documents=0,
+    )
+
+    summary = bitbucket_views._sync_summary(
+        (repository,), extraction, automation={"state": "up_to_date"}
+    )
+
+    assert summary["state"] == "attention"
+    assert summary["label"] == "Indexing pending"
+    assert summary["detail"] == (
+        f"{pending_count} PDF{'s' if pending_count != 1 else ''} awaiting indexing"
+    )
+    assert summary["last_completed"] == repository.last_sync_successful_at
 
 
 def test_same_named_repositories_have_separate_managed_folders(settings):

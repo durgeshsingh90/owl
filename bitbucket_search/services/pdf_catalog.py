@@ -31,6 +31,7 @@ from bitbucket_search.models import (
     PDFLocalPolicyState,
     RepositorySyncPhase,
 )
+from bitbucket_search.services.filesystem_paths import filesystem_path
 from bitbucket_search.services.git_sync import (
     ProgressCallback,
     RepositorySyncError,
@@ -375,7 +376,7 @@ def _parse_tree_pdfs(
     *,
     ignored_paths: frozenset[str] = frozenset(),
 ) -> tuple[_TreePDF, ...]:
-    repository_root = repository_path.resolve()
+    repository_root = filesystem_path(repository_path.resolve())
     documents: list[_TreePDF] = []
     seen_paths: set[str] = set()
     for raw_record in records:
@@ -407,10 +408,11 @@ def _parse_tree_pdfs(
         current = repository_root
         for part in relative.parts:
             current /= part
-            if current.is_symlink():
+            if current.is_symlink() or current.is_junction():
                 raise RepositorySyncError(
                     "unsafe_pdf_path",
-                    "A tracked PDF resolves through a symbolic link. OWL did not catalog it.",
+                    "A tracked PDF resolves through a symbolic link or junction. "
+                    "OWL did not catalog it.",
                 )
         try:
             resolved = candidate.resolve(strict=True)
