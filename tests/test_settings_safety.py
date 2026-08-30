@@ -5,6 +5,7 @@ import sys
 import uuid
 from pathlib import Path
 
+import pytest
 from django.conf import settings
 
 
@@ -87,6 +88,42 @@ def test_bitbucket_inventory_and_search_page_sizes_are_capped_at_two_hundred(tmp
 
     assert result.returncode == 0
     assert result.stdout.strip() == "200 200"
+
+
+@pytest.mark.parametrize(
+    ("configured_hosts", "expected_hosts"),
+    [
+        (None, ("bitbucket.org", "github.com", "scm.mastercard.int")),
+        ("git.example.invalid", ("git.example.invalid",)),
+        ("", ()),
+    ],
+    ids=("default-hosts", "explicit-override", "explicitly-disabled"),
+)
+def test_bitbucket_allowed_hosts_defaults_and_environment_override(
+    tmp_path, configured_hosts, expected_hosts
+):
+    environment = _isolated_subprocess_environment(tmp_path)
+    environment["OWL_DATA_ROOT"] = str(tmp_path / "runtime")
+    if configured_hosts is None:
+        environment.pop("BITBUCKET_ALLOWED_HOSTS", None)
+    else:
+        environment["BITBUCKET_ALLOWED_HOSTS"] = configured_hosts
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from owl import settings; print(repr(settings.BITBUCKET_ALLOWED_HOSTS))",
+        ],
+        cwd=settings.BASE_DIR,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == repr(expected_hosts)
 
 
 def test_test_settings_ignore_an_environment_file_with_external_values(tmp_path):

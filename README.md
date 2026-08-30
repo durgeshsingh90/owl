@@ -102,10 +102,11 @@ Bitbucket Search now provides repository registration and durable background syn
   and older-year timeline when no search is active.
 
 Repository URLs are canonicalized and deduplicated. Credentials embedded in URLs are rejected;
-Git uses the existing SSH agent or external credential manager. `bitbucket.org` is approved by
-default. Set `BITBUCKET_ALLOWED_HOSTS` in your local `.env` to a comma-separated list of exact
-hostnames for internal Bitbucket servers or GitHub, or set it explicitly blank to disable
-repository additions. Keep all hosts you want to use in the list, for example:
+Git uses the existing SSH agent or external credential manager. Django's `owl/settings.py`
+approves `bitbucket.org`, `github.com`, and `scm.mastercard.int` by default. Leave
+`BITBUCKET_ALLOWED_HOSTS` unset to use those defaults, or set it in your local `.env` to replace
+them with a comma-separated list of exact hostnames. An explicitly blank value disables
+repository additions. When overriding, keep all hosts you want to use in the list, for example:
 
 ```dotenv
 BITBUCKET_ALLOWED_HOSTS=bitbucket.org,github.com,scm.example.invalid
@@ -117,8 +118,7 @@ An explicitly configured process environment takes precedence over `.env`.
 Bitbucket Server/Data Center clone URLs with context paths are supported, such as
 `https://scm.example.invalid/stash/scm/adr/engineering-sign-off.git`; OWL preserves the full
 clone path. Internal servers still require network/VPN access and working Git credentials
-on the computer running OWL. Keep real internal addresses in the ignored `.env`, not in
-tracked source files.
+on the computer running OWL. Keep additional private host overrides in the ignored `.env`.
 
 VSDX extraction and OCR remain out of scope. Image-only PDFs are catalogued and reported as having
 no machine-readable text; OWL does not invent text that the parser cannot read.
