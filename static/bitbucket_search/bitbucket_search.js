@@ -134,6 +134,21 @@
 
     const selectionForm = workspace.querySelector("[data-repository-selection-form]");
     let deletionUnlocked = false;
+    let deleteRelockTimer = null;
+    let deleteUnlockExpiresAt = 0;
+    const announceDeleteLock = (message) => {
+        const status = workspace.querySelector("[data-repository-delete-status]");
+        if (status) status.textContent = message;
+    };
+    const resetDeleteLock = () => {
+        if (deletionUnlocked) announceDeleteLock("Repository deletion locked.");
+        deletionUnlocked = false;
+        deleteUnlockExpiresAt = 0;
+        if (deleteRelockTimer !== null) {
+            window.clearTimeout(deleteRelockTimer);
+            deleteRelockTimer = null;
+        }
+    };
     const repositoryCheckboxes = () =>
         Array.from(workspace.querySelectorAll("[data-repository-select]"));
     const selectedRepositoryCards = () => {
@@ -160,7 +175,8 @@
         const allExcluded = count > 0 && selected.every((card) =>
             card.dataset.repositoryRefreshExcluded === "true",
         );
-        if (unavailable || busy || removalPending) deletionUnlocked = false;
+        if (unavailable || busy || removalPending ||
+            (deletionUnlocked && Date.now() >= deleteUnlockExpiresAt)) resetDeleteLock();
         const disable = (selector, disabled, title) => {
             workspace.querySelectorAll(selector).forEach((button) => {
                 button.disabled = disabled;
@@ -173,12 +189,18 @@
             busy ? "Selected repository work in progress" : `Refresh ${suffix}`);
         disable("[data-selected-exclude]", unavailable || removalPending,
             `${allExcluded ? "Include" : "Exclude"} ${suffix} ${allExcluded ? "in" : "from"} refresh`);
-        disable("[data-selected-unlock]", unavailable || busy || removalPending,
-            `${deletionUnlocked ? "Lock" : "Unlock"} deletion for ${suffix}`);
-        disable("[data-selected-remove]", unavailable || busy || removalPending || !deletionUnlocked,
-            deletionUnlocked ? `Delete ${suffix} from this computer` : "Unlock repository deletion first");
-        workspace.querySelectorAll("[data-selected-unlock]").forEach((button) => {
-            button.setAttribute("aria-pressed", String(deletionUnlocked));
+        const deleteTitle = !count ? "Select repositories to delete"
+            : repositorySubmissionPending ? "Wait for the repository request to finish"
+            : repositoryStatusPending ? "Wait for the latest repository status before deleting"
+            : busy ? "Wait for selected repositories' Git and PDF workers to finish before deleting"
+            : removalPending ? "Use Retry removal to finish incomplete repository removal"
+            : deletionUnlocked ? `Click again to delete ${suffix} from this computer`
+            : `Unlock deletion for ${suffix}`;
+        disable("[data-selected-remove]", unavailable || busy || removalPending, deleteTitle);
+        workspace.querySelectorAll("[data-selected-remove]").forEach((button) => {
+            button.dataset.deleteLocked = String(!deletionUnlocked);
+            const icon = button.querySelector("[data-selected-delete-lock-icon]");
+            if (icon) icon.textContent = deletionUnlocked ? "🔓" : "🔒";
         });
         workspace.querySelectorAll("[data-selected-exclude]").forEach((button) => {
             button.setAttribute("aria-pressed", String(allExcluded));
@@ -209,14 +231,28 @@
         repositoryCheckboxes().forEach((checkbox) => {
             if (checkbox.value === selected.value) checkbox.checked = selected.checked;
         });
-        deletionUnlocked = false;
+        resetDeleteLock();
         updateSelectedRepositoryActions();
     });
     workspace.addEventListener("click", (event) => {
-        const unlock = event.target.closest?.("[data-selected-unlock]");
-        if (!unlock || unlock.disabled) return;
-        deletionUnlocked = !deletionUnlocked;
+        const button = event.target.closest?.("[data-selected-remove]");
+        if (!button) return;
         updateSelectedRepositoryActions();
+        if (button.disabled) {
+            event.preventDefault();
+            return;
+        }
+        if (deletionUnlocked) return;
+        // Match Bookmark Manager: first click only arms this same button.
+        event.preventDefault();
+        deletionUnlocked = true;
+        deleteUnlockExpiresAt = Date.now() + 10000;
+        deleteRelockTimer = window.setTimeout(() => {
+            resetDeleteLock();
+            updateSelectedRepositoryActions();
+        }, 10000);
+        updateSelectedRepositoryActions();
+        announceDeleteLock("Delete unlocked. Click again to review removal of the selected repositories. Locks again in 10 seconds.");
     });
     updateSelectedRepositoryActions();
 
@@ -226,6 +262,8 @@
             const submitter = event.submitter;
             const operation = submitter?.value;
             if (event.defaultPrevented) return;
+            // Timers can be delayed in background tabs; never accept expired consent.
+            updateSelectedRepositoryActions();
             if (!submitter || submitter.disabled || repositorySubmissionPending ||
                 repositoryStatusPending || !selectedRepositoryCards().length ||
                 !["refresh", "exclude", "remove"].includes(operation) ||
@@ -241,7 +279,7 @@
             intent.value = operation;
             form.appendChild(intent);
             repositorySubmissionPending = true;
-            deletionUnlocked = false;
+            resetDeleteLock();
             updateSelectedRepositoryActions();
             updateRefreshAllButtons();
             return;
@@ -266,7 +304,7 @@
         }
         // Keep the native POST and CSRF handling, but lock both buttons before navigation.
         repositorySubmissionPending = true;
-        deletionUnlocked = false;
+        resetDeleteLock();
         updateSelectedRepositoryActions();
         updateRefreshAllButtons();
     });
@@ -418,7 +456,7 @@
                 if (!knownRepositoryIds.has(checkbox.value)) {
                     checkbox.checked = false;
                     checkbox.disabled = true;
-                    deletionUnlocked = false;
+                    resetDeleteLock();
                 }
             });
             updateSelectedRepositoryActions();
@@ -488,7 +526,7 @@
             // A failed status request cannot confirm that all workers are idle.
             settledPolls = 0;
             repositoryStatusPending = true;
-            deletionUnlocked = false;
+            resetDeleteLock();
             updateRefreshAllButtons();
             updateSelectedRepositoryActions();
             document.querySelectorAll("[data-repository-id]").forEach((card) => {
@@ -523,7 +561,7 @@
         // A restored page may predate a submitted job. Recheck before unlocking it.
         repositorySubmissionPending = false;
         repositoryStatusPending = true;
-        deletionUnlocked = false;
+        resetDeleteLock();
         selectionForm?.querySelectorAll('input[name="operation"]').forEach((input) => input.remove());
         updateSelectedRepositoryActions();
         updateRefreshAllButtons();
@@ -544,7 +582,7 @@
                     if (checkbox) checkbox.checked = false;
                 }
             });
-            deletionUnlocked = false;
+            resetDeleteLock();
             updateSelectedRepositoryActions();
         });
     });

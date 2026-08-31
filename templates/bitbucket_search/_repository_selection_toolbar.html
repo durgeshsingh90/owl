@@ -6,10 +6,7 @@
     <button class="bb-repository-tool" type="submit" name="operation" value="exclude" form="bb-repository-selection-form" title="Exclude selected repositories from refresh" aria-label="Exclude selected repositories from refresh" data-selected-exclude disabled>
         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="M9.5 8.5v7M14.5 8.5v7"/></svg>
     </button>
-    <button class="bb-repository-tool" type="button" title="Unlock repository deletion" aria-label="Unlock repository deletion" aria-pressed="false" data-selected-unlock disabled>
-        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="5.5" y="10" width="13" height="10" rx="2"/><path class="bb-repository-lock-shackle" d="M8 10V7a4 4 0 0 1 8 0v3"/><path d="M12 14v2"/></svg>
-    </button>
-    <button class="bb-repository-tool bb-repository-tool--danger" type="submit" name="operation" value="remove" form="bb-repository-selection-form" title="Unlock deletion first" aria-label="Delete selected repositories: unlock deletion first" data-selected-remove disabled>
-        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7M14 10v7"/></svg>
+    <button class="bb-repository-tool bb-repository-tool--danger" type="submit" name="operation" value="remove" form="bb-repository-selection-form" title="Select repositories to delete" aria-label="Select repositories to delete" data-delete-locked="true" data-selected-remove disabled>
+        <span class="bb-repository-delete-lock" aria-hidden="true" data-selected-delete-lock-icon>🔒</span>
     </button>
 </div>

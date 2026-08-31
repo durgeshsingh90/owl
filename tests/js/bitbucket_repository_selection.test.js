@@ -114,22 +114,28 @@ const element = (hook, attributes = {}, tag = "div") =>
     new Element(tag, { [hook]: "", ...attributes });
 
 function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = false, duplicateCopies = false } = {}) {
-    const controls = {
+    const makeControls = () => ({
         refresh: element("data-selected-refresh", { type: "submit", name: "operation", value: "refresh", disabled: "" }, "button"),
         exclude: element("data-selected-exclude", { type: "submit", name: "operation", value: "exclude", disabled: "" }, "button"),
-        unlock: element("data-selected-unlock", { type: "button", disabled: "", "aria-pressed": "false" }, "button"),
-        remove: element("data-selected-remove", { type: "submit", name: "operation", value: "remove", disabled: "" }, "button"),
+        remove: element("data-selected-remove", { type: "submit", name: "operation", value: "remove", disabled: "", "data-delete-locked": "true" }, "button"),
+        deleteIcon: element("data-selected-delete-lock-icon", {}, "span"),
         excluded: element("data-selected-excluded-value", { type: "hidden", name: "excluded", value: "yes" }, "input"),
         count: element("data-repository-selection-count"),
         spinner: element("data-selected-refresh-spinner", { hidden: "" }),
         icon: element("data-selected-refresh-icon", {}, "svg"),
-    };
-    controls.refresh.appendChild(controls.icon);
-    controls.refresh.appendChild(controls.spinner);
+    });
+    const controls = makeControls();
+    const controlCopies = duplicateCopies ? [controls, makeControls()] : [controls];
     const form = element("data-repository-selection-form", {
         id: "bb-repository-selection-form", method: "post", action: "/pdfs/repositories/selected/",
     }, "form");
-    [controls.refresh, controls.exclude, controls.unlock, controls.remove, controls.excluded, controls.count].forEach((node) => form.appendChild(node));
+    controlCopies.forEach((copy) => {
+        copy.refresh.appendChild(copy.icon);
+        copy.refresh.appendChild(copy.spinner);
+        copy.deleteIcon.textContent = "🔒";
+        copy.remove.appendChild(copy.deleteIcon);
+        [copy.refresh, copy.exclude, copy.remove, copy.excluded, copy.count].forEach((node) => form.appendChild(node));
+    });
     const global = {
         button: element("data-refresh-all-button", {}, "button"),
         icon: element("data-refresh-all-icon", {}, "svg"),
@@ -153,6 +159,8 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
     });
     workspace.appendChild(form);
     workspace.appendChild(globalForm);
+    const deleteStatus = element("data-repository-delete-status");
+    workspace.appendChild(deleteStatus);
     const filter = element("data-repository-filter", { type: "search" }, "input");
     workspace.appendChild(filter);
     const renderedRepositories = duplicateCopies ? repositories.flatMap((repo) => [repo, repo]) : repositories;
@@ -192,10 +200,12 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
     const responses = [];
     let timerId = 0;
     let reloads = 0;
+    let fetchCount = 0;
+    let now = 100000;
     const window = {
         location: { reload() { reloads += 1; } },
         addEventListener(name, callback) { windows.set(name, callback); },
-        setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
+        setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay, dueAt: now + delay }); return id; },
         clearTimeout(id) { timers.delete(id); },
         OWLRepositoryTimers: {
             update(timer, timing) { timerUpdates.push({ timer, timing }); timer.textContent = timing?.label || ""; },
@@ -203,18 +213,39 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
         },
     };
     vm.runInNewContext(source, {
-        document, window,
-        fetch: async () => ({ ok: true, json: async () => {
-            const response = responses.shift();
-            if (response instanceof Error) throw response;
-            return response;
-        } }),
+        document, window, Date: class extends Date { static now() { return now; } },
+        fetch: async () => {
+            fetchCount += 1;
+            return { ok: true, json: async () => {
+                const response = responses.shift();
+                if (response instanceof Error) throw response;
+                return response;
+            } };
+        },
     });
     return {
-        controls, cards, form, global, globalForm, workspace, timerUpdates, staleTimers,
+        controls, controlCopies, cards, form, global, globalForm, workspace, timerUpdates, staleTimers, deleteStatus,
         reloads: () => reloads,
+        fetchCount: () => fetchCount,
         select(index, checked = true) { cards[index].checkbox.checked = checked; cards[index].checkbox.dispatch("change"); },
-        unlock() { return controls.unlock.dispatch("click"); },
+        unlock(copy = 0) { return controlCopies[copy].remove.dispatch("click"); },
+        clickRemove(copy = 0) { return controlCopies[copy].remove.dispatch("click"); },
+        async pageshow() {
+            responses.push(new Error("Awaiting a fresh status after restoring the page"));
+            windows.get("pageshow")?.({ persisted: true });
+            await new Promise((resolve) => setImmediate(resolve));
+        },
+        deleteTimers() { return [...timers.values()].filter((timer) => timer.delay === 10000); },
+        advanceTime(milliseconds, { runTimers = true } = {}) {
+            now += milliseconds;
+            if (!runTimers) return;
+            for (const [id, timer] of [...timers]) {
+                if (timer.delay === 10000 && timer.dueAt <= now) {
+                    timers.delete(id);
+                    timer.callback();
+                }
+            }
+        },
         filter(value) { filter.value = value; filter.dispatch("input"); },
         submit(control) { return form.dispatch("submit", { submitter: controls[control] }); },
         async poll({ overrides = {}, extraction = {}, work, fail = false } = {}) {
@@ -246,23 +277,35 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
     };
 }
 
-test("selection enables shared actions but removal stays locked until explicitly unlocked", () => {
+test("selection enables a single locked delete control that arms on its first click", () => {
     const page = boot();
-    Object.values(page.controls).slice(0, 4).forEach((button) => assert.equal(button.disabled, true));
+    for (const action of ["refresh", "exclude", "remove"]) assert.equal(page.controls[action].disabled, true);
     page.select(0);
     assert.equal(page.controls.refresh.disabled, false);
     assert.equal(page.controls.exclude.disabled, false);
-    assert.equal(page.controls.unlock.disabled, false);
-    assert.equal(page.controls.remove.disabled, true);
-    page.unlock();
+    assert.equal(page.controls.remove.disabled, false, "An idle selection can click the locked button to arm it");
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true");
+    assert.equal(page.controls.deleteIcon.textContent, "🔒");
+    assert.equal(page.controls.remove.title, "Unlock deletion for 1 selected repository");
+    assert.equal(page.controls.remove.getAttribute("aria-label"), page.controls.remove.title);
+    const click = page.unlock();
+    assert.equal(click.defaultPrevented, true, "The first click never submits removal");
+    assert.equal(page.form.querySelector('input[name="operation"]'), null, "Arming adds no removal intent");
+    assert.equal(page.fetchCount(), 0, "The first click does not send a backend request");
+    assert.equal(page.global.button.disabled, false, "Arming does not start a repository request");
     assert.equal(page.controls.remove.disabled, false);
-    assert.equal(page.controls.unlock.getAttribute("aria-pressed"), "true");
+    assert.equal(page.controls.remove.dataset.deleteLocked, "false");
+    assert.equal(page.controls.deleteIcon.textContent, "🔓");
+    assert.equal(page.controls.remove.title, "Click again to delete 1 selected repository from this computer");
+    assert.equal(page.controls.remove.getAttribute("aria-label"), page.controls.remove.title);
     page.select(1);
-    assert.equal(page.controls.remove.disabled, true, "Changing the selected target set relocks deletion");
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true", "Changing the selected target set relocks deletion");
+    assert.equal(page.controls.deleteIcon.textContent, "🔒");
+    assert.equal(page.controls.remove.title, "Unlock deletion for 2 selected repositories");
     assert.match(page.controls.count.textContent, /2/);
     page.select(0, false);
     page.select(1, false);
-    for (const action of ["refresh", "exclude", "unlock", "remove"]) {
+    for (const action of ["refresh", "exclude", "remove"]) {
         assert.equal(page.controls[action].disabled, true, `${action} requires a selection`);
     }
 });
@@ -278,8 +321,120 @@ test("desktop and mobile repository checkboxes stay synchronized and count uniqu
     page.unlock();
     page.select(1, false);
     assert.deepEqual(page.cards.map(({ checkbox }) => checkbox.checked), [false, false, true, true]);
-    assert.equal(page.controls.remove.disabled, true);
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true");
     assert.match(page.controls.count.textContent, /^1 selected$/);
+});
+
+test("the same lock icon state is shared across desktop and mobile delete controls", () => {
+    const page = boot({ duplicateCopies: true });
+    page.select(0);
+    const assertCopies = (locked) => {
+        for (const copy of page.controlCopies) {
+            assert.equal(copy.remove.disabled, false);
+            assert.equal(copy.remove.dataset.deleteLocked, String(locked));
+            assert.equal(copy.deleteIcon.textContent, locked ? "🔒" : "🔓");
+            assert.equal(copy.remove.title, locked
+                ? "Unlock deletion for 1 selected repository"
+                : "Click again to delete 1 selected repository from this computer");
+        }
+    };
+    assertCopies(true);
+    assert.equal(page.controlCopies[1].deleteIcon.dispatch("click").defaultPrevented, true,
+        "Clicking the icon inside the mobile control arms the same shared button state");
+    assertCopies(false);
+    assert.match(page.deleteStatus.textContent, /unlocked.*10 seconds/i);
+    assert.equal(page.clickRemove(0).defaultPrevented, false, "The desktop copy observes the mobile unlock");
+    page.advanceTime(10000);
+    assertCopies(true);
+    assert.match(page.deleteStatus.textContent, /locked/i);
+});
+
+test("delete automatically relocks after ten seconds without changing the selected targets", () => {
+    const page = boot();
+    page.select(0);
+    page.unlock();
+    assert.equal(page.deleteTimers().length, 1);
+    page.advanceTime(9999);
+    assert.equal(page.controls.remove.dataset.deleteLocked, "false");
+    page.advanceTime(1);
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true");
+    assert.equal(page.controls.deleteIcon.textContent, "🔒");
+    assert.equal(page.deleteTimers().length, 0);
+    assert.equal(page.controls.remove.disabled, false, "The user can start another explicit unlock cycle");
+    assert.equal(page.cards[0].checkbox.checked, true);
+    assert.equal(page.submit("remove").defaultPrevented, true);
+    assert.equal(page.form.querySelector('input[name="operation"]'), null);
+});
+
+test("a delayed browser timer cannot leave expired deletion consent valid", () => {
+    for (const action of ["click", "submit"]) {
+        const page = boot();
+        page.select(0);
+        page.unlock();
+        page.advanceTime(10000, { runTimers: false });
+        assert.equal(page.deleteTimers().length, 1, "The suspended-tab timer has deliberately not fired");
+        const event = action === "click" ? page.clickRemove() : page.submit("remove");
+        assert.equal(event.defaultPrevented, true, `${action} checks the actual deadline before any submission`);
+        assert.equal(page.form.querySelector('input[name="operation"]'), null);
+        assert.equal(page.global.button.disabled, false);
+        if (action === "click") {
+            assert.equal(page.controls.remove.dataset.deleteLocked, "false", "An expired second click only starts a fresh unlock");
+            assert.equal(page.deleteTimers().length, 1, "Only the fresh unlock timer remains");
+            page.advanceTime(10000);
+        }
+        assert.equal(page.controls.remove.dataset.deleteLocked, "true");
+        assert.equal(page.deleteTimers().length, 0);
+    }
+});
+
+test("new unlock cycles cancel earlier timers and keep their own full ten-second window", () => {
+    const page = boot();
+    page.select(0);
+    page.unlock();
+    page.advanceTime(5000);
+    page.select(1);
+    assert.equal(page.deleteTimers().length, 0);
+    page.unlock();
+    assert.equal(page.deleteTimers().length, 1);
+    page.advanceTime(5000);
+    assert.equal(page.controls.remove.dataset.deleteLocked, "false", "The cancelled first timer cannot relock a newer consent window");
+    page.advanceTime(4999);
+    assert.equal(page.controls.remove.dataset.deleteLocked, "false");
+    page.advanceTime(1);
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true");
+    assert.equal(page.deleteTimers().length, 0);
+});
+
+test("status polling and unrelated repository work neither relock nor extend current consent", async () => {
+    const page = boot();
+    page.select(0);
+    page.unlock();
+    const [timer] = page.deleteTimers();
+    page.advanceTime(3000);
+    await page.poll();
+    assert.equal(page.controls.remove.dataset.deleteLocked, "false");
+    page.advanceTime(3000);
+    await page.poll({ overrides: { 2: { active: true, hasActiveWork: true, state: "fetching" } } });
+    assert.equal(page.controls.remove.dataset.deleteLocked, "false", "Only work on selected targets revokes the unlock");
+    assert.equal(page.controls.remove.disabled, false);
+    assert.equal(page.global.button.disabled, true, "Unrelated work still locks global refresh");
+    assert.equal(page.deleteTimers()[0], timer, "Polling does not replace or postpone the expiry timer");
+    page.advanceTime(4000);
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true");
+});
+
+test("restoring a page revokes earlier unlock consent and waits for fresh repository status", async () => {
+    const page = boot();
+    page.select(0);
+    page.unlock();
+    await page.pageshow();
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true");
+    assert.equal(page.controls.remove.disabled, true);
+    assert.equal(page.deleteTimers().length, 0);
+    assert.equal(page.submit("remove").defaultPrevented, true);
+    await page.poll();
+    assert.equal(page.controls.remove.disabled, false);
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true");
 });
 
 test("filtering away a selected repository clears it and relocks deletion", () => {
@@ -291,8 +446,20 @@ test("filtering away a selected repository clears it and relocks deletion", () =
     assert.equal(page.cards[0].checkbox.checked, false);
     assert.equal(page.cards[0].card.hidden, true);
     assert.equal(page.cards[1].checkbox.checked, true);
-    assert.equal(page.controls.remove.disabled, true);
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true");
+    assert.equal(page.deleteTimers().length, 0);
     assert.match(page.controls.count.textContent, /^1 selected$/);
+});
+
+test("editing repository search relocks deletion even when the selected repository remains visible", () => {
+    const page = boot();
+    page.select(0);
+    page.unlock();
+    page.filter("Repository");
+    assert.equal(page.cards[0].checkbox.checked, true);
+    assert.equal(page.cards[0].card.hidden, false);
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true");
+    assert.equal(page.deleteTimers().length, 0);
 });
 
 test("shared exclusion value includes an entirely excluded selection and excludes mixed selections", () => {
@@ -301,7 +468,7 @@ test("shared exclusion value includes an entirely excluded selection and exclude
     assert.equal(page.controls.excluded.value, "no");
     page.select(1);
     assert.equal(page.controls.excluded.value, "yes");
-    assert.equal(page.controls.remove.disabled, true);
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true");
 });
 
 test("native operation submits retain checked repository IDs and enforce the delete lock", () => {
@@ -313,9 +480,15 @@ test("native operation submits retain checked repository IDs and enforce the del
     unlocked.select(0);
     unlocked.select(1);
     unlocked.unlock();
+    assert.equal(unlocked.clickRemove().defaultPrevented, false, "The second click can use the native POST confirmation flow");
     assert.equal(unlocked.submit("remove").defaultPrevented, false);
     assert.equal(unlocked.form.querySelector('input[name="operation"]').value, "remove", "Native POST keeps validated intent when submitter is disabled");
     assert.deepEqual(unlocked.cards.filter(({ checkbox }) => checkbox.checked).map(({ checkbox }) => checkbox.value), ["1", "2"]);
+    assert.equal(unlocked.controls.remove.dataset.deleteLocked, "true", "A submitted request consumes the unlock");
+    assert.equal(unlocked.controls.remove.disabled, true);
+    assert.equal(unlocked.deleteTimers().length, 0, "Submission cancels the arming timer");
+    assert.equal(unlocked.submit("remove").defaultPrevented, true, "Repeated submission cannot reuse consumed consent");
+    assert.equal(unlocked.form.querySelectorAll('input[name="operation"]').length, 1);
     for (const action of ["refresh", "exclude"]) {
         const page = boot();
         page.select(0);
@@ -338,7 +511,10 @@ test("new Git or PDF work relocks selection and replaces the global refresh icon
         const timing = { active: true, label: work.active ? "Refreshing" : "Reading PDFs", startedAt: "2026-08-30T11:00:00Z" };
         await page.poll({ overrides: { 1: { ...work, workerTiming: timing } } });
         assert.equal(page.controls.remove.disabled, true);
-        assert.equal(page.controls.unlock.getAttribute("aria-pressed"), "false");
+        assert.equal(page.controls.remove.dataset.deleteLocked, "true");
+        assert.equal(page.controls.deleteIcon.textContent, "🔒");
+        assert.equal(page.deleteTimers().length, 0);
+        assert.match(page.controls.remove.title, /workers to finish/i);
         assert.equal(page.global.button.disabled, true);
         assert.equal(page.global.spinner.hidden, false);
         assert.equal(page.global.icon.hidden, true);
@@ -383,7 +559,7 @@ test("pending removal and completed work cannot silently unlock destructive acti
     assert.equal(page.controls.refresh.disabled, true);
     assert.equal(page.controls.exclude.disabled, true);
     await page.poll();
-    assert.equal(page.controls.remove.disabled, true, "Returning to idle never restores old unlock consent");
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true", "Returning to idle never restores old unlock consent");
 });
 
 test("a status outage relocks destructive actions until fresh state arrives", async () => {
@@ -395,7 +571,8 @@ test("a status outage relocks destructive actions until fresh state arrives", as
     assert.equal(page.controls.refresh.disabled, true);
     assert.equal(page.global.button.disabled, true);
     await page.poll();
-    assert.equal(page.controls.remove.disabled, true);
+    assert.equal(page.controls.remove.disabled, false, "Fresh idle status allows a new first click");
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true", "Recovery never restores earlier consent");
     assert.equal(page.controls.refresh.disabled, false);
     assert.equal(page.global.button.disabled, false);
 });

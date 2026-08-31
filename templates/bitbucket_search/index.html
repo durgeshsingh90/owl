@@ -5,7 +5,7 @@
 {% block theme_default %}dark{% endblock %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=people-sort-v1">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=repository-delete-lock-v1">
 {% endblock %}
 
 {% block app_header %}{% endblock %}
@@ -28,6 +28,7 @@
         {% csrf_token %}
         <input type="hidden" name="excluded" value="yes" data-selected-excluded-value>
     </form>
+    <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-repository-delete-status></span>
     <aside class="bb-repository-rail" aria-labelledby="bb-repositories-heading">
         <a class="bb-brand" href="{% url 'core:dashboard' %}" aria-label="OWL Home">
             <span class="bb-brand__mark" aria-hidden="true">
@@ -555,6 +556,6 @@
 {% block global_status %}{% endblock %}
 
 {% block scripts %}
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-work-status-v1" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-delete-lock-v1" defer></script>
 <script src="{% static 'bitbucket_search/people_sort.js' %}?v=people-sort-v1" defer></script>
 {% endblock %}

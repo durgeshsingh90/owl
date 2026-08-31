@@ -46,8 +46,11 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert '<summary class="bb-add-repository" aria-label="Add a new repository">' in html
     assert html.count('aria-label="Add a new repository"') == 2
     assert html.count("data-selected-refresh disabled") == 2
-    assert html.count("data-selected-unlock disabled") == 2
+    assert "data-selected-unlock" not in html
     assert html.count("data-selected-remove disabled") == 2
+    assert html.count('data-delete-locked="true"') == 2
+    assert html.count("data-selected-delete-lock-icon>🔒</span>") == 2
+    assert html.count("data-repository-delete-status") == 1
     assert 'id="bb-repository-selection-form"' in html
     assert 'action="/pdfs/repositories/add/"' in html
     assert "Add &amp; clone in background" in html
@@ -62,8 +65,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=people-sort-v1" in html
-    assert "bitbucket_search/bitbucket_search.js?v=repository-work-status-v1" in html
+    assert "bitbucket_search/bitbucket_search.css?v=repository-delete-lock-v1" in html
+    assert "bitbucket_search/bitbucket_search.js?v=repository-delete-lock-v1" in html
 
 
 @pytest.mark.parametrize("view_name", ["bitbucket_search:index", "bitbucket_search:repositories"])
@@ -99,6 +102,17 @@ def test_workspace_omits_redundant_search_navigation_and_keeps_repository_contro
     assert "data-selected-refresh" in rail.group("body")
     assert "data-selected-exclude" in rail.group("body")
     assert "data-selected-remove" in rail.group("body")
+    assert "data-selected-unlock" not in html
+    toolbars = re.findall(
+        r'<div class="bb-repository-selection-toolbar"[^>]*>(.*?)</div>',
+        html,
+        re.DOTALL,
+    )
+    assert len(toolbars) == 2
+    for toolbar in toolbars:
+        assert len(re.findall(r"<button\b", toolbar)) == 3
+        assert 'data-delete-locked="true"' in toolbar
+        assert 'aria-hidden="true" data-selected-delete-lock-icon>🔒</span>' in toolbar
     assert "data-repository-filter" in rail.group("body")
     for total in ("repositories", "pdfs", "vsdx", "bytes"):
         assert f"data-total-{total}" in rail.group("body")
