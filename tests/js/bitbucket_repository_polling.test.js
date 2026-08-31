@@ -280,3 +280,66 @@ test("settled work waits for an open status panel and a later new worker starts 
     await page.poll();
     assert.equal(page.reloadCount(), 1);
 });
+
+test("ready Git repositories finish their PDF queue before exactly one final reload", async () => {
+    const queued = {
+        active: true, kind: "indexing", phase: "pdf_queued", label: "PDF extraction queued",
+        detail: "8 PDFs queued", queuedPdfs: 8, runningPdfs: 0,
+        queuedSyncJobs: 0, runningSyncJobs: 0, pendingCleanupJobs: 0,
+    };
+    const running = {
+        ...queued, phase: "extracting", label: "Extracting PDF text",
+        detail: "2 PDFs extracting · 6 queued", queuedPdfs: 6, runningPdfs: 2,
+    };
+    const done = {
+        ...queued, active: false, kind: "idle", phase: "idle", label: "", detail: "",
+        queuedPdfs: 0, runningPdfs: 0,
+    };
+    const state = (activity, publication, failed = 0) => snapshot({
+        repositories: [repository(false, { hasActiveWork: activity.active, activity })],
+        catalog: { publicationSignature: "catalog-complete" },
+        work: {
+            active: activity.active, label: activity.label,
+            detail: `Synthetic repository: ${activity.detail}`,
+            activeRepositories: Number(activity.active),
+            queuedPdfs: activity.queuedPdfs, runningPdfs: activity.runningPdfs,
+        },
+        extraction: {
+            active: activity.active, queuedJobs: activity.queuedPdfs, runningJobs: activity.runningPdfs,
+            failedJobs: failed, pendingDocuments: failed, publicationSignature: publication,
+        },
+    });
+    const page = boot([
+        state(queued, "queued"), state(running, "partially-indexed"),
+        state(done, "indexing-complete", 2), state(done, "indexing-complete", 2),
+    ]);
+    for (let index = 0; index < 3; index += 1) {
+        await page.poll();
+        assert.equal(page.reloadCount(), 0, "Neither Git-ready, PDF progress, nor the first terminal snapshot reloads");
+    }
+    await page.poll();
+    assert.equal(page.reloadCount(), 1);
+    assert.equal(page.pendingPolls(), 0, "Terminal failures are not background workers and do not poll forever");
+});
+
+test("pending cleanup work cannot be mistaken for idle while waiting to reload", async () => {
+    const changed = snapshot({ catalog: { publicationSignature: "catalog-next" } });
+    const activity = {
+        active: true, kind: "cleanup", phase: "cleanup_pending", label: "Finishing local cleanup",
+        detail: "Local cleanup is pending", queuedPdfs: 0, runningPdfs: 0,
+        queuedSyncJobs: 0, runningSyncJobs: 0, pendingCleanupJobs: 1,
+    };
+    const cleanup = {
+        ...changed,
+        repositories: [repository(false, { hasActiveWork: true, activity })],
+        work: { active: true, label: activity.label, detail: activity.detail, activeRepositories: 1, queuedPdfs: 0, runningPdfs: 0 },
+    };
+    const page = boot([changed, cleanup, cleanup, changed, changed]);
+    for (let index = 0; index < 4; index += 1) {
+        await page.poll();
+        assert.equal(page.reloadCount(), 0, "Cleanup holds and resets the idle confirmation despite no Git or PDF job");
+    }
+    await page.poll();
+    assert.equal(page.reloadCount(), 1);
+    assert.equal(page.pendingPolls(), 0);
+});

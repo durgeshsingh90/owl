@@ -3,7 +3,7 @@
     {% for repository in repositories %}
     <li class="bb-repository-card" data-repository-id="{{ repository.pk }}" data-repository-state="{{ repository.sync_state }}" data-repository-active-work="{{ repository.has_active_work|yesno:'true,false' }}" data-repository-active-sync="{{ repository.has_active_sync|yesno:'true,false' }}" data-repository-refresh-excluded="{{ repository.exclude_from_refresh|yesno:'true,false' }}" data-repository-removal-pending="{{ repository.has_removal_pending|yesno:'true,false' }}" data-repository-search-value="{{ repository.display_name }} {{ repository.canonical_remote_key }} {{ repository.default_branch }}">
         <div class="bb-repository-card__main">
-            <span class="bb-repository-state bb-repository-state--{{ repository.sync_state }}" data-repository-state-icon role="img" aria-label="{{ repository.display_name }}: {{ repository.get_sync_state_display }}">
+            <span class="bb-repository-state bb-repository-state--{% if repository.activity.active %}working{% else %}{{ repository.sync_state }}{% endif %}" data-repository-state-icon role="img" aria-label="{{ repository.display_name }}: {% if repository.activity.active %}{{ repository.activity.label }}{% else %}{{ repository.get_sync_state_display }}{% endif %}" title="{% if repository.activity.active %}{{ repository.activity.detail }}{% else %}{{ repository.get_sync_state_display }}{% endif %}">
                 <svg class="bb-state-icon bb-state-icon--ready" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="m8.5 12 2.2 2.2 4.8-5"/></svg>
                 <svg class="bb-state-icon bb-state-icon--active" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v11M8 10l4 4 4-4M5 19h14"/></svg>
                 <svg class="bb-state-icon bb-state-icon--attention" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="M12 8v5M12 16.5v.5"/></svg>
@@ -12,6 +12,7 @@
             <span class="bb-repository-card__copy">
                 <strong data-repository-name title="{{ repository.display_name }}">{{ repository.display_name }}</strong>
                 <small data-repository-documents>{{ repository.pdf_count }} PDF · {{ repository.vsdx_count }} VSDX</small>
+                <small class="bb-repository-work-label" data-repository-work-label title="{{ repository.activity.detail }}"{% if not repository.activity.active %} hidden{% endif %}>{{ repository.activity.detail }}</small>
                 <small class="bb-repository-exclusion" data-repository-exclusion{% if not repository.exclude_from_refresh %} hidden{% endif %} title="Skipped by Refresh all and scheduled refreshes; manual refresh is still available">Refresh excluded</small>
                 <a class="bb-repository-removal-retry" data-repository-removal-retry href="{% url 'bitbucket_search:repository_remove' repository.pk %}"{% if not repository.has_removal_pending %} hidden{% endif %}>Removal incomplete · Retry removal</a>
                 <small

@@ -663,6 +663,43 @@
     animation: bb-download-pulse 1.2s ease-in-out infinite;
 }
 
+/* Git may be ready while PDF workers still own this repository. */
+.bb-repository-state--working,
+.bb-repository-state--unknown {
+    color: var(--bb-amber);
+    border-color: var(--bb-amber);
+    background: var(--bb-amber-soft);
+}
+
+.bb-repository-state--working .bb-state-icon,
+.bb-repository-state--unknown .bb-state-icon {
+    display: none;
+}
+
+.bb-repository-state--working::after {
+    content: "";
+    width: 15px;
+    height: 15px;
+    border: 2px solid var(--bb-line-strong);
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: bb-refresh-all-spin 0.8s linear infinite;
+}
+
+.bb-repository-state--unknown .bb-state-icon--attention {
+    display: block;
+}
+
+.bb-repository-card__copy .bb-repository-work-label {
+    color: var(--bb-amber);
+    overflow-wrap: anywhere;
+    white-space: normal;
+}
+
+.bb-repository-work-label[hidden] {
+    display: none;
+}
+
 .bb-repository-state--failed,
 .bb-repository-state--interrupted,
 .bb-repository-state--blocked_dirty {
@@ -881,6 +918,7 @@
 }
 
 .bb-topbar__actions {
+    position: relative;
     display: flex;
     flex: 0 0 auto;
     align-items: center;
@@ -970,6 +1008,39 @@
 .bb-refresh-all__meta small {
     color: var(--bb-muted-low);
     font-size: 0.57rem;
+}
+
+.bb-refresh-all:hover .bb-refresh-all__meta,
+.bb-refresh-all:focus-within .bb-refresh-all__meta {
+    top: calc(100% + 0.55rem);
+    right: 0;
+    z-index: 50;
+    width: min(380px, calc(100vw - 2rem));
+    height: auto;
+    padding: 0.65rem 0.8rem;
+    margin: 0;
+    overflow: visible;
+    border: 1px solid var(--bb-line-strong);
+    border-radius: 8px;
+    color: var(--bb-text);
+    background: var(--bb-surface);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+    clip-path: none;
+    white-space: normal;
+    pointer-events: none;
+}
+
+.bb-refresh-all__meta strong,
+.bb-refresh-all__meta small {
+    overflow-wrap: anywhere;
+    white-space: normal;
+    line-height: 1.4;
+}
+
+.bb-refresh-all__meta small {
+    margin-top: 0.2rem;
+    color: var(--bb-muted);
+    font-size: 0.68rem;
 }
 
 .bb-refresh-all--active .bb-refresh-all__meta strong,
@@ -1405,6 +1476,50 @@
     margin: 0;
     color: var(--bb-muted);
     font-size: 0.6rem;
+}
+
+.bb-people-sort {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--bb-muted);
+    font-size: 0.66rem;
+}
+
+.bb-people-sort > svg {
+    width: 15px;
+    height: 15px;
+    flex: 0 0 auto;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.5;
+}
+
+.bb-people-sort select {
+    min-width: 0;
+    min-height: 32px;
+    flex: 1;
+    padding: 0.35rem 0.4rem;
+    border: 1px solid var(--bb-line-strong);
+    border-radius: 6px;
+    color: var(--bb-text-soft);
+    background: var(--bb-surface-soft);
+    font: inherit;
+    cursor: pointer;
+}
+
+.bb-people-sort select:focus-visible {
+    border-color: var(--bb-amber);
+    outline: 3px solid var(--bb-amber-soft);
+    outline-offset: 0;
+}
+
+.bb-people-sort select:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
 }
 
 .bb-people-filter-form {

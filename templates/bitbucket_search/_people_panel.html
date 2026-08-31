@@ -37,6 +37,16 @@
                 {% if not git_people and not people_groups %}disabled{% endif %}
             >
         </div>
+        <label class="bb-people-sort" for="{{ people_panel_id }}-sort">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16M4 12h10M4 18h4M18 11v9m-3-3 3 3 3-3"/></svg>
+            <span>Sort</span>
+            <select id="{{ people_panel_id }}-sort" aria-label="Sort people" title="Sort people; your choice is saved on this browser" data-people-sort{% if not git_people %} disabled{% endif %}>
+                <option value="most_pdfs">Most PDFs</option>
+                <option value="recent">Recent committers</option>
+                <option value="most_commits">Most commits</option>
+                <option value="name">Name A–Z</option>
+            </select>
+        </label>
         <p id="{{ people_panel_id }}-search-status" role="status" aria-live="polite" data-people-filter-search-status>{{ git_people_total }} committer{{ git_people_total|pluralize }} · {{ people_groups|length }} group{{ people_groups|length|pluralize }} available</p>
     </div>
 
@@ -82,7 +92,7 @@
             </div>
             <ul class="bb-people-list" data-git-people-list>
                 {% for person in git_people %}
-                <li data-people-filter-entry data-people-entry-kind="committer" data-people-search-value="{{ person.name }}">
+                <li data-people-filter-entry data-people-entry-kind="committer" data-people-search-value="{{ person.name }}" data-people-name="{{ person.name }}" data-people-last-commit="{{ person.last_committed_at|date:'U' }}" data-people-commit-count="{{ person.commit_count }}" data-people-pdf-count="{{ person.pdf_count }}">
                     <label class="bb-people-option{% if person.selected %} is-active{% endif %}" title="Include PDFs whose latest Git committer is {{ person.name }}">
                         <input type="checkbox" name="committer" value="{{ person.name }}" data-committer-select{% if person.selected %} checked{% endif %}>
                         <span class="bb-people-avatar" aria-hidden="true">{{ person.name|slice:":1"|upper }}</span>

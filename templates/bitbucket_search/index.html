@@ -5,7 +5,7 @@
 {% block theme_default %}dark{% endblock %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=repository-contrast-v1">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=people-sort-v1">
 {% endblock %}
 
 {% block app_header %}{% endblock %}
@@ -114,14 +114,19 @@
                     data-repository-count="{{ repository_count|default:0 }}"
                     data-enabled-repository-count="{{ refresh_all_enabled_count }}"
                     data-active-repository-count="{{ refresh_all_active_count }}"
+                    data-work-label="{{ repository_work_summary.label }}"
+                    data-work-detail="{{ repository_work_summary.detail }}"
+                    tabindex="0"
+                    aria-label="Repository refresh and background activity"
+                    aria-describedby="bb-refresh-all-description"
                 >
                     {% csrf_token %}
                     <button
                         class="bb-icon-button bb-refresh-all__button"
                         type="submit"
                         {% if refresh_all_active_count %}
-                        aria-label="{{ refresh_all_active_count }} repositor{{ refresh_all_active_count|pluralize:'y,ies' }} working in the background"
-                        title="Repositories are working; wait for Git and PDF workers to finish"
+                        aria-label="Refresh all repositories unavailable: {{ repository_work_summary.detail }}"
+                        title="{{ repository_work_summary.label }} — {{ repository_work_summary.detail }}"
                         disabled aria-busy="true"
                         {% elif not repository_count %}
                         aria-label="Refresh all repositories unavailable: no repositories are connected"
@@ -144,13 +149,13 @@
                         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-icon{% if refresh_all_active_count %} hidden{% endif %}><path d="M19 8a7.5 7.5 0 1 0 1 7"/><path d="M19 3v5h-5"/></svg>
                         <span class="bb-refresh-all__spinner" aria-hidden="true" data-refresh-all-spinner{% if not refresh_all_active_count %} hidden{% endif %}></span>
                     </button>
-                    <span class="bb-refresh-all__meta" role="status" aria-live="polite" aria-atomic="true">
+                    <span class="bb-refresh-all__meta" id="bb-refresh-all-description" role="status" aria-live="polite" aria-atomic="true">
                         <strong data-refresh-all-label>
-                            {% if refresh_all_active_count %}Repository work in progress{% elif not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %}Refresh all unavailable{% else %}Refresh all repositories{% endif %}
+                            {% if refresh_all_active_count %}{{ repository_work_summary.label }}{% elif not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %}Refresh all unavailable{% else %}Refresh all repositories{% endif %}
                         </strong>
                         <small data-refresh-all-detail>
                             {% if refresh_all_active_count %}
-                            {{ refresh_all_active_count }} repositor{{ refresh_all_active_count|pluralize:'y,ies' }} working in the background
+                            {{ repository_work_summary.detail }}
                             {% elif not repository_count %}
                             Add a repository to enable workspace refresh
                             {% elif not refresh_all_enabled_count %}
@@ -195,7 +200,7 @@
                     Repositories
                 </span>
                 <span class="bb-mobile-repositories__meta">
-                    <small data-mobile-repository-count>{{ repository_count }} connected{% if active_repository_count %} · {{ active_repository_count }} syncing{% elif automation_payload.state == "retry_wait" %} · retry scheduled{% elif automation_payload.state == "exhausted" %} · retries exhausted{% endif %}</small>
+                    <small data-mobile-repository-count>{{ repository_count }} connected{% if active_work_repository_count %} · {{ active_work_repository_count }} working{% elif automation_payload.state == "retry_wait" %} · retry scheduled{% elif automation_payload.state == "exhausted" %} · retries exhausted{% endif %}</small>
                     <span class="bb-mobile-repositories__indicator" aria-hidden="true"></span>
                 </span>
             </summary>
@@ -550,5 +555,6 @@
 {% block global_status %}{% endblock %}
 
 {% block scripts %}
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-selection-v1" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-work-status-v1" defer></script>
+<script src="{% static 'bitbucket_search/people_sort.js' %}?v=people-sort-v1" defer></script>
 {% endblock %}

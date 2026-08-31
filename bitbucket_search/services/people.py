@@ -6,10 +6,11 @@ import logging
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Q
+from django.db.models import Count, Max, Q
 
 from bitbucket_search.models import (
     BitbucketPeopleGroup,
@@ -39,6 +40,7 @@ class GitPersonSummary:
     commit_count: int
     pdf_count: int
     repository_names: tuple[str, ...] = ()
+    last_committed_at: datetime | None = None
 
     @property
     def repository_count(self) -> int:
@@ -55,10 +57,13 @@ def git_people_summaries() -> tuple[GitPersonSummary, ...]:
     active PDFs whose latest available Git commit has this committer identity.
     Repository involvement comes from that history, independently of whether
     any current PDF is attributed to the person or matches the current search.
+    Recency uses the latest Git committer timestamp in the same available history,
+    not the authored timestamp or when OWL discovered a PDF.
     """
 
     alias_counts: dict[str, Counter[str]] = defaultdict(Counter)
     repositories_by_identity: dict[str, dict[int, str]] = defaultdict(dict)
+    latest_commit_by_identity: dict[str, datetime] = {}
     for row in (
         GitCommit.objects.filter(repository__enabled=True)
         .filter(
@@ -68,7 +73,7 @@ def git_people_summaries() -> tuple[GitPersonSummary, ...]:
         )
         .order_by()
         .values("committer_name", "repository_id", "repository__display_name")
-        .annotate(row_count=Count("id"))
+        .annotate(row_count=Count("id"), last_committed_at=Max("committed_at"))
         .iterator()
     ):
         try:
@@ -78,6 +83,12 @@ def git_people_summaries() -> tuple[GitPersonSummary, ...]:
         identity = display_name.casefold()
         alias_counts[identity][display_name] += row["row_count"]
         repositories_by_identity[identity][row["repository_id"]] = row["repository__display_name"]
+        committed_at = row["last_committed_at"]
+        if committed_at is not None and (
+            identity not in latest_commit_by_identity
+            or committed_at > latest_commit_by_identity[identity]
+        ):
+            latest_commit_by_identity[identity] = committed_at
 
     pdf_counts: Counter[str] = Counter()
     for row in (
@@ -126,6 +137,7 @@ def git_people_summaries() -> tuple[GitPersonSummary, ...]:
                         ),
                     )
                 ),
+                last_committed_at=latest_commit_by_identity.get(identity),
             )
         )
 

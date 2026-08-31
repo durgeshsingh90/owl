@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime, timedelta
+from html import escape
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -15,6 +16,8 @@ from bitbucket_search import views as bitbucket_views
 from bitbucket_search.models import (
     BitbucketRepository,
     PDFDocument,
+    PDFExtractionJob,
+    PDFExtractionJobStatus,
     RepositorySyncJob,
     RepositorySyncJobStatus,
     RepositorySyncOperation,
@@ -22,6 +25,7 @@ from bitbucket_search.models import (
     RepositorySyncTrigger,
 )
 from bitbucket_search.services import repository_sync
+from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 from bitbucket_search.services.repository_sync import repository_status_snapshot
 
 pytestmark = pytest.mark.django_db
@@ -58,8 +62,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=repository-contrast-v1" in html
-    assert "bitbucket_search/bitbucket_search.js?v=repository-selection-v1" in html
+    assert "bitbucket_search/bitbucket_search.css?v=people-sort-v1" in html
+    assert "bitbucket_search/bitbucket_search.js?v=repository-work-status-v1" in html
 
 
 @pytest.mark.parametrize("view_name", ["bitbucket_search:index", "bitbucket_search:repositories"])
@@ -203,6 +207,17 @@ def _repository_cards(html: str, repository_id: int) -> tuple[str, ...]:
     )
 
 
+def _assert_refresh_work_summary(form: str, summary: dict) -> None:
+    assert summary["active"] is True
+    for hook, key in (("label", "label"), ("detail", "detail")):
+        content = re.search(rf"data-refresh-all-{hook}>\s*(.*?)\s*</", form, re.DOTALL)
+        assert content is not None
+        assert content.group(1) == escape(summary[key])
+    assert 'tabindex="0"' in form
+    assert 'aria-describedby="bb-refresh-all-description"' in form
+    assert 'id="bb-refresh-all-description"' in form
+
+
 def test_refresh_all_controls_are_accessible_and_truthful_when_unavailable(loopback_client):
     empty_response = loopback_client.get(reverse("bitbucket_search:index"))
     empty_html = empty_response.content.decode()
@@ -285,8 +300,11 @@ def test_refresh_all_controls_enable_only_when_all_repositories_are_idle(loopbac
     assert partial_response.context["enabled_repository_count"] == 2
     assert partial_response.context["active_repository_count"] == 1
     assert "bb-refresh-all--active" in partial_desktop
-    assert partial_html.count("Repository work in progress") == 1
-    assert "1 repository working in the background" in partial_desktop
+    _assert_refresh_work_summary(
+        partial_desktop, partial_response.context["repository_work_summary"]
+    )
+    assert "Git sync queued" in partial_desktop
+    assert "networking" in partial_desktop
     assert "Refresh remaining repositories" not in partial_html
     assert 'disabled aria-busy="true"' in partial_desktop
 
@@ -302,7 +320,9 @@ def test_refresh_all_controls_enable_only_when_all_repositories_are_idle(loopbac
 
     assert active_response.context["active_repository_count"] == 2
     assert "bb-refresh-all--active" in active_desktop
-    assert active_html.count("Repository work in progress") == 1
+    _assert_refresh_work_summary(active_desktop, active_response.context["repository_work_summary"])
+    assert "architecture" in active_desktop
+    assert "networking" in active_desktop
     assert 'disabled aria-busy="true"' in active_desktop
 
 
@@ -346,7 +366,7 @@ def test_refresh_all_controls_stay_disabled_through_add_and_refresh_phases(
     form = _workspace_refresh_form(html)
     assert 'disabled aria-busy="true"' in form
     assert 'data-active-repository-count="1"' in form
-    assert "Repository work in progress" in form
+    _assert_refresh_work_summary(form, response.context["repository_work_summary"])
     assert "data-refresh-all-icon hidden" in form
     assert "data-refresh-all-spinner hidden" not in form
 
@@ -396,6 +416,139 @@ def test_refresh_all_controls_reenable_after_jobs_finish(loopback_client, sync_s
     assert "data-refresh-all-spinner hidden" in form
 
 
+def _pdf_worker(repository, index, status):
+    document = PDFDocument.objects.create(
+        repository=repository,
+        filename=f"Guide {index}.pdf",
+        relative_path=f"docs/Guide {index}.pdf",
+        git_blob_id=f"{index:040x}",
+        file_size=100,
+    )
+    return PDFExtractionJob.objects.create(
+        document=document,
+        target_git_blob_id=document.git_blob_id,
+        target_source_commit="b" * 40,
+        target_relative_path=document.relative_path,
+        target_file_size=document.file_size,
+        target_extractor_version=PDF_EXTRACTOR_VERSION,
+        status=status,
+        started_at=timezone.now() - timedelta(minutes=2)
+        if status == PDFExtractionJobStatus.RUNNING
+        else None,
+        heartbeat_at=timezone.now() if status == PDFExtractionJobStatus.RUNNING else None,
+    )
+
+
+@pytest.mark.parametrize("view_name", ["bitbucket_search:index", "bitbucket_search:repositories"])
+@pytest.mark.parametrize(("queued", "running"), [(3, 0), (2, 1), (0, 3)])
+def test_git_ready_repository_shows_pdf_worker_phase_in_sidebar_and_refresh_tooltip(
+    loopback_client, view_name, queued, running
+):
+    repository = BitbucketRepository.objects.create(
+        display_name="design-notes",
+        canonical_remote_key="bitbucket.org/workspace/design-notes",
+        remote_url="ssh://git@bitbucket.org/workspace/design-notes.git",
+        sync_state=RepositorySyncState.READY,
+    )
+    for index in range(queued + running):
+        _pdf_worker(
+            repository,
+            index,
+            PDFExtractionJobStatus.QUEUED if index < queued else PDFExtractionJobStatus.RUNNING,
+        )
+    idle = BitbucketRepository.objects.create(
+        display_name="idle-notes",
+        canonical_remote_key="bitbucket.org/workspace/idle-notes",
+        remote_url="ssh://git@bitbucket.org/workspace/idle-notes.git",
+        sync_state=RepositorySyncState.READY,
+    )
+    response = loopback_client.get(reverse(view_name))
+    html = response.content.decode()
+    payload = loopback_client.get(reverse("bitbucket_search:repository_status")).json()
+    status = next(item for item in payload["repositories"] if item["id"] == repository.pk)
+    activity = status["activity"]
+    assert response.status_code == 200
+    assert status["state"] == "ready"
+    assert status["active"] is False
+    assert status["hasActiveWork"] is True
+    assert activity["active"] is True
+    assert activity["phase"] == ("extracting" if running else "pdf_queued")
+    assert activity["queuedPdfs"] == queued
+    assert activity["runningPdfs"] == running
+    assert response.context["active_repository_count"] == 0, "The Git job has already finished"
+    cards = _repository_cards(html, repository.pk)
+    assert len(cards) == 2, "Desktop and mobile show the same current worker evidence"
+    for card in cards:
+        icon = re.search(r"<span[^>]+data-repository-state-icon[^>]*>", card)
+        assert icon is not None
+        assert "bb-repository-state--working" in icon.group()
+        assert "bb-repository-state--ready" not in icon.group()
+        assert escape(activity["label"]) in icon.group()
+        label = re.search(
+            r"<small[^>]+data-repository-work-label[^>]*>(.*?)</small>", card, re.DOTALL
+        )
+        assert label is not None
+        assert " hidden" not in label.group()
+        assert label.group(1).strip() == escape(activity["detail"] or activity["label"])
+        assert "data-repository-worker-timer" in card
+        if running:
+            assert 'data-worker-kind="indexing"' in card
+            assert 'data-worker-started-at=""' not in card
+        else:
+            assert 'data-worker-started-at=""' in card, "Queued jobs do not invent a running timer"
+    for card in _repository_cards(html, idle.pk):
+        assert "bb-repository-state--ready" in card
+        assert "bb-repository-state--working" not in card
+        assert re.search(r"data-repository-work-label[^>]*\bhidden", card)
+    form = _workspace_refresh_form(html)
+    _assert_refresh_work_summary(form, payload["work"])
+    assert response.context["repository_work_summary"] == payload["work"]
+    assert repository.display_name in payload["work"]["detail"]
+    assert idle.display_name not in payload["work"]["detail"]
+    assert 'disabled aria-busy="true"' in form
+    assert "data-refresh-all-icon hidden" in form
+    assert "data-refresh-all-spinner hidden" not in form
+
+
+@pytest.mark.parametrize(
+    "job_status",
+    [
+        PDFExtractionJobStatus.SUCCEEDED,
+        PDFExtractionJobStatus.FAILED,
+        PDFExtractionJobStatus.INTERRUPTED,
+        PDFExtractionJobStatus.CANCELLED,
+    ],
+)
+def test_terminal_pdf_jobs_do_not_leave_global_refresh_or_sidebar_busy(loopback_client, job_status):
+    repository = BitbucketRepository.objects.create(
+        display_name="finished-pdf-work",
+        canonical_remote_key="bitbucket.org/workspace/finished-pdf-work",
+        remote_url="ssh://git@bitbucket.org/workspace/finished-pdf-work.git",
+        sync_state=RepositorySyncState.READY,
+    )
+    job = _pdf_worker(repository, 1, PDFExtractionJobStatus.RUNNING)
+    active_response = loopback_client.get(reverse("bitbucket_search:index"))
+    assert 'disabled aria-busy="true"' in _workspace_refresh_form(active_response.content.decode())
+    job.status = job_status
+    job.completed_at = timezone.now()
+    job.save(update_fields={"status", "completed_at"})
+    response = loopback_client.get(reverse("bitbucket_search:index"))
+    html = response.content.decode()
+    payload = loopback_client.get(reverse("bitbucket_search:repository_status")).json()
+    assert payload["work"]["active"] is False
+    assert payload["repositories"][0]["hasActiveWork"] is False
+    assert payload["repositories"][0]["activity"]["active"] is False
+    assert payload["extraction"]["pendingDocuments"] == 1, "Pending text is not a running job"
+    form = _workspace_refresh_form(html)
+    assert "disabled" not in form
+    assert 'aria-busy="true"' not in form
+    assert "data-refresh-all-icon hidden" not in form
+    assert "data-refresh-all-spinner hidden" in form
+    for card in _repository_cards(html, repository.pk):
+        assert "bb-repository-state--working" not in card
+        assert re.search(r"data-repository-work-label[^>]*\bhidden", card)
+
+
 def test_empty_pdf_timeline_keeps_search_available_and_explains_the_zero_state(
     loopback_client,
 ):
@@ -438,6 +591,32 @@ def test_responsive_pdf_rows_override_the_generic_block_row_rule():
     mobile_css = css[compact_end : css.index("@media (prefers-reduced-motion", compact_end)]
     assert ".bb-results-table .bb-document-row {\n        grid-template-areas:" in compact_css
     assert ".bb-results-table .bb-document-row {\n        grid-template-areas:" in mobile_css
+
+
+def test_background_work_styles_show_an_amber_spinner_and_accessible_refresh_tooltip():
+    css = (
+        Path(__file__).parents[1] / "static" / "bitbucket_search" / "bitbucket_search.css"
+    ).read_text(encoding="utf-8")
+    working = re.search(
+        r"\.bb-repository-state--working,\s*\.bb-repository-state--unknown\s*\{([^}]+)\}",
+        css,
+    )
+    assert working is not None
+    assert "color: var(--bb-amber);" in working.group(1)
+    assert re.search(r"\.bb-repository-state--working::after\s*\{[^}]*animation:", css)
+    assert re.search(
+        r"\.bb-repository-state--unknown \.bb-state-icon--attention\s*\{\s*display: block;",
+        css,
+    )
+    tooltip = re.search(
+        r"\.bb-refresh-all:hover \.bb-refresh-all__meta,\s*"
+        r"\.bb-refresh-all:focus-within \.bb-refresh-all__meta\s*\{([^}]+)\}",
+        css,
+    )
+    assert tooltip is not None
+    for declaration in ("height: auto;", "clip-path: none;", "white-space: normal;"):
+        assert declaration in tooltip.group(1)
+    assert ".bb-repository-work-label[hidden] {\n    display: none;" in css
 
 
 def test_pdf_inventory_does_not_auto_append_more_pages_on_scroll():
@@ -886,12 +1065,13 @@ def test_repository_poller_tracks_daily_idle_and_catalog_publication_contract():
     assert "workspace.dataset.dailyRefreshEnabled" in javascript
     assert "workspace.dataset.catalogPublicationSignature" in javascript
     assert "catalogPublicationChanged" in javascript
-    assert "`${repository.name}: ${repository.stateLabel}`" in javascript
+    assert "`${repository.name}: ${working ? workLabel : repository.stateLabel}`" in javascript
     assert "`${repository.pdfCount} PDF · ${repository.vsdxCount} VSDX`" in javascript
     assert (
-        "card.dataset.repositoryActiveWork = String(Boolean(repository.hasActiveWork || repository.active));"
+        "Boolean(repository.activity?.active || repository.hasActiveWork || repository.active)"
         in javascript
     )
+    assert "card.dataset.repositoryActiveWork = String(working);" in javascript
     assert (
         "card.dataset.repositoryRemovalPending = String(Boolean(repository.hasRemovalPending));"
         in javascript

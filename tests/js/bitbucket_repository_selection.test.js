@@ -171,19 +171,23 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
             ...(repo.removal ? { disabled: "" } : {}),
         }, "input");
         const timer = element("data-repository-worker-timer", { hidden: "" });
+        const stateIcon = element("data-repository-state-icon");
+        const workLabel = element("data-repository-work-label", { hidden: "" });
         card.appendChild(checkbox);
         card.appendChild(timer);
-        card.appendChild(element("data-repository-state-icon"));
+        card.appendChild(stateIcon);
+        card.appendChild(workLabel);
         card.appendChild(element("data-repository-documents"));
         card.appendChild(element("data-repository-exclusion"));
         workspace.appendChild(card);
-        return { card, checkbox, timer };
+        return { card, checkbox, timer, stateIcon, workLabel };
     });
     const document = new Element("document", {}, [workspace]);
     document.getElementById = (id) => document.querySelector(`#${id}`);
     document.createElement = (tag) => new Element(tag);
     const timers = new Map();
     const timerUpdates = [];
+    const staleTimers = [];
     const windows = new Map();
     const responses = [];
     let timerId = 0;
@@ -195,7 +199,7 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
         clearTimeout(id) { timers.delete(id); },
         OWLRepositoryTimers: {
             update(timer, timing) { timerUpdates.push({ timer, timing }); timer.textContent = timing?.label || ""; },
-            stale() {},
+            stale(timer) { staleTimers.push(timer); },
         },
     };
     vm.runInNewContext(source, {
@@ -207,13 +211,13 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
         } }),
     });
     return {
-        controls, cards, form, global, globalForm, workspace, timerUpdates,
+        controls, cards, form, global, globalForm, workspace, timerUpdates, staleTimers,
         reloads: () => reloads,
         select(index, checked = true) { cards[index].checkbox.checked = checked; cards[index].checkbox.dispatch("change"); },
         unlock() { return controls.unlock.dispatch("click"); },
         filter(value) { filter.value = value; filter.dispatch("input"); },
         submit(control) { return form.dispatch("submit", { submitter: controls[control] }); },
-        async poll({ overrides = {}, extraction = {}, fail = false } = {}) {
+        async poll({ overrides = {}, extraction = {}, work, fail = false } = {}) {
             const payload = {
                 repositories: repositories.map((repo) => ({
                     id: repo.id, name: `Repository ${repo.id}`, state: "ready", stateLabel: "Ready",
@@ -230,6 +234,7 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
                     active: false, queuedJobs: 0, runningJobs: 0, pendingDocuments: 0,
                     indexedDocuments: repositories.length, publicationSignature: "extraction-initial", ...extraction,
                 },
+                ...(work ? { work } : {}),
             };
             responses.push(fail ? new Error("Synthetic status outage") : payload);
             const scheduled = [...timers].find(([, value]) => value.callback.name === "poll");
@@ -401,4 +406,129 @@ test("workers on excluded repositories still animate the global status icon", as
     assert.equal(page.global.spinner.hidden, false);
     assert.equal(page.global.icon.hidden, true);
     assert.equal(page.global.button.disabled, true);
+});
+
+const pdfActivity = (queued, running) => ({
+    active: queued + running > 0,
+    kind: queued + running ? "indexing" : "idle",
+    phase: running ? "extracting" : queued ? "pdf_queued" : "idle",
+    label: running ? "Extracting PDF text" : queued ? "PDF extraction queued" : "Ready",
+    detail: running ? `${running} PDFs extracting · ${queued} queued` : queued ? `${queued} PDFs queued` : "",
+    queuedPdfs: queued, runningPdfs: running,
+    queuedSyncJobs: 0, runningSyncJobs: 0, pendingCleanupJobs: 0,
+});
+
+test("ready Git repositories display their queued and running PDF work instead of a green tick", async () => {
+    const page = boot({ duplicateCopies: true });
+    const timers = page.cards.map(({ timer }) => timer);
+    for (const [queued, running] of [[7, 0], [5, 2]]) {
+        const activity = pdfActivity(queued, running);
+        const timing = running
+            ? { active: true, label: "Extracting PDFs", kind: "indexing", startedAt: "2026-08-31T10:00:00Z" }
+            : { active: false, label: "", kind: "", startedAt: "" };
+        const work = {
+            active: true, label: activity.label,
+            detail: `Repository 1: ${activity.detail}`,
+            activeRepositories: 1, queuedPdfs: queued, runningPdfs: running,
+        };
+        await page.poll({
+            overrides: { 1: { active: false, state: "ready", hasActiveWork: true, activity, workerTiming: timing } },
+            extraction: { active: true, queuedJobs: queued, runningJobs: running }, work,
+        });
+        for (const card of page.cards.slice(0, 2)) {
+            assert.equal(card.card.dataset.repositoryState, "ready", "Git completion remains independent of PDF worker state");
+            assert.match(card.stateIcon.className, /bb-repository-state--working/);
+            assert.doesNotMatch(card.stateIcon.className, /bb-repository-state--ready/);
+            assert.match(card.stateIcon.getAttribute("aria-label"), new RegExp(activity.label));
+            assert.equal(card.workLabel.hidden, false);
+            assert.equal(card.workLabel.textContent, activity.detail);
+            assert.equal(page.timerUpdates.some((update) => update.timer === card.timer && update.timing === timing), true);
+        }
+        for (const card of page.cards.slice(2)) {
+            assert.match(card.stateIcon.className, /bb-repository-state--ready/);
+            assert.equal(card.workLabel.hidden, true, "An unrelated idle repository is not shown as extracting");
+        }
+        assert.equal(page.global.spinner.hidden, false);
+        assert.equal(page.global.icon.hasAttribute("hidden"), true);
+        assert.equal(page.global.button.disabled, true);
+        assert.equal(page.global.label.textContent, work.label);
+        assert.equal(page.global.detail.textContent, work.detail);
+        assert.match(page.global.button.title, /Repository 1/);
+        assert.match(page.global.button.title, new RegExp(String(queued)));
+        assert.equal(page.reloads(), 0);
+    }
+    assert.deepEqual(page.cards.map(({ timer }) => timer), timers, "Status updates never replace existing worker timer elements");
+    await page.poll({
+        overrides: { 1: { activity: pdfActivity(0, 0) } },
+        extraction: { failedJobs: 2, interruptedJobs: 1, pendingDocuments: 3 },
+        work: { active: false, label: "", detail: "", activeRepositories: 0, queuedPdfs: 0, runningPdfs: 0 },
+    });
+    assert.equal(page.global.spinner.hidden, true, "Terminal failed/interrupted jobs do not leave an indefinite spinner");
+    assert.equal(page.global.icon.hasAttribute("hidden"), false);
+    assert.equal(page.global.button.disabled, false);
+    for (const card of page.cards) {
+        assert.match(card.stateIcon.className, /bb-repository-state--ready/);
+        assert.equal(card.workLabel.hidden, true);
+    }
+    assert.equal(page.reloads(), 0, "The first settled snapshot still waits for confirmation");
+    await page.poll();
+    assert.equal(page.reloads(), 1, "One final reload publishes the completed batch");
+});
+
+test("status failure explicitly shows unknown state and resumes real PDF status on recovery", async () => {
+    const page = boot();
+    const activity = pdfActivity(3, 1);
+    const current = {
+        overrides: { 1: { hasActiveWork: true, activity } },
+        extraction: { active: true, queuedJobs: 3, runningJobs: 1 },
+        work: { active: true, label: activity.label, detail: `Repository 1: ${activity.detail}`, activeRepositories: 1, queuedPdfs: 3, runningPdfs: 1 },
+    };
+    await page.poll(current);
+    await page.poll({ fail: true });
+    for (const card of page.cards) {
+        assert.match(card.stateIcon.className, /bb-repository-state--unknown/);
+        assert.doesNotMatch(card.stateIcon.className, /bb-repository-state--ready/);
+        assert.equal(card.workLabel.hidden, false);
+        assert.match(card.workLabel.textContent, /Status unavailable/i);
+        assert.match(card.stateIcon.getAttribute("aria-label"), /Status unavailable/i);
+        assert.equal(page.staleTimers.includes(card.timer), true);
+    }
+    assert.equal(page.global.button.disabled, true);
+    assert.equal(page.reloads(), 0);
+    await page.poll(current);
+    assert.match(page.cards[0].stateIcon.className, /bb-repository-state--working/);
+    assert.equal(page.cards[0].workLabel.textContent, activity.detail);
+    assert.match(page.cards[1].stateIcon.className, /bb-repository-state--ready/);
+    assert.equal(page.cards[1].workLabel.hidden, true);
+    assert.equal(page.global.detail.textContent, current.work.detail);
+    assert.equal(page.reloads(), 0);
+});
+
+test("the refresh tooltip attributes simultaneous background work to its repositories", async () => {
+    const page = boot();
+    const activity = pdfActivity(12, 3);
+    const cloning = {
+        active: true, kind: "sync", phase: "cloning", label: "Cloning repository",
+        detail: "Downloading the repository", queuedPdfs: 0, runningPdfs: 0,
+        queuedSyncJobs: 0, runningSyncJobs: 1, pendingCleanupJobs: 0,
+    };
+    const work = {
+        active: true, label: "Cloning repository · Extracting PDF text",
+        detail: "Repository 1: Cloning repository · Repository 2: 3 PDFs extracting · 12 queued",
+        activeRepositories: 2, queuedPdfs: 12, runningPdfs: 3,
+    };
+    await page.poll({
+        overrides: {
+            1: { active: true, hasActiveWork: true, state: "cloning", activity: cloning },
+            2: { active: false, hasActiveWork: true, state: "ready", activity },
+        },
+        extraction: { active: true, queuedJobs: 12, runningJobs: 3 }, work,
+    });
+    assert.equal(page.global.label.textContent, work.label);
+    assert.equal(page.global.detail.textContent, work.detail);
+    for (const expected of ["Repository 1", "Repository 2", "12", "3"]) {
+        assert.ok(page.global.button.title.includes(expected), `Refresh tooltip identifies ${expected}`);
+    }
+    assert.equal(page.global.button.getAttribute("aria-busy"), "true");
+    assert.equal(page.reloads(), 0);
 });

@@ -20,6 +20,10 @@
     let repositorySubmissionPending = false;
     let repositoryStatusPending = false;
     let extractionWorkActive = workspace.dataset.extractionActive === "true";
+    let workSummary = {
+        label: initialRefreshAllState?.workLabel || "",
+        detail: initialRefreshAllState?.workDetail || "",
+    };
     const repositoryNoun = (count) => (count === 1 ? "repository" : "repositories");
     const setRefreshIconBusy = (icon, busy) => {
         if (!icon) return;
@@ -30,7 +34,9 @@
         else icon.removeAttribute("hidden");
     };
 
-    const updateRefreshAllButtons = (repositories, extraction) => {
+    const updateRefreshAllButtons = (repositories, extraction, work) => {
+        if (work) workSummary = work;
+        else if (repositories) workSummary = { label: "", detail: "" };
         if (extraction) {
             extractionWorkActive = Boolean(extraction.active || extraction.queuedJobs > 0 || extraction.runningJobs > 0);
         }
@@ -69,17 +75,17 @@
                 ariaLabel = "Refresh all repositories unavailable: repository request in progress";
                 title = "Wait for the repository request to finish before refreshing all";
             } else if (repositoryStatusPending) {
-                label = "Checking repository status";
-                detail = "Waiting for the latest repository activity";
+                label = "Repository status unavailable";
+                detail = "Cannot confirm current work; retrying the status check";
                 ariaLabel = "Refresh all repositories unavailable: checking repository status";
                 title = "Wait for the latest repository status before refreshing all";
             } else if (activeRepositoryCount > 0 || extractionWorkActive) {
-                label = "Repository work in progress";
-                detail = activeRepositoryCount > 0
+                label = workSummary.label || "Repository work in progress";
+                detail = workSummary.detail || (activeRepositoryCount > 0
                     ? `${activeRepositoryCount} ${repositoryNoun(activeRepositoryCount)} working in the background`
-                    : "PDF indexing in progress";
+                    : "PDF indexing in progress");
                 ariaLabel = `Refresh all repositories unavailable: ${detail}`;
-                title = "Repository work in progress — wait for Git and PDF workers to finish";
+                title = `${label}\n${detail}`;
             } else if (unavailable) {
                 label = "Refresh all unavailable";
                 if (!repositoryCount) {
@@ -269,22 +275,32 @@
         document.querySelectorAll(`[data-repository-id="${repositoryId}"]`);
 
     const updateRepository = (repository) => {
+        const working = Boolean(repository.activity?.active || repository.hasActiveWork || repository.active);
+        const workLabel = repository.activity?.label || repository.workerTiming?.label || "Repository work in progress";
+        const workDetail = repository.activity?.detail || workLabel;
         cardsFor(repository.id).forEach((card) => {
             window.OWLRepositoryTimers?.update(
                 card.querySelector("[data-repository-worker-timer]"), repository.workerTiming,
             );
             card.dataset.repositoryState = repository.state;
-            card.dataset.repositoryActiveWork = String(Boolean(repository.hasActiveWork || repository.active));
+            card.dataset.repositoryActiveWork = String(working);
             card.dataset.repositoryActiveSync = String(Boolean(repository.active));
             card.dataset.repositoryRefreshExcluded = String(Boolean(repository.refreshExcluded));
             card.dataset.repositoryRemovalPending = String(Boolean(repository.hasRemovalPending));
             const stateIcon = card.querySelector("[data-repository-state-icon]");
             if (stateIcon) {
-                stateIcon.className = `bb-repository-state bb-repository-state--${repository.state}`;
+                stateIcon.className = `bb-repository-state bb-repository-state--${working ? "working" : repository.state}`;
                 stateIcon.setAttribute(
                     "aria-label",
-                    `${repository.name}: ${repository.stateLabel}`,
+                    `${repository.name}: ${working ? workLabel : repository.stateLabel}`,
                 );
+                stateIcon.title = working ? workDetail : repository.stateLabel;
+            }
+            const workStatus = card.querySelector("[data-repository-work-label]");
+            if (workStatus) {
+                workStatus.textContent = working ? workDetail : "";
+                workStatus.title = working ? workDetail : "";
+                workStatus.hidden = !working;
             }
             const documents = card.querySelector("[data-repository-documents]");
             if (documents) {
@@ -314,9 +330,9 @@
         document.querySelectorAll("[data-total-bytes]").forEach((element) => {
             element.textContent = totals.bytesLabel;
         });
-        const activeCount = repositories.filter((repository) => repository.active).length;
+        const activeCount = repositories.filter((repository) => repository.active || repository.hasActiveWork).length;
         document.querySelectorAll("[data-mobile-repository-count]").forEach((element) => {
-            let activityLabel = activeCount ? ` · ${activeCount} syncing` : "";
+            let activityLabel = activeCount ? ` · ${activeCount} working` : "";
             if (!activeCount && automation?.state === "retry_wait") {
                 activityLabel = " · retry scheduled";
             } else if (!activeCount && automation?.state === "exhausted") {
@@ -332,7 +348,7 @@
     let activeRepositoryIds = new Set(
         Array.from(
             document.querySelectorAll(
-                '[data-repository-state="queued"], [data-repository-state="cloning"], [data-repository-state="fetching"], [data-repository-state="updating"]',
+                '[data-repository-state="queued"], [data-repository-state="cloning"], [data-repository-state="fetching"], [data-repository-state="updating"], [data-repository-active-work="true"]',
             ),
             (card) => card.dataset.repositoryId,
         ).filter(Boolean),
@@ -396,7 +412,7 @@
             const payload = await response.json();
             payload.repositories.forEach(updateRepository);
             repositoryStatusPending = false;
-            updateRefreshAllButtons(payload.repositories, payload.extraction);
+            updateRefreshAllButtons(payload.repositories, payload.extraction, payload.work);
             const knownRepositoryIds = new Set(payload.repositories.map((repository) => String(repository.id)));
             repositoryCheckboxes().forEach((checkbox) => {
                 if (!knownRepositoryIds.has(checkbox.value)) {
@@ -409,11 +425,11 @@
             updateTotals(payload.totals, payload.repositories, payload.automation);
             const repositoryCompleted = payload.repositories.some(
                 (repository) =>
-                    activeRepositoryIds.has(String(repository.id)) && !repository.active,
+                    activeRepositoryIds.has(String(repository.id)) && !(repository.active || repository.hasActiveWork),
             );
             activeRepositoryIds = new Set(
                 payload.repositories
-                    .filter((repository) => repository.active)
+                    .filter((repository) => repository.active || repository.hasActiveWork)
                     .map((repository) => String(repository.id)),
             );
             const extraction = payload.extraction || {
@@ -451,7 +467,7 @@
                 extractionCompleted ||
                 extractionPublicationChanged ||
                 catalogPublicationChanged;
-            const backgroundWorkActive = activeRepositoryIds.size > 0 ||
+            const backgroundWorkActive = activeRepositoryCount > 0 || activeRepositoryIds.size > 0 ||
                 extractionActive || repositorySubmissionPending || repositoryStatusPending;
             if (backgroundWorkActive || extractionPublicationChanged || catalogPublicationChanged) {
                 settledPolls = 0;
@@ -475,6 +491,20 @@
             deletionUnlocked = false;
             updateRefreshAllButtons();
             updateSelectedRepositoryActions();
+            document.querySelectorAll("[data-repository-id]").forEach((card) => {
+                const icon = card.querySelector("[data-repository-state-icon]");
+                if (icon) {
+                    icon.className = "bb-repository-state bb-repository-state--unknown";
+                    icon.setAttribute("aria-label", "Repository status unavailable");
+                    icon.title = "Cannot confirm current work; retrying the status check";
+                }
+                const workStatus = card.querySelector("[data-repository-work-label]");
+                if (workStatus) {
+                    workStatus.textContent = "Status unavailable";
+                    workStatus.title = "Cannot confirm current work; retrying the status check";
+                    workStatus.hidden = false;
+                }
+            });
             document.querySelectorAll("[data-repository-id] [data-repository-worker-timer]").forEach((timer) => {
                 window.OWLRepositoryTimers?.stale(timer);
             });

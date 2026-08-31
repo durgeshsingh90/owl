@@ -34,8 +34,6 @@ from bitbucket_search.models import (
     PDFDocument,
     PDFDocumentAddedEvidence,
     PDFDocumentLifecycle,
-    PDFExtractionJob,
-    PDFExtractionJobStatus,
     PDFIndexState,
     RepositoryRemovalRecovery,
     RepositorySyncJob,
@@ -78,6 +76,10 @@ from bitbucket_search.services.people import (
     PeopleGroupValidationError,
     create_people_group,
     git_people_summaries,
+)
+from bitbucket_search.services.repository_activity import (
+    repository_work_summary,
+    with_repository_activity,
 )
 from bitbucket_search.services.repository_lifecycle import (
     RepositoryLifecycleError,
@@ -1106,6 +1108,7 @@ def _index_context(
             "pdf_count": person.pdf_count,
             "repository_count": person.repository_count,
             "repository_names": person.repository_names,
+            "last_committed_at": person.last_committed_at,
             "selected": person.name.casefold() in selected_people_keys,
             "group_form_selected": person.name.casefold() in group_form_member_keys,
         }
@@ -1154,6 +1157,7 @@ def _index_context(
         ),
         "active_repository_count": sum(item.has_active_sync for item in repositories),
         "active_work_repository_count": sum(item.has_active_work for item in repositories),
+        "repository_work_summary": repository_work_summary(repositories),
         "active_enabled_repository_count": sum(
             item.enabled and item.has_active_sync for item in repositories
         ),
@@ -1224,20 +1228,7 @@ def _with_repository_work_status(
     repository_ids = tuple(repository.pk for repository in repositories)
     if not repository_ids:
         return repositories
-    busy_ids = set(
-        RepositorySyncJob.objects.filter(
-            repository_id__in=repository_ids,
-            status__in=(RepositorySyncJobStatus.QUEUED, RepositorySyncJobStatus.RUNNING),
-        ).values_list("repository_id", flat=True)
-    )
-    busy_ids.update(
-        PDFExtractionJob.objects.filter(
-            document__repository_id__in=repository_ids,
-            status__in=(PDFExtractionJobStatus.QUEUED, PDFExtractionJobStatus.RUNNING),
-        ).values_list("document__repository_id", flat=True)
-    )
-    for repository in repositories:
-        repository.has_active_work = repository.has_active_sync or repository.pk in busy_ids
+    with_repository_activity(repositories)
     removal_ids = set(
         RepositoryRemovalRecovery.objects.filter(repository_id__in=repository_ids).values_list(
             "repository_id", flat=True
@@ -1249,7 +1240,7 @@ def _with_repository_work_status(
 
 
 def _repository_payload(repository: BitbucketRepository) -> dict[str, object]:
-    if not hasattr(repository, "has_active_work"):
+    if not hasattr(repository, "activity"):
         _with_repository_work_status((repository,))
     automatic = _automatic_refresh_payload(repository)
     last_attempt_at = automatic["lastAttemptAt"] or (
@@ -1275,6 +1266,7 @@ def _repository_payload(repository: BitbucketRepository) -> dict[str, object]:
         "enabled": repository.enabled,
         "refreshExcluded": repository.exclude_from_refresh,
         "hasActiveWork": repository.has_active_work,
+        "activity": repository.activity,
         "hasRemovalPending": repository.has_removal_pending,
         "lastAttemptAt": last_attempt_at,
         "lastSuccessfulAt": (
@@ -2467,6 +2459,7 @@ def repository_status(request: HttpRequest) -> JsonResponse:
     return JsonResponse(
         {
             "repositories": [_repository_payload(repository) for repository in repositories],
+            "work": repository_work_summary(repositories),
             "summary": _sync_summary(repositories, extraction_status, automation),
             "automation": automation,
             "catalog": {
