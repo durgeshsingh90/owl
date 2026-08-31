@@ -16,6 +16,7 @@
     --bb-amber-soft: rgb(240 173 69 / 13%);
     --bb-blue: #3b73c8;
     --bb-blue-soft: rgb(59 115 200 / 22%);
+    --bb-repository-text: #bcd5ff;
     --bb-neutral: #8fa2b6;
     --bb-success: #55c879;
     --bb-success-soft: rgb(85 200 121 / 14%);
@@ -46,6 +47,7 @@
     --bb-amber-soft: rgb(183 113 16 / 12%);
     --bb-blue: #2f67ad;
     --bb-blue-soft: rgb(47 103 173 / 14%);
+    --bb-repository-text: #254f7b;
     --bb-neutral: #4e6579;
     --bb-success: #238b49;
     --bb-success-soft: rgb(35 139 73 / 12%);
@@ -756,47 +758,6 @@
     gap: 0.8rem;
     margin-top: auto;
     padding: 0.8rem 0.9rem 1rem;
-}
-
-.bb-rail-links {
-    display: grid;
-    gap: 0.2rem;
-}
-
-.bb-rail-links a {
-    display: flex;
-    min-height: 36px;
-    align-items: center;
-    gap: 0.65rem;
-    padding: 0.4rem 0.65rem;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    color: var(--bb-muted);
-    font-size: 0.71rem;
-    font-weight: 600;
-    text-decoration: none;
-}
-
-.bb-rail-links a:hover,
-.bb-rail-links a.is-active {
-    color: var(--bb-text-soft);
-    background: var(--bb-surface-hover);
-}
-
-.bb-rail-links a.is-active {
-    border-color: var(--bb-line);
-    box-shadow: inset 2px 0 0 var(--bb-amber);
-}
-
-.bb-rail-links svg {
-    width: 16px;
-    height: 16px;
-    flex: 0 0 auto;
-    fill: none;
-    stroke: currentColor;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    stroke-width: 1.55;
 }
 
 .bb-statistics {
@@ -2525,9 +2486,10 @@
     padding: 0.18rem 0.4rem;
     overflow: hidden;
     border-radius: 4px;
-    color: #bcd5ff;
+    color: var(--bb-repository-text);
     background: var(--bb-blue-soft);
     font-size: 0.6rem;
+    font-weight: 600;
     text-overflow: ellipsis;
     white-space: nowrap;
 }

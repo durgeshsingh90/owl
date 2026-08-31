@@ -58,16 +58,24 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=repository-selection-v1" in html
+    assert "bitbucket_search/bitbucket_search.css?v=repository-contrast-v1" in html
     assert "bitbucket_search/bitbucket_search.js?v=repository-selection-v1" in html
 
 
-def test_topbar_and_desktop_rail_omit_verbose_sync_status_navigation(loopback_client):
-    response = loopback_client.get(reverse("bitbucket_search:index"))
+@pytest.mark.parametrize("view_name", ["bitbucket_search:index", "bitbucket_search:repositories"])
+def test_workspace_omits_redundant_search_navigation_and_keeps_repository_controls(
+    loopback_client, view_name
+):
+    response = loopback_client.get(reverse(view_name))
     html = response.content.decode()
     topbar = re.search(r'<header class="bb-topbar">(?P<body>.*?)</header>', html, re.DOTALL)
     rail = re.search(
-        r'<nav class="bb-rail-links" aria-label="Bitbucket Search functions">(?P<body>.*?)</nav>',
+        r'<aside class="bb-repository-rail"[^>]*>(?P<body>.*?)</aside>',
+        html,
+        re.DOTALL,
+    )
+    mobile_navigation = re.search(
+        r'<nav aria-label="Bitbucket Search mobile functions">(?P<body>.*?)</nav>',
         html,
         re.DOTALL,
     )
@@ -75,15 +83,34 @@ def test_topbar_and_desktop_rail_omit_verbose_sync_status_navigation(loopback_cl
     assert response.status_code == 200
     assert topbar is not None
     assert rail is not None
+    assert mobile_navigation is not None
     assert "Sync status" not in topbar.group("body")
     assert "bb-sync-status" not in topbar.group("body")
     assert "data-sync-summary" not in topbar.group("body")
-    assert "Search PDFs" in rail.group("body")
-    assert "Repositories" not in rail.group("body")
+    assert "bb-rail-links" not in html
+    assert "Search PDFs" not in rail.group("body")
     assert "Index &amp; refresh status" not in rail.group("body")
+    assert 'id="bb-repositories-heading">Repositories</h2>' in rail.group("body")
+    assert 'aria-label="Add a new repository"' in rail.group("body")
+    assert "data-selected-refresh" in rail.group("body")
+    assert "data-selected-exclude" in rail.group("body")
+    assert "data-selected-remove" in rail.group("body")
+    assert "data-repository-filter" in rail.group("body")
+    for total in ("repositories", "pdfs", "vsdx", "bytes"):
+        assert f"data-total-{total}" in rail.group("body")
+    assert "Search PDFs" not in mobile_navigation.group("body")
+    assert 'href="/pdfs/repositories/"' in mobile_navigation.group("body")
+    assert ">Repositories</a>" in mobile_navigation.group("body")
+    assert 'href="/pdfs/status/">Sync status</a>' in mobile_navigation.group("body")
+    assert 'action="/pdfs/" data-pdf-search-form' in html
+    assert "data-pdf-search-input" in html
+    assert "data-pdf-search-input disabled" not in html
 
     static_root = Path(__file__).parents[1] / "static" / "bitbucket_search"
     assert "bb-sync-status" not in (static_root / "bitbucket_search.css").read_text(
+        encoding="utf-8"
+    )
+    assert ".bb-rail-links" not in (static_root / "bitbucket_search.css").read_text(
         encoding="utf-8"
     )
     assert "data-sync-summary" not in (static_root / "bitbucket_search.js").read_text(

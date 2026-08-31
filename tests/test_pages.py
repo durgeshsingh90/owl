@@ -256,7 +256,7 @@ def test_bookmark_search_feedback_precedes_active_filters_without_revealing_hidd
             "Bookmark Manager functions",
             None,
         ),
-        ("/pdfs/", "bitbucket", "Bitbucket Search functions", "Search PDFs"),
+        ("/pdfs/", "bitbucket", "Bitbucket Search functions", None),
         (
             "/pdfs/repositories/",
             "bitbucket",
@@ -286,8 +286,9 @@ def test_each_app_route_uses_its_own_left_sidebar(
     sidebar_id = "bookmark-app-sidebar" if active_app == "bookmarks" else "bitbucket-app-sidebar"
     if path in {"/pdfs/", "/pdfs/repositories/"}:
         assert 'class="bitbucket-workspace"' in html
+        assert "bb-rail-links" not in html
         sidebar = re.search(
-            rf'<nav class="bb-rail-links" aria-label="{re.escape(sidebar_label)}">(.*?)</nav>',
+            r'<aside class="bb-repository-rail"[^>]*>(.*?)</aside>',
             html,
             re.DOTALL,
         )
@@ -302,6 +303,10 @@ def test_each_app_route_uses_its_own_left_sidebar(
             html,
             re.DOTALL,
         )
+        if active_app == "bitbucket":
+            assert sidebar is not None
+            assert 'href="/pdfs/">Search PDFs</a>' in sidebar.group(1)
+            assert 'href="/pdfs/repositories/">Repositories</a>' in sidebar.group(1)
     assert sidebar is not None
     current_links = re.findall(
         r'<a[^>]*aria-current="page"[^>]*>(.*?)</a>',
@@ -324,22 +329,27 @@ def test_each_app_route_uses_its_own_left_sidebar(
 def test_bitbucket_search_uses_the_repository_workspace_shell(loopback_client):
     response = loopback_client.get("/pdfs/")
     html = response.content.decode()
-    desktop_functions = re.search(
-        r'<nav class="bb-rail-links" aria-label="Bitbucket Search functions">(.*?)</nav>',
+    repository_rail = re.search(
+        r'<aside class="bb-repository-rail"[^>]*>(.*?)</aside>',
         html,
         re.DOTALL,
+    )
+    mobile_functions = re.search(
+        r'<nav aria-label="Bitbucket Search mobile functions">(.*?)</nav>', html, re.DOTALL
     )
 
     assert response.status_code == 200
     assert '<body class="bitbucket-shell" data-theme="dark">' in html
     assert 'class="bb-repository-rail" aria-labelledby="bb-repositories-heading"' in html
     assert 'class="bb-stage" aria-label="Bitbucket Search workspace"' in html
-    assert 'class="bb-rail-links" aria-label="Bitbucket Search functions"' in html
-    assert desktop_functions is not None
-    assert "Search PDFs" in desktop_functions.group(1)
-    assert "Repositories" not in desktop_functions.group(1)
-    assert "Index &amp; refresh status" not in desktop_functions.group(1)
-    assert 'href="/pdfs/" aria-current="page"' in html
+    assert "bb-rail-links" not in html
+    assert repository_rail is not None
+    assert mobile_functions is not None
+    assert "Search PDFs" not in repository_rail.group(1)
+    assert "Index &amp; refresh status" not in repository_rail.group(1)
+    assert "Search PDFs" not in mobile_functions.group(1)
+    assert 'href="/pdfs/repositories/">Repositories</a>' in mobile_functions.group(1)
+    assert 'href="/pdfs/status/">Sync status</a>' in mobile_functions.group(1)
     assert 'role="status" aria-live="polite" aria-atomic="true"' in html
     assert re.search(
         r'<summary class="bb-add-repository" aria-label="Add a new repository">.*?New.*?</summary>',

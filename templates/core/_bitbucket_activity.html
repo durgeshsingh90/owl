@@ -1,4 +1,5 @@
-{% load l10n %}
+{% load l10n tz %}
+{% get_current_timezone as activity_timezone %}
 <section class="knowledge-dashboard-section knowledge-git-activity" id="bitbucket-activity" aria-labelledby="bitbucket-activity-heading" aria-describedby="bitbucket-activity-note">
     <div class="knowledge-section-heading knowledge-git-activity__heading">
         <div><p class="knowledge-kicker">Repository pulse</p><h2 id="bitbucket-activity-heading">Bitbucket activity</h2></div>
@@ -9,7 +10,7 @@
         {% endif %}
     </div>
     <div class="knowledge-git-activity__summary">
-        <p>{{ bitbucket_dashboard.label|default:"Last 7 days" }} <span aria-hidden="true">·</span> Available Git history</p>
+        <p>{{ bitbucket_dashboard.label|default:"This week" }} <span aria-hidden="true">·</span> Available Git history</p>
         <a class="knowledge-section-link" href="{% url 'bitbucket_search:index' %}">Browse repositories <span aria-hidden="true">→</span></a>
     </div>
 
@@ -24,7 +25,7 @@
         <div class="knowledge-git-activity__rankings">
             <section class="knowledge-git-activity__ranking" aria-labelledby="git-people-heading">
                 <div class="knowledge-git-activity__panel-heading"><h3 id="git-people-heading">Commits by person</h3><span>Top 10</span></div>
-                <p class="knowledge-git-activity__caption">Git committers</p>
+                <p class="knowledge-git-activity__caption">Git committers across indexed repositories</p>
                 <ol class="knowledge-git-activity__list" role="list">
                     {% for person in bitbucket_dashboard.people|slice:":10" %}
                         <li>
@@ -100,5 +101,5 @@
             {% if bitbucket_dashboard.coverage.last_indexed_at %}Last indexed <time datetime="{{ bitbucket_dashboard.coverage.last_indexed_at|date:'c' }}">{{ bitbucket_dashboard.coverage.last_indexed_at|date:"j M Y, H:i T" }}</time>.{% endif %}
         </p>
     {% endif %}
-    <p class="knowledge-git-activity__note" id="bitbucket-activity-note">People are Git committers, not push actors. Counts cover all file types, not only PDFs. Folder counts use each changed file’s direct parent; one commit can count in several folders.</p>
+    <p class="knowledge-git-activity__note" id="bitbucket-activity-note">People are Git committers, not push actors. Counts cover all file types, not only PDFs. Calendar periods use {{ activity_timezone }}; weeks start Monday. Last 6 months is a rolling period. Folder counts use each changed file’s direct parent; one commit can count in several folders.</p>
 </section>

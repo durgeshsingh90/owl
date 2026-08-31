@@ -10,10 +10,20 @@ from django.contrib.staticfiles import finders
 from django.template.loader import render_to_string
 from django.utils import translation
 
+PERIOD_LABELS = (
+    ("today", "Today"),
+    ("week", "This week"),
+    ("last_week", "Last week"),
+    ("month", "This month"),
+    ("six_months", "Last 6 months"),
+    ("year", "This year"),
+)
+
 
 def _dashboard(**overrides):
     values = {
-        "label": "Last 7 days",
+        "period": "week",
+        "label": "This week",
         "has_data": True,
         "has_repositories": True,
         "total_commits": 12,
@@ -105,36 +115,32 @@ def test_git_progress_values_stay_numeric_with_localized_commit_counts(settings)
     assert 'value="2.000"' not in html
 
 
-def test_period_filters_preserve_supplied_queries_and_have_one_anchor():
-    filters = (
+@pytest.mark.parametrize(("selected_period", "selected_label"), PERIOD_LABELS)
+def test_period_filters_preserve_supplied_queries_and_have_one_anchor(
+    selected_period, selected_label
+):
+    filters = tuple(
         {
-            "label": "Last 7 days",
-            "href": "?year=2025&activity=opened&git_period=week#bitbucket-activity",
-            "selected": False,
-        },
-        {
-            "label": "Last month",
-            "href": "?year=2025&activity=opened&git_period=month#bitbucket-activity",
-            "selected": True,
-        },
-        {
-            "label": "Last 6 months",
-            "href": "?year=2025&activity=opened&git_period=six_months#bitbucket-activity",
-            "selected": False,
-        },
-        {
-            "label": "Last year",
-            "href": "?year=2025&activity=opened&git_period=year#bitbucket-activity",
-            "selected": False,
-        },
+            "label": label,
+            "href": f"?year=2025&activity=opened&people_period=today&git_period={period}#bitbucket-activity",
+            "selected": period == selected_period,
+        }
+        for period, label in PERIOD_LABELS
     )
-    html = _render(filters=filters)
+    html = _render(_dashboard(period=selected_period, label=selected_label), filters=filters)
     nav = re.search(r'<nav[^>]+aria-label="Bitbucket activity period">(.*?)</nav>', html, re.DOTALL)
     assert nav is not None
     links = re.findall(r'href="([^"]+)"', nav.group(1))
     assert [unescape(link) for link in links] == [item["href"] for item in filters]
     assert nav.group(1).count('aria-current="page"') == 1
-    assert 'class="is-active" aria-current="page">Last month</a>' in nav.group(1)
+    assert f'class="is-active" aria-current="page">{selected_label}</a>' in nav.group(1)
+    assert html.index(f">{selected_label}</a>") < html.index(
+        'class="knowledge-git-activity__metrics"'
+    )
+    summary = re.search(
+        r'<div class="knowledge-git-activity__summary">(.*?)</div>', html, re.DOTALL
+    )
+    assert summary and selected_label in summary.group(1)
 
 
 @pytest.mark.parametrize(
@@ -145,14 +151,27 @@ def test_period_filters_preserve_supplied_queries_and_have_one_anchor():
         (True, 2, "No commits in this period"),
     ],
 )
+@pytest.mark.parametrize(("period", "label"), PERIOD_LABELS)
 def test_activity_empty_states_do_not_claim_missing_data_is_no_activity(
-    has_repositories, indexed, message
+    has_repositories, indexed, message, period, label
 ):
-    dashboard = _dashboard(has_data=False, has_repositories=has_repositories, total_commits=0)
+    dashboard = _dashboard(
+        period=period,
+        label=label,
+        has_data=False,
+        has_repositories=has_repositories,
+        total_commits=0,
+        active_people=0,
+        active_repositories=0,
+        active_folders=0,
+    )
     dashboard.coverage.indexed_repositories = indexed
     html = _render(dashboard)
     assert message in html
     assert 'class="knowledge-git-activity__rankings"' not in html
+    assert "<dt>Commits</dt><dd>0</dd>" in html
+    assert "<dt>People</dt><dd>0</dd>" in html
+    assert label in html
     if indexed == 0:
         assert "No commits in this period" not in html
 

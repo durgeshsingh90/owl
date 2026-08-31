@@ -24,10 +24,12 @@ from bitbucket_search.services.logging_events import get_logger, log_event
 logger = get_logger("analytics")
 
 ACTIVITY_PERIOD_LABELS = {
-    "week": "Last 7 days",
-    "month": "Last month",
+    "today": "Today",
+    "week": "This week",
+    "last_week": "Last week",
+    "month": "This month",
     "six_months": "Last 6 months",
-    "year": "Last year",
+    "year": "This year",
 }
 RANKING_LIMIT = 10
 
@@ -70,7 +72,7 @@ class BitbucketDashboard:
     period: str
     label: str
     started_at: datetime
-    ended_at: datetime
+    ended_at: datetime  # Exclusive for last_week; inclusive for the current/rolling periods.
     total_commits: int
     active_people: int
     active_repositories: int
@@ -89,16 +91,23 @@ class BitbucketDashboard:
         return self.coverage.total_repositories > 0
 
 
-def _period_start(period: str, ended_at: datetime) -> datetime:
-    """Subtract calendar months in the current timezone, clamping month ends."""
+def _period_bounds(period: str, now: datetime) -> tuple[datetime, datetime]:
+    """Use local calendar boundaries, retaining the rolling six-month option."""
 
-    if period == "week":
-        return ended_at - timedelta(days=7)
-    months = {"month": 1, "six_months": 6, "year": 12}[period]
-    year, zero_based_month = divmod(ended_at.year * 12 + ended_at.month - 1 - months, 12)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0, fold=0)
+    if period == "today":
+        return midnight, now
+    if period in {"week", "last_week"}:
+        monday = midnight - timedelta(days=midnight.weekday())
+        return (monday - timedelta(days=7), monday) if period == "last_week" else (monday, now)
+    if period == "month":
+        return midnight.replace(day=1), now
+    if period == "year":
+        return midnight.replace(month=1, day=1), now
+    year, zero_based_month = divmod(now.year * 12 + now.month - 1 - 6, 12)
     month = zero_based_month + 1
-    day = min(ended_at.day, monthrange(year, month)[1])
-    return ended_at.replace(year=year, month=month, day=day)
+    day = min(now.day, monthrange(year, month)[1])
+    return now.replace(year=year, month=month, day=day), now
 
 
 def _people_activity(commits) -> tuple[PersonActivity, ...]:
@@ -144,7 +153,7 @@ def _build_dashboard(*, period: str, now: datetime | None) -> BitbucketDashboard
     if timezone.is_naive(ended_at):
         ended_at = timezone.make_aware(ended_at)
     ended_at = timezone.localtime(ended_at)
-    started_at = _period_start(period, ended_at)
+    started_at, ended_at = _period_bounds(period, ended_at)
 
     indexed = Q(activity_indexed_at__isnull=False) & ~Q(activity_indexed_commit="")
     coverage_values = BitbucketRepository.objects.filter(enabled=True).aggregate(
@@ -175,7 +184,7 @@ def _build_dashboard(*, period: str, now: datetime | None) -> BitbucketDashboard
             repository__activity_indexed_at__isnull=False,
             in_activity_history=True,
             committed_at__gte=started_at,
-            committed_at__lte=ended_at,
+            **{"committed_at__lt" if period == "last_week" else "committed_at__lte": ended_at},
         )
         .exclude(repository__activity_indexed_commit="")
         .order_by()
@@ -244,9 +253,10 @@ def get_bitbucket_dashboard(
 ) -> BitbucketDashboard:
     """Summarize available Git history without Git access or database mutations.
 
-    Windows include their starting instant and end now; commits dated in the
-    future are excluded. Month, six-month and year windows are rolling calendar
-    intervals in the application's current timezone, not fixed day counts.
+    Today, this week, this month and this year start at their local calendar
+    boundary and include now. Weeks start on Monday; last week excludes this
+    Monday's boundary. Last 6 months remains a rolling calendar interval. All
+    boundaries use the application's current timezone, not fixed UTC day counts.
     """
 
     selected = period if isinstance(period, str) and period in ACTIVITY_PERIOD_LABELS else "week"

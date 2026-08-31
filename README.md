@@ -40,8 +40,12 @@ Home also shows a cached approximation of the local database size, table count, 
 entries, and the exact date and time of that measurement. Home reads OWL's local database and does
 not contact an external service by itself.
 
-The **Bitbucket activity** section ranks Git committers, repositories, and folders for the last
-7 days, calendar month, 6 calendar months, or calendar year (rolling back from the current time).
+The **Bitbucket activity** section ranks Git committers, repositories, and folders for **Today**,
+**This week**, **Last week**, **This month**, **Last 6 months**, and **This year**. It defaults to
+This week. Calendar periods use OWL's configured local time zone: today starts at midnight,
+weeks start Monday, this month starts on the first, and this year starts January 1. Last week
+covers the previous Monday through Sunday, excluding this Monday. Last 6 months remains a
+rolling calendar-month window. Current periods end at the current time, excluding future commits.
 It counts available commits across all file types in each enabled repository's synchronized
 branch, not only PDF changes. Counts use the Git committer and commit timestamp, not the person
 who pushed. Each `(repository, commit)` counts once; a folder receives one count per commit

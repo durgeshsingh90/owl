@@ -5,7 +5,7 @@
 {% block theme_default %}dark{% endblock %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=repository-selection-v1">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=repository-contrast-v1">
 {% endblock %}
 
 {% block app_header %}{% endblock %}
@@ -83,13 +83,6 @@
         </section>
 
         <div class="bb-rail-footer">
-            <nav class="bb-rail-links" aria-label="Bitbucket Search functions">
-                <a{% if active_section == "search" %} class="is-active" aria-current="page"{% endif %} href="{% url 'bitbucket_search:index' %}">
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 4.5 4.5"/></svg>
-                    Search PDFs
-                </a>
-            </nav>
-
             <dl class="bb-statistics" aria-label="Bitbucket Search totals">
                 <div><dt>Total repositories</dt><dd data-total-repositories>{{ repository_count }}</dd></div>
                 <div><dt>PDF files</dt><dd data-total-pdfs>{{ pdf_count }}</dd></div>
@@ -220,7 +213,6 @@
                 {% include "bitbucket_search/_repository_list.html" %}
                 {% if not repositories %}<p>No repositories are connected yet.</p>{% endif %}
                 <nav aria-label="Bitbucket Search mobile functions">
-                    <a href="{% url 'bitbucket_search:index' %}"{% if active_section == "search" %} aria-current="page"{% endif %}>Search PDFs</a>
                     <a href="{% url 'bitbucket_search:repositories' %}"{% if active_section == "repositories" %} aria-current="page"{% endif %}>Repositories</a>
                     <a href="{% url 'bitbucket_search:index_status' %}">Sync status</a>
                 </nav>
