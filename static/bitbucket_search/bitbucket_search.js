@@ -252,7 +252,7 @@
             updateSelectedRepositoryActions();
         }, 10000);
         updateSelectedRepositoryActions();
-        announceDeleteLock("Delete unlocked. Click again to review removal of the selected repositories. Locks again in 10 seconds.");
+        announceDeleteLock("Delete unlocked. Click again to delete the selected repositories, downloaded files and indexed data from this computer. Remote repositories stay unchanged. Locks again in 10 seconds.");
     });
     updateSelectedRepositoryActions();
 
@@ -278,6 +278,15 @@
             intent.name = "operation";
             intent.value = operation;
             form.appendChild(intent);
+            if (operation === "remove") {
+                // The valid second click is confirmation, just like Bookmark Manager.
+                // Never include it in the initial page or merely unlocked state.
+                const confirmation = document.createElement("input");
+                confirmation.type = "hidden";
+                confirmation.name = "confirmed";
+                confirmation.value = "yes";
+                form.appendChild(confirmation);
+            }
             repositorySubmissionPending = true;
             resetDeleteLock();
             updateSelectedRepositoryActions();
@@ -562,7 +571,7 @@
         repositorySubmissionPending = false;
         repositoryStatusPending = true;
         resetDeleteLock();
-        selectionForm?.querySelectorAll('input[name="operation"]').forEach((input) => input.remove());
+        selectionForm?.querySelectorAll('input[name="operation"], input[name="confirmed"]').forEach((input) => input.remove());
         updateSelectedRepositoryActions();
         updateRefreshAllButtons();
         window.clearTimeout(pollTimer);

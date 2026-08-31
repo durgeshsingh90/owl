@@ -378,8 +378,9 @@ def test_selected_removal_first_post_is_read_only_and_has_explicit_confirmation(
     remove.assert_not_called()
 
 
+@pytest.mark.parametrize("async_request", [False, True], ids=["native-second-click", "async"])
 def test_confirmed_selected_removal_deletes_only_synthetic_selected_local_data(
-    local_client, selected_url, selected_repositories, monkeypatch
+    local_client, selected_url, selected_repositories, monkeypatch, async_request
 ):
     first, second, other = selected_repositories
     paths = {}
@@ -401,12 +402,17 @@ def test_confirmed_selected_removal_deletes_only_synthetic_selected_local_data(
     response = local_client.post(
         selected_url,
         _data((first, first, second), "remove", confirmed="yes"),
-        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        **({"HTTP_X_REQUESTED_WITH": "XMLHttpRequest"} if async_request else {}),
     )
-    assert response.status_code == 200
-    assert response.json()["removedIds"] == [first.pk, second.pk]
-    assert response.json()["remainingIds"] == []
+    if async_request:
+        assert response.status_code == 200
+        assert response.json()["removedIds"] == [first.pk, second.pk]
+        assert response.json()["remainingIds"] == []
+    else:
+        assert response.status_code == 302
+        assert response.url == reverse("bitbucket_search:index")
     assert set(BitbucketRepository.objects.values_list("pk", flat=True)) == {other.pk}
+    assert set(PDFDocument.objects.values_list("repository_id", flat=True)) == {other.pk}
     assert PDFDocument.objects.count() == 1
     assert not paths[first.pk].exists() and not paths[second.pk].exists()
     assert (paths[other.pk] / "Guide.pdf").read_bytes() == b"synthetic test PDF"

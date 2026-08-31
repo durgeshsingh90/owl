@@ -218,11 +218,9 @@ Never paste a real PAT into this repository, a test, a screenshot, or a support 
 
 ## First-time setup
 
-The project is already in the requested location on this Mac. Open Terminal and run these
-commands exactly:
+The project can live in any folder. Open Terminal in your OWL checkout and run:
 
 ```bash
-cd /Users/durgesh/Projects/owl
 python3.13 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -234,11 +232,10 @@ python manage.py migrate
 
 What those commands do:
 
-1. open the existing OWL project;
-2. create an isolated Python environment inside `.venv`;
-3. install the exact locked application and development dependency versions;
-4. create your ignored local settings file without replacing one that already exists;
-5. create the local database under `var/`.
+1. create an isolated Python environment inside `.venv`;
+2. install the exact locked application and development dependency versions;
+3. create your ignored local settings file without replacing one that already exists;
+4. create the local database under `var/`.
 
 On another computer where OWL has not been downloaded, first run:
 
@@ -249,18 +246,16 @@ cd owl
 
 ### Windows Command Prompt
 
-On Windows with Python 3.13 installed, open Command Prompt and run:
+On Windows with Python 3.13 installed, open Command Prompt in your OWL checkout and run:
 
 ```bat
-cd C:\Users\YOUR_USERNAME\code\owl
 py -3.13 -m venv .venv
 .venv\Scripts\activate.bat
 python --version
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 if not exist .env copy .env.example .env
-python manage.py migrate
-python manage.py run_owl
+python start.py
 ```
 
 `python --version` must report Python 3.13.x or 3.14.x. The activated interpreter shown by
@@ -271,9 +266,7 @@ app. This preserves your bookmarks while adding any columns required by the newe
 
 ```bat
 git pull
-.venv\Scripts\activate.bat
-python manage.py migrate
-python manage.py run_owl
+python start.py
 ```
 
 The first start creates a strong machine-local Django key under `var/secrets/` when
@@ -281,15 +274,37 @@ The first start creates a strong machine-local Django key under `var/secrets/` w
 
 ## Run OWL
 
-From `/Users/durgesh/Projects/owl`, run:
+Stop any earlier OWL server and workers before starting another instance. From your OWL folder:
 
 ```bash
-source .venv/bin/activate
-python manage.py run_owl 127.0.0.1:8000
+python3 start.py
 ```
 
-Then open [http://127.0.0.1:8000/](http://127.0.0.1:8000/) in your browser. Press `Control-C`
-in Terminal when you want to stop OWL.
+On Windows, use `python start.py` (or `py start.py`). No environment activation is needed:
+the launcher finds the checkout from its own location and prefers its `.venv` interpreter
+(`.venv/bin/python` on macOS/Linux, `.venv\Scripts\python.exe` on Windows). If no local `.venv`
+exists, it uses the Python interpreter that launched it; install OWL's dependencies first.
+You can also invoke the script by its path from another folder, including paths with spaces.
+
+The launcher checks the app, backs up an existing SQLite database **only when updates are pending**,
+applies those updates, and starts `run_owl` with the website and its background workers.
+Backups go to the configured data folder's `backups` directory (normally `var/backups`), with unique
+names; it never overwrites earlier backups. A failed backup or database update stops startup.
+If a database lock blocks the backup for 30 seconds, startup stops and asks you to close other
+OWL instances; large backups can keep running while they make progress.
+It does not install packages, pull Git changes, replace `.env`, or change worker settings.
+
+Optional commands:
+
+```bash
+python3 start.py 9000       # Use a different port
+python3 start.py --check   # Check setup without applying updates or starting workers
+python3 start.py --help
+```
+
+The address and port default come from `run_owl`, not the launcher. Normally open
+[OWL](http://127.0.0.1:8000/) in your browser. Keep the terminal open; press `Control-C` to stop.
+Direct `python manage.py run_owl` remains available when you manage database updates yourself.
 
 `run_owl` starts the local website, its resident weekly Confluence scheduler, a bounded parallel
 Bitbucket repository-worker pool, and a separate bounded PDF-worker pool. The Bitbucket supervisor
@@ -366,11 +381,13 @@ running finishes normally; the exclusion applies to future work. You can still s
 repository and use **Refresh selected**, or select only excluded repositories and use
 **Include in refresh** to restore bulk and scheduled refreshes.
 
-Deletion starts locked. Select the repositories, click the **Unlock deletion** icon, then the
-**Delete** icon. Changing the selection or starting background work locks deletion again.
-The confirmation page lists exactly which repositories will be removed before deleting their managed local checkouts,
-retained PDF copies, repository records, commit history, document records, jobs, and indexed
-text that no other PDF uses. The remote repository is never changed. Removal is blocked while
+Deletion uses the same two-click control as Bookmark Manager. Select the repositories, then click
+the **🔒** button once to unlock it (**🔓**). Clicking that same button again within 10 seconds
+deletes the selected repositories immediately, without another confirmation page. This removes
+their managed local checkouts, retained PDF copies, repository records, commit history, document
+records, jobs, and indexed text that no other PDF uses. The remote repository is never changed.
+The button relocks after 10 seconds, when the selection changes, or when selected repository work
+starts or its status cannot be verified. Removal is blocked while
 that repository has queued or running sync or extraction work. If local cleanup fails, OWL
 keeps a recovery record and offers **Retry removal** instead of claiming that deletion finished.
 This is ordinary local deletion, not a secure erase of backups, application logs, or disk history.

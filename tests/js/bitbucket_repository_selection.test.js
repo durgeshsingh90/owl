@@ -291,6 +291,7 @@ test("selection enables a single locked delete control that arms on its first cl
     const click = page.unlock();
     assert.equal(click.defaultPrevented, true, "The first click never submits removal");
     assert.equal(page.form.querySelector('input[name="operation"]'), null, "Arming adds no removal intent");
+    assert.equal(page.form.querySelector('input[name="confirmed"]'), null, "The first click never confirms deletion");
     assert.equal(page.fetchCount(), 0, "The first click does not send a backend request");
     assert.equal(page.global.button.disabled, false, "Arming does not start a repository request");
     assert.equal(page.controls.remove.disabled, false);
@@ -480,23 +481,53 @@ test("native operation submits retain checked repository IDs and enforce the del
     unlocked.select(0);
     unlocked.select(1);
     unlocked.unlock();
-    assert.equal(unlocked.clickRemove().defaultPrevented, false, "The second click can use the native POST confirmation flow");
+    assert.equal(unlocked.clickRemove().defaultPrevented, false, "The second click can submit confirmed deletion directly");
     assert.equal(unlocked.submit("remove").defaultPrevented, false);
     assert.equal(unlocked.form.querySelector('input[name="operation"]').value, "remove", "Native POST keeps validated intent when submitter is disabled");
+    assert.equal(unlocked.form.querySelector('input[name="confirmed"]').value, "yes", "The validated second click confirms deletion without a third confirmation page");
     assert.deepEqual(unlocked.cards.filter(({ checkbox }) => checkbox.checked).map(({ checkbox }) => checkbox.value), ["1", "2"]);
     assert.equal(unlocked.controls.remove.dataset.deleteLocked, "true", "A submitted request consumes the unlock");
     assert.equal(unlocked.controls.remove.disabled, true);
     assert.equal(unlocked.deleteTimers().length, 0, "Submission cancels the arming timer");
     assert.equal(unlocked.submit("remove").defaultPrevented, true, "Repeated submission cannot reuse consumed consent");
     assert.equal(unlocked.form.querySelectorAll('input[name="operation"]').length, 1);
+    assert.equal(unlocked.form.querySelectorAll('input[name="confirmed"]').length, 1);
     for (const action of ["refresh", "exclude"]) {
         const page = boot();
         page.select(0);
         const event = page.submit(action);
         assert.equal(event.defaultPrevented, false, `${action} proceeds via the selected POST form`);
         assert.equal(page.form.querySelector('input[name="operation"]').value, action);
+        assert.equal(page.form.querySelector('input[name="confirmed"]'), null, "Refresh and exclude never carry deletion confirmation");
         assert.equal(page.global.button.disabled, true, "Duplicate global submission is prevented");
     }
+});
+
+test("restoring a submitted deletion clears its confirmation before another action", async () => {
+    const page = boot();
+    page.select(0);
+    page.unlock();
+    page.clickRemove();
+    assert.equal(page.submit("remove").defaultPrevented, false);
+    assert.equal(page.form.querySelector('input[name="confirmed"]').value, "yes");
+    await page.pageshow();
+    assert.equal(page.form.querySelector('input[name="confirmed"]'), null);
+    assert.equal(page.form.querySelector('input[name="operation"]'), null);
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true");
+    await page.poll();
+    assert.equal(page.submit("remove").defaultPrevented, true, "Restored pages require a new two-click confirmation");
+    assert.equal(page.form.querySelector('input[name="confirmed"]'), null);
+    assert.equal(page.submit("refresh").defaultPrevented, false);
+    assert.equal(page.form.querySelector('input[name="confirmed"]'), null);
+});
+
+test("expired unlock never creates a deletion confirmation", () => {
+    const page = boot();
+    page.select(0);
+    page.unlock();
+    page.advanceTime(10000, { runTimers: false });
+    assert.equal(page.submit("remove").defaultPrevented, true);
+    assert.equal(page.form.querySelector('input[name="confirmed"]'), null);
 });
 
 test("new Git or PDF work relocks selection and replaces the global refresh icon with a spinner", async () => {
