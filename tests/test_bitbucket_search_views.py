@@ -365,5 +365,6 @@ def test_repository_status_includes_extraction_counts(client):
         "indexedDocuments": 1,
         "staleDocuments": 0,
         "active": False,
+        "workerLimit": 4,
         "publicationSignature": "0:1:0:0:0",
     }

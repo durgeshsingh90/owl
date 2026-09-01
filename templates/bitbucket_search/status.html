@@ -1,8 +1,10 @@
 {% extends "owl/base.html" %}
 {% load static %}
 
+{% block title %}Repository logs · OWL{% endblock %}
+
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=daily-sync-v1">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=repository-activity-v1">
 {% endblock %}
 
 {% block app_sidebar %}
@@ -10,61 +12,235 @@
 {% endblock %}
 
 {% block content %}
-<div class="page-stack page-stack--centered bb-status-page">
-    <header class="page-heading page-heading--status">
+<div class="page-stack page-stack--centered bb-status-page bb-logs-page">
+    <header class="page-heading page-heading--status bb-logs-heading">
         <div>
-            <p class="eyebrow">{{ eyebrow }}</p>
-            <h1>{{ heading }}</h1>
-            <p class="lede">Daily Git refreshes and PDF catalogue publication run outside the web request. A failed refresh leaves the last successful catalogue available while OWL waits two hours before the next retry.</p>
+            <p class="eyebrow">Repository diagnostics</p>
+            <h1>Repository logs</h1>
+            <p class="lede">Inspect the complete retained, redacted output for Git clone or refresh work, PDF catalogue publication, and every durable PDF text-indexing job.</p>
         </div>
         <div class="overall-status overall-status--{{ sync_summary.state }}" role="status" aria-live="polite" aria-atomic="true">
             <span class="overall-status__dot" aria-hidden="true"></span>
-            <span><small>Repository status</small><strong>{{ sync_summary.label }}</strong></span>
+            <span><small>Current activity</small><strong>{{ sync_summary.label|default:"Waiting for workers" }}</strong></span>
         </div>
     </header>
 
-    <section class="status-grid" aria-label="Repository refresh overview">
-        <article class="status-card{% if automation_payload.state == 'retry_wait' or automation_payload.state == 'due' %} status-card--attention{% elif automation_payload.state == 'exhausted' %} status-card--error{% endif %}">
-            <div class="status-card__heading"><span class="status-symbol" aria-hidden="true">↻</span><div><h2>Daily automation</h2><strong>{{ automation_payload.label }}</strong></div></div>
-            <p>{{ automation_payload.detail }}{% if automation_payload.nextActionAt %} Next action: <time datetime="{{ automation_payload.nextActionAt }}">{{ automation_payload.nextActionDisplay }}</time>.{% endif %}</p>
-        </article>
+    <section class="status-grid bb-log-overview" aria-label="Repository log overview">
         <article class="status-card{% if unresolved_repository_count %} status-card--error{% endif %}">
-            <div class="status-card__heading"><span class="status-symbol" aria-hidden="true">{{ active_jobs }}</span><div><h2>Repository workers</h2><strong>{{ active_jobs }} active of {{ repo_worker_limit }} allowed</strong></div></div>
-            <p>{{ enabled_repository_count }} of {{ repository_count }} repositories participate in daily refreshes. {{ unresolved_repository_count }} currently have an unresolved failed, interrupted, or locally blocked state.</p>
+            <div class="status-card__heading"><span class="status-symbol" aria-hidden="true">Git</span><div><h2>Git workers</h2><strong>{{ active_jobs|default:0 }} active of {{ repo_worker_limit|default:"—" }}</strong></div></div>
+            <p>Clone and refresh workers stream redacted Git output while catalogue discovery follows the downloaded revision.</p>
         </article>
-        <article class="status-card{% if extraction_status.failed_jobs or extraction_status.interrupted_jobs or extraction_status.stale_documents %} status-card--attention{% endif %}">
-            <div class="status-card__heading"><span class="status-symbol" aria-hidden="true">PDF</span><div><h2>PDF catalogue</h2><strong>{{ pdf_count }} active PDFs</strong></div></div>
-            <p>{{ extraction_status.indexed_documents }} indexed · {{ extraction_status.pending_documents }} pending · {{ extraction_status.queued_jobs|add:extraction_status.running_jobs }} extraction jobs active.</p>
+        <article class="status-card{% if index_needs_attention %} status-card--attention{% endif %}">
+            {% if selected_repository %}
+            <div class="status-card__heading"><span class="status-symbol" aria-hidden="true">PDF</span><div><h2>Selected repository PDF indexing</h2><strong>{{ index_job_counts.running }} active for this repository · global pool limit {{ index_worker_limit|default:"—" }}</strong></div></div>
+            <p>{{ index_job_counts.queued }} queued · {{ index_job_counts.succeeded }} succeeded attempts · {{ index_job_counts.failed }} failed · {{ index_job_counts.interrupted }} interrupted · {{ index_job_counts.cancelled }} cancelled.</p>
+            {% if index_job_counts.queued or index_job_counts.running %}
+            <form class="bb-stop-indexing-form" method="post" action="{% url 'bitbucket_search:repository_index_cancel' selected_repository.pk %}">
+                {% csrf_token %}
+                <input type="hidden" name="return_to" value="logs">
+                <button type="submit">Stop indexing now</button>
+                <small>Stops this repository's queued attempts and revokes active parser leases.</small>
+            </form>
+            {% endif %}
+            {% else %}
+            <div class="status-card__heading"><span class="status-symbol" aria-hidden="true">PDF</span><div><h2>PDF index workers</h2><strong>{{ extraction_status.running_jobs|default:0 }} active of {{ index_worker_limit|default:"—" }}</strong></div></div>
+            <p>{{ extraction_status.indexed_documents|default:0 }} indexed documents · {{ extraction_status.queued_jobs|default:0 }} queued · {{ extraction_status.failed_jobs|default:0 }} failed documents.</p>
+            {% endif %}
+        </article>
+        <article class="status-card{% if automation_payload.state == 'retry_wait' or automation_payload.state == 'due' %} status-card--attention{% elif automation_payload.state == 'exhausted' %} status-card--error{% endif %}">
+            <div class="status-card__heading"><span class="status-symbol" aria-hidden="true">↻</span><div><h2>Daily automation</h2><strong>{{ automation_payload.label|default:"Not scheduled" }}</strong></div></div>
+            <p>{{ automation_payload.detail|default:"Automatic repository refresh information is unavailable." }}{% if automation_payload.nextActionAt %} Next action: <time datetime="{{ automation_payload.nextActionAt }}">{{ automation_payload.nextActionDisplay }}</time>.{% endif %}</p>
         </article>
     </section>
 
-    <section class="bb-status-repositories" aria-labelledby="bb-status-repositories-heading">
-        <div class="bb-status-repositories__heading">
-            <div><p class="eyebrow">Current state</p><h2 id="bb-status-repositories-heading">Repositories</h2></div>
-            <a href="{% url 'bitbucket_search:index' %}">Return to PDF catalogue</a>
+    <section class="bb-log-toolbar" aria-labelledby="bb-log-repository-heading">
+        <div>
+            <p class="eyebrow">Log source</p>
+            <h2 id="bb-log-repository-heading">Choose a repository</h2>
+            <p>Logs are separated by repository so concurrent workers remain easy to follow.</p>
         </div>
         {% if repositories %}
-        <div class="bb-status-table-wrap">
-            <table class="bb-status-table">
-                <caption class="visually-hidden">Current repository refresh, retry, and PDF catalogue status</caption>
-                <thead><tr><th scope="col">Repository</th><th scope="col">Git refresh</th><th scope="col">Automatic schedule</th><th scope="col">Published catalogue</th></tr></thead>
-                <tbody>
-                    {% for repository in repositories %}
-                    {% with automatic=repository.automatic_refresh_ui %}
-                    <tr>
-                        <th scope="row"><strong>{{ repository.display_name }}</strong>{% if repository.default_branch %}<small>{{ repository.default_branch }}</small>{% endif %}</th>
-                        <td><strong class="bb-status-state bb-status-state--{{ repository.sync_state }}">{{ repository.get_sync_state_display }}</strong><small>{{ repository.status_message|default:"Waiting for first synchronization." }}</small></td>
-                        <td><strong class="bb-status-automatic bb-status-automatic--{{ automatic.state }}">{{ automatic.label }}</strong><small>{{ automatic.detail }}</small></td>
-                        <td><strong>{{ repository.pdf_count }} PDF{{ repository.pdf_count|pluralize }}</strong><small>{% if repository.last_sync_successful_at %}{% if repository.catalog_is_stale %}Retained from{% else %}Updated{% endif %} {{ repository.last_sync_successful_at|date:"j M Y, H:i T" }}{% else %}Not published yet{% endif %}</small></td>
-                    </tr>
-                    {% endwith %}
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
+        <form class="bb-log-repository-form" method="get" action="{% url 'bitbucket_search:index_status' %}">
+            <label for="bb-log-repository">Repository</label>
+            <select id="bb-log-repository" name="repository">
+                {% for repository in repositories %}
+                <option value="{{ repository.pk }}"{% if selected_repository and repository.pk == selected_repository.pk %} selected{% endif %}>{{ repository.display_name }}</option>
+                {% endfor %}
+            </select>
+            <button type="submit">View logs</button>
+        </form>
         {% else %}
-        <div class="bb-status-empty"><strong>No repositories connected</strong><p>Add a repository before the daily scheduler can refresh Git or publish PDFs.</p><a href="{% url 'bitbucket_search:repositories' %}#bb-add-repository">Add Repository</a></div>
+        <a class="bb-log-add-repository" href="{% url 'bitbucket_search:repositories' %}#bb-add-repository">Add Repository</a>
         {% endif %}
     </section>
+
+    {% if selected_repository %}
+    <section class="bb-log-repository" aria-labelledby="bb-selected-repository-heading">
+        <header class="bb-log-repository__heading">
+            <div>
+                <p class="eyebrow">Selected repository</p>
+                <h2 id="bb-selected-repository-heading">{{ selected_repository.display_name }}</h2>
+                <p>{% if selected_repository.default_branch %}Branch {{ selected_repository.default_branch }} · {% endif %}{{ selected_repository.pdf_count }} PDF{{ selected_repository.pdf_count|pluralize }} in the published catalogue.</p>
+                <p class="bb-log-repository__status">
+                    <strong>{{ selected_repository.get_sync_state_display }}</strong>
+                    · {{ selected_repository.status_message|default:"Waiting for the first Git run." }}
+                    {% if selected_repository.last_sync_successful_at %}
+                    · {% if selected_repository.catalog_is_stale %}Retained from{% else %}Catalogue updated{% endif %}
+                    <time datetime="{{ selected_repository.last_sync_successful_at|date:'c' }}">{{ selected_repository.last_sync_successful_at|date:"j M Y, H:i T" }}</time>
+                    {% endif %}
+                </p>
+            </div>
+            <a href="{% url 'bitbucket_search:index' %}?repository={{ selected_repository.pk }}">Open PDF catalogue</a>
+        </header>
+
+        <div class="bb-log-section" aria-labelledby="bb-git-log-heading">
+            <header class="bb-log-section__heading">
+                <div>
+                    <p class="eyebrow">Clone and refresh</p>
+                    <h3 id="bb-git-log-heading">Git and catalogue log</h3>
+                </div>
+                <p>Refresh uses a safe fetch and fast-forward update; credentials and remote URLs are redacted.</p>
+            </header>
+
+            <div class="bb-git-log-layout">
+                <nav class="bb-git-run-list" aria-label="Git runs for {{ selected_repository.display_name }}">
+                    {% for job in git_jobs %}
+                    <a class="bb-git-run{% if selected_git_job and job.pk == selected_git_job.pk %} is-current{% endif %}" href="{% url 'bitbucket_search:index_status' %}?repository={{ selected_repository.pk }}&amp;git_job={{ job.pk }}"{% if selected_git_job and job.pk == selected_git_job.pk %} aria-current="true"{% endif %}>
+                        <span>
+                            <strong>{{ job.get_operation_display|default:"Git run" }}</strong>
+                            <small>#{{ job.pk }} · {{ job.requested_at|date:"j M Y, H:i:s T" }}</small>
+                        </span>
+                        <span class="bb-log-state bb-log-state--{{ job.status }}">{{ job.get_status_display|default:job.status }}</span>
+                    </a>
+                    {% empty %}
+                    <p class="bb-log-empty">No Git clone or refresh has started for this repository.</p>
+                    {% endfor %}
+                </nav>
+
+                <article class="bb-git-console-card">
+                    {% if selected_git_job %}
+                    <header class="bb-git-console-card__heading">
+                        <div>
+                            <p class="eyebrow">Run #{{ selected_git_job.pk }}</p>
+                            <h4>{% if selected_git_job.operation == 'clone' %}Git clone{% else %}Git refresh{% endif %}</h4>
+                        </div>
+                        <span class="bb-log-state bb-log-state--{{ selected_git_job.status }}">{{ selected_git_job.get_status_display|default:selected_git_job.status }}</span>
+                    </header>
+                    <dl class="bb-log-metadata">
+                        <div><dt>Phase</dt><dd>{{ selected_git_job.get_phase_display|default:selected_git_job.phase|default:"Waiting" }}</dd></div>
+                        <div><dt>Progress</dt><dd>{{ selected_git_job.progress|default:0 }}%</dd></div>
+                        <div><dt>Started</dt><dd>{% if selected_git_job.started_at %}<time datetime="{{ selected_git_job.started_at|date:'c' }}">{{ selected_git_job.started_at|date:"j M Y, H:i:s T" }}</time>{% else %}Not yet{% endif %}</dd></div>
+                        <div><dt>Finished</dt><dd>{% if selected_git_job.completed_at %}<time datetime="{{ selected_git_job.completed_at|date:'c' }}">{{ selected_git_job.completed_at|date:"j M Y, H:i:s T" }}</time>{% else %}Not yet{% endif %}</dd></div>
+                    </dl>
+                    {% if selected_git_job.status_message %}<p class="bb-log-run-message">{{ selected_git_job.status_message }}</p>{% endif %}
+                    {% if selected_git_job.error_summary and selected_git_job.error_summary != selected_git_job.status_message %}<p class="bb-log-run-message bb-log-run-message--error">{{ selected_git_job.error_summary }}</p>{% endif %}
+                    {% if selected_git_log %}
+                    <pre class="bb-log-console" tabindex="0" aria-label="Redacted {% if selected_git_job.operation == 'clone' %}Git clone{% else %}Git refresh{% endif %} output for {{ selected_repository.display_name }}">{{ selected_git_log }}</pre>
+                    {% else %}
+                    <p class="bb-log-empty">No Git output has been recorded for this run yet.</p>
+                    {% endif %}
+                    {% if selected_git_log_truncated %}<p class="bb-log-truncated">This run exceeded the retained output limit. The oldest lines are unavailable.</p>{% endif %}
+                    {% else %}
+                    <p class="bb-log-empty">Select a Git run to inspect its clone, refresh, and catalogue output.</p>
+                    {% endif %}
+                </article>
+            </div>
+        </div>
+
+        <div class="bb-log-section" aria-labelledby="bb-index-log-heading">
+            <header class="bb-log-section__heading">
+                <div>
+                    <p class="eyebrow">Parallel queue</p>
+                    <h3 id="bb-index-log-heading">PDF indexing jobs</h3>
+                </div>
+                <p>Up to {{ index_worker_limit|default:"—" }} PDF workers can extract text concurrently. Every row is one durable PDF revision attempt.</p>
+            </header>
+
+            {% if index_event_log %}
+            <article class="bb-index-event-log" aria-labelledby="bb-index-event-log-heading">
+                <header class="bb-git-console-card__heading">
+                    <div>
+                        <p class="eyebrow">State transitions</p>
+                        <h4 id="bb-index-event-log-heading">PDF indexing log snapshot</h4>
+                    </div>
+                    <div class="bb-index-event-log__actions">
+                        <span class="bb-log-state">{{ index_event_count }} transition{{ index_event_count|pluralize }} shown</span>
+                        <a href="{% url 'bitbucket_search:index_status' %}?repository={{ selected_repository.pk }}{% if selected_git_job %}&amp;git_job={{ selected_git_job.pk }}{% endif %}{% if index_event_before %}&amp;index_event_before={{ index_event_before }}{% elif index_event_after %}&amp;index_event_after={{ index_event_after }}{% endif %}{% if index_job_before %}&amp;index_job_before={{ index_job_before }}{% elif index_job_after %}&amp;index_job_after={{ index_job_after }}{% endif %}">Refresh snapshot</a>
+                    </div>
+                </header>
+                <pre class="bb-log-console" tabindex="0" aria-live="off" aria-label="PDF indexing transitions for {{ selected_repository.display_name }}">{{ index_event_log }}</pre>
+                {% if index_event_has_newer or index_event_has_older %}
+                <nav class="bb-log-pagination" aria-label="PDF indexing transition log pages">
+                    {% if index_event_has_newer %}<a href="{% url 'bitbucket_search:index_status' %}?repository={{ selected_repository.pk }}{% if selected_git_job %}&amp;git_job={{ selected_git_job.pk }}{% endif %}&amp;index_event_after={{ index_event_newer_after }}{% if index_job_before %}&amp;index_job_before={{ index_job_before }}{% elif index_job_after %}&amp;index_job_after={{ index_job_after }}{% endif %}">Newer transitions</a>{% else %}<span aria-disabled="true">Newer transitions</span>{% endif %}
+                    <strong>Stable cursor · up to {{ index_event_page_size }} transitions</strong>
+                    {% if index_event_has_older %}<a href="{% url 'bitbucket_search:index_status' %}?repository={{ selected_repository.pk }}{% if selected_git_job %}&amp;git_job={{ selected_git_job.pk }}{% endif %}&amp;index_event_before={{ index_event_older_before }}{% if index_job_before %}&amp;index_job_before={{ index_job_before }}{% elif index_job_after %}&amp;index_job_after={{ index_job_after }}{% endif %}">Older transitions</a>{% else %}<span aria-disabled="true">Older transitions</span>{% endif %}
+                </nav>
+                {% endif %}
+            </article>
+            {% endif %}
+
+            <dl class="bb-index-log-counts" aria-label="PDF indexing attempt counts">
+                <div><dt>Total attempts</dt><dd>{{ index_job_counts.total|default:0 }}</dd></div>
+                <div><dt>Queued</dt><dd>{{ index_job_counts.queued|default:0 }}</dd></div>
+                <div><dt>Running</dt><dd>{{ index_job_counts.running|default:0 }}</dd></div>
+                <div><dt>Succeeded</dt><dd>{{ index_job_counts.succeeded|default:0 }}</dd></div>
+                <div><dt>Failed attempts</dt><dd>{{ index_job_counts.failed|default:0 }}</dd></div>
+                <div><dt>Interrupted attempts</dt><dd>{{ index_job_counts.interrupted|default:0 }}</dd></div>
+                <div><dt>Cancelled attempts</dt><dd>{{ index_job_counts.cancelled|default:0 }}</dd></div>
+            </dl>
+
+            {% if index_jobs %}
+            <div class="bb-index-log-table-wrap" tabindex="0" role="region" aria-label="PDF indexing log entries for {{ selected_repository.display_name }}">
+                <table class="bb-index-log-table">
+                    <caption class="visually-hidden">PDF indexing job history for {{ selected_repository.display_name }}</caption>
+                    <thead>
+                        <tr><th scope="col">PDF revision</th><th scope="col">Status</th><th scope="col">Phase</th><th scope="col">Progress</th><th scope="col">Worker</th><th scope="col">Requested</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for job in index_jobs %}
+                        <tr>
+                            <th scope="row">
+                                <strong title="{{ job.target_relative_path }}">{{ job.target_relative_path|default:"PDF path unavailable" }}</strong>
+                                <small>Job #{{ job.pk }}{% if job.retry_count %} · retry {{ job.retry_count }}{% endif %}</small>
+                            </th>
+                            <td>
+                                <strong class="bb-log-state bb-log-state--{{ job.status }}">{{ job.get_status_display|default:job.status }}</strong>
+                                {% if job.error_summary %}<small class="bb-index-log-error">{{ job.error_summary }}</small>{% endif %}
+                            </td>
+                            <td>{{ job.get_phase_display|default:job.phase|default:"Waiting" }}</td>
+                            <td><progress max="100" value="{{ job.progress|default:0 }}">{{ job.progress|default:0 }}%</progress><small>{{ job.progress|default:0 }}%</small></td>
+                            <td>{% if job.worker_pid %}{{ job.worker_pid }}{% else %}—{% endif %}</td>
+                            <td><time datetime="{{ job.requested_at|date:'c' }}">{{ job.requested_at|date:"j M Y, H:i:s T" }}</time>{% if job.completed_at %}<small>Finished {{ job.completed_at|date:"j M Y, H:i:s T" }}</small>{% endif %}</td>
+                        </tr>
+                        {% empty %}
+                        <tr><td colspan="6"><p class="bb-log-empty">No PDF indexing jobs have been recorded for this repository.</p></td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% if index_job_has_newer or index_job_has_older %}
+            <nav class="bb-log-pagination" aria-label="PDF indexing log pages">
+                {% if index_job_has_newer %}<a href="{% url 'bitbucket_search:index_status' %}?repository={{ selected_repository.pk }}{% if selected_git_job %}&amp;git_job={{ selected_git_job.pk }}{% endif %}&amp;index_job_after={{ index_job_newer_after }}{% if index_event_before %}&amp;index_event_before={{ index_event_before }}{% elif index_event_after %}&amp;index_event_after={{ index_event_after }}{% endif %}">Newer jobs</a>{% else %}<span aria-disabled="true">Newer jobs</span>{% endif %}
+                <strong>Stable cursor · up to {{ index_job_page_size }} attempts</strong>
+                {% if index_job_has_older %}<a href="{% url 'bitbucket_search:index_status' %}?repository={{ selected_repository.pk }}{% if selected_git_job %}&amp;git_job={{ selected_git_job.pk }}{% endif %}&amp;index_job_before={{ index_job_older_before }}{% if index_event_before %}&amp;index_event_before={{ index_event_before }}{% elif index_event_after %}&amp;index_event_after={{ index_event_after }}{% endif %}">Older jobs</a>{% else %}<span aria-disabled="true">Older jobs</span>{% endif %}
+            </nav>
+            {% endif %}
+            {% else %}
+            <p class="bb-log-empty">No PDF indexing jobs have been recorded for this repository.</p>
+            {% endif %}
+        </div>
+    </section>
+    {% elif repositories %}
+    <section class="bb-status-empty bb-log-page-empty" aria-labelledby="bb-log-select-empty-heading">
+        <strong id="bb-log-select-empty-heading">Choose a repository to view its logs</strong>
+        <p>Git clone or refresh output and PDF indexing jobs will appear here.</p>
+    </section>
+    {% else %}
+    <section class="bb-status-empty bb-log-page-empty" aria-labelledby="bb-log-empty-heading">
+        <strong id="bb-log-empty-heading">No repository logs yet</strong>
+        <p>Add a repository to start a background Git clone, publish its PDF catalogue, and queue PDF text indexing.</p>
+        <a href="{% url 'bitbucket_search:repositories' %}#bb-add-repository">Add Repository</a>
+    </section>
+    {% endif %}
 </div>
 {% endblock %}

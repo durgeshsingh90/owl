@@ -70,5 +70,10 @@ urlpatterns = [
     ),
     path("repositories/status/", views.repository_status, name="repository_status"),
     path("repositories/<int:repository_id>/logs/", views.repository_logs, name="repository_logs"),
+    path(
+        "repositories/<int:repository_id>/indexing/cancel/",
+        views.cancel_repository_indexing,
+        name="repository_index_cancel",
+    ),
     path("status/", views.index_status, name="index_status"),
 ]

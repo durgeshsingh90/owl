@@ -317,6 +317,20 @@ def test_shallow_boundary_never_claims_a_confirmed_addition(settings, tmp_path):
     assert document.added_evidence == PDFDocumentAddedEvidence.BEFORE_AVAILABLE_HISTORY
     assert document.added_commit is None
 
+    observed_at = datetime(2026, 8, 30, 12, tzinfo=UTC)
+    publish_repository_pdf_catalog(
+        repository,
+        catalog,
+        result_commit=head,
+        observed_at=observed_at,
+    )
+    persisted = PDFDocument.objects.get(repository=repository)
+    assert persisted.discovered_at == observed_at
+    assert persisted.added_evidence == PDFDocumentAddedEvidence.BEFORE_AVAILABLE_HISTORY
+    assert persisted.added_commit is None
+    assert persisted.timeline_at == observed_at
+    assert persisted.timeline_basis == PDFDocumentTimelineBasis.OWL_DISCOVERED
+
 
 def test_publish_refresh_preserves_open_usage_and_marks_missing_pdfs_removed(
     settings,

@@ -115,6 +115,7 @@ def test_timeline_row_labels_git_author_without_claiming_push_or_project_evidenc
 
     assert row.added_by_label == "A. Architect · Git author"
     assert row.added_date_label == "20 Aug 2026"
+    assert row.added_date_source_label == "Git addition"
     assert "Original Git addition" in row.added_date_detail
     assert row.project_label == ""
     assert row.history_label == "Full reachable history"
@@ -124,10 +125,11 @@ def test_timeline_row_labels_git_author_without_claiming_push_or_project_evidenc
     assert row.path_copy_available is True
 
 
-def test_unknown_addition_never_uses_owl_discovery_date(tmp_path, settings):
+@override_settings(TIME_ZONE="Europe/Dublin")
+def test_unknown_git_addition_uses_explicit_owl_discovery_fallback(tmp_path, settings):
     settings.BITBUCKET_REPOSITORIES_ROOT = tmp_path / "managed-repositories"
     repository = _repository()
-    discovered_at = timezone.now() - timedelta(days=7)
+    discovered_at = datetime(2026, 8, 22, 9, 15, tzinfo=UTC)
     document = PDFDocument.objects.create(
         repository=repository,
         filename="Legacy.pdf",
@@ -141,9 +143,10 @@ def test_unknown_addition_never_uses_owl_discovery_date(tmp_path, settings):
     row = views._timeline_row(document)
 
     assert row.added_by_label == "Unavailable in available Git history"
-    assert row.added_date_label == "Unavailable"
-    assert row.added_date_detail == "Original addition not found in available Git history."
-    assert "OWL discovery date" not in row.added_date_detail
+    assert row.added_date_label == "22 Aug 2026"
+    assert row.added_date_source_label == "First seen by OWL"
+    assert "First seen by OWL · 22 Aug 2026, 10:15" in row.added_date_detail
+    assert "Original Git-added date is unavailable" in row.added_date_detail
     assert row.history_label == "Available history · Git-added date unavailable"
 
 
@@ -190,6 +193,7 @@ def test_list_and_search_show_original_repo_addition_not_discovery_or_latest_cha
     assert ">Date added to repo</span>" in row_html
     assert "3 Jul 2024" in row_html  # Git commit timestamp, converted to local time.
     assert "00:30" in row_html
+    assert "Git addition" in row_html
     assert "Original Author" in row_html
     assert "2023" not in row_html
     assert "2026" not in row_html
@@ -207,7 +211,10 @@ def test_list_and_search_show_original_repo_addition_not_discovery_or_latest_cha
         (PDFDocumentAddedEvidence.NOT_FOUND, True),
     ],
 )
-def test_unknown_repo_dates_are_unavailable_in_every_list(client, search, evidence, with_commit):
+@override_settings(TIME_ZONE="Europe/Dublin")
+def test_unknown_git_dates_show_explicit_owl_discovery_fallback(
+    client, search, evidence, with_commit
+):
     repository = _repository()
     commit = None
     if with_commit:
@@ -230,20 +237,21 @@ def test_unknown_repo_dates_are_unavailable_in_every_list(client, search, eviden
     html = response.content.decode()
     row_start = html.index(f'data-document-id="{document.pk}"')
     row_html = html[row_start : html.index("</tr>", row_start)]
-    assert (
-        'title="Original addition not found in available Git history.">Unavailable</strong>'
-        in row_html
-    )
-    assert "2026" not in row_html
+    assert "30 Aug 2026" in row_html
+    assert "First seen by OWL" in row_html
+    assert "Original Git-added date is unavailable" in row_html
     assert "2024" not in row_html
-    assert "OWL discovery" not in html
     if not search:
-        assert 'data-timeline-group-key="repo-date-unavailable"' in html
-        assert 'data-timeline-group-key="today"' not in html
+        expected_key, _label, _detail = views._timeline_bucket(
+            timezone.localtime(document.discovered_at).date(),
+            today=timezone.localdate(),
+        )
+        assert f'data-timeline-group-key="{expected_key}"' in html
+        assert 'data-timeline-group-key="repo-date-unavailable"' not in html
 
 
 @override_settings(BITBUCKET_PDF_PAGE_SIZE=10)
-def test_timeline_orders_by_repo_addition_with_unknown_dates_last_across_pages(monkeypatch):
+def test_timeline_orders_and_groups_by_the_displayed_date_source(monkeypatch):
     repository = _repository()
     monkeypatch.setattr(views.timezone, "localdate", lambda: date(2026, 8, 30))
     dated_ids = []
@@ -269,19 +277,20 @@ def test_timeline_orders_by_repo_addition_with_unknown_dates_last_across_pages(m
         repository=repository,
         filename="Unknown.pdf",
         relative_path="Unknown.pdf",
+        discovered_at=datetime(2026, 8, 30, 12, tzinfo=UTC),
         timeline_at=datetime(2026, 8, 30, 23, tzinfo=UTC),
     )
 
     page, groups = views._pdf_timeline_page(1)
-    assert [document.pk for document in page] == list(reversed(dated_ids))
-    assert [group.key for group in groups] == ["year-2024"]
+    assert [document.pk for document in page] == [unknown.pk, *list(reversed(dated_ids[1:]))]
+    assert [group.key for group in groups] == ["today", "year-2024"]
     page, groups = views._pdf_timeline_page(2)
-    assert [document.pk for document in page] == [unknown.pk]
-    assert [group.key for group in groups] == ["repo-date-unavailable"]
+    assert [document.pk for document in page] == [dated_ids[0]]
+    assert [group.key for group in groups] == ["year-2024"]
 
 
 @override_settings(BITBUCKET_PDF_PAGE_SIZE=10)
-def test_document_page_returns_legacy_json_and_html_with_stable_undated_pagination(client):
+def test_document_page_returns_json_and_html_with_stable_discovery_date_pagination(client):
     repository = _repository()
     observed_at = timezone.now()
     for index in range(11):
@@ -305,7 +314,8 @@ def test_document_page_returns_legacy_json_and_html_with_stable_undated_paginati
     assert payload["nextPageUrl"] == ""
     assert payload["html"].count("data-pdf-row") == 1
     assert "Document-00.pdf" in payload["html"]
-    assert 'data-timeline-group-key="repo-date-unavailable"' in payload["html"]
+    assert "First seen by OWL" in payload["html"]
+    assert 'data-timeline-group-key="repo-date-unavailable"' not in payload["html"]
     assert 'name="return_page" value="2"' in payload["html"]
 
     fallback = client.get(url, REMOTE_ADDR="127.0.0.1")

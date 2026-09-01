@@ -12,7 +12,7 @@ from unittest.mock import Mock
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import OperationalError, transaction
+from django.db import OperationalError, connection, transaction
 
 from bitbucket_search.management.commands import (
     bitbucket_index_worker,
@@ -27,6 +27,7 @@ from bitbucket_search.models import (
     PDFExtractionJobStatus,
     PDFPageExtractionState,
     PDFTextRevisionState,
+    RepositoryOperationLogChannel,
     RepositorySyncState,
 )
 from bitbucket_search.services import pdf_indexing
@@ -185,6 +186,81 @@ def test_repeated_identical_heartbeat_progress_is_logged_once(pdf_target, captur
         if "phase=extracting" in record.getMessage() and "progress=60" in record.getMessage()
     ]
     assert len(repeated) == 1
+    entries = list(job.operation_log_entries.order_by("id"))
+    assert [(entry.event, entry.phase, entry.progress) for entry in entries] == [
+        ("indexing_claimed", "validating", 1),
+        ("indexing_phase_changed", "validating", 5),
+        ("indexing_phase_changed", "hashing", 10),
+        ("indexing_phase_changed", "extracting", 20),
+        ("indexing_phase_changed", "publishing", 95),
+        ("indexing_completed", "completed", 100),
+    ]
+    phase_entries = [entry for entry in entries if entry.event == "indexing_phase_changed"]
+    assert [entry.phase for entry in phase_entries] == [
+        "validating",
+        "hashing",
+        "extracting",
+        "publishing",
+    ]
+    assert sum(entry.phase == "extracting" for entry in phase_entries) == 1
+    assert entries[-1].event == "indexing_completed"
+    assert entries[-1].progress == 100
+    assert all(entry.channel == RepositoryOperationLogChannel.INDEXING for entry in entries)
+    assert _PRIVATE not in "\n".join(entry.message for entry in entries)
+
+
+def test_progress_and_completion_events_share_their_state_transactions(pdf_target, monkeypatch):
+    repository, _document, path = pdf_target
+    observed: list[tuple[str, bool]] = []
+    original_append = pdf_indexing.append_operation_log_entry_safely
+
+    def record_transaction(**values):
+        observed.append((values["event"], connection.in_atomic_block))
+        return original_append(**values)
+
+    monkeypatch.setattr(
+        pdf_indexing,
+        "append_operation_log_entry_safely",
+        record_transaction,
+    )
+    job = _claimed(repository)
+
+    completed = pdf_indexing.execute_claimed_extraction_job(
+        job.pk, extraction_runner=lambda *_args: _stage(path)
+    )
+
+    assert completed.status == PDFExtractionJobStatus.SUCCEEDED
+    durable_transitions = [
+        inside_transaction
+        for event, inside_transaction in observed
+        if event in {"indexing_phase_changed", "indexing_completed"}
+    ]
+    assert durable_transitions
+    assert all(durable_transitions)
+
+
+def test_failure_event_shares_the_terminal_state_transaction(pdf_target, monkeypatch):
+    repository, _document, path = pdf_target
+    observed: list[tuple[str, bool]] = []
+    original_append = pdf_indexing.append_operation_log_entry_safely
+
+    def record_transaction(**values):
+        observed.append((values["event"], connection.in_atomic_block))
+        return original_append(**values)
+
+    monkeypatch.setattr(
+        pdf_indexing,
+        "append_operation_log_entry_safely",
+        record_transaction,
+    )
+    job = _claimed(repository)
+
+    completed = pdf_indexing.execute_claimed_extraction_job(
+        job.pk, extraction_runner=lambda *_args: _stage(path, "corrupt")
+    )
+
+    assert completed.status == PDFExtractionJobStatus.FAILED
+    assert ("indexing_failed", True) in observed
 
 
 @pytest.mark.parametrize("state", ["corrupt", "encrypted", "resource_limit"])
@@ -232,6 +308,10 @@ def test_failure_code_is_known_and_exception_message_is_never_logged(
 
     message = _event(captured_logs, "pdf_extraction_failed", level=logging.ERROR)[0].getMessage()
     assert f"error_code={'pdf_indexing_error' if code == _PRIVATE else code}" in message
+    operation_entry = job.operation_log_entries.order_by("id").last()
+    assert operation_entry.event == "indexing_failed"
+    assert operation_entry.severity == "error"
+    assert _PRIVATE not in operation_entry.message
     _assert_private(captured_logs, path)
 
 
@@ -280,6 +360,10 @@ def test_intentional_checkout_deferral_is_warning_without_error(pdf_target, capt
 
     assert deferred.status == PDFExtractionJobStatus.QUEUED
     _event(captured_logs, "pdf_extraction_deferred", level=logging.WARNING)
+    operation_entry = job.operation_log_entries.order_by("id").last()
+    assert operation_entry.event == "indexing_deferred"
+    assert operation_entry.phase == "queued"
+    assert operation_entry.progress == 0
     assert not [record for record in captured_logs.records if record.levelno >= logging.ERROR]
     _assert_private(captured_logs, path)
 

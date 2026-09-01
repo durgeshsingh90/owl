@@ -47,7 +47,7 @@ from bitbucket_search.services.pdf_indexing import queue_repository_pdf_extracti
 from bitbucket_search.services.repository_lock import repository_worker_wakeup_lock
 from bitbucket_search.services.repository_urls import normalize_repository_url
 from bitbucket_search.services.repository_worker_timing import (
-    running_pdf_worker_starts,
+    running_pdf_worker_activity,
     worker_timing,
 )
 from bookmark_manager.models import Notification, NotificationKind, NotificationState
@@ -1450,20 +1450,29 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
     last_saved_at = 0.0
     last_phase = job.phase
     last_progress = job.progress
+    last_message = job.status_message
     stage = "git_sync"
 
     def save_progress(phase: str, progress: int, message: str) -> None:
-        nonlocal last_saved_at, last_phase, last_progress
+        nonlocal last_saved_at, last_message, last_phase, last_progress
         flush_git_output()
         now_monotonic = time.monotonic()
         progress = max(last_progress, min(int(progress), 99))
-        changed = phase != last_phase or progress != last_progress
+        safe_message = " ".join(message.split())[:500]
+        message_changed = safe_message != last_message
+        changed = phase != last_phase or progress != last_progress or message_changed
         if not changed and now_monotonic - last_saved_at < 1.5:
             return
         heartbeat = timezone.now()
-        safe_message = " ".join(message.split())[:500]
-        if phase != last_phase:
-            emit_git_output(safe_message)
+        if phase != last_phase or message_changed:
+            emit_git_output(
+                safe_message,
+                operation=(
+                    "catalogue"
+                    if phase in {RepositorySyncPhase.DISCOVERING, RepositorySyncPhase.FINALIZING}
+                    else ""
+                ),
+            )
         with transaction.atomic():
             updated = RepositorySyncJob.objects.filter(
                 pk=job.pk,
@@ -1485,6 +1494,7 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
                 status_message=safe_message,
             )
         last_saved_at = now_monotonic
+        last_message = safe_message
         last_phase = phase
         last_progress = progress
         if changed:
@@ -1784,7 +1794,7 @@ def repository_status_snapshot(*, at=None) -> tuple[BitbucketRepository, ...]:
         )
         .order_by("display_name", "id")
     )
-    indexing_starts = running_pdf_worker_starts(observed_at=observed_at) if repositories else {}
+    indexing_activity = running_pdf_worker_activity(observed_at=observed_at) if repositories else {}
     for repository in repositories:
         repository.automatic_refresh = _repository_automation_status(
             repository,
@@ -1804,6 +1814,8 @@ def repository_status_snapshot(*, at=None) -> tuple[BitbucketRepository, ...]:
             sync_started_at=running_job.started_at if running_job else None,
             sync_operation=running_job.operation if running_job else None,
             sync_phase=running_job.phase if running_job else None,
-            indexing_started_at=indexing_starts.get(repository.pk),
+            sync_progress=running_job.progress if running_job else None,
+            indexing_started_at=(indexing_activity.get(repository.pk) or {}).get("started_at"),
+            indexing_progress=(indexing_activity.get(repository.pk) or {}).get("progress"),
         )
     return repositories

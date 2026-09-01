@@ -196,7 +196,18 @@ def test_remove_controls_and_status_include_git_and_pdf_worker_activity(
     confirmation = local_client.get(
         reverse("bitbucket_search:repository_remove", args=(repository.pk,))
     )
-    assert confirmation.context["repository_busy"]
+    if phase.startswith("sync"):
+        assert confirmation.context["repository_git_busy"]
+        assert not confirmation.context["repository_pdf_indexing"]
+        assert "Git work is active" in confirmation.content.decode()
+    else:
+        assert confirmation.context["repository_pdf_indexing"]
+        assert not confirmation.context["repository_git_busy"]
+        assert "Active PDF indexing will be stopped" in confirmation.content.decode()
+    assert not re.search(
+        r'<button class="button button--danger"[^>]+disabled',
+        confirmation.content.decode(),
+    )
     status = local_client.get(reverse("bitbucket_search:repository_status"))
     assert status.json()["repositories"][0]["hasActiveWork"]
 

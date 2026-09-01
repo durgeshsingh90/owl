@@ -168,6 +168,24 @@ class PDFExtractionJobPhase(models.TextChoices):
     COMPLETED = "completed", "Completed"
 
 
+class RepositoryOperationLogChannel(models.TextChoices):
+    """Stable source categories for one repository's user-facing operation log."""
+
+    GIT = "git", "Git"
+    CATALOGUE = "catalogue", "Catalogue"
+    INDEXING = "indexing", "PDF indexing"
+    WORKER = "worker", "Background worker"
+
+
+class RepositoryOperationLogSeverity(models.TextChoices):
+    """Small fixed severity vocabulary safe to expose in the local log viewer."""
+
+    DEBUG = "debug", "Debug"
+    INFO = "info", "Information"
+    WARNING = "warning", "Warning"
+    ERROR = "error", "Error"
+
+
 class BitbucketRepository(models.Model):
     """One approved Git repository managed in OWL's private media area."""
 
@@ -694,6 +712,7 @@ class RepositorySyncJob(models.Model):
     output_log = models.TextField(blank=True, default="")
     output_log_truncated = models.BooleanField(default=False)
     output_log_updated_at = models.DateTimeField(null=True, blank=True)
+    operation_log_truncated = models.BooleanField(default=False)
     source_commit = models.CharField(max_length=64, blank=True)
     result_commit = models.CharField(max_length=64, blank=True)
     requested_at = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -753,3 +772,73 @@ class RepositorySyncJob(models.Model):
             RepositorySyncJobStatus.QUEUED,
             RepositorySyncJobStatus.RUNNING,
         }
+
+
+class RepositoryOperationLogEntry(models.Model):
+    """One immutable, cursor-ordered repository operation log record.
+
+    Git output is sanitized before it reaches this model. Indexing messages use a
+    fixed application vocabulary and reference the durable extraction job rather
+    than storing PDF text or an absolute local path.
+    """
+
+    repository = models.ForeignKey(
+        BitbucketRepository,
+        on_delete=models.CASCADE,
+        related_name="operation_log_entries",
+    )
+    sync_job = models.ForeignKey(
+        RepositorySyncJob,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="operation_log_entries",
+    )
+    extraction_job = models.ForeignKey(
+        PDFExtractionJob,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="operation_log_entries",
+    )
+    channel = models.CharField(max_length=16, choices=RepositoryOperationLogChannel)
+    severity = models.CharField(
+        max_length=8,
+        choices=RepositoryOperationLogSeverity,
+        default=RepositoryOperationLogSeverity.INFO,
+    )
+    phase = models.CharField(max_length=32, blank=True)
+    event = models.CharField(max_length=64)
+    message = models.CharField(max_length=1024)
+    progress = models.PositiveSmallIntegerField(null=True, blank=True)
+    worker_pid = models.PositiveIntegerField(null=True, blank=True)
+    occurred_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(sync_job__isnull=False) | models.Q(extraction_job__isnull=False)
+                ),
+                name="bitbucket_log_entry_has_job",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(progress__isnull=True) | models.Q(progress__lte=100),
+                name="bitbucket_log_progress_lte_100",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("repository", "channel", "id"),
+                name="bb_log_repo_channel_idx",
+            ),
+            models.Index(fields=("sync_job", "id"), name="bb_log_sync_cursor_idx"),
+            models.Index(
+                fields=("extraction_job", "id"),
+                name="bb_log_extract_cursor_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.repository_id} — {self.channel} — {self.event}"

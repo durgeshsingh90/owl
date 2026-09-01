@@ -48,6 +48,7 @@
             <span class="bb-cell-label" aria-hidden="true">Date added to repo</span>
             <span class="bb-document-date">
                 <strong{% if row.added_date_detail %} title="{{ row.added_date_detail }}"{% endif %}>{{ row.added_date_label }}</strong>
+                <small>{{ row.added_date_source_label }}</small>
             </span>
         </td>
         <td class="bb-document-cell bb-document-cell--author" headers="bb-pdf-column-author">

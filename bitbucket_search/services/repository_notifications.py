@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
-from django.db.models import Case, Count, IntegerField, Max, Min, OuterRef, Q, Subquery, Value, When
+from django.db.models import (
+    Avg,
+    Case,
+    Count,
+    IntegerField,
+    Max,
+    Min,
+    OuterRef,
+    Q,
+    Subquery,
+    Value,
+    When,
+)
 from django.db.models.functions import Coalesce
 from django.urls import reverse
 from django.utils import timezone
@@ -20,6 +32,7 @@ from bitbucket_search.models import (
     RepositorySyncState,
 )
 from bitbucket_search.services.git_output import bounded_git_output
+from bitbucket_search.services.repository_activity import summarize_operation_activities
 from bitbucket_search.services.repository_worker_timing import (
     current_pdf_extraction_jobs,
     running_pdf_start_filter,
@@ -125,6 +138,7 @@ def _repository_rows():
             "status",
             "phase",
             "operation",
+            "progress",
             "error_code",
             "requested_at",
             "started_at",
@@ -197,6 +211,8 @@ def _extraction_states(*, observed_at):
             active_count=Count("pk"),
             running_count=Count("pk", filter=Q(status=PDFExtractionJobStatus.RUNNING)),
             running_started_at=Min("started_at", filter=running_pdf_start_filter(observed_at)),
+            running_progress=Avg("progress", filter=running_pdf_start_filter(observed_at)),
+            queued_count=Count("pk", filter=Q(status=PDFExtractionJobStatus.QUEUED)),
             updated_at=Max(Coalesce("heartbeat_at", "started_at", "requested_at")),
         )
         .order_by()
@@ -322,6 +338,92 @@ def _status(repository, documents, extraction):
     )
 
 
+def _valid_running_start(value, observed_at):
+    if value is None or timezone.is_naive(value) or value > observed_at:
+        return None
+    return value.isoformat()
+
+
+def _sync_activity(repository, *, observed_at):
+    status = repository["job_status"]
+    operation_value = repository["job_operation"]
+    if status not in _ACTIVE_SYNC or operation_value not in RepositorySyncOperation.values:
+        return None
+    operation = "clone" if operation_value == RepositorySyncOperation.CLONE else "pull"
+    state = "running" if status == RepositorySyncJobStatus.RUNNING else "queued"
+    display_status, label, detail = _busy_status(repository)
+    phase = repository["job_phase"] or display_status
+    if state == "queued":
+        phase = "queued"
+        label = f"Git {'clone' if operation == 'clone' else 'pull'} queued"
+    progress_value = repository["job_progress"] if state == "running" else None
+    progress = max(0, min(int(progress_value), 100)) if progress_value is not None else None
+    started_at = (
+        _valid_running_start(repository["job_started_at"], observed_at)
+        if state == "running"
+        else None
+    )
+    return {
+        "operation": operation,
+        "active": True,
+        "state": state,
+        "phase": phase,
+        "phaseLabel": label,
+        "detail": detail,
+        "progress": progress,
+        "progressScope": "job" if progress is not None else None,
+        "startedAt": started_at,
+        "observedAt": observed_at.isoformat() if started_at else None,
+        "queuedJobs": 1 if state == "queued" else 0,
+        "runningJobs": 1 if state == "running" else 0,
+        "count": 1,
+    }
+
+
+def _indexing_activity(extraction, *, observed_at):
+    active_count = max(0, int(extraction.get("active_count") or 0))
+    if not active_count:
+        return None
+    running_jobs = max(0, int(extraction.get("running_count") or 0))
+    queued_jobs = max(0, int(extraction.get("queued_count") or 0))
+    state = "running" if running_jobs else "queued"
+    progress_value = extraction.get("running_progress") if running_jobs else None
+    progress = (
+        max(0, min(int(round(float(progress_value))), 100)) if progress_value is not None else None
+    )
+    started_at = (
+        _valid_running_start(extraction.get("running_started_at"), observed_at)
+        if running_jobs
+        else None
+    )
+    if running_jobs:
+        phase = "extracting"
+        label = "Extracting PDF text"
+    else:
+        phase = "pdf_queued"
+        label = "PDF indexing queued"
+    details = []
+    if running_jobs:
+        details.append(f"{running_jobs} PDF{'s' if running_jobs != 1 else ''} extracting")
+    if queued_jobs:
+        details.append(f"{queued_jobs} PDF{'s' if queued_jobs != 1 else ''} queued")
+    return {
+        "operation": "indexing",
+        "active": True,
+        "state": state,
+        "phase": phase,
+        "phaseLabel": label,
+        "detail": " · ".join(details) or label,
+        "progress": progress,
+        "progressScope": "running_workers_average" if progress is not None else None,
+        "startedAt": started_at,
+        "observedAt": observed_at.isoformat() if started_at else None,
+        "queuedJobs": queued_jobs,
+        "runningJobs": running_jobs,
+        "count": active_count,
+    }
+
+
 def repository_notification_statuses(*, at=None) -> dict[str, object]:
     """Return every repository's latest state in three SELECT-only queries.
 
@@ -332,7 +434,13 @@ def repository_notification_statuses(*, at=None) -> dict[str, object]:
     observed_at = at or timezone.now()
     repositories = _repository_rows()
     if not repositories:
-        return {"total": 0, "activeCount": 0, "failedCount": 0, "items": []}
+        return {
+            "total": 0,
+            "activeCount": 0,
+            "failedCount": 0,
+            "activities": [],
+            "items": [],
+        }
     document_states = _document_states()
     extraction_states = _extraction_states(observed_at=observed_at)
     target = reverse("bitbucket_search:index")
@@ -364,6 +472,15 @@ def repository_notification_statuses(*, at=None) -> dict[str, object]:
             ).split()
         )
         log_output, _ = bounded_git_output(repository["job_output_log"] or "")
+        activities = tuple(
+            activity
+            for activity in (
+                _sync_activity(repository, observed_at=observed_at),
+                _indexing_activity(extraction, observed_at=observed_at),
+            )
+            if activity is not None
+        )
+        primary_activity = activities[0] if activities else None
         items.append(
             {
                 "id": repository["id"],
@@ -377,8 +494,16 @@ def repository_notification_statuses(*, at=None) -> dict[str, object]:
                     sync_started_at=repository["job_started_at"],
                     sync_operation=repository["job_operation"],
                     sync_phase=repository["job_phase"],
+                    sync_progress=repository["job_progress"],
                     indexing_started_at=extraction.get("running_started_at"),
+                    indexing_progress=extraction.get("running_progress"),
                 ),
+                "operation": primary_activity["operation"] if primary_activity else None,
+                "phase": primary_activity["phase"] if primary_activity else None,
+                "phaseLabel": primary_activity["phaseLabel"] if primary_activity else None,
+                "progress": primary_activity["progress"] if primary_activity else None,
+                "activity": primary_activity,
+                "activities": activities,
                 "updatedAt": _iso(updated_at),
                 "lastSuccessAt": _iso(
                     _latest_time(repository["last_sync_successful_at"], repository["successful_at"])
@@ -390,8 +515,11 @@ def repository_notification_statuses(*, at=None) -> dict[str, object]:
                 "detail": detail,
                 "logPreview": log_output.splitlines()[-2:],
                 "targetPath": f"{target}?repository={repository['id']}",
-                "statusTargetPath": status_target,
+                "statusTargetPath": f"{status_target}?repository={repository['id']}",
                 "logsUrl": reverse("bitbucket_search:repository_logs", args=(repository["id"],)),
+                "cancelIndexingUrl": reverse(
+                    "bitbucket_search:repository_index_cancel", args=(repository["id"],)
+                ),
                 "active": tone == "progress" or bool(extraction.get("active_count", 0)),
             }
         )
@@ -399,5 +527,8 @@ def repository_notification_statuses(*, at=None) -> dict[str, object]:
         "total": len(items),
         "activeCount": sum(item["active"] for item in items),
         "failedCount": sum(item["statusTone"] == "error" for item in items),
+        "activities": summarize_operation_activities(
+            activity for item in items for activity in item["activities"]
+        ),
         "items": items,
     }

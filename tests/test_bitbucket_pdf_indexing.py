@@ -14,13 +14,17 @@ from django.utils import timezone
 from bitbucket_search.models import (
     BitbucketRepository,
     PDFDocument,
+    PDFDocumentLifecycle,
     PDFExtractionJob,
+    PDFExtractionJobPhase,
     PDFExtractionJobStatus,
     PDFIndexState,
     PDFPageExtractionState,
     PDFTextPage,
     PDFTextRevision,
     PDFTextRevisionState,
+    RepositoryOperationLogEntry,
+    RepositoryOperationLogSeverity,
     RepositorySyncJob,
     RepositorySyncJobStatus,
     RepositorySyncOperation,
@@ -158,6 +162,16 @@ def test_claim_path_never_runs_repository_wide_reconciliation(
     reconcile.assert_not_called()
 
 
+def test_empty_claim_does_not_take_a_sqlite_write_lock():
+    with CaptureQueriesContext(connection) as queries:
+        assert claim_next_extraction_job() is None
+
+    statements = tuple(query["sql"].lstrip().upper() for query in queries)
+    assert not any(
+        statement.startswith(("INSERT", "UPDATE", "DELETE", "REPLACE")) for statement in statements
+    )
+
+
 def test_large_repository_queue_and_idle_sweep_use_bounded_queries(
     indexed_pdf_target,
 ):
@@ -187,6 +201,73 @@ def test_large_repository_queue_and_idle_sweep_use_bounded_queries(
 
     assert swept.queued_job_ids == ()
     assert len(sweep_queries) <= 8
+
+
+def test_five_thousand_document_queue_keeps_batched_query_shape(indexed_pdf_target):
+    repository, _document, _pdf_path = indexed_pdf_target
+    PDFDocument.objects.bulk_create(
+        [
+            PDFDocument(
+                repository=repository,
+                filename=f"Corpus-{index:05d}.pdf",
+                relative_path=f"corpus/Corpus-{index:05d}.pdf",
+                file_size=1_024 + index,
+                git_blob_id=f"{index:040x}",
+                last_seen_commit="b" * 40,
+            )
+            for index in range(1, 5_000)
+        ],
+        batch_size=500,
+    )
+
+    with CaptureQueriesContext(connection) as queries:
+        queued = queue_repository_pdf_extractions(repository)
+
+    assert len(queued.queued_job_ids) == 5_000
+    assert PDFExtractionJob.objects.filter(document__repository=repository).count() == 5_000
+    assert len(queries) <= 50
+
+
+def test_bulk_unavailable_cancellation_uses_bounded_log_writes(indexed_pdf_target):
+    repository, _document, _pdf_path = indexed_pdf_target
+    PDFDocument.objects.bulk_create(
+        [
+            PDFDocument(
+                repository=repository,
+                filename=f"Removed-{index}.pdf",
+                relative_path=f"removed/Removed-{index}.pdf",
+                file_size=100 + index,
+                git_blob_id=f"{index:040x}",
+                last_seen_commit="b" * 40,
+            )
+            for index in range(1, 80)
+        ]
+    )
+    queued = queue_repository_pdf_extractions(repository)
+    PDFDocument.objects.filter(repository=repository).update(
+        lifecycle_state=PDFDocumentLifecycle.REMOVED
+    )
+
+    with CaptureQueriesContext(connection) as queries:
+        cancelled = queue_repository_pdf_extractions(repository)
+
+    assert len(cancelled.cancelled_job_ids) == len(queued.queued_job_ids) == 80
+    assert (
+        PDFExtractionJob.objects.filter(
+            pk__in=cancelled.cancelled_job_ids,
+            status=PDFExtractionJobStatus.CANCELLED,
+            error_code="extraction_target_unavailable",
+        ).count()
+        == 80
+    )
+    assert (
+        RepositoryOperationLogEntry.objects.filter(
+            extraction_job_id__in=cancelled.cancelled_job_ids,
+            event="indexing_cancelled",
+        ).count()
+        == 80
+    )
+    assert len(queries) <= 20
 
 
 def test_claim_waits_until_all_repository_sync_jobs_are_terminal(indexed_pdf_target):
@@ -329,6 +410,44 @@ def test_sweep_cancels_mismatched_running_job_and_queues_current_target(
     assert replacement.document_id == document.pk
     assert replacement.target_git_blob_id == document.git_blob_id
     assert replacement.target_source_commit == document.last_seen_commit
+    cancellation = claimed.operation_log_entries.get(event="indexing_cancelled")
+    assert claimed.error_code == "extraction_target_changed"
+    assert cancellation.severity == RepositoryOperationLogSeverity.WARNING
+    assert cancellation.phase == claimed.phase
+    assert cancellation.progress == claimed.progress
+    assert cancellation.occurred_at == claimed.completed_at
+    assert cancellation.message == (
+        "PDF indexing was cancelled because a newer PDF revision replaced this extraction."
+    )
+
+    sweep_pdf_extraction_queue()
+
+    assert claimed.operation_log_entries.filter(event="indexing_cancelled").count() == 1
+
+
+def test_repository_queue_logs_unavailable_target_cancellation_once(indexed_pdf_target):
+    repository, document, _pdf_path = indexed_pdf_target
+    queued = queue_repository_pdf_extractions(repository)
+    job = PDFExtractionJob.objects.get(pk=queued.queued_job_ids[0])
+    PDFDocument.objects.filter(pk=document.pk).update(lifecycle_state=PDFDocumentLifecycle.REMOVED)
+
+    first = queue_repository_pdf_extractions(repository)
+    second = queue_repository_pdf_extractions(repository)
+
+    job.refresh_from_db()
+    assert first.cancelled_job_ids == (job.pk,)
+    assert second.cancelled_job_ids == ()
+    assert job.status == PDFExtractionJobStatus.CANCELLED
+    assert job.error_code == "extraction_target_unavailable"
+    cancellation = job.operation_log_entries.get(event="indexing_cancelled")
+    assert cancellation.severity == RepositoryOperationLogSeverity.WARNING
+    assert cancellation.phase == PDFExtractionJobPhase.QUEUED
+    assert cancellation.progress == 0
+    assert cancellation.occurred_at == job.completed_at
+    assert cancellation.message == (
+        "PDF indexing was cancelled because the document is no longer active in an enabled "
+        "repository."
+    )
 
 
 def test_successful_parent_publication_attaches_pages_and_fts_atomically(indexed_pdf_target):

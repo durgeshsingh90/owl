@@ -20,7 +20,8 @@
             <strong>{{ repository.name }}</strong> · {{ repository.pdf_count }} PDF{{ repository.pdf_count|pluralize }} · {{ repository.vsdx_count }} VSDX
             {% if repository.path %}<p class="bb-delete-confirmation__path"><code>{{ repository.path }}</code></p>{% endif %}
             {% if repository.removal_incomplete %}<p>Removal incomplete. Retry will finish this repository's remaining local cleanup.</p>{% endif %}
-            {% if repository.busy %}<p>Background work is still running.</p>{% endif %}
+            {% if repository.pdf_indexing %}<p>Active PDF indexing will be stopped before removal.</p>{% endif %}
+            {% if repository.git_busy %}<p>Git work is active; OWL may ask you to retry this repository after the worker finishes.</p>{% endif %}
         </li>
         {% endfor %}
     </ul>
@@ -30,7 +31,6 @@
         <li>Their PDFs, indexed text not shared with other repositories, commit history records, and background jobs in OWL's database.</li>
     </ul>
     <p>Remote repositories are not changed. Unselected repositories and shared indexed text are kept. You can add a repository again later to download a fresh copy.</p>
-    {% if repository_busy %}<p role="alert">Wait for all selected repositories' Git and PDF workers to finish before removing them.</p>{% endif %}
     {% for error in removal_errors %}<p role="alert">Repository {{ error.repositoryId }}: {{ error.detail }}</p>{% endfor %}
     <form method="post" action="{% url 'bitbucket_search:repositories_selected' %}">
         {% csrf_token %}
@@ -39,7 +39,7 @@
         {% for repository in selected_repositories %}<input type="hidden" name="repository_ids" value="{{ repository.id }}">{% endfor %}
         <div class="bb-delete-confirmation__actions">
             <a class="button button--secondary" href="{{ cancel_url }}">Cancel</a>
-            <button class="button button--danger" type="submit"{% if repository_busy %} disabled{% endif %}>Remove selected repositories and local data</button>
+            <button class="button button--danger" type="submit">Remove selected repositories and local data</button>
         </div>
     </form>
 </section>

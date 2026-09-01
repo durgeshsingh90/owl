@@ -17,14 +17,19 @@ from bitbucket_search.models import (
     BitbucketRepository,
     PDFDocument,
     PDFExtractionJob,
+    PDFExtractionJobPhase,
     PDFExtractionJobStatus,
+    PDFIndexState,
+    RepositoryOperationLogChannel,
     RepositorySyncJob,
     RepositorySyncJobStatus,
     RepositorySyncOperation,
+    RepositorySyncPhase,
     RepositorySyncState,
     RepositorySyncTrigger,
 )
 from bitbucket_search.services import repository_sync
+from bitbucket_search.services.operation_logs import append_operation_log_entry
 from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 from bitbucket_search.services.repository_sync import repository_status_snapshot
 
@@ -46,6 +51,7 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert '<summary class="bb-add-repository" aria-label="Add a new repository">' in html
     assert html.count('aria-label="Add a new repository"') == 2
     assert html.count("data-selected-refresh disabled") == 2
+    assert html.count("data-selected-stop-indexing disabled") == 2
     assert "data-selected-unlock" not in html
     assert html.count("data-selected-remove disabled") == 2
     assert html.count('data-delete-locked="true"') == 2
@@ -65,8 +71,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=repository-delete-two-click-v2" in html
-    assert "bitbucket_search/bitbucket_search.js?v=repository-delete-two-click-v2" in html
+    assert "bitbucket_search/bitbucket_search.css?v=repository-activity-v1" in html
+    assert "bitbucket_search/bitbucket_search.js?v=repository-activity-v1" in html
     assert 'name="confirmed"' not in html
 
 
@@ -102,6 +108,7 @@ def test_workspace_omits_redundant_search_navigation_and_keeps_repository_contro
     assert 'aria-label="Add a new repository"' in rail.group("body")
     assert "data-selected-refresh" in rail.group("body")
     assert "data-selected-exclude" in rail.group("body")
+    assert "data-selected-stop-indexing" in rail.group("body")
     assert "data-selected-remove" in rail.group("body")
     assert "data-selected-unlock" not in html
     toolbars = re.findall(
@@ -111,7 +118,7 @@ def test_workspace_omits_redundant_search_navigation_and_keeps_repository_contro
     )
     assert len(toolbars) == 2
     for toolbar in toolbars:
-        assert len(re.findall(r"<button\b", toolbar)) == 3
+        assert len(re.findall(r"<button\b", toolbar)) == 4
         assert 'data-delete-locked="true"' in toolbar
         assert 'aria-hidden="true" data-selected-delete-lock-icon>🔒</span>' in toolbar
     assert "data-repository-filter" in rail.group("body")
@@ -120,7 +127,7 @@ def test_workspace_omits_redundant_search_navigation_and_keeps_repository_contro
     assert "Search PDFs" not in mobile_navigation.group("body")
     assert 'href="/pdfs/repositories/"' in mobile_navigation.group("body")
     assert ">Repositories</a>" in mobile_navigation.group("body")
-    assert 'href="/pdfs/status/">Sync status</a>' in mobile_navigation.group("body")
+    assert 'href="/pdfs/status/">Repository logs</a>' in mobile_navigation.group("body")
     assert 'action="/pdfs/" data-pdf-search-form' in html
     assert "data-pdf-search-input" in html
     assert "data-pdf-search-input disabled" not in html
@@ -168,7 +175,7 @@ def test_bitbucket_topbar_omits_settings_icon_and_preserves_other_controls(
     )
     assert "data-settings-open" not in topbar_html
     assert "data-repository-status-toggle" in topbar_html
-    assert 'aria-label="Open background status"' in topbar_html
+    assert 'aria-label="Open repository logs"' in topbar_html
     assert "data-notification-toggle" in topbar_html
     assert 'aria-label="Open notifications"' in topbar_html
     assert '<summary class="bb-icon-button" aria-label="Applications">' in topbar_html
@@ -454,6 +461,218 @@ def _pdf_worker(repository, index, status):
     )
 
 
+@override_settings(PDF_MAX_EXTRACTION_WORKERS=6)
+def test_repository_log_endpoint_includes_parallel_pdf_worker_activity(loopback_client):
+    repository = BitbucketRepository.objects.create(
+        display_name="worker-logs",
+        canonical_remote_key="bitbucket.org/workspace/worker-logs",
+        remote_url="ssh://git@bitbucket.org/workspace/worker-logs.git",
+        sync_state=RepositorySyncState.READY,
+    )
+    running = _pdf_worker(repository, 1, PDFExtractionJobStatus.RUNNING)
+    failed = _pdf_worker(repository, 2, PDFExtractionJobStatus.FAILED)
+    failed.phase = PDFExtractionJobPhase.COMPLETED
+    failed.progress = 73
+    failed.error_code = "synthetic_failure"
+    failed.error_summary = "The PDF parser stopped safely."
+    failed.completed_at = timezone.now()
+    failed.save(update_fields={"phase", "progress", "error_code", "error_summary", "completed_at"})
+    append_operation_log_entry(
+        repository_id=repository.pk,
+        extraction_job_id=running.pk,
+        channel=RepositoryOperationLogChannel.INDEXING,
+        event="indexing_phase_changed",
+        message="Extracting searchable PDF text.",
+        phase=PDFExtractionJobPhase.EXTRACTING,
+        progress=42,
+        worker_pid=running.worker_pid,
+    )
+
+    response = loopback_client.get(
+        reverse("bitbucket_search:repository_logs", args=(repository.pk,))
+    )
+    indexing = response.json()["indexing"]
+
+    assert response.status_code == 200
+    assert indexing["workerLimit"] == 6
+    assert indexing["active"] is True
+    assert indexing["counts"][PDFExtractionJobStatus.RUNNING] == 1
+    assert indexing["counts"][PDFExtractionJobStatus.FAILED] == 1
+    assert "Extracting searchable PDF text." in "\n".join(indexing["lines"])
+    assert indexing["countsKind"] == "attempts"
+    assert "entries" not in indexing
+    assert "no-store" in response.headers["Cache-Control"]
+
+
+def test_pdf_log_overview_attention_is_scoped_to_the_selected_repository(loopback_client):
+    clean_repository = BitbucketRepository.objects.create(
+        display_name="clean-selected-repository",
+        canonical_remote_key="bitbucket.org/workspace/clean-selected-repository",
+        remote_url="ssh://git@bitbucket.org/workspace/clean-selected-repository.git",
+        sync_state=RepositorySyncState.READY,
+    )
+    failed_repository = BitbucketRepository.objects.create(
+        display_name="failed-other-repository",
+        canonical_remote_key="bitbucket.org/workspace/failed-other-repository",
+        remote_url="ssh://git@bitbucket.org/workspace/failed-other-repository.git",
+        sync_state=RepositorySyncState.READY,
+    )
+    _pdf_worker(clean_repository, 1, PDFExtractionJobStatus.SUCCEEDED)
+    failed_job = _pdf_worker(failed_repository, 2, PDFExtractionJobStatus.FAILED)
+    PDFDocument.objects.filter(pk=failed_job.document_id).update(index_state=PDFIndexState.FAILED)
+
+    def pdf_card_classes(repository):
+        html = loopback_client.get(
+            reverse("bitbucket_search:index_status"), {"repository": repository.pk}
+        ).content.decode()
+        card = re.search(
+            r'<article class="([^"]*status-card[^"]*)">\s*<div class="status-card__heading">'
+            r"<span[^>]*>PDF</span><div><h2>Selected repository PDF indexing</h2>",
+            html,
+        )
+        assert card is not None
+        return card.group(1)
+
+    assert "status-card--attention" not in pdf_card_classes(clean_repository)
+    assert "status-card--attention" in pdf_card_classes(failed_repository)
+
+
+@override_settings(PDF_MAX_EXTRACTION_WORKERS=4)
+def test_pdf_log_overview_scopes_activity_against_the_global_worker_pool(loopback_client):
+    selected_repository = BitbucketRepository.objects.create(
+        display_name="selected-idle-repository",
+        canonical_remote_key="bitbucket.org/workspace/selected-idle-repository",
+        remote_url="ssh://git@bitbucket.org/workspace/selected-idle-repository.git",
+        sync_state=RepositorySyncState.READY,
+    )
+    busy_repository = BitbucketRepository.objects.create(
+        display_name="other-busy-repository",
+        canonical_remote_key="bitbucket.org/workspace/other-busy-repository",
+        remote_url="ssh://git@bitbucket.org/workspace/other-busy-repository.git",
+        sync_state=RepositorySyncState.READY,
+    )
+    _pdf_worker(busy_repository, 1, PDFExtractionJobStatus.RUNNING)
+
+    selected_html = loopback_client.get(
+        reverse("bitbucket_search:index_status"), {"repository": selected_repository.pk}
+    ).content.decode()
+    busy_html = loopback_client.get(
+        reverse("bitbucket_search:index_status"), {"repository": busy_repository.pk}
+    ).content.decode()
+
+    assert "Selected repository PDF indexing" in selected_html
+    assert "0 active for this repository · global pool limit 4" in selected_html
+    assert "1 active for this repository · global pool limit 4" in busy_html
+
+
+def test_full_repository_logs_page_paginates_git_and_pdf_history(loopback_client, monkeypatch):
+    monkeypatch.setattr(bitbucket_views, "_INDEX_LOG_PAGE_SIZE", 2)
+    monkeypatch.setattr(bitbucket_views, "_INDEX_EVENT_PAGE_SIZE", 2)
+    repository = BitbucketRepository.objects.create(
+        display_name="five-thousand-pdfs",
+        canonical_remote_key="bitbucket.org/workspace/five-thousand-pdfs",
+        remote_url="ssh://git@bitbucket.org/workspace/five-thousand-pdfs.git",
+        sync_state=RepositorySyncState.READY,
+    )
+    sync_job = RepositorySyncJob.objects.create(
+        repository=repository,
+        operation=RepositorySyncOperation.CLONE,
+        status=RepositorySyncJobStatus.SUCCEEDED,
+        phase=RepositorySyncPhase.COMPLETED,
+        progress=100,
+        status_message="Repository clone and catalogue publication completed.",
+        completed_at=timezone.now(),
+    )
+    for message, channel, phase in (
+        ("Receiving objects: 100%", RepositoryOperationLogChannel.GIT, "clone"),
+        (
+            "Published 5,000 PDF catalogue rows.",
+            RepositoryOperationLogChannel.CATALOGUE,
+            "catalogue",
+        ),
+    ):
+        append_operation_log_entry(
+            repository_id=repository.pk,
+            sync_job_id=sync_job.pk,
+            channel=channel,
+            event="git_output"
+            if channel == RepositoryOperationLogChannel.GIT
+            else "catalogue_output",
+            message=message,
+            phase=phase,
+        )
+    extraction_jobs = [
+        _pdf_worker(repository, index, PDFExtractionJobStatus.SUCCEEDED) for index in range(3)
+    ]
+    event_entries = []
+    for index, extraction_job in enumerate(extraction_jobs):
+        event_entries.append(
+            append_operation_log_entry(
+                repository_id=repository.pk,
+                sync_job_id=sync_job.pk,
+                extraction_job_id=extraction_job.pk,
+                channel=RepositoryOperationLogChannel.INDEXING,
+                event="indexing_completed",
+                message=f"PDF indexing completed for durable attempt {index}.",
+                phase=PDFExtractionJobPhase.COMPLETED,
+                progress=100,
+            )
+        )
+
+    first = loopback_client.get(
+        reverse("bitbucket_search:index_status"),
+        {"repository": repository.pk},
+    )
+    first_html = first.content.decode()
+
+    assert first.status_code == 200
+    assert "Repository logs" in first_html
+    assert "Receiving objects: 100%" in first_html
+    assert "Published 5,000 PDF catalogue rows." in first_html
+    assert "PDF indexing log snapshot" in first_html
+    assert "Refresh snapshot" in first_html
+    assert "2 transitions shown" in first_html
+    assert "Stable cursor · up to 2 transitions" in first_html
+    assert "Stable cursor · up to 2 attempts" in first_html
+    assert "docs/Guide 2.pdf" in first_html
+    assert "docs/Guide 0.pdf" not in first_html
+    assert f"index_job_before={extraction_jobs[-2].pk}" in first_html
+
+    newer_job = _pdf_worker(repository, 3, PDFExtractionJobStatus.SUCCEEDED)
+    append_operation_log_entry(
+        repository_id=repository.pk,
+        sync_job_id=sync_job.pk,
+        extraction_job_id=extraction_jobs[2].pk,
+        channel=RepositoryOperationLogChannel.INDEXING,
+        event="indexing_completed",
+        message="A newer transition arrived after the first snapshot.",
+        phase=PDFExtractionJobPhase.COMPLETED,
+        progress=100,
+    )
+
+    second = loopback_client.get(
+        reverse("bitbucket_search:index_status"),
+        {
+            "repository": repository.pk,
+            "index_job_before": extraction_jobs[-2].pk,
+            "index_event_before": event_entries[-2].pk,
+        },
+    )
+    second_html = second.content.decode()
+
+    assert second.status_code == 200
+    assert "docs/Guide 0.pdf" in second_html
+    assert newer_job.target_relative_path not in second_html
+    assert "PDF indexing completed for durable attempt 0." in second_html
+    assert "A newer transition arrived after the first snapshot." not in second_html
+    assert (
+        f"index_event_before={event_entries[-2].pk}&amp;index_job_before={extraction_jobs[-2].pk}"
+    ) in second_html
+    assert (
+        f"index_job_after={extraction_jobs[0].pk}&amp;index_event_before={event_entries[-2].pk}"
+    ) in second_html
+
+
 @pytest.mark.parametrize("view_name", ["bitbucket_search:index", "bitbucket_search:repositories"])
 @pytest.mark.parametrize(("queued", "running"), [(3, 0), (2, 1), (0, 3)])
 def test_git_ready_repository_shows_pdf_worker_phase_in_sidebar_and_refresh_tooltip(
@@ -517,7 +736,23 @@ def test_git_ready_repository_shows_pdf_worker_phase_in_sidebar_and_refresh_tool
         assert re.search(r"data-repository-work-label[^>]*\bhidden", card)
     form = _workspace_refresh_form(html)
     _assert_refresh_work_summary(form, payload["work"])
-    assert response.context["repository_work_summary"] == payload["work"]
+
+    # These are separate truthful snapshots, so their observation clocks may differ.
+    # Compare the durable activity contract without pretending they were sampled together.
+    def stable_work(work):
+        return {
+            **work,
+            "activities": [
+                {
+                    key: value
+                    for key, value in activity.items()
+                    if key not in {"startedAt", "observedAt"}
+                }
+                for activity in work["activities"]
+            ],
+        }
+
+    assert stable_work(response.context["repository_work_summary"]) == stable_work(payload["work"])
     assert repository.display_name in payload["work"]["detail"]
     assert idle.display_name not in payload["work"]["detail"]
     assert 'disabled aria-busy="true"' in form
@@ -685,6 +920,7 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_page_navigation(
                             "project_label": "Architecture & Design",
                             "added_by_label": "A. Author",
                             "added_date_label": "Today",
+                            "added_date_source_label": "Git addition",
                             "added_date_detail": "10:24 AM",
                             "history_label": "Git addition",
                         },
@@ -703,6 +939,7 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_page_navigation(
                             "project_label": "",
                             "added_by_label": "",
                             "added_date_label": "14 Dec 2025",
+                            "added_date_source_label": "First seen by OWL",
                             "added_date_detail": "",
                             "history_label": "Discovered by OWL",
                         },
@@ -728,7 +965,8 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_page_navigation(
     assert "Architecture &amp; Design" in html
     assert "A. Author" in html
     assert "Added by (Git author)" in html
-    assert "Git addition" not in html
+    assert "Git addition" in html
+    assert "First seen by OWL" in html
     assert "Discovered by OWL" not in html
     assert f'id="pdf-document-{network_plan.pk}"' in html
     network_row_start = html.index(f'data-document-id="{network_plan.pk}"')
@@ -789,7 +1027,8 @@ def test_pdf_timeline_fragment_preserves_boundary_group_key(loopback_client):
 
     assert first_page.status_code == 200
     assert f'data-document-id="{newer_document.pk}"' in first_html
-    assert 'data-timeline-group-key="repo-date-unavailable"' in first_html
+    assert 'data-timeline-group-key="repo-date-unavailable"' not in first_html
+    assert "First seen by OWL" in first_html
     assert f'href="{next_page_url}" rel="next" data-pdf-next-page' in first_html
 
     second_page = loopback_client.get(
@@ -802,7 +1041,8 @@ def test_pdf_timeline_fragment_preserves_boundary_group_key(loopback_client):
     assert second_page.status_code == 200
     assert payload["nextPageUrl"] == ""
     assert f'data-document-id="{older_document.pk}"' in payload["html"]
-    assert 'data-timeline-group-key="repo-date-unavailable"' in payload["html"]
+    assert 'data-timeline-group-key="repo-date-unavailable"' not in payload["html"]
+    assert "First seen by OWL" in payload["html"]
     assert payload["html"].count('name="return_page" value="2"') == 2
     assert 'data-tooltip="Open file"' in payload["html"]
     assert 'data-tooltip="Open folder"' in payload["html"]

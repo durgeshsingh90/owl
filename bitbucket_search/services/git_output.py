@@ -13,17 +13,30 @@ import unicodedata
 from collections import deque
 from contextvars import ContextVar
 
-from django.db import DatabaseError
+from django.db import DatabaseError, transaction
 from django.utils import timezone
 
-from bitbucket_search.models import RepositorySyncJob, RepositorySyncJobStatus
+from bitbucket_search.models import (
+    RepositoryOperationLogChannel,
+    RepositoryOperationLogEntry,
+    RepositoryOperationLogSeverity,
+    RepositorySyncJob,
+    RepositorySyncJobStatus,
+)
 from bitbucket_search.services.logging_events import get_logger, log_event
+from bitbucket_search.services.operation_logs import build_operation_log_entry
 from core.logging import REDACTED, redact_log_text
 
 MAX_LOG_CHARACTERS = 32_768
 MAX_LOG_LINES = 200
 MAX_RAW_LINE = 16_384
 MAX_LINE_CHARACTERS = 1_024
+MAX_PERSISTED_LOG_ENTRIES_PER_SYNC_JOB = 20_000
+_PERSISTED_OUTPUT_CHANNELS = (
+    RepositoryOperationLogChannel.GIT,
+    RepositoryOperationLogChannel.CATALOGUE,
+    RepositoryOperationLogChannel.WORKER,
+)
 _ANSI = re.compile(
     r"(?:\x1b\]|\x9d).*?(?:\x07|\x1b\\|\x9c|$)|"
     r"(?:\x1b[P_X^]|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9c|$)|"
@@ -147,6 +160,19 @@ class RepositoryGitLog:
         self.truncated = job.output_log_truncated or clipped
         self.last_saved_at = 0.0
         self.dirty = False
+        self.pending_entries: list[RepositoryOperationLogEntry] = []
+        job_id = getattr(job, "pk", None)
+        self.persisted_entry_count = (
+            RepositoryOperationLogEntry.objects.filter(
+                sync_job_id=job_id,
+                channel__in=_PERSISTED_OUTPUT_CHANNELS,
+            ).count()
+            if job_id
+            else 0
+        )
+        self.operation_log_truncated = bool(getattr(job, "operation_log_truncated", False)) or (
+            self.persisted_entry_count >= MAX_PERSISTED_LOG_ENTRIES_PER_SYNC_JOB
+        )
         self.private_key_block = False
         self.hide_next_line = False
         self.control_string: str | None = None
@@ -245,13 +271,62 @@ class RepositoryGitLog:
         label = (
             operation
             if operation
-            in {"clone", "fetch", "merge", "checkout", "sparse-checkout", "lfs", "connection"}
+            in {
+                "clone",
+                "fetch",
+                "merge",
+                "checkout",
+                "sparse-checkout",
+                "lfs",
+                "connection",
+                "catalogue",
+            }
             else "worker"
         )
         severity = {"error": "ERROR", "warning": "WARNING", "debug": "DEBUG"}.get(level, "INFO")
-        stamp = timezone.now().strftime("%H:%M:%S UTC")
+        severity_value = {
+            "ERROR": RepositoryOperationLogSeverity.ERROR,
+            "WARNING": RepositoryOperationLogSeverity.WARNING,
+            "DEBUG": RepositoryOperationLogSeverity.DEBUG,
+        }.get(severity, RepositoryOperationLogSeverity.INFO)
+        channel = (
+            RepositoryOperationLogChannel.CATALOGUE
+            if label == "catalogue"
+            else RepositoryOperationLogChannel.WORKER
+            if label == "worker"
+            else RepositoryOperationLogChannel.GIT
+        )
+        event = (
+            "catalogue_output"
+            if channel == RepositoryOperationLogChannel.CATALOGUE
+            else "worker_output"
+            if channel == RepositoryOperationLogChannel.WORKER
+            else "git_output"
+        )
         for line in safe.splitlines():
+            occurred_at = timezone.now()
+            stamp = occurred_at.strftime("%H:%M:%S UTC")
             self.lines.append(f"{stamp} {severity} [{label}] {line}")
+            if getattr(self.job, "pk", None) and getattr(self.job, "repository_id", None):
+                if (
+                    self.persisted_entry_count + len(self.pending_entries)
+                    < MAX_PERSISTED_LOG_ENTRIES_PER_SYNC_JOB
+                ):
+                    self.pending_entries.append(
+                        build_operation_log_entry(
+                            repository_id=self.job.repository_id,
+                            sync_job_id=self.job.pk,
+                            channel=channel,
+                            severity=severity_value,
+                            phase=label,
+                            event=event,
+                            message=line,
+                            worker_pid=getattr(self.job, "worker_pid", None),
+                            occurred_at=occurred_at,
+                        )
+                    )
+                else:
+                    self.operation_log_truncated = True
         while len(self.lines) > MAX_LOG_LINES or len("\n".join(self.lines)) > MAX_LOG_CHARACTERS:
             self.lines.popleft()
             self.truncated = True
@@ -262,29 +337,73 @@ class RepositoryGitLog:
         observed = time.monotonic()
         if not self.dirty or (not force and observed - self.last_saved_at < 1.0):
             return
+        if not getattr(self.job, "pk", None):
+            self.dirty = False
+            return
         self.last_saved_at = observed
         try:
             # A stale worker cannot overwrite a newer worker's log/lease. A
             # terminal transition by this worker still needs its final tail.
-            updated = RepositorySyncJob.objects.filter(
-                pk=self.job.pk,
-                worker_pid=self.job.worker_pid,
-                status__in=(
-                    RepositorySyncJobStatus.RUNNING,
-                    RepositorySyncJobStatus.SUCCEEDED,
-                    RepositorySyncJobStatus.FAILED,
-                    RepositorySyncJobStatus.INTERRUPTED,
-                ),
-            ).update(
-                output_log="\n".join(self.lines),
-                output_log_truncated=self.truncated,
-                output_log_updated_at=timezone.now(),
-            )
+            pending_count = len(self.pending_entries)
+            persisted_count = self.persisted_entry_count
+            created_count = 0
+            effective_operation_log_truncated = self.operation_log_truncated
+            with transaction.atomic():
+                updated = RepositorySyncJob.objects.filter(
+                    pk=self.job.pk,
+                    worker_pid=self.job.worker_pid,
+                    status__in=(
+                        RepositorySyncJobStatus.RUNNING,
+                        RepositorySyncJobStatus.SUCCEEDED,
+                        RepositorySyncJobStatus.FAILED,
+                        RepositorySyncJobStatus.INTERRUPTED,
+                    ),
+                ).update(
+                    output_log="\n".join(self.lines),
+                    output_log_truncated=self.truncated,
+                    output_log_updated_at=timezone.now(),
+                )
+                if updated:
+                    persisted_count = RepositoryOperationLogEntry.objects.filter(
+                        sync_job_id=self.job.pk,
+                        channel__in=_PERSISTED_OUTPUT_CHANNELS,
+                    ).count()
+                    available = max(
+                        MAX_PERSISTED_LOG_ENTRIES_PER_SYNC_JOB - persisted_count,
+                        0,
+                    )
+                    entries_to_create = self.pending_entries[:available]
+                    created_count = len(entries_to_create)
+                    effective_operation_log_truncated = (
+                        self.operation_log_truncated
+                        or pending_count > created_count
+                        or RepositorySyncJob.objects.filter(pk=self.job.pk)
+                        .values_list("operation_log_truncated", flat=True)
+                        .get()
+                    )
+                    if effective_operation_log_truncated:
+                        RepositorySyncJob.objects.filter(pk=self.job.pk).update(
+                            operation_log_truncated=True
+                        )
+                    if entries_to_create:
+                        RepositoryOperationLogEntry.objects.bulk_create(
+                            entries_to_create,
+                            batch_size=200,
+                        )
             if updated:
+                self.persisted_entry_count = persisted_count + created_count
+                self.operation_log_truncated = effective_operation_log_truncated
+                if pending_count:
+                    del self.pending_entries[:pending_count]
                 self.dirty = False
         except DatabaseError as exc:
             # Losing optional console output must not fail a clone or hide its
             # primary error. Retain the bounded tail for the next flush attempt.
+            # ``bulk_create`` can assign in-memory primary keys before a later
+            # statement/commit rolls the transaction back. Clear them so retrying
+            # this same pending batch remains an insert and cannot duplicate it.
+            for entry in self.pending_entries:
+                entry.pk = None
             log_event(
                 logger, logging.ERROR, "git_output_save_failed", error=exc, job_id=self.job.pk
             )

@@ -9,6 +9,8 @@ from django.utils import timezone
 
 from bitbucket_search.models import (
     BitbucketRepository,
+    RepositoryOperationLogChannel,
+    RepositoryOperationLogEntry,
     RepositorySyncJob,
     RepositorySyncJobStatus,
     RepositorySyncOperation,
@@ -18,6 +20,10 @@ from bitbucket_search.models import (
 from bitbucket_search.services import git_output, repository_sync
 from bitbucket_search.services.git_output import RepositoryGitLog, emit_git_output
 from bitbucket_search.services.git_sync import RepositorySyncError
+from bitbucket_search.services.operation_logs import (
+    append_operation_log_entry,
+    repository_operation_log_entries,
+)
 from bookmark_manager.models import Notification, NotificationState
 
 pytestmark = pytest.mark.django_db
@@ -60,6 +66,17 @@ def test_log_is_live_redacted_bounded_and_not_printed(running_job, caplog):
     assert "Receiving objects: 499" in running_job.output_log
     assert "Receiving objects" not in caplog.text
     assert "do-not-store" not in caplog.text
+    full_entries = list(
+        RepositoryOperationLogEntry.objects.filter(sync_job=running_job).order_by("id")
+    )
+    assert len(full_entries) > git_output.MAX_LOG_LINES
+    assert [entry.pk for entry in full_entries] == sorted(entry.pk for entry in full_entries)
+    full_output = "\n".join(entry.message for entry in full_entries)
+    assert "Receiving objects: 0" in full_output
+    assert "Receiving objects: 499" in full_output
+    assert "do-not-store" not in full_output
+    assert "placeholder" not in full_output
+    assert "https://" not in full_output
 
 
 def test_sink_is_isolated_and_resets_after_exception(running_job):
@@ -76,9 +93,15 @@ def test_sink_preserves_warning_and_error_levels(running_job):
     with RepositoryGitLog(running_job):
         emit_git_output("warning: synthetic retry", level="warning", operation="fetch")
         emit_git_output("fatal: synthetic failure", level="error", operation="fetch")
+        emit_git_output("Reading repository catalogue", operation="catalogue")
     running_job.refresh_from_db()
     assert "WARNING [fetch]" in running_job.output_log
     assert "ERROR [fetch]" in running_job.output_log
+    assert RepositoryOperationLogEntry.objects.filter(
+        sync_job=running_job,
+        channel=RepositoryOperationLogChannel.CATALOGUE,
+        event="catalogue_output",
+    ).exists()
 
 
 def test_sink_hides_key_blocks_and_credential_continuations_across_calls(running_job):
@@ -98,6 +121,14 @@ def test_sink_hides_key_blocks_and_credential_continuations_across_calls(running
     assert "privatebody" not in running_job.output_log
     assert "unlabelled-value" not in running_job.output_log
     assert "Receiving objects: 100%" in running_job.output_log
+    full_output = "\n".join(
+        RepositoryOperationLogEntry.objects.filter(sync_job=running_job).values_list(
+            "message", flat=True
+        )
+    )
+    assert "privatebody" not in full_output
+    assert "unlabelled-value" not in full_output
+    assert "Receiving objects: 100%" in full_output
 
 
 def test_cancelled_or_replaced_worker_cannot_overwrite_log(running_job):
@@ -106,11 +137,13 @@ def test_cancelled_or_replaced_worker_cannot_overwrite_log(running_job):
         emit_git_output("Old worker output")
     running_job.refresh_from_db()
     assert not running_job.output_log
+    assert not RepositoryOperationLogEntry.objects.filter(sync_job=running_job).exists()
     with RepositoryGitLog(running_job):
         RepositorySyncJob.objects.filter(pk=running_job.pk).update(status="cancelled")
         emit_git_output("Cancelled worker output")
     running_job.refresh_from_db()
     assert not running_job.output_log
+    assert not RepositoryOperationLogEntry.objects.filter(sync_job=running_job).exists()
 
 
 def test_optional_log_storage_failure_does_not_hide_primary_error(running_job, monkeypatch):
@@ -125,6 +158,125 @@ def test_optional_log_storage_failure_does_not_hide_primary_error(running_job, m
         output.flush(force=True)
     running_job.refresh_from_db()
     assert "Still downloading" in running_job.output_log
+
+
+def test_full_log_and_compatibility_tail_retry_atomically_without_duplicates(
+    running_job, monkeypatch
+):
+    original_bulk_create = RepositoryOperationLogEntry.objects.bulk_create
+    calls = 0
+
+    def insert_then_fail_once(entries, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = original_bulk_create(entries, **kwargs)
+        if calls == 1:
+            raise OperationalError("locked after insert")
+        return result
+
+    with RepositoryGitLog(running_job) as output:
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                RepositoryOperationLogEntry.objects,
+                "bulk_create",
+                insert_then_fail_once,
+            )
+            emit_git_output("Receiving objects: retry me", operation="clone")
+        running_job.refresh_from_db()
+        assert running_job.output_log == ""
+        assert not RepositoryOperationLogEntry.objects.filter(sync_job=running_job).exists()
+        output.flush(force=True)
+
+    running_job.refresh_from_db()
+    assert "Receiving objects: retry me" in running_job.output_log
+    assert list(
+        RepositoryOperationLogEntry.objects.filter(sync_job=running_job).values_list(
+            "message", flat=True
+        )
+    ) == ["Receiving objects: retry me"]
+
+
+def test_full_log_cap_sets_explicit_truncation_flag(running_job, monkeypatch):
+    monkeypatch.setattr(git_output, "MAX_PERSISTED_LOG_ENTRIES_PER_SYNC_JOB", 3)
+    with RepositoryGitLog(running_job):
+        for number in range(5):
+            emit_git_output(f"line {number}", operation="clone")
+
+    running_job.refresh_from_db()
+    assert running_job.operation_log_truncated
+    assert RepositoryOperationLogEntry.objects.filter(sync_job=running_job).count() == 3
+
+
+def test_operation_log_query_helper_is_repository_and_cursor_scoped(running_job):
+    first = append_operation_log_entry(
+        repository_id=running_job.repository_id,
+        sync_job_id=running_job.pk,
+        channel=RepositoryOperationLogChannel.GIT,
+        event="git_output",
+        message="first",
+    )
+    second = append_operation_log_entry(
+        repository_id=running_job.repository_id,
+        sync_job_id=running_job.pk,
+        channel=RepositoryOperationLogChannel.CATALOGUE,
+        event="catalogue_output",
+        message="second",
+    )
+    later_job = RepositorySyncJob.objects.create(
+        repository=running_job.repository,
+        operation=RepositorySyncOperation.REFRESH,
+        status=RepositorySyncJobStatus.SUCCEEDED,
+    )
+    third = append_operation_log_entry(
+        repository_id=running_job.repository_id,
+        sync_job_id=later_job.pk,
+        channel=RepositoryOperationLogChannel.WORKER,
+        event="worker_output",
+        message="third",
+    )
+    other_repository = BitbucketRepository.objects.create(
+        display_name="Other documents",
+        canonical_remote_key="example.invalid/workspace/other-docs",
+        remote_url="https://example.invalid/workspace/other-docs.git",
+    )
+    other_job = RepositorySyncJob.objects.create(
+        repository=other_repository,
+        operation=RepositorySyncOperation.CLONE,
+    )
+    append_operation_log_entry(
+        repository_id=other_repository.pk,
+        sync_job_id=other_job.pk,
+        channel=RepositoryOperationLogChannel.GIT,
+        event="git_output",
+        message="other",
+    )
+
+    assert list(
+        repository_operation_log_entries(running_job.repository_id).values_list("id", flat=True)
+    ) == [first.pk, second.pk, third.pk]
+    assert list(
+        repository_operation_log_entries(
+            running_job.repository_id, sync_job_id=running_job.pk
+        ).values_list("id", flat=True)
+    ) == [first.pk, second.pk]
+    assert list(
+        repository_operation_log_entries(running_job.repository_id, after_id=first.pk).values_list(
+            "id", flat=True
+        )
+    ) == [second.pk, third.pk]
+    assert list(
+        repository_operation_log_entries(running_job.repository_id, before_id=third.pk).values_list(
+            "id", flat=True
+        )
+    ) == [first.pk, second.pk]
+    with pytest.raises(ValueError, match="only one"):
+        repository_operation_log_entries(
+            running_job.repository_id,
+            after_id=first.pk,
+            before_id=third.pk,
+        )
+    later_job.delete()
+    assert not RepositoryOperationLogEntry.objects.filter(pk=third.pk).exists()
 
 
 def test_endpoint_exposes_only_latest_job_and_sanitizes_stored_values(client, running_job):

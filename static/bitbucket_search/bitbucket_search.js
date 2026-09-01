@@ -168,14 +168,18 @@
             card.dataset.repositoryActiveWork === "true" ||
             card.dataset.repositoryActiveSync === "true",
         );
+        const pdfIndexing = selected.some((card) =>
+            card.dataset.repositoryPdfIndexingActive === "true",
+        );
         const removalPending = selected.some((card) =>
             card.dataset.repositoryRemovalPending === "true",
         );
         const unavailable = !count || repositorySubmissionPending || repositoryStatusPending;
+        const destructiveUnavailable = !count || repositorySubmissionPending || removalPending;
         const allExcluded = count > 0 && selected.every((card) =>
             card.dataset.repositoryRefreshExcluded === "true",
         );
-        if (unavailable || busy || removalPending ||
+        if (destructiveUnavailable ||
             (deletionUnlocked && Date.now() >= deleteUnlockExpiresAt)) resetDeleteLock();
         const disable = (selector, disabled, title) => {
             workspace.querySelectorAll(selector).forEach((button) => {
@@ -189,14 +193,18 @@
             busy ? "Selected repository work in progress" : `Refresh ${suffix}`);
         disable("[data-selected-exclude]", unavailable || removalPending,
             `${allExcluded ? "Include" : "Exclude"} ${suffix} ${allExcluded ? "in" : "from"} refresh`);
+        const stopTitle = !count ? "Select a repository with active PDF indexing to stop"
+            : repositorySubmissionPending ? "Wait for the repository request to finish"
+            : removalPending ? "Use Retry removal to finish incomplete repository removal"
+            : pdfIndexing ? `Stop PDF indexing for ${suffix}`
+            : `No active PDF indexing for ${suffix}`;
+        disable("[data-selected-stop-indexing]", destructiveUnavailable || !pdfIndexing, stopTitle);
         const deleteTitle = !count ? "Select repositories to delete"
             : repositorySubmissionPending ? "Wait for the repository request to finish"
-            : repositoryStatusPending ? "Wait for the latest repository status before deleting"
-            : busy ? "Wait for selected repositories' Git and PDF workers to finish before deleting"
             : removalPending ? "Use Retry removal to finish incomplete repository removal"
             : deletionUnlocked ? `Click again to delete ${suffix} from this computer`
             : `Unlock deletion for ${suffix}`;
-        disable("[data-selected-remove]", unavailable || busy || removalPending, deleteTitle);
+        disable("[data-selected-remove]", destructiveUnavailable, deleteTitle);
         workspace.querySelectorAll("[data-selected-remove]").forEach((button) => {
             button.dataset.deleteLocked = String(!deletionUnlocked);
             const icon = button.querySelector("[data-selected-delete-lock-icon]");
@@ -266,7 +274,7 @@
             updateSelectedRepositoryActions();
             if (!submitter || submitter.disabled || repositorySubmissionPending ||
                 repositoryStatusPending || !selectedRepositoryCards().length ||
-                !["refresh", "exclude", "remove"].includes(operation) ||
+                !["refresh", "exclude", "stop_indexing", "remove"].includes(operation) ||
                 (operation === "remove" && !deletionUnlocked)) {
                 event.preventDefault();
                 return;
@@ -325,18 +333,31 @@
         const working = Boolean(repository.activity?.active || repository.hasActiveWork || repository.active);
         const workLabel = repository.activity?.label || repository.workerTiming?.label || "Repository work in progress";
         const workDetail = repository.activity?.detail || workLabel;
+        const operation = ["clone", "pull", "indexing"].includes(repository.activity?.operation)
+            ? repository.activity.operation : "";
+        const suppliedProgress = Number(repository.activity?.progress);
+        const hasProgress = repository.activity?.progress !== null
+            && repository.activity?.progress !== undefined && Number.isFinite(suppliedProgress);
+        const progressValue = hasProgress
+            ? Math.round(Math.min(100, Math.max(0, suppliedProgress))) : null;
         cardsFor(repository.id).forEach((card) => {
             window.OWLRepositoryTimers?.update(
                 card.querySelector("[data-repository-worker-timer]"), repository.workerTiming,
             );
             card.dataset.repositoryState = repository.state;
+            card.dataset.repositoryOperation = operation;
             card.dataset.repositoryActiveWork = String(working);
             card.dataset.repositoryActiveSync = String(Boolean(repository.active));
+            card.dataset.repositoryPdfIndexingActive = String(Boolean(
+                Number(repository.activity?.queuedPdfs || 0) +
+                Number(repository.activity?.runningPdfs || 0),
+            ));
             card.dataset.repositoryRefreshExcluded = String(Boolean(repository.refreshExcluded));
             card.dataset.repositoryRemovalPending = String(Boolean(repository.hasRemovalPending));
             const stateIcon = card.querySelector("[data-repository-state-icon]");
             if (stateIcon) {
                 stateIcon.className = `bb-repository-state bb-repository-state--${working ? "working" : repository.state}`;
+                stateIcon.dataset.repositoryOperation = operation;
                 stateIcon.setAttribute(
                     "aria-label",
                     `${repository.name}: ${working ? workLabel : repository.stateLabel}`,
@@ -348,6 +369,27 @@
                 workStatus.textContent = working ? workDetail : "";
                 workStatus.title = working ? workDetail : "";
                 workStatus.hidden = !working;
+            }
+            const progressContainer = card.querySelector("[data-repository-progress]");
+            const progressBar = card.querySelector("[data-repository-progress-bar]");
+            const progressLabel = card.querySelector("[data-repository-progress-label]");
+            const showProgress = working && Boolean(operation);
+            if (progressContainer) {
+                progressContainer.hidden = !showProgress;
+                progressContainer.title = showProgress ? workDetail : "";
+            }
+            if (progressBar) {
+                if (showProgress && progressValue !== null) {
+                    progressBar.value = progressValue;
+                    progressBar.setAttribute("value", String(progressValue));
+                } else {
+                    progressBar.removeAttribute("value");
+                }
+            }
+            if (progressLabel) {
+                progressLabel.textContent = progressValue !== null
+                    ? `${progressValue}%`
+                    : String(repository.activity?.phase || "").includes("queued") ? "Queued" : "Running";
             }
             const documents = card.querySelector("[data-repository-documents]");
             if (documents) {

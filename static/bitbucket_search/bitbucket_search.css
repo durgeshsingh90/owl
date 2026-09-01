@@ -265,6 +265,12 @@
     background: var(--bb-danger-soft);
 }
 
+.bb-repository-tool--stop:not(:disabled) {
+    border-color: var(--bb-amber);
+    color: var(--bb-amber);
+    background: var(--bb-amber-soft);
+}
+
 .bb-repository-delete-lock {
     font-size: 17px;
     line-height: 1;
@@ -283,6 +289,31 @@
     color: var(--bb-amber);
     cursor: wait;
     opacity: 1;
+}
+
+.bb-stop-indexing-form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.55rem 0.75rem;
+    margin-top: 0.85rem;
+}
+
+.bb-stop-indexing-form button {
+    min-height: 36px;
+    padding: 0.5rem 0.8rem;
+    border: 1px solid var(--bb-danger);
+    border-radius: 6px;
+    color: var(--bb-danger);
+    background: var(--bb-danger-soft);
+    cursor: pointer;
+    font: inherit;
+    font-weight: 700;
+}
+
+.bb-stop-indexing-form small {
+    flex: 1 1 13rem;
+    color: var(--bb-muted);
 }
 
 .bb-section-heading h2 {
@@ -691,6 +722,46 @@
     animation: bb-refresh-all-spin 0.8s linear infinite;
 }
 
+.bb-repository-state--working[data-repository-operation="clone"]::after,
+.bb-repository-state--working[data-repository-operation="pull"]::after,
+.bb-repository-state--working[data-repository-operation="indexing"]::after {
+    display: none;
+}
+
+.bb-repository-state--working[data-repository-operation="clone"] {
+    color: #38a6d2;
+    border-color: #38a6d2;
+    background: rgb(56 166 210 / 12%);
+}
+
+.bb-repository-state--working[data-repository-operation="pull"] {
+    color: var(--bb-amber);
+}
+
+.bb-repository-state--working[data-repository-operation="indexing"] {
+    color: #a576d0;
+    border-color: #a576d0;
+    background: rgb(165 118 208 / 12%);
+}
+
+.bb-repository-state--working[data-repository-operation="clone"] .bb-state-icon--clone,
+.bb-repository-state--working[data-repository-operation="pull"] .bb-state-icon--pull,
+.bb-repository-state--working[data-repository-operation="indexing"] .bb-state-icon--indexing {
+    display: block;
+}
+
+.bb-repository-state--working[data-repository-operation="clone"] .bb-state-icon--clone {
+    animation: bb-download-pulse 1.1s ease-in-out infinite;
+}
+
+.bb-repository-state--working[data-repository-operation="pull"] .bb-state-icon--pull {
+    animation: bb-operation-spin 1.4s linear infinite;
+}
+
+.bb-repository-state--working[data-repository-operation="indexing"] .bb-state-icon--indexing {
+    animation: bb-indexing-pulse 1.2s ease-in-out infinite;
+}
+
 .bb-repository-state--unknown .bb-state-icon--attention {
     display: block;
 }
@@ -703,6 +774,70 @@
 
 .bb-repository-work-label[hidden] {
     display: none;
+}
+
+.bb-repository-progress {
+    display: grid;
+    grid-template-columns: minmax(52px, 1fr) auto;
+    align-items: center;
+    gap: 0.35rem;
+    margin-top: 0.22rem;
+    color: var(--bb-amber);
+}
+
+.bb-repository-card[data-repository-operation="clone"] .bb-repository-progress {
+    color: #38a6d2;
+}
+
+.bb-repository-card[data-repository-operation="indexing"] .bb-repository-progress {
+    color: #a576d0;
+}
+
+.bb-repository-progress[hidden] {
+    display: none;
+}
+
+.bb-repository-progress progress {
+    width: 100%;
+    height: 5px;
+    overflow: hidden;
+    border: 0;
+    border-radius: 999px;
+    background: var(--bb-line);
+    accent-color: currentColor;
+}
+
+.bb-repository-progress progress::-webkit-progress-bar {
+    border-radius: 999px;
+    background: var(--bb-line);
+}
+
+.bb-repository-progress progress::-webkit-progress-value {
+    border-radius: 999px;
+    background: currentColor;
+}
+
+.bb-repository-progress progress::-moz-progress-bar {
+    border-radius: 999px;
+    background: currentColor;
+}
+
+.bb-repository-progress progress:not([value]) {
+    background: linear-gradient(90deg, transparent, currentColor, transparent) 0 0 / 45% 100% no-repeat,
+        var(--bb-line);
+    animation: bb-progress-indeterminate 1.2s ease-in-out infinite;
+}
+
+.bb-repository-progress > small[data-repository-progress-label] {
+    margin: 0;
+    color: currentColor;
+    font-size: 0.58rem;
+    font-variant-numeric: tabular-nums;
+}
+
+@keyframes bb-progress-indeterminate {
+    0% { background-position: -80% 0; }
+    100% { background-position: 180% 0; }
 }
 
 .bb-repository-state--failed,
@@ -722,6 +857,23 @@
 
     50% {
         transform: translateY(1px);
+        opacity: 1;
+    }
+}
+
+@keyframes bb-operation-spin {
+    to { transform: rotate(360deg); }
+}
+
+@keyframes bb-indexing-pulse {
+    0%,
+    100% {
+        transform: scale(0.9);
+        opacity: 0.68;
+    }
+
+    50% {
+        transform: scale(1.05);
         opacity: 1;
     }
 }
@@ -1184,6 +1336,529 @@
 
 .bb-status-empty p {
     margin: 0.35rem 0 0.8rem;
+}
+
+/* Repository logs: full-page Git and parallel PDF worker diagnostics. */
+.bb-logs-page {
+    width: min(100%, 1400px);
+}
+
+.bb-logs-heading .lede {
+    max-width: 760px;
+}
+
+.bb-log-overview .status-symbol {
+    width: 34px;
+    border-radius: 8px;
+    font-size: 0.65rem;
+    letter-spacing: 0.02em;
+}
+
+.bb-log-toolbar,
+.bb-log-repository,
+.bb-log-page-empty {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    box-shadow: var(--shadow-sm);
+}
+
+.bb-log-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 0.8fr);
+    align-items: end;
+    gap: 1.25rem;
+    padding: 1.15rem 1.3rem;
+}
+
+.bb-log-toolbar h2,
+.bb-log-toolbar p,
+.bb-log-repository__heading h2,
+.bb-log-repository__heading p,
+.bb-log-section__heading h3,
+.bb-log-section__heading p,
+.bb-git-console-card__heading h4,
+.bb-git-console-card__heading p {
+    margin-bottom: 0;
+}
+
+.bb-log-toolbar > div > p:last-child,
+.bb-log-repository__heading p,
+.bb-log-section__heading > p {
+    color: var(--muted);
+    font-size: 0.78rem;
+}
+
+.bb-log-repository-form {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 0.45rem 0.65rem;
+}
+
+.bb-log-repository-form label {
+    grid-column: 1 / -1;
+    color: var(--muted-strong);
+    font-size: 0.72rem;
+    font-weight: 760;
+}
+
+.bb-log-repository-form select,
+.bb-log-repository-form button {
+    min-height: 42px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+}
+
+.bb-log-repository-form select {
+    width: 100%;
+    min-width: 0;
+    padding: 0.55rem 2rem 0.55rem 0.7rem;
+    color: var(--ink);
+    background: var(--surface-subtle);
+}
+
+.bb-log-repository-form button,
+.bb-log-add-repository {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.55rem 0.85rem;
+    color: #fff;
+    border-color: var(--navy);
+    background: var(--navy);
+    cursor: pointer;
+    font-size: 0.78rem;
+    font-weight: 760;
+    text-decoration: none;
+}
+
+.bb-log-repository-form button:hover,
+.bb-log-add-repository:hover {
+    color: #fff;
+    background: var(--navy-strong);
+}
+
+.bb-log-add-repository {
+    min-height: 42px;
+    justify-self: end;
+    border: 1px solid var(--navy);
+    border-radius: var(--radius-sm);
+}
+
+.bb-log-repository {
+    overflow: hidden;
+}
+
+.bb-log-repository__heading,
+.bb-log-section__heading,
+.bb-git-console-card__heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.bb-log-repository__heading {
+    padding: 1.15rem 1.3rem;
+    border-bottom: 1px solid var(--line);
+}
+
+.bb-log-repository__heading > div,
+.bb-log-section__heading > div,
+.bb-git-console-card__heading > div {
+    min-width: 0;
+}
+
+.bb-log-repository__heading h2,
+.bb-log-section__heading h3 {
+    overflow-wrap: anywhere;
+}
+
+.bb-log-repository__heading > a {
+    flex: 0 0 auto;
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.bb-log-section {
+    padding: 1.25rem 1.3rem 1.4rem;
+}
+
+.bb-log-section + .bb-log-section {
+    border-top: 1px solid var(--line);
+}
+
+.bb-log-section__heading {
+    align-items: end;
+    margin-bottom: 0.9rem;
+}
+
+.bb-log-section__heading > p {
+    max-width: 520px;
+    text-align: right;
+}
+
+.bb-git-log-layout {
+    display: grid;
+    grid-template-columns: minmax(220px, 0.32fr) minmax(0, 1fr);
+    gap: 0.9rem;
+}
+
+.bb-git-run-list,
+.bb-git-console-card {
+    min-width: 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--surface-subtle);
+}
+
+.bb-git-run-list {
+    display: grid;
+    max-height: 520px;
+    align-content: start;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+}
+
+.bb-git-run {
+    display: flex;
+    min-height: 64px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.65rem;
+    padding: 0.65rem 0.75rem;
+    color: var(--ink);
+    border-bottom: 1px solid var(--line);
+    text-decoration: none;
+}
+
+.bb-git-run:last-child {
+    border-bottom: 0;
+}
+
+.bb-git-run:hover,
+.bb-git-run.is-current {
+    color: var(--ink);
+    background: var(--surface-strong);
+}
+
+.bb-git-run.is-current {
+    box-shadow: inset 3px 0 0 var(--amber);
+}
+
+.bb-git-run > span:first-child {
+    min-width: 0;
+}
+
+.bb-git-run strong,
+.bb-git-run small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.bb-git-run strong {
+    font-size: 0.8rem;
+}
+
+.bb-git-run small {
+    margin-top: 0.15rem;
+    color: var(--muted);
+    font-size: 0.67rem;
+}
+
+.bb-git-console-card {
+    padding: 0.85rem;
+}
+
+.bb-git-console-card__heading {
+    align-items: center;
+}
+
+.bb-git-console-card__heading h4 {
+    color: var(--ink);
+    font-size: 1rem;
+}
+
+.bb-log-state {
+    display: inline-flex;
+    width: fit-content;
+    flex: 0 0 auto;
+    align-items: center;
+    padding: 0.14rem 0.42rem;
+    border-radius: 999px;
+    color: var(--muted-strong);
+    background: var(--surface-strong);
+    font-size: 0.66rem;
+    font-weight: 780;
+    line-height: 1.35;
+    white-space: nowrap;
+}
+
+.bb-log-state--queued,
+.bb-log-state--running {
+    color: var(--amber);
+    background: var(--amber-soft);
+}
+
+.bb-log-state--succeeded {
+    color: var(--teal);
+    background: var(--teal-soft);
+}
+
+.bb-log-state--failed,
+.bb-log-state--interrupted {
+    color: var(--red);
+    background: var(--red-soft);
+}
+
+.bb-log-metadata,
+.bb-index-log-counts {
+    display: grid;
+    margin: 0;
+}
+
+.bb-log-metadata {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0;
+    margin-top: 0.75rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+}
+
+.bb-log-metadata > div,
+.bb-index-log-counts > div {
+    min-width: 0;
+    padding: 0.55rem 0.65rem;
+}
+
+.bb-log-metadata > div + div,
+.bb-index-log-counts > div + div {
+    border-left: 1px solid var(--line);
+}
+
+.bb-log-metadata dt,
+.bb-index-log-counts dt {
+    color: var(--muted);
+    font-size: 0.62rem;
+    font-weight: 760;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.bb-log-metadata dd,
+.bb-index-log-counts dd {
+    margin: 0.12rem 0 0;
+    overflow-wrap: anywhere;
+    color: var(--ink);
+    font-size: 0.74rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+}
+
+.bb-log-run-message,
+.bb-log-truncated,
+.bb-log-empty {
+    margin: 0.7rem 0 0;
+    color: var(--muted);
+    font-size: 0.76rem;
+    line-height: 1.5;
+}
+
+.bb-log-repository__status strong {
+    color: var(--ink);
+}
+
+.bb-log-run-message--error {
+    color: var(--red);
+}
+
+.bb-log-truncated {
+    color: var(--amber);
+}
+
+.bb-git-run-list > .bb-log-empty {
+    margin: 0;
+    padding: 1rem;
+}
+
+.bb-log-console {
+    display: block;
+    width: 100%;
+    min-height: 180px;
+    max-height: 520px;
+    margin: 0.75rem 0 0;
+    padding: 0.8rem;
+    overflow: auto;
+    overscroll-behavior: contain;
+    border: 1px solid #31475a;
+    border-radius: var(--radius-sm);
+    color: #e5edf4;
+    background: #071522;
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: 0.72rem;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+    tab-size: 4;
+    white-space: pre-wrap;
+    scrollbar-width: thin;
+}
+
+.bb-log-console:focus-visible,
+.bb-index-log-table-wrap:focus-visible {
+    outline: 3px solid #1b7fb2;
+    outline-offset: 2px;
+}
+
+.bb-index-log-counts {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    margin-bottom: 0.9rem;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--surface-subtle);
+}
+
+.bb-index-event-log {
+    margin-bottom: 0.9rem;
+    padding: 0.85rem;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--surface-subtle);
+}
+
+.bb-index-event-log .bb-log-console {
+    min-height: 130px;
+    max-height: 360px;
+}
+
+.bb-index-event-log__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.65rem;
+}
+
+.bb-index-event-log__actions > a {
+    font-size: 0.72rem;
+    font-weight: 720;
+}
+
+.bb-index-log-counts dd {
+    font-size: 1rem;
+}
+
+.bb-index-log-table-wrap {
+    max-width: 100%;
+    overflow: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    scrollbar-width: thin;
+}
+
+.bb-index-log-table {
+    width: 100%;
+    min-width: 920px;
+    border-collapse: collapse;
+    background: var(--surface);
+}
+
+.bb-index-log-table th,
+.bb-index-log-table td {
+    padding: 0.7rem 0.75rem;
+    border-bottom: 1px solid var(--line);
+    color: var(--muted-strong);
+    font-size: 0.73rem;
+    text-align: left;
+    vertical-align: top;
+}
+
+.bb-index-log-table thead th {
+    position: sticky;
+    z-index: 1;
+    top: 0;
+    color: var(--muted);
+    background: var(--surface-subtle);
+    font-size: 0.65rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.bb-index-log-table tbody tr:last-child > * {
+    border-bottom: 0;
+}
+
+.bb-index-log-table tbody th {
+    width: 34%;
+    color: var(--ink);
+}
+
+.bb-index-log-table tbody th strong,
+.bb-index-log-table td small,
+.bb-index-log-table tbody th small {
+    display: block;
+}
+
+.bb-index-log-table tbody th strong {
+    max-width: 440px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.bb-index-log-table td small,
+.bb-index-log-table tbody th small {
+    margin-top: 0.2rem;
+    color: var(--muted);
+    font-size: 0.65rem;
+}
+
+.bb-index-log-table .bb-index-log-error {
+    max-width: 260px;
+    color: var(--red);
+    overflow-wrap: anywhere;
+}
+
+.bb-index-log-table progress {
+    display: block;
+    width: 92px;
+    height: 7px;
+    margin-top: 0.25rem;
+    accent-color: var(--teal);
+}
+
+.bb-log-pagination {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.8rem;
+    font-size: 0.74rem;
+}
+
+.bb-log-pagination a,
+.bb-log-pagination span {
+    width: fit-content;
+}
+
+.bb-log-pagination > :last-child {
+    justify-self: end;
+}
+
+.bb-log-pagination span[aria-disabled="true"] {
+    color: var(--muted);
+}
+
+.bb-log-page-empty {
+    min-height: 220px;
+    display: grid;
+    place-content: center;
 }
 
 .bb-icon-button {
@@ -3516,6 +4191,55 @@
     }
 }
 
+@media (max-width: 900px) {
+    .bb-log-toolbar {
+        grid-template-columns: minmax(0, 1fr);
+        align-items: stretch;
+    }
+
+    .bb-log-section__heading {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .bb-log-section__heading > p {
+        max-width: none;
+        text-align: left;
+    }
+
+    .bb-git-log-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .bb-git-run-list {
+        max-height: 240px;
+    }
+
+    .bb-log-metadata {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .bb-log-metadata > div:nth-child(3) {
+        border-left: 0;
+    }
+
+    .bb-log-metadata > div:nth-child(n + 3) {
+        border-top: 1px solid var(--line);
+    }
+
+    .bb-index-log-counts {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .bb-index-log-counts > div:nth-child(3n + 1) {
+        border-left: 0;
+    }
+
+    .bb-index-log-counts > div:nth-child(n + 4) {
+        border-top: 1px solid var(--line);
+    }
+}
+
 @media (max-width: 620px) {
     .bb-status-page .page-heading--status,
     .bb-status-repositories__heading {
@@ -3529,6 +4253,95 @@
 
     .bb-status-repositories__heading {
         padding: 1rem;
+    }
+
+    .bb-log-toolbar,
+    .bb-log-repository__heading,
+    .bb-log-section {
+        padding: 1rem;
+    }
+
+    .bb-log-repository-form {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .bb-log-repository-form button,
+    .bb-log-add-repository {
+        width: 100%;
+        min-height: 44px;
+    }
+
+    .bb-log-add-repository {
+        justify-self: stretch;
+    }
+
+    .bb-log-repository__heading {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .bb-log-repository__heading > a {
+        min-height: 44px;
+        display: inline-flex;
+        align-items: center;
+    }
+
+    .bb-git-run {
+        min-height: 68px;
+    }
+
+    .bb-log-metadata {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .bb-log-metadata > div + div,
+    .bb-log-metadata > div:nth-child(3) {
+        border-top: 1px solid var(--line);
+        border-left: 0;
+    }
+
+    .bb-log-console {
+        min-height: 160px;
+        max-height: 45vh;
+        max-height: 45dvh;
+    }
+
+    .bb-index-log-counts {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .bb-index-log-counts > div {
+        border-top: 0;
+        border-left: 0;
+    }
+
+    .bb-index-log-counts > div:nth-child(even) {
+        border-left: 1px solid var(--line);
+    }
+
+    .bb-index-log-counts > div:nth-child(n + 3) {
+        border-top: 1px solid var(--line);
+    }
+
+    .bb-index-log-table {
+        min-width: 800px;
+    }
+
+    .bb-log-pagination {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .bb-log-pagination strong {
+        grid-column: 1 / -1;
+        grid-row: 1;
+        text-align: center;
+    }
+
+    .bb-log-pagination a,
+    .bb-log-pagination span {
+        display: inline-flex;
+        min-height: 44px;
+        align-items: center;
     }
 
     .bb-topbar {

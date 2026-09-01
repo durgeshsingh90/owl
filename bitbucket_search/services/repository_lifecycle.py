@@ -7,7 +7,10 @@ import os
 import re
 import shutil
 import stat
+import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +29,7 @@ from bitbucket_search.models import (
 )
 from bitbucket_search.services.filesystem_paths import filesystem_path
 from bitbucket_search.services.logging_events import get_logger, log_event
+from bitbucket_search.services.pdf_indexing import cancel_repository_pdf_extractions
 from bitbucket_search.services.repository_lock import (
     RepositoryCheckoutBusy,
     pdf_extraction_claim_lock,
@@ -42,6 +46,8 @@ _ACTIVE_SYNC_STATES = (
     RepositorySyncState.FETCHING,
     RepositorySyncState.UPDATING,
 )
+_REMOVAL_CHECKOUT_WAIT_SECONDS = 3.0
+_REMOVAL_CHECKOUT_POLL_SECONDS = 0.05
 
 
 class RepositoryLifecycleError(RuntimeError):
@@ -166,7 +172,7 @@ def _safe_tree(path: Path) -> bool:
     return True
 
 
-def _ensure_idle(repository: BitbucketRepository) -> None:
+def _ensure_git_idle(repository: BitbucketRepository) -> None:
     if (
         repository.sync_state in _ACTIVE_SYNC_STATES
         or repository.sync_jobs.filter(
@@ -177,14 +183,40 @@ def _ensure_idle(repository: BitbucketRepository) -> None:
             "repository_busy",
             "Wait for this repository's background refresh to finish before removing it.",
         )
+
+
+def _ensure_pdf_stopped(repository: BitbucketRepository) -> None:
     if PDFExtractionJob.objects.filter(
         document__repository=repository,
         status__in=(PDFExtractionJobStatus.QUEUED, PDFExtractionJobStatus.RUNNING),
     ).exists():
         raise RepositoryLifecycleError(
-            "pdf_extraction_busy",
-            "Wait for this repository's PDF indexing to finish before removing it.",
+            "repository_removal_pending",
+            "OWL is still stopping this repository's PDF indexing. Use Retry removal.",
         )
+
+
+@contextmanager
+def _bounded_repository_checkout_lock(repository_id: int) -> Iterator[None]:
+    """Wait briefly for revoked PDF readers without hanging a delete request."""
+
+    deadline = time.monotonic() + max(0.0, _REMOVAL_CHECKOUT_WAIT_SECONDS)
+    acquired = None
+    while acquired is None:
+        candidate = repository_checkout_lock(repository_id, blocking=False)
+        try:
+            candidate.__enter__()
+        except RepositoryCheckoutBusy:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(_REMOVAL_CHECKOUT_POLL_SECONDS, remaining))
+        else:
+            acquired = candidate
+    try:
+        yield
+    finally:
+        acquired.__exit__(None, None, None)
 
 
 def _manifest(repository: BitbucketRepository) -> list[dict[str, str]]:
@@ -304,33 +336,16 @@ def _delete_database_records(repository: BitbucketRepository) -> None:
     ).delete()
 
 
-def _remove_locked(repository_id: int) -> RepositoryRemovalResult:
-    recovery = RepositoryRemovalRecovery.objects.filter(repository_id=repository_id).first()
-    if recovery is not None and recovery.database_deleted:
-        result = RepositoryRemovalResult(repository_id, recovery.display_name)
-        _purge(recovery)
-        return result
-    if recovery is not None:
-        with pdf_extraction_claim_lock(), transaction.atomic(durable=True):
-            reserve_repository_write()
-            repository = BitbucketRepository.objects.select_for_update().get(pk=repository_id)
-            _ensure_idle(repository)
-        _restore(recovery)
-        recovery.delete()
+def _prepare_removal_intent(repository_id: int) -> RepositoryRemovalRecovery:
+    """Publish a durable queue barrier before revoking this repository's PDF leases."""
 
-    try:
-        initial = BitbucketRepository.objects.get(pk=repository_id)
-    except BitbucketRepository.DoesNotExist as error:
-        raise RepositoryLifecycleError(
-            "repository_unavailable", "This repository has already been removed or is unavailable."
-        ) from error
-    _ensure_idle(initial)
-    # Walking a huge checkout must not hold SQLite's writer or the global PDF
-    # publication gate. The exclusive per-repository lock keeps its files still.
-    manifest = _manifest(initial)
+    completed_recovery = RepositoryRemovalRecovery.objects.filter(
+        repository_id=repository_id,
+        database_deleted=True,
+    ).first()
+    if completed_recovery is not None:
+        return completed_recovery
 
-    # Commit the recovery journal before any filesystem move. A database outage
-    # or failed rollback can never leave a quarantine with no durable owner.
     with pdf_extraction_claim_lock(), transaction.atomic(durable=True):
         reserve_repository_write()
         try:
@@ -340,23 +355,83 @@ def _remove_locked(repository_id: int) -> RepositoryRemovalResult:
                 "repository_unavailable",
                 "This repository has already been removed or is unavailable.",
             ) from error
-        _ensure_idle(repository)
+        # Git has no repository-scoped stop contract yet. Reject it before
+        # publishing removal intent. PDF leases are revoked after this commit.
+        _ensure_git_idle(repository)
+        recovery = (
+            RepositoryRemovalRecovery.objects.select_for_update()
+            .filter(repository_id=repository_id)
+            .first()
+        )
+        if recovery is None:
+            recovery = RepositoryRemovalRecovery.objects.create(
+                repository_id=repository_id,
+                display_name=repository.display_name,
+                quarantine_manifest=[],
+            )
+    return recovery
+
+
+def _remove_locked(repository_id: int) -> RepositoryRemovalResult:
+    recovery = RepositoryRemovalRecovery.objects.filter(repository_id=repository_id).first()
+    if recovery is not None and recovery.database_deleted:
+        result = RepositoryRemovalResult(repository_id, recovery.display_name)
+        _purge(recovery)
+        return result
+    if recovery is None:
+        raise RepositoryLifecycleError(
+            "repository_removal_pending",
+            "OWL could not find this repository's removal journal. Retry removal.",
+        )
+
+    # A prior attempt may have moved only part of the manifest. Restore it while
+    # keeping the same journal continuously visible to every Git/PDF queue.
+    if recovery.quarantine_manifest:
+        _restore(recovery)
+
+    try:
+        initial = BitbucketRepository.objects.get(pk=repository_id)
+    except BitbucketRepository.DoesNotExist as error:
+        raise RepositoryLifecycleError(
+            "repository_unavailable", "This repository has already been removed or is unavailable."
+        ) from error
+    _ensure_git_idle(initial)
+    _ensure_pdf_stopped(initial)
+    # Walking a huge checkout must not hold SQLite's writer or the global PDF
+    # publication gate. The exclusive per-repository lock keeps its files still.
+    manifest = _manifest(initial)
+
+    # Update the already-committed journal before any filesystem move. It must
+    # remain visible continuously from cancellation through the final purge.
+    with pdf_extraction_claim_lock(), transaction.atomic(durable=True):
+        reserve_repository_write()
+        try:
+            repository = BitbucketRepository.objects.select_for_update().get(pk=repository_id)
+        except BitbucketRepository.DoesNotExist as error:
+            raise RepositoryLifecycleError(
+                "repository_unavailable",
+                "This repository has already been removed or is unavailable.",
+            ) from error
+        _ensure_git_idle(repository)
+        _ensure_pdf_stopped(repository)
         if (repository.display_name, repository.local_path) != (
             initial.display_name,
             initial.local_path,
         ):
             raise _invalid_path()
-        recovery = RepositoryRemovalRecovery.objects.create(
-            repository_id=repository_id,
-            display_name=repository.display_name,
-            quarantine_manifest=manifest,
+        recovery = RepositoryRemovalRecovery.objects.select_for_update().get(
+            repository_id=repository_id
         )
+        recovery.display_name = repository.display_name
+        recovery.quarantine_manifest = manifest
+        recovery.save(update_fields=("display_name", "quarantine_manifest"))
     result = RepositoryRemovalResult(repository_id, repository.display_name)
     try:
         with pdf_extraction_claim_lock(), transaction.atomic(durable=True):
             reserve_repository_write()
             repository = BitbucketRepository.objects.select_for_update().get(pk=repository_id)
-            _ensure_idle(repository)
+            _ensure_git_idle(repository)
+            _ensure_pdf_stopped(repository)
             for original, quarantine in _manifest_paths(recovery):
                 if not filesystem_path(original).is_dir() or filesystem_path(quarantine).exists():
                     raise _invalid_path()
@@ -365,10 +440,9 @@ def _remove_locked(repository_id: int) -> RepositoryRemovalResult:
             recovery.database_deleted = True
             recovery.save(update_fields=("database_deleted",))
     except Exception:
-        # The journal still says database_deleted=False after rollback. Retain
-        # it if restore fails; a later retry safely restores before starting anew.
+        # The rollback leaves database_deleted=False. Restore what moved, but
+        # retain the journal as a queue barrier for an exact retry.
         _restore(recovery)
-        recovery.delete()
         raise
     _purge(recovery)
     return result
@@ -392,11 +466,16 @@ def remove_repository(repository_id: int, *, confirmed: bool = False) -> Reposit
         claimfile = roots["staging"] / "service-locks" / "pdf-extraction-claim.lock"
         if _is_link(lockfile) or _is_link(claimfile):
             raise _invalid_path()
-        with repository_checkout_lock(repository_id, blocking=False):
+        recovery = _prepare_removal_intent(repository_id)
+        if not recovery.database_deleted:
+            cancel_repository_pdf_extractions(repository_id)
+        with _bounded_repository_checkout_lock(repository_id):
             result = _remove_locked(repository_id)
     except RepositoryCheckoutBusy as error:
         raise RepositoryLifecycleError(
-            "repository_busy", "This repository is in use. Wait for its background work to finish."
+            "repository_removal_pending",
+            "PDF indexing was stopped, but OWL is still waiting for the repository folder "
+            "to be released. Use Retry removal.",
         ) from error
     except Exception as error:
         log_event(

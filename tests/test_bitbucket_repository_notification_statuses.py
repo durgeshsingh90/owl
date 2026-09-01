@@ -87,7 +87,13 @@ def _item(repository):
 def test_empty_snapshot_has_one_read_only_query(django_assert_num_queries):
     with django_assert_num_queries(1):
         payload = repository_notification_statuses()
-    assert payload == {"total": 0, "activeCount": 0, "failedCount": 0, "items": []}
+    assert payload == {
+        "total": 0,
+        "activeCount": 0,
+        "failedCount": 0,
+        "activities": [],
+        "items": [],
+    }
 
 
 def test_every_repository_is_returned_without_a_limit_or_n_plus_one(django_assert_num_queries):
@@ -287,6 +293,93 @@ def test_active_durable_job_overrides_stale_repository_state(job_status, operati
     assert payload["activeCount"] == 1
     assert payload["items"][0]["status"] == status
     assert payload["items"][0]["active"] is True
+
+
+def test_payload_distinguishes_clone_pull_and_indexing_with_progress_and_timing():
+    observed_at = timezone.now()
+    clone = _repository("Clone")
+    pull = _repository("Pull")
+    indexing = _repository("Indexing", sync_state=RepositorySyncState.READY)
+    _job(
+        clone,
+        RepositorySyncJobStatus.RUNNING,
+        operation=RepositorySyncOperation.CLONE,
+        phase=RepositorySyncPhase.FINALIZING,
+        progress=88,
+        started_at=observed_at - timedelta(minutes=3),
+        heartbeat_at=observed_at,
+    )
+    _job(
+        pull,
+        RepositorySyncJobStatus.RUNNING,
+        operation=RepositorySyncOperation.REFRESH,
+        phase=RepositorySyncPhase.DISCOVERING,
+        progress=64,
+        started_at=observed_at - timedelta(minutes=2),
+        heartbeat_at=observed_at,
+    )
+    first = _document(indexing, filename="first.pdf", relative_path="docs/first.pdf")
+    second = _document(indexing, filename="second.pdf", relative_path="docs/second.pdf")
+    queued = _document(indexing, filename="queued.pdf", relative_path="docs/queued.pdf")
+    _extraction(
+        first,
+        PDFExtractionJobStatus.RUNNING,
+        progress=25,
+        started_at=observed_at - timedelta(minutes=5),
+        heartbeat_at=observed_at,
+    )
+    _extraction(
+        second,
+        PDFExtractionJobStatus.RUNNING,
+        progress=75,
+        started_at=observed_at - timedelta(minutes=4),
+        heartbeat_at=observed_at,
+    )
+    _extraction(queued, PDFExtractionJobStatus.QUEUED, progress=0)
+
+    payload = repository_notification_statuses(at=observed_at)
+
+    activities = {activity["operation"]: activity for activity in payload["activities"]}
+    assert tuple(activities) == ("clone", "pull", "indexing")
+    assert activities["clone"]["progress"] == 88
+    assert activities["clone"]["label"] == "Git clone"
+    assert activities["pull"]["progress"] == 64
+    assert activities["pull"]["label"] == "Git pull"
+    assert activities["indexing"]["progress"] == 50
+    assert activities["indexing"]["queuedJobs"] == 1
+    assert activities["indexing"]["runningJobs"] == 2
+    items = {item["name"]: item for item in payload["items"]}
+    assert items["Clone"]["operation"] == "clone"
+    assert items["Clone"]["phaseLabel"] == "Updating catalogue"
+    assert items["Clone"]["workerTiming"]["operation"] == "clone"
+    assert items["Pull"]["operation"] == "pull"
+    assert items["Pull"]["phaseLabel"] == "Updating catalogue"
+    assert items["Indexing"]["activity"]["progressScope"] == ("running_workers_average")
+    assert (
+        items["Indexing"]["activity"]["startedAt"]
+        == (observed_at - timedelta(minutes=5)).isoformat()
+    )
+
+
+def test_queued_operation_has_no_fabricated_progress_or_timer():
+    repository = _repository("Queued clone")
+    _job(
+        repository,
+        RepositorySyncJobStatus.QUEUED,
+        operation=RepositorySyncOperation.CLONE,
+        phase=RepositorySyncPhase.QUEUED,
+        progress=73,
+    )
+
+    payload = repository_notification_statuses()
+
+    item = payload["items"][0]
+    assert item["operation"] == "clone"
+    assert item["progress"] is None
+    assert item["workerTiming"] is None
+    assert item["activity"]["state"] == "queued"
+    assert item["activity"]["startedAt"] is None
+    assert payload["activities"][0]["progress"] is None
 
 
 @pytest.mark.parametrize(
@@ -496,7 +589,10 @@ def test_endpoint_is_read_only_even_with_stale_jobs_and_does_not_leak_diagnostic
     payload = response.json()["repositoryStatuses"]
     assert payload["items"][0]["name"] == "Visible repository"
     assert payload["items"][0]["targetPath"] == f"/pdfs/?repository={repository.pk}"
-    assert payload["items"][0]["statusTargetPath"] == "/pdfs/status/"
+    assert payload["items"][0]["statusTargetPath"] == (f"/pdfs/status/?repository={repository.pk}")
+    assert payload["items"][0]["cancelIndexingUrl"] == (
+        f"/pdfs/repositories/{repository.pk}/indexing/cancel/"
+    )
     serialized = json.dumps(payload)
     for private_value in (private_path, private_url, private_message, "remote_url", "local_path"):
         assert private_value not in serialized

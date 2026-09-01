@@ -46,7 +46,13 @@ _GIT_LFS_POINTER_OID = re.compile(rb"^oid sha256:[0-9a-f]{64}$", re.MULTILINE)
 _GIT_LFS_POINTER_SIZE = re.compile(rb"^size [0-9]+$", re.MULTILINE)
 _GIT_LFS_POINTER_MAX_BYTES = 8_192
 _IS_WINDOWS = os.name == "nt"
-_WINDOWS_PUBLISH_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0, 2.0)
+# Windows can keep a directory handle briefly after Git exits (for example,
+# while Defender or an indexer inspects the new files). Keep this bounded, but
+# long enough to outlast the common short-lived sharing violation.
+_WINDOWS_PUBLISH_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+_WINDOWS_TRANSIENT_PUBLISH_ERRORS = frozenset({5, 32, 33})
+_PUBLISH_RECOVERY_NAME = re.compile(r"\.owl-checkout-publish-[0-9a-f]{32}")
+_COPY_HEARTBEAT_BYTES = 8 * 1024 * 1024
 _CONSOLE_LINE_LIMIT = 16_384
 logger = get_logger("git")
 _GIT_COMMAND_OPERATIONS = frozenset(
@@ -1103,6 +1109,49 @@ def _ahead_behind(
         ) from exc
 
 
+def _remove_owned_tree(resolved: Path, *, failure_event: str) -> None:
+    """Remove one already-boundary-checked private tree without following links."""
+
+    native_root = filesystem_path(resolved)
+
+    def remove_readonly(function, path, error):
+        if isinstance(error, FileNotFoundError):
+            return
+        candidate = Path(path)
+        # Git object files can have Windows' read-only bit. Only clear that bit
+        # for deletion of an entry in this exact OWL-owned tree; do not follow
+        # links, repair arbitrary ACLs, or retry non-deletion operations.
+        if (
+            not _IS_WINDOWS
+            or not isinstance(error, PermissionError)
+            or function not in {os.unlink, os.remove, os.rmdir}
+            or candidate.is_symlink()
+            or candidate.is_junction()
+            or not candidate.resolve(strict=False).is_relative_to(native_root)
+        ):
+            raise error
+        metadata = candidate.stat(follow_symlinks=False)
+        if metadata.st_mode & stat.S_IWRITE:
+            raise error
+        candidate.chmod(stat.S_IMODE(metadata.st_mode) | stat.S_IWRITE)
+        function(path)
+
+    try:
+        shutil.rmtree(native_root, onexc=remove_readonly)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        # Cleanup is secondary. In particular, its PermissionError must not
+        # replace a checkout, scan, or publication error reported to the user.
+        log_event(
+            logger,
+            logging.ERROR,
+            failure_event,
+            error=exc,
+            error_code="staging_cleanup_failed",
+        )
+
+
 def _remove_staging_directory(staging_path: Path) -> None:
     """Best-effort removal of this clone's private staging tree, never its error."""
 
@@ -1115,36 +1164,7 @@ def _remove_staging_directory(staging_path: Path) -> None:
             r"repository-[0-9]+-[0-9a-f]{32}", resolved.name
         ):
             return
-        native_root = filesystem_path(resolved)
-
-        def remove_readonly(function, path, error):
-            if isinstance(error, FileNotFoundError):
-                return
-            candidate = Path(path)
-            # Git object files can have Windows' read-only bit. Only clear that
-            # bit for deletion of an entry in our own tree; do not follow links,
-            # repair arbitrary ACLs, or retry non-deletion operations.
-            if (
-                not _IS_WINDOWS
-                or not isinstance(error, PermissionError)
-                or function not in {os.unlink, os.remove, os.rmdir}
-                or candidate.is_symlink()
-                or candidate.is_junction()
-                or not candidate.resolve(strict=False).is_relative_to(native_root)
-            ):
-                raise error
-            metadata = candidate.stat(follow_symlinks=False)
-            if metadata.st_mode & stat.S_IWRITE:
-                raise error
-            candidate.chmod(stat.S_IMODE(metadata.st_mode) | stat.S_IWRITE)
-            function(path)
-
-        shutil.rmtree(native_root, onexc=remove_readonly)
-    except FileNotFoundError:
-        pass
-    except Exception as exc:
-        # Cleanup is secondary. In particular, its PermissionError must not
-        # replace a checkout, scan, or publication error reported to the user.
+    except OSError as exc:
         log_event(
             logger,
             logging.ERROR,
@@ -1152,6 +1172,157 @@ def _remove_staging_directory(staging_path: Path) -> None:
             error=exc,
             error_code="staging_cleanup_failed",
         )
+        return
+    _remove_owned_tree(resolved, failure_event="git_staging_cleanup_failed")
+
+
+def _remove_publish_recovery(recovery: Path, target_parent: Path) -> None:
+    """Best-effort cleanup limited to this publication's private sibling tree."""
+
+    try:
+        expected_parent = target_parent.resolve()
+        if recovery.is_symlink() or recovery.is_junction():
+            return
+        resolved = recovery.resolve(strict=False)
+        if resolved.parent != expected_parent or not _PUBLISH_RECOVERY_NAME.fullmatch(
+            resolved.name
+        ):
+            return
+    except OSError as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "git_checkout_publish_recovery_cleanup_failed",
+            error=exc,
+            error_code="staging_cleanup_failed",
+        )
+        return
+    _remove_owned_tree(
+        resolved,
+        failure_event="git_checkout_publish_recovery_cleanup_failed",
+    )
+
+
+def _publish_wait(delay_seconds: float, heartbeat_callback: HeartbeatCallback) -> None:
+    """Wait in heartbeat-sized slices so publication retries remain cancellable."""
+
+    remaining = delay_seconds
+    while remaining > 0:
+        heartbeat_callback()
+        delay = min(remaining, _HEARTBEAT_INTERVAL_SECONDS)
+        time.sleep(delay)
+        remaining -= delay
+    heartbeat_callback()
+
+
+def _is_transient_publish_error(error: OSError) -> bool:
+    return _IS_WINDOWS and getattr(error, "winerror", None) in _WINDOWS_TRANSIENT_PUBLISH_ERRORS
+
+
+def _replace_checkout_with_retries(
+    source: Path,
+    target: Path,
+    *,
+    heartbeat_callback: HeartbeatCallback,
+) -> None:
+    """Rename one private checkout into an absent target with bounded lock retries."""
+
+    for attempt in range(len(_WINDOWS_PUBLISH_RETRY_DELAYS) + 1):
+        if os.path.lexists(target):
+            raise RepositorySyncError(
+                "destination_exists",
+                "The managed destination already exists. OWL left it unchanged.",
+            )
+        try:
+            os.replace(source, target)
+            return
+        except OSError as exc:
+            if not _is_transient_publish_error(exc) or attempt == len(
+                _WINDOWS_PUBLISH_RETRY_DELAYS
+            ):
+                raise
+            if attempt == 0:
+                emit_git_output(
+                    "The managed-folder move is temporarily blocked; OWL is retrying it safely.",
+                    operation="worker",
+                    level="warning",
+                )
+            log_event(
+                logger,
+                logging.WARNING,
+                "git_checkout_publish_retry",
+                error=exc,
+                retry_number=attempt + 1,
+                retries_remaining=len(_WINDOWS_PUBLISH_RETRY_DELAYS) - attempt,
+            )
+            _publish_wait(_WINDOWS_PUBLISH_RETRY_DELAYS[attempt], heartbeat_callback)
+
+
+def _copy_file_with_heartbeat(
+    source: str | os.PathLike[str],
+    target: str | os.PathLike[str],
+    *,
+    heartbeat_callback: HeartbeatCallback,
+) -> str:
+    """Copy a regular checkout file without leaving a long silent lease gap."""
+
+    with open(source, "rb") as source_handle, open(target, "wb") as target_handle:
+        while chunk := source_handle.read(_COPY_HEARTBEAT_BYTES):
+            target_handle.write(chunk)
+            heartbeat_callback()
+    shutil.copystat(source, target, follow_symlinks=True)
+    heartbeat_callback()
+    return os.fspath(target)
+
+
+def _recover_checkout_publication(
+    staging: Path,
+    target: Path,
+    *,
+    heartbeat_callback: HeartbeatCallback,
+) -> None:
+    """Copy to a private target-volume sibling, then publish that copy atomically."""
+
+    recovery = target.parent / f".owl-checkout-publish-{uuid.uuid4().hex}"
+    native_staging = filesystem_path(staging)
+    native_recovery = filesystem_path(recovery)
+    last_copy_heartbeat = 0.0
+
+    def copy_heartbeat() -> None:
+        nonlocal last_copy_heartbeat
+        observed_at = time.monotonic()
+        if observed_at - last_copy_heartbeat < _HEARTBEAT_INTERVAL_SECONDS:
+            return
+        heartbeat_callback()
+        last_copy_heartbeat = observed_at
+
+    try:
+        if os.path.lexists(filesystem_path(target)):
+            raise RepositorySyncError(
+                "destination_exists",
+                "The managed destination already exists. OWL left it unchanged.",
+            )
+        heartbeat_callback()
+        shutil.copytree(
+            native_staging,
+            native_recovery,
+            symlinks=True,
+            copy_function=lambda source, destination: _copy_file_with_heartbeat(
+                source,
+                destination,
+                heartbeat_callback=copy_heartbeat,
+            ),
+        )
+        heartbeat_callback()
+        _replace_checkout_with_retries(
+            native_recovery,
+            filesystem_path(target),
+            heartbeat_callback=heartbeat_callback,
+        )
+    except BaseException:
+        _remove_publish_recovery(recovery, target.parent)
+        raise
+    _remove_staging_directory(staging)
 
 
 def _publish_staged_checkout(
@@ -1160,49 +1331,107 @@ def _publish_staged_checkout(
     *,
     heartbeat_callback: HeartbeatCallback,
 ) -> None:
-    """Publish a new clone, briefly tolerating Windows sharing/permission locks."""
+    """Publish a clone with bounded lock retries and an atomic copy recovery."""
 
     native_staging = filesystem_path(staging)
     native_target = filesystem_path(target)
     try:
         native_target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        for attempt in range(len(_WINDOWS_PUBLISH_RETRY_DELAYS) + 1):
-            if os.path.lexists(native_target):
-                raise RepositorySyncError(
-                    "destination_exists",
-                    "The managed destination already exists. OWL left it unchanged.",
-                )
+    except OSError as exc:
+        log_event(logger, logging.ERROR, "git_checkout_publish_root_failed", error=exc)
+        raise RepositorySyncError(
+            "checkout_publish_failed",
+            "OWL could not prepare its managed repository folder. Check write and create-folder "
+            "permissions for the OWL data folder, then retry.",
+        ) from exc
+    try:
+        try:
+            _replace_checkout_with_retries(
+                native_staging,
+                native_target,
+                heartbeat_callback=heartbeat_callback,
+            )
+            return
+        except OSError as direct_error:
+            if direct_error.errno != errno.EXDEV and not _is_transient_publish_error(direct_error):
+                raise
+            reason = "cross_device" if direct_error.errno == errno.EXDEV else "transient_lock"
+            log_event(
+                logger,
+                logging.WARNING,
+                "git_checkout_publish_recovery_started",
+                error=direct_error,
+                reason=reason,
+            )
+            emit_git_output(
+                "The direct checkout move was blocked; OWL is making a private recovery copy.",
+                operation="worker",
+                level="warning",
+            )
             try:
-                os.replace(native_staging, native_target)
-                return
-            except OSError as exc:
-                if (
-                    not _IS_WINDOWS
-                    or getattr(exc, "winerror", None) not in {5, 32, 33}
-                    or attempt == len(_WINDOWS_PUBLISH_RETRY_DELAYS)
-                ):
-                    raise
+                _recover_checkout_publication(
+                    staging,
+                    target,
+                    heartbeat_callback=heartbeat_callback,
+                )
+            except RepositorySyncError:
+                raise
+            except OSError as recovery_error:
                 log_event(
                     logger,
                     logging.ERROR,
-                    "git_checkout_publish_retry",
-                    error=exc,
-                    retry_number=attempt + 1,
+                    "git_checkout_publish_recovery_failed",
+                    error=recovery_error,
+                    reason=reason,
                 )
-                # Keep the lease alive during a short antivirus/indexer lock.
-                remaining = _WINDOWS_PUBLISH_RETRY_DELAYS[attempt]
-                while remaining > 0:
-                    heartbeat_callback()
-                    delay = min(remaining, _HEARTBEAT_INTERVAL_SECONDS)
-                    time.sleep(delay)
-                    remaining -= delay
-                heartbeat_callback()
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "git_checkout_publish_failed",
+                    error=recovery_error,
+                    reason=reason,
+                )
+                if recovery_error.errno == errno.ENOSPC:
+                    summary = (
+                        "Git downloaded the checkout, but OWL did not have enough free space to "
+                        "make its private publication copy. Free space in the OWL data folder, "
+                        "then retry."
+                    )
+                elif reason == "cross_device":
+                    summary = (
+                        "OWL could not safely copy the downloaded checkout between the configured "
+                        "drives. Check available space and write permissions, then retry."
+                    )
+                else:
+                    summary = (
+                        "Git downloaded the checkout, but Windows kept its folder locked after "
+                        "OWL's bounded retries and private-copy recovery. Close Explorer preview "
+                        "windows, PDF tools, sync tools, or scanners using the OWL data folder, "
+                        "then retry."
+                    )
+                raise RepositorySyncError("checkout_publish_failed", summary) from recovery_error
+            emit_git_output(
+                "OWL recovered the checkout and published it to the managed folder.",
+                operation="worker",
+            )
+            log_event(
+                logger,
+                logging.INFO,
+                "git_checkout_publish_recovered",
+                reason=reason,
+            )
     except OSError as exc:
         log_event(logger, logging.ERROR, "git_checkout_publish_failed", error=exc)
         if exc.errno == errno.EXDEV:
             summary = (
-                "The downloaded checkout could not be moved into place because OWL's temporary "
-                "and repository folders are on different drives. Keep them on the same drive."
+                "OWL could not safely copy the downloaded checkout between the configured drives. "
+                "Check available space and write permissions, then retry."
+            )
+        elif _is_transient_publish_error(exc):
+            summary = (
+                "Git downloaded the checkout, but Windows kept its folder locked after OWL's "
+                "bounded retries and private-copy recovery. Close Explorer preview windows, PDF "
+                "tools, sync tools, or scanners using the OWL data folder, then retry."
             )
         else:
             summary = (

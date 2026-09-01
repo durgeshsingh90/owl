@@ -65,7 +65,7 @@ def test_selected_actions_are_post_only(local_client, selected_url):
     assert local_client.get(selected_url).status_code == 405
 
 
-@pytest.mark.parametrize("operation", ["refresh", "exclude", "remove"])
+@pytest.mark.parametrize("operation", ["refresh", "exclude", "stop_indexing", "remove"])
 @pytest.mark.parametrize(
     "ids",
     [
@@ -84,9 +84,14 @@ def test_selected_actions_are_post_only(local_client, selected_url):
 def test_invalid_whole_selection_cannot_mutate(
     local_client, selected_url, selected_repositories, monkeypatch, operation, ids
 ):
-    actions = [Mock() for _ in range(3)]
+    actions = [Mock() for _ in range(4)]
     for name, action in zip(
-        ("queue_repository_refresh", "set_repository_refresh_excluded", "remove_repository"),
+        (
+            "queue_repository_refresh",
+            "set_repository_refresh_excluded",
+            "cancel_repository_pdf_extractions",
+            "remove_repository",
+        ),
         actions,
         strict=True,
     ):
@@ -103,7 +108,7 @@ def test_invalid_whole_selection_cannot_mutate(
     assert BitbucketRepository.objects.count() == 3
 
 
-@pytest.mark.parametrize("operation", ["refresh", "exclude", "remove"])
+@pytest.mark.parametrize("operation", ["refresh", "exclude", "stop_indexing", "remove"])
 def test_unknown_id_blocks_entire_valid_selection(
     local_client, selected_url, selected_repositories, monkeypatch, operation
 ):
@@ -112,6 +117,7 @@ def test_unknown_id_blocks_entire_valid_selection(
     for name in (
         "queue_repository_refresh",
         "set_repository_refresh_excluded",
+        "cancel_repository_pdf_extractions",
         "remove_repository",
     ):
         monkeypatch.setattr(views, name, mutation)
@@ -140,7 +146,7 @@ def test_ambiguous_operation_or_policy_rejected(
     assert not BitbucketRepository.objects.filter(exclude_from_refresh=True).exists()
 
 
-@pytest.mark.parametrize("operation", ["refresh", "exclude", "remove"])
+@pytest.mark.parametrize("operation", ["refresh", "exclude", "stop_indexing", "remove"])
 @pytest.mark.parametrize(
     "origin,token,remote,allowed",
     [
@@ -166,6 +172,7 @@ def test_selected_actions_keep_csrf_and_strict_loopback(
     for name in (
         "queue_repository_refresh",
         "set_repository_refresh_excluded",
+        "cancel_repository_pdf_extractions",
         "remove_repository",
     ):
         monkeypatch.setattr(views, name, mutation)
@@ -302,11 +309,59 @@ def test_worker_wakeup_failure_keeps_selected_jobs_queued_and_reports_warning(
     assert RepositorySyncJob.objects.filter(status=RepositorySyncJobStatus.QUEUED).count() == 2
 
 
+def test_selected_stop_indexing_is_scoped_deduplicated_and_preserves_git(
+    local_client, selected_url, selected_repositories
+):
+    first, second, other = selected_repositories
+    jobs = []
+    for repository, status in (
+        (first, PDFExtractionJobStatus.QUEUED),
+        (second, PDFExtractionJobStatus.RUNNING),
+        (other, PDFExtractionJobStatus.RUNNING),
+    ):
+        document = PDFDocument.objects.create(
+            repository=repository,
+            filename=f"{repository.display_name}.pdf",
+            relative_path=f"{repository.display_name}.pdf",
+        )
+        jobs.append(
+            PDFExtractionJob.objects.create(
+                document=document,
+                status=status,
+                target_git_blob_id="a" * 40,
+                target_source_commit="b" * 40,
+                target_relative_path=document.relative_path,
+                target_extractor_version="test",
+            )
+        )
+    git_job = RepositorySyncJob.objects.create(
+        repository=first, status=RepositorySyncJobStatus.RUNNING
+    )
+
+    response = local_client.post(
+        selected_url,
+        _data((first, first, second), "stop_indexing"),
+        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "cancelled"
+    assert response.json()["completedIds"] == [first.pk, second.pk]
+    assert response.json()["cancelled"] == {"queued": 1, "running": 1, "total": 2}
+    for job in jobs[:2]:
+        job.refresh_from_db()
+        assert job.status == PDFExtractionJobStatus.CANCELLED
+    jobs[2].refresh_from_db()
+    git_job.refresh_from_db()
+    assert jobs[2].status == PDFExtractionJobStatus.RUNNING
+    assert git_job.status == RepositorySyncJobStatus.RUNNING
+
+
 @pytest.mark.parametrize(
     "operation,phase",
     [
         (operation, phase)
-        for operation in ("refresh", "remove")
+        for operation in ("refresh",)
         for phase in ("sync_queued", "sync_running", "pdf_queued", "pdf_running")
     ]
     + [("refresh", "disabled"), ("refresh", "removal")],
@@ -417,6 +472,59 @@ def test_confirmed_selected_removal_deletes_only_synthetic_selected_local_data(
     assert not paths[first.pk].exists() and not paths[second.pk].exists()
     assert (paths[other.pk] / "Guide.pdf").read_bytes() == b"synthetic test PDF"
     no_remote_operation.assert_not_called()
+
+
+def test_selected_removal_cancels_pdf_work_and_reports_active_git_per_repository(
+    local_client, selected_url, selected_repositories
+):
+    pdf_active, git_active, unselected = selected_repositories
+    paths = {}
+    for repository in (pdf_active, git_active):
+        checkout = managed_repository_path(repository)
+        (checkout / ".git").mkdir(parents=True)
+        (checkout / "Guide.pdf").write_bytes(b"synthetic test PDF")
+        repository.local_path = str(checkout)
+        repository.save(update_fields=("local_path",))
+        paths[repository.pk] = checkout
+    document = PDFDocument.objects.create(
+        repository=pdf_active,
+        filename="Guide.pdf",
+        relative_path="Guide.pdf",
+        file_size=(paths[pdf_active.pk] / "Guide.pdf").stat().st_size,
+        git_blob_id="a" * 40,
+        last_seen_commit="b" * 40,
+    )
+    PDFExtractionJob.objects.create(
+        document=document,
+        status=PDFExtractionJobStatus.RUNNING,
+        target_git_blob_id=document.git_blob_id,
+        target_source_commit=document.last_seen_commit,
+        target_relative_path=document.relative_path,
+        target_file_size=document.file_size,
+        target_extractor_version="test",
+    )
+    RepositorySyncJob.objects.create(
+        repository=git_active,
+        status=RepositorySyncJobStatus.RUNNING,
+    )
+
+    response = local_client.post(
+        selected_url,
+        _data((pdf_active, git_active), "remove", confirmed="yes"),
+        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+    )
+
+    assert response.status_code == 409
+    assert response.json()["removedIds"] == [pdf_active.pk]
+    assert response.json()["remainingIds"] == [git_active.pk]
+    assert response.json()["failures"][0]["code"] == "repository_busy"
+    assert not paths[pdf_active.pk].exists()
+    assert paths[git_active.pk].exists()
+    assert set(BitbucketRepository.objects.values_list("pk", flat=True)) == {
+        git_active.pk,
+        unselected.pk,
+    }
+    assert not RepositoryRemovalRecovery.objects.filter(repository_id=git_active.pk).exists()
 
 
 @pytest.mark.parametrize("async_request", [False, True])

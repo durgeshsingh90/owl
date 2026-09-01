@@ -160,8 +160,8 @@ Bitbucket Search now provides repository registration and durable background syn
 - keep the existing newest-first Today, Yesterday, week, month, six-month, current-year, last-year,
   and older-year timeline when no search is active, using the original Git addition's commit
   date, not the date OWL discovered the PDF. The column is labelled "Date added to repo";
-  PDFs whose original addition is outside available history show "Unavailable" and appear
-  after dated PDFs in "Repo date unavailable";
+  PDFs whose original addition is outside available history show their OWL discovery date with
+  the visible source **First seen by OWL**, while confirmed dates show **Git addition**;
 - display 100 PDFs per page by default (also capped at 100 for legacy larger page-size links).
   Use the page-navigation links to browse older results; scrolling does not append more rows;
 - keep the current page and saved theme stable during background work. Status updates live,
@@ -314,6 +314,14 @@ during that day's cycle. Repository and PDF worker limits are configured indepen
 `BITBUCKET_MAX_REPO_WORKERS` and `PDF_MAX_EXTRACTION_WORKERS`.
 The PDF limit is global, auto-sized up to four by default, and permits concurrent PDFs
 from the same repository. A different repository can index while another downloads.
+The Repository logs page shows the configured limit, active workers, every durable PDF
+attempt, and the retained redacted Git clone/refresh output. Select a repository there and use
+**Stop indexing now** to cancel its queued attempts and revoke active parser leases; an active
+isolated parser is terminated when its next one-second heartbeat observes the revoked lease.
+The same repository-scoped action is available from the sidebar selection toolbar.
+On a high-memory machine,
+`PDF_MAX_EXTRACTION_WORKERS` can be set from 5 through 8; values above 8 are rejected because
+each isolated parser can use substantial memory and SQLite still publishes through one writer.
 Only short queue/publication writes are serialized; PDF parsing stays parallel.
 Restart OWL and all background workers after upgrading so every process uses the new
 shared-reader/exclusive-writer checkout locking.
@@ -386,15 +394,22 @@ the **🔒** button once to unlock it (**🔓**). Clicking that same button agai
 deletes the selected repositories immediately, without another confirmation page. This removes
 their managed local checkouts, retained PDF copies, repository records, commit history, document
 records, jobs, and indexed text that no other PDF uses. The remote repository is never changed.
-The button relocks after 10 seconds, when the selection changes, or when selected repository work
-starts or its status cannot be verified. Removal is blocked while
-that repository has queued or running sync or extraction work. If local cleanup fails, OWL
+The button relocks after 10 seconds, when the selection changes, after submission/page restore,
+or when status cannot be verified. Starting or finishing repository work does not turn this
+accidental-delete guard into a worker lock. Removal is not UI-locked by PDF indexing: OWL first
+cancels that repository's queued and running PDF attempts, waits briefly for active parsers to
+release the checkout, and then removes it. Active Git clone/refresh work is not killed; the
+removal request returns a retryable conflict for only that repository. If local cleanup fails, OWL
 keeps a recovery record and offers **Retry removal** instead of claiming that deletion finished.
 This is ordinary local deletion, not a secure erase of backups, application logs, or disk history.
 
 The top-bar **Refresh all repositories** control is icon-only, with its name on hover. While Git
 or PDF workers are active, it becomes a loading indicator and cannot queue another global refresh.
-Running repositories continue to show their elapsed worker timers in the sidebar.
+The separate **Repository logs** control replaces its idle terminal icon with distinct Clone, Pull,
+and Indexing chips while those operations run; each chip shows honest progress (or a queued/running
+state when no percentage exists) and a live elapsed timer from the real worker start. Affected
+repository cards use the matching operation icon, progress bar, and timer. Running repositories
+continue to show their elapsed worker timers in the sidebar.
 
 Run migrations and restart OWL/workers after upgrading. Existing per-PDF exclusions migrate
 to their parent repository. Their frozen copies stay readable until a successful explicit

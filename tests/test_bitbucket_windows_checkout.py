@@ -199,21 +199,24 @@ def test_persistent_windows_publish_failure_is_classified_and_bounded(
 
     assert captured.value.code == "checkout_publish_failed"
     assert captured.value.__cause__ is failure
-    assert replace.call_count == len(git_sync._WINDOWS_PUBLISH_RETRY_DELAYS) + 1
+    # One bounded series for the original tree and one for the private copy.
+    assert replace.call_count == 2 * (len(git_sync._WINDOWS_PUBLISH_RETRY_DELAYS) + 1)
     assert staging.is_dir()
     assert not target.exists()
+    assert not list(tmp_path.glob(".owl-checkout-publish-*"))
+    assert "private-copy recovery" in captured.value.summary
+    assert "event=git_checkout_publish_recovery_started" in events.text
+    assert "event=git_checkout_publish_recovery_failed" in events.text
     assert "event=git_checkout_publish_failed" in events.text
     assert "winerror=5" in events.text
     assert "private checkout path" not in events.text
 
 
-@pytest.mark.parametrize(
-    "failure", [OSError(errno.EXDEV, "private"), OSError(errno.ENOSPC, "private")]
-)
-def test_non_transient_publish_failure_is_not_retried(tmp_path, monkeypatch, failure):
+def test_non_transient_publish_failure_is_not_retried(tmp_path, monkeypatch):
     staging = tmp_path / "staging"
     staging.mkdir()
     monkeypatch.setattr(git_sync, "_IS_WINDOWS", True)
+    failure = OSError(errno.ENOSPC, "private")
     replace = Mock(side_effect=failure)
     monkeypatch.setattr(git_sync.os, "replace", replace)
     sleep = Mock()
@@ -223,6 +226,162 @@ def test_non_transient_publish_failure_is_not_retried(tmp_path, monkeypatch, fai
     assert captured.value.code == "checkout_publish_failed"
     replace.assert_called_once()
     sleep.assert_not_called()
+
+
+def test_publish_root_permission_failure_is_actionable_and_preserves_staging(
+    tmp_path, monkeypatch, events
+):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "guide.pdf").write_bytes(b"synthetic PDF")
+    target = tmp_path / "repositories" / "checkout"
+    failure = _windows_error(5)
+    monkeypatch.setattr(Path, "mkdir", Mock(side_effect=failure))
+    replace = Mock()
+    monkeypatch.setattr(git_sync.os, "replace", replace)
+
+    with pytest.raises(git_sync.RepositorySyncError) as captured:
+        git_sync._publish_staged_checkout(staging, target, heartbeat_callback=Mock())
+
+    assert captured.value.code == "checkout_publish_failed"
+    assert captured.value.__cause__ is failure
+    assert "prepare its managed repository folder" in captured.value.summary
+    assert (staging / "guide.pdf").read_bytes() == b"synthetic PDF"
+    replace.assert_not_called()
+    assert "event=git_checkout_publish_root_failed" in events.text
+    assert "private checkout path" not in events.text
+
+
+def test_cross_device_publish_uses_private_copy_then_atomic_sibling_move(
+    tmp_path, settings, monkeypatch, events
+):
+    staging = _staging(tmp_path, settings)
+    (staging / "guide.pdf").write_bytes(b"synthetic PDF")
+    outside = tmp_path / "outside.pdf"
+    outside.write_bytes(b"outside")
+    (staging / "linked.pdf").symlink_to(outside)
+    target = tmp_path / "repositories" / "checkout"
+    real_replace = os.replace
+    calls = []
+
+    def cross_device_then_replace(source, destination):
+        calls.append((Path(source), Path(destination)))
+        if len(calls) == 1:
+            raise OSError(errno.EXDEV, "private checkout path")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(git_sync.os, "replace", cross_device_then_replace)
+    heartbeat = Mock()
+
+    git_sync._publish_staged_checkout(staging, target, heartbeat_callback=heartbeat)
+
+    assert (target / "guide.pdf").read_bytes() == b"synthetic PDF"
+    assert (target / "linked.pdf").is_symlink()
+    assert not staging.exists()
+    assert not list(target.parent.glob(".owl-checkout-publish-*"))
+    assert len(calls) == 2
+    assert heartbeat.call_count >= 3
+    assert "event=git_checkout_publish_recovered" in events.text
+    assert "reason=cross_device" in events.text
+    assert "private checkout path" not in events.text
+
+
+def test_persistent_source_lock_recovers_by_publishing_an_unlocked_private_copy(
+    tmp_path, settings, monkeypatch, events
+):
+    staging = _staging(tmp_path, settings)
+    (staging / "guide.pdf").write_bytes(b"synthetic PDF")
+    target = tmp_path / "repositories" / "checkout"
+    real_replace = os.replace
+    source_failure = _windows_error(32)
+    calls = []
+    output = Mock()
+    monkeypatch.setattr(git_sync, "_IS_WINDOWS", True)
+    monkeypatch.setattr(git_sync, "_WINDOWS_PUBLISH_RETRY_DELAYS", ())
+    monkeypatch.setattr(git_sync, "emit_git_output", output)
+
+    def locked_source_then_replace(source, destination):
+        calls.append((Path(source), Path(destination)))
+        if Path(source) == staging:
+            raise source_failure
+        real_replace(source, destination)
+
+    monkeypatch.setattr(git_sync.os, "replace", locked_source_then_replace)
+
+    git_sync._publish_staged_checkout(staging, target, heartbeat_callback=Mock())
+
+    assert (target / "guide.pdf").read_bytes() == b"synthetic PDF"
+    assert not staging.exists()
+    assert len(calls) == 2
+    assert "event=git_checkout_publish_recovered" in events.text
+    assert "reason=transient_lock" in events.text
+    assert "winerror=32" in events.text
+    assert [call.args[0] for call in output.call_args_list] == [
+        "The direct checkout move was blocked; OWL is making a private recovery copy.",
+        "OWL recovered the checkout and published it to the managed folder.",
+    ]
+
+
+def test_failed_cross_device_copy_preserves_source_and_cleans_partial_private_copy(
+    tmp_path, settings, monkeypatch, events
+):
+    staging = _staging(tmp_path, settings)
+    (staging / "guide.pdf").write_bytes(b"synthetic PDF")
+    target = tmp_path / "repositories" / "checkout"
+    target.parent.mkdir(parents=True)
+    monkeypatch.setattr(
+        git_sync.os,
+        "replace",
+        Mock(side_effect=OSError(errno.EXDEV, "private checkout path")),
+    )
+
+    def fail_copy(_source, destination, **_kwargs):
+        Path(destination).mkdir()
+        (Path(destination) / "partial").write_bytes(b"partial")
+        raise OSError(errno.ENOSPC, "private recovery path")
+
+    monkeypatch.setattr(git_sync.shutil, "copytree", fail_copy)
+
+    with pytest.raises(git_sync.RepositorySyncError) as captured:
+        git_sync._publish_staged_checkout(staging, target, heartbeat_callback=Mock())
+
+    assert captured.value.code == "checkout_publish_failed"
+    assert "enough free space" in captured.value.summary
+    assert staging.is_dir()
+    assert (staging / "guide.pdf").read_bytes() == b"synthetic PDF"
+    assert not target.exists()
+    assert not list(target.parent.glob(".owl-checkout-publish-*"))
+    assert "event=git_checkout_publish_recovery_failed" in events.text
+    assert "errno=28" in events.text
+    assert "private checkout path" not in events.text
+    assert "private recovery path" not in events.text
+
+
+def test_cross_device_recovery_never_overwrites_a_destination_created_during_handoff(
+    tmp_path, settings, monkeypatch
+):
+    staging = _staging(tmp_path, settings)
+    (staging / "guide.pdf").write_bytes(b"synthetic PDF")
+    target = tmp_path / "repositories" / "checkout"
+
+    def destination_appears(_source, _destination):
+        target.mkdir(parents=True)
+        (target / "preserve.txt").write_text("preserve")
+        raise OSError(errno.EXDEV, "private checkout path")
+
+    replace = Mock(side_effect=destination_appears)
+    copytree = Mock()
+    monkeypatch.setattr(git_sync.os, "replace", replace)
+    monkeypatch.setattr(git_sync.shutil, "copytree", copytree)
+
+    with pytest.raises(git_sync.RepositorySyncError) as captured:
+        git_sync._publish_staged_checkout(staging, target, heartbeat_callback=Mock())
+
+    assert captured.value.code == "destination_exists"
+    assert (target / "preserve.txt").read_text() == "preserve"
+    assert (staging / "guide.pdf").read_bytes() == b"synthetic PDF"
+    replace.assert_called_once()
+    copytree.assert_not_called()
 
 
 def test_publish_does_not_overwrite_a_destination_that_appears_during_retry(tmp_path, monkeypatch):

@@ -5,7 +5,7 @@
 {% block theme_default %}dark{% endblock %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=repository-delete-two-click-v2">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=repository-activity-v1">
 {% endblock %}
 
 {% block app_header %}{% endblock %}
@@ -220,7 +220,7 @@
                 {% if not repositories %}<p>No repositories are connected yet.</p>{% endif %}
                 <nav aria-label="Bitbucket Search mobile functions">
                     <a href="{% url 'bitbucket_search:repositories' %}"{% if active_section == "repositories" %} aria-current="page"{% endif %}>Repositories</a>
-                    <a href="{% url 'bitbucket_search:index_status' %}">Sync status</a>
+                    <a href="{% url 'bitbucket_search:index_status' %}">Repository logs</a>
                 </nav>
             </div>
         </details>
@@ -458,7 +458,7 @@
                                                     {% if search_query.has_query and not search_index_available %}
                                                     <span class="bb-planned-label">Search index unavailable</span>
                                                     <h2>PDF search cannot run yet</h2>
-                                                    <p>The repository inventory remains available. Check indexing status, then retry this bookmarked query.</p>
+                                                    <p>The repository inventory remains available. Check the repository logs, then retry this bookmarked query.</p>
                                                     {% elif extraction_payload.active or extraction_status.pending_documents %}
                                                     <span class="bb-planned-label">Indexing is still publishing text</span>
                                                     <h2>No published PDF matches yet</h2>
@@ -474,7 +474,7 @@
                                                     {% if repositories and extraction_payload.active %}
                                                     <p>The background workers are downloading repository content and indexing discovered PDFs. This page will update as text is published.</p>
                                                     {% elif repositories %}
-                                                    <p>No active PDF has been discovered in the connected repositories yet. Refresh a repository or review worker status for errors.</p>
+                                                    <p>No active PDF has been discovered in the connected repositories yet. Refresh a repository or review the repository logs for errors.</p>
                                                     {% else %}
                                                     <p>Add an approved repository. Clone, refresh, PDF extraction, and indexing all happen outside this web request.</p>
                                                     {% endif %}
@@ -488,7 +488,7 @@
                                             {% else %}
                                             <a class="bb-primary-link" href="{% url 'bitbucket_search:repositories' %}#bb-add-repository">Add Repository</a>
                                             {% endif %}
-                                            <a href="{% url 'bitbucket_search:index_status' %}">View indexing status <span aria-hidden="true">→</span></a>
+                                            <a href="{% url 'bitbucket_search:index_status' %}">View repository logs <span aria-hidden="true">→</span></a>
                                         </div>
 
                                         <div class="bb-planned-context">
@@ -556,6 +556,6 @@
 {% block global_status %}{% endblock %}
 
 {% block scripts %}
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-delete-two-click-v2" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-activity-v1" defer></script>
 <script src="{% static 'bitbucket_search/people_sort.js' %}?v=people-sort-v1" defer></script>
 {% endblock %}

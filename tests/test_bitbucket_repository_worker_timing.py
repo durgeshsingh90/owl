@@ -131,6 +131,11 @@ def test_sync_timer_keeps_its_start_across_download_and_catalogue_phases():
             "observedAt": NOW.isoformat(),
             "label": label,
             "kind": "sync",
+            "operation": "clone",
+            "phase": phase,
+            "phaseLabel": label,
+            "progress": 0,
+            "progressScope": "job",
         }
 
 
@@ -153,6 +158,11 @@ def test_finished_sync_clears_timer_and_next_refresh_uses_a_new_start():
         "observedAt": NOW.isoformat(),
         "label": "Refreshing",
         "kind": "sync",
+        "operation": "pull",
+        "phase": "fetching",
+        "phaseLabel": "Refreshing",
+        "progress": 0,
+        "progressScope": "job",
     }
 
 
@@ -173,6 +183,11 @@ def test_longest_running_current_pdf_worker_is_used_after_sync_and_stops_when_fi
         "observedAt": NOW.isoformat(),
         "label": "Indexing PDFs",
         "kind": "indexing",
+        "operation": "indexing",
+        "phase": "extracting",
+        "phaseLabel": "Indexing PDFs",
+        "progress": 0,
+        "progressScope": "running_workers_average",
     }
     first.status = PDFExtractionJobStatus.SUCCEEDED
     first.save(update_fields=("status",))
@@ -283,6 +298,11 @@ def test_timer_contract_is_published_in_rail_endpoint_notification_endpoint_and_
         "observedAt": NOW.isoformat(),
         "label": "Downloading",
         "kind": "sync",
+        "operation": "clone",
+        "phase": "cloning",
+        "phaseLabel": "Downloading",
+        "progress": 0,
+        "progressScope": "job",
     }
     response = client.get(reverse("bitbucket_search:repository_status"))
     assert response.status_code == 200

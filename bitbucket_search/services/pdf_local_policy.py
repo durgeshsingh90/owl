@@ -20,18 +20,25 @@ from bitbucket_search.models import (
     BitbucketRepository,
     PDFDocument,
     PDFDocumentLifecycle,
+    PDFExtractionJob,
     PDFExtractionJobStatus,
     PDFLocalPolicy,
     PDFLocalPolicyState,
     PDFTextRevision,
+    RepositoryOperationLogChannel,
+    RepositoryOperationLogEntry,
+    RepositoryOperationLogSeverity,
     RepositorySyncJobStatus,
     RepositorySyncState,
 )
 from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
+from bitbucket_search.services.operation_logs import build_operation_log_entry
 from bitbucket_search.services.repository_lock import (
     RepositoryCheckoutBusy,
+    pdf_extraction_claim_lock,
     repository_checkout_lock,
 )
+from bitbucket_search.services.repository_sync import reserve_repository_write
 
 if TYPE_CHECKING:
     from bitbucket_search.services.document_actions import DocumentActionError
@@ -287,12 +294,53 @@ def _locked_document(document_id: int) -> tuple[PDFDocument, BitbucketRepository
             "pdf_extraction_busy",
             "Wait for this PDF's text extraction to finish before changing it.",
         )
-    document.extraction_jobs.filter(status=PDFExtractionJobStatus.QUEUED).update(
-        status=PDFExtractionJobStatus.CANCELLED,
-        completed_at=timezone.now(),
-        error_code="pdf_local_policy_changed",
-        error_summary="This PDF's local refresh rule changed before extraction started.",
+    observed_at = timezone.now()
+    queued_jobs = tuple(
+        PDFExtractionJob.objects.select_for_update()
+        .filter(document=document, status=PDFExtractionJobStatus.QUEUED)
+        .order_by("id")
+        .values(
+            "id",
+            "repository_sync_job_id",
+            "phase",
+            "progress",
+            "worker_pid",
+        )
     )
+    if queued_jobs:
+        queued_ids = tuple(job["id"] for job in queued_jobs)
+        updated = PDFExtractionJob.objects.filter(
+            pk__in=queued_ids,
+            status=PDFExtractionJobStatus.QUEUED,
+        ).update(
+            status=PDFExtractionJobStatus.CANCELLED,
+            completed_at=observed_at,
+            error_code="pdf_local_policy_changed",
+            error_summary="This PDF's local refresh rule changed before extraction started.",
+        )
+        if updated != len(queued_ids):
+            # The checkout gate, claim gate, row locks, and SQLite writer
+            # reservation make this defensive. Roll back rather than publish a
+            # local policy whose queue transition is ambiguous.
+            raise DatabaseError("The queued PDF extraction transition changed concurrently.")
+        RepositoryOperationLogEntry.objects.bulk_create(
+            [
+                build_operation_log_entry(
+                    repository_id=document.repository_id,
+                    sync_job_id=job["repository_sync_job_id"],
+                    extraction_job_id=job["id"],
+                    channel=RepositoryOperationLogChannel.INDEXING,
+                    severity=RepositoryOperationLogSeverity.WARNING,
+                    phase=job["phase"],
+                    event="indexing_cancelled",
+                    message=("PDF indexing was cancelled because its local refresh rule changed."),
+                    progress=job["progress"],
+                    worker_pid=job["worker_pid"],
+                    occurred_at=observed_at,
+                )
+                for job in queued_jobs
+            ]
+        )
     return document, repository
 
 
@@ -341,7 +389,16 @@ def _change_pdf(document_id: int, *, delete: bool) -> PDFDocument | None:
         with repository_checkout_lock(repository_id, blocking=False):
             try:
                 with transaction.atomic(durable=True):
-                    document, repository = _locked_document(document_id)
+                    # Hold the global claim gate only around the queue
+                    # transition, not the following snapshot and Git work.
+                    # The open transaction keeps the job/document rows stable
+                    # until the complete policy change commits.
+                    with pdf_extraction_claim_lock():
+                        # Reserve SQLite's writer before _locked_document reads
+                        # the queue. A simultaneous sweep then waits and observes
+                        # the completed transition instead of duplicating it.
+                        reserve_repository_write()
+                        document, repository = _locked_document(document_id)
                     policy = (
                         PDFLocalPolicy.objects.select_for_update().filter(document=document).first()
                     )
@@ -525,7 +582,9 @@ def _resume_registered_pdf(document_id: int) -> PDFDocument:
             repository_checkout_lock(_repository_id(document_id), blocking=False),
             transaction.atomic(durable=True),
         ):
-            document, _repository = _locked_document(document_id)
+            with pdf_extraction_claim_lock():
+                reserve_repository_write()
+                document, _repository = _locked_document(document_id)
             policy = PDFLocalPolicy.objects.select_for_update().filter(document=document).first()
             if policy is None:
                 log_event(

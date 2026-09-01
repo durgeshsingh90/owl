@@ -133,6 +133,11 @@ def test_active_sync_phase_is_reported_without_loading_output(
     assert repository.activity["label"] == label
     assert repository.activity["detail"] == label
     assert repository.activity["kind"] == "sync"
+    assert repository.activity["operation"] == (
+        "clone" if operation == RepositorySyncOperation.CLONE else "pull"
+    )
+    assert repository.activity["progress"] == 0
+    assert repository.activity["operations"][0]["phaseLabel"] == label
     assert repository.activity["runningSyncJobs"] == 1
     summary = repository_work_summary((repository,))
     assert summary["label"] == label
@@ -149,6 +154,9 @@ def test_waiting_sync_has_queue_label_without_inventing_running_worker():
     assert repository.activity["queuedSyncJobs"] == 1
     assert repository.activity["runningSyncJobs"] == 0
     assert repository.activity["detail"] == "Git sync queued"
+    assert repository.activity["operation"] == "pull"
+    assert repository.activity["progress"] is None
+    assert repository.activity["operations"][0]["phaseLabel"] == "Git pull queued"
 
 
 @pytest.mark.parametrize("status", [PDFExtractionJobStatus.QUEUED, PDFExtractionJobStatus.RUNNING])
@@ -248,6 +256,7 @@ def test_completed_failed_and_cancelled_jobs_do_not_keep_work_spinner_active():
         "activeRepositories": 0,
         "queuedPdfs": 0,
         "runningPdfs": 0,
+        "activities": [],
     }
 
 
@@ -268,6 +277,14 @@ def test_summary_is_bounded_to_two_repositories_and_two_labels_but_counts_all_jo
     )
     assert summary["activeRepositories"] == 4
     assert summary["queuedPdfs"] == summary["runningPdfs"] == 1
+    assert [activity["operation"] for activity in summary["activities"]] == [
+        "clone",
+        "pull",
+        "indexing",
+    ]
+    assert summary["activities"][0]["progress"] == 0
+    assert summary["activities"][2]["queuedJobs"] == 1
+    assert summary["activities"][2]["runningJobs"] == 1
 
 
 def test_active_summary_skips_idle_repositories_and_deduplicates_phase_labels():
@@ -315,7 +332,13 @@ def test_initial_context_and_status_poll_agree_for_git_ready_with_pdf_work(clien
     payload = response.json()
 
     assert initial.status_code == response.status_code == 200
-    assert initial.context["repository_work_summary"] == payload["work"]
+    initial_work = initial.context["repository_work_summary"]
+    assert initial_work["label"] == payload["work"]["label"]
+    assert initial_work["activeRepositories"] == payload["work"]["activeRepositories"]
+    for work in (initial_work, payload["work"]):
+        assert work["activities"][0]["operation"] == "indexing"
+        assert work["activities"][0]["progress"] == 0
+        assert work["activities"][0]["startedAt"]
     assert payload["repositories"][0]["activity"]["phase"] == "extracting"
     assert payload["repositories"][0]["state"] == RepositorySyncState.READY
     assert payload["work"]["label"] == "Extracting PDF text"
@@ -329,3 +352,22 @@ def test_empty_work_summary_is_read_only_and_idle(django_assert_num_queries):
         summary = repository_work_summary(())
     assert not summary["active"]
     assert summary["label"] == "Idle"
+
+
+def test_parallel_pdf_progress_is_explicitly_the_running_worker_average():
+    repository = _repository()
+    _pdf_job(repository, PDFExtractionJobStatus.RUNNING, progress=25)
+    _pdf_job(repository, PDFExtractionJobStatus.RUNNING, progress=75)
+    _pdf_job(repository, PDFExtractionJobStatus.QUEUED, progress=0)
+
+    with_repository_activity((repository,))
+
+    activity = repository.activity
+    assert activity["operation"] == "indexing"
+    assert activity["progress"] == 50
+    assert activity["progressScope"] == "running_workers_average"
+    assert activity["operations"][0]["queuedJobs"] == 1
+    assert activity["operations"][0]["runningJobs"] == 2
+    summary = repository_work_summary((repository,))["activities"][0]
+    assert summary["progress"] == 50
+    assert summary["progressScope"] == "running_jobs_average"

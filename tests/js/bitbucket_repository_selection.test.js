@@ -117,6 +117,7 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
     const makeControls = () => ({
         refresh: element("data-selected-refresh", { type: "submit", name: "operation", value: "refresh", disabled: "" }, "button"),
         exclude: element("data-selected-exclude", { type: "submit", name: "operation", value: "exclude", disabled: "" }, "button"),
+        stop: element("data-selected-stop-indexing", { type: "submit", name: "operation", value: "stop_indexing", disabled: "" }, "button"),
         remove: element("data-selected-remove", { type: "submit", name: "operation", value: "remove", disabled: "", "data-delete-locked": "true" }, "button"),
         deleteIcon: element("data-selected-delete-lock-icon", {}, "span"),
         excluded: element("data-selected-excluded-value", { type: "hidden", name: "excluded", value: "yes" }, "input"),
@@ -134,7 +135,7 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
         copy.refresh.appendChild(copy.spinner);
         copy.deleteIcon.textContent = "🔒";
         copy.remove.appendChild(copy.deleteIcon);
-        [copy.refresh, copy.exclude, copy.remove, copy.excluded, copy.count].forEach((node) => form.appendChild(node));
+        [copy.refresh, copy.exclude, copy.stop, copy.remove, copy.excluded, copy.count].forEach((node) => form.appendChild(node));
     });
     const global = {
         button: element("data-refresh-all-button", {}, "button"),
@@ -170,6 +171,7 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
             "data-repository-state": repo.active ? "fetching" : "ready",
             "data-repository-active-sync": String(Boolean(repo.active)),
             "data-repository-active-work": String(Boolean(repo.active || repo.work)),
+            "data-repository-pdf-indexing-active": String(Boolean(repo.pdf)),
             "data-repository-refresh-excluded": String(Boolean(repo.excluded)),
             "data-repository-removal-pending": String(Boolean(repo.removal)),
             "data-repository-search-value": `Repository ${repo.id}`,
@@ -181,14 +183,23 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
         const timer = element("data-repository-worker-timer", { hidden: "" });
         const stateIcon = element("data-repository-state-icon");
         const workLabel = element("data-repository-work-label", { hidden: "" });
+        const progressContainer = element("data-repository-progress", { hidden: "" });
+        const progressBar = element("data-repository-progress-bar", { max: "100" }, "progress");
+        const progressLabel = element("data-repository-progress-label", {}, "small");
+        progressContainer.appendChild(progressBar);
+        progressContainer.appendChild(progressLabel);
         card.appendChild(checkbox);
         card.appendChild(timer);
         card.appendChild(stateIcon);
         card.appendChild(workLabel);
+        card.appendChild(progressContainer);
         card.appendChild(element("data-repository-documents"));
         card.appendChild(element("data-repository-exclusion"));
         workspace.appendChild(card);
-        return { card, checkbox, timer, stateIcon, workLabel };
+        return {
+            card, checkbox, timer, stateIcon, workLabel,
+            progressContainer, progressBar, progressLabel,
+        };
     });
     const document = new Element("document", {}, [workspace]);
     document.getElementById = (id) => document.querySelector(`#${id}`);
@@ -279,7 +290,7 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
 
 test("selection enables a single locked delete control that arms on its first click", () => {
     const page = boot();
-    for (const action of ["refresh", "exclude", "remove"]) assert.equal(page.controls[action].disabled, true);
+    for (const action of ["refresh", "exclude", "stop", "remove"]) assert.equal(page.controls[action].disabled, true);
     page.select(0);
     assert.equal(page.controls.refresh.disabled, false);
     assert.equal(page.controls.exclude.disabled, false);
@@ -306,7 +317,7 @@ test("selection enables a single locked delete control that arms on its first cl
     assert.match(page.controls.count.textContent, /2/);
     page.select(0, false);
     page.select(1, false);
-    for (const action of ["refresh", "exclude", "remove"]) {
+    for (const action of ["refresh", "exclude", "stop", "remove"]) {
         assert.equal(page.controls[action].disabled, true, `${action} requires a selection`);
     }
 });
@@ -424,13 +435,13 @@ test("status polling and unrelated repository work neither relock nor extend cur
     assert.equal(page.controls.remove.dataset.deleteLocked, "true");
 });
 
-test("restoring a page revokes earlier unlock consent and waits for fresh repository status", async () => {
+test("restoring a page revokes earlier consent without hiding a fresh delete unlock", async () => {
     const page = boot();
     page.select(0);
     page.unlock();
     await page.pageshow();
     assert.equal(page.controls.remove.dataset.deleteLocked, "true");
-    assert.equal(page.controls.remove.disabled, true);
+    assert.equal(page.controls.remove.disabled, false);
     assert.equal(page.deleteTimers().length, 0);
     assert.equal(page.submit("remove").defaultPrevented, true);
     await page.poll();
@@ -501,6 +512,13 @@ test("native operation submits retain checked repository IDs and enforce the del
         assert.equal(page.form.querySelector('input[name="confirmed"]'), null, "Refresh and exclude never carry deletion confirmation");
         assert.equal(page.global.button.disabled, true, "Duplicate global submission is prevented");
     }
+    const stopping = boot({ repositories: [{ id: 1, pdf: true }] });
+    stopping.select(0);
+    const stopEvent = stopping.submit("stop");
+    assert.equal(stopEvent.defaultPrevented, false, "Stop indexing posts through the selected repository form");
+    assert.equal(stopping.form.querySelector('input[name="operation"]').value, "stop_indexing");
+    assert.equal(stopping.form.querySelector('input[name="confirmed"]'), null, "Stopping indexing never carries deletion confirmation");
+    assert.deepEqual(stopping.cards.filter(({ checkbox }) => checkbox.checked).map(({ checkbox }) => checkbox.value), ["1"]);
 });
 
 test("restoring a submitted deletion clears its confirmation before another action", async () => {
@@ -530,22 +548,23 @@ test("expired unlock never creates a deletion confirmation", () => {
     assert.equal(page.form.querySelector('input[name="confirmed"]'), null);
 });
 
-test("new Git or PDF work relocks selection and replaces the global refresh icon with a spinner", async () => {
-    for (const work of [
-        { active: true, hasActiveWork: true, state: "fetching" },
-        { active: false, hasActiveWork: true },
+test("new Git or PDF work leaves accidental-delete consent intact and animates refresh", async () => {
+    for (const [work, activity, stopEnabled] of [
+        [{ active: true, hasActiveWork: true, state: "fetching" }, { queuedPdfs: 0, runningPdfs: 0 }, false],
+        [{ active: false, hasActiveWork: true }, { queuedPdfs: 2, runningPdfs: 1 }, true],
     ]) {
         const page = boot();
         page.select(0);
         page.unlock();
         const timer = page.cards[0].timer;
         const timing = { active: true, label: work.active ? "Refreshing" : "Reading PDFs", startedAt: "2026-08-30T11:00:00Z" };
-        await page.poll({ overrides: { 1: { ...work, workerTiming: timing } } });
-        assert.equal(page.controls.remove.disabled, true);
-        assert.equal(page.controls.remove.dataset.deleteLocked, "true");
-        assert.equal(page.controls.deleteIcon.textContent, "🔒");
-        assert.equal(page.deleteTimers().length, 0);
-        assert.match(page.controls.remove.title, /workers to finish/i);
+        await page.poll({ overrides: { 1: { ...work, activity, workerTiming: timing } } });
+        assert.equal(page.controls.remove.disabled, false);
+        assert.equal(page.controls.remove.dataset.deleteLocked, "false");
+        assert.equal(page.controls.deleteIcon.textContent, "🔓");
+        assert.equal(page.deleteTimers().length, 1);
+        assert.match(page.controls.remove.title, /click again to delete/i);
+        assert.equal(page.controls.stop.disabled, !stopEnabled);
         assert.equal(page.global.button.disabled, true);
         assert.equal(page.global.spinner.hidden, false);
         assert.equal(page.global.icon.hidden, true);
@@ -561,6 +580,27 @@ test("new Git or PDF work relocks selection and replaces the global refresh icon
         assert.equal(page.controls.icon.hasAttribute("hidden"), false, "Selected refresh SVG becomes visible after workers finish");
         assert.equal(page.global.spinner.hidden, true);
         assert.equal(page.controls.spinner.hidden, true);
+        assert.equal(page.controls.remove.dataset.deleteLocked, "false", "Worker completion does not rewrite the user's consent timer");
+    }
+});
+
+test("queued and running PDF indexing can be stopped or deleted without a worker UI lock", async () => {
+    for (const activity of [
+        { active: true, queuedPdfs: 4, runningPdfs: 0 },
+        { active: true, queuedPdfs: 2, runningPdfs: 2 },
+    ]) {
+        const page = boot();
+        page.select(0);
+        await page.poll({ overrides: { 1: { hasActiveWork: true, activity } } });
+        assert.equal(page.controls.stop.disabled, false);
+        assert.match(page.controls.stop.title, /stop pdf indexing/i);
+        assert.equal(page.controls.remove.disabled, false);
+        page.unlock();
+        await page.poll({ overrides: { 1: { hasActiveWork: true, activity } } });
+        assert.equal(page.controls.remove.dataset.deleteLocked, "false", "PDF status polling cannot revoke accidental-delete consent");
+        assert.equal(page.clickRemove().defaultPrevented, false);
+        assert.equal(page.submit("remove").defaultPrevented, false);
+        assert.equal(page.form.querySelector('input[name="confirmed"]').value, "yes");
     }
 });
 
@@ -593,12 +633,14 @@ test("pending removal and completed work cannot silently unlock destructive acti
     assert.equal(page.controls.remove.dataset.deleteLocked, "true", "Returning to idle never restores old unlock consent");
 });
 
-test("a status outage relocks destructive actions until fresh state arrives", async () => {
+test("a status outage relocks consent but never turns the delete control into a worker lock", async () => {
     const page = boot();
     page.select(0);
     page.unlock();
     await page.poll({ fail: true });
-    assert.equal(page.controls.remove.disabled, true);
+    assert.equal(page.controls.remove.disabled, false);
+    assert.equal(page.controls.remove.dataset.deleteLocked, "true");
+    assert.match(page.controls.remove.title, /unlock deletion/i);
     assert.equal(page.controls.refresh.disabled, true);
     assert.equal(page.global.button.disabled, true);
     await page.poll();
@@ -624,6 +666,68 @@ const pdfActivity = (queued, running) => ({
     detail: running ? `${running} PDFs extracting · ${queued} queued` : queued ? `${queued} PDFs queued` : "",
     queuedPdfs: queued, runningPdfs: running,
     queuedSyncJobs: 0, runningSyncJobs: 0, pendingCleanupJobs: 0,
+});
+
+test("repository polling selects clone, pull and indexing states with determinate or honest indeterminate progress", async () => {
+    const page = boot({ repositories: [{ id: 1 }] });
+    const card = page.cards[0];
+
+    await page.poll({ overrides: { 1: {
+        active: true, hasActiveWork: true, state: "cloning",
+        activity: {
+            active: true, operation: "clone", phase: "cloning", progress: 42,
+            label: "Git clone", detail: "Receiving Git objects",
+        },
+    } } });
+    assert.equal(card.card.dataset.repositoryOperation, "clone");
+    assert.equal(card.stateIcon.dataset.repositoryOperation, "clone");
+    assert.match(card.stateIcon.className, /bb-repository-state--working/);
+    assert.equal(card.progressContainer.hidden, false);
+    assert.equal(card.progressContainer.title, "Receiving Git objects");
+    assert.equal(card.progressBar.getAttribute("value"), "42");
+    assert.equal(card.progressBar.value, "42");
+    assert.equal(card.progressLabel.textContent, "42%");
+
+    await page.poll({ overrides: { 1: {
+        active: true, hasActiveWork: true, state: "queued",
+        activity: {
+            active: true, operation: "pull", phase: "sync_queued", progress: null,
+            label: "Git pull queued", detail: "Waiting for a Git worker",
+        },
+    } } });
+    assert.equal(card.card.dataset.repositoryOperation, "pull");
+    assert.equal(card.stateIcon.dataset.repositoryOperation, "pull");
+    assert.equal(card.progressContainer.hidden, false);
+    assert.equal(card.progressBar.hasAttribute("value"), false, "Queued pull stays indeterminate");
+    assert.equal(card.progressLabel.textContent, "Queued");
+
+    await page.poll({ overrides: { 1: {
+        active: false, hasActiveWork: true, state: "ready",
+        activity: {
+            active: true, operation: "indexing", phase: "extracting", progress: null,
+            label: "PDF indexing", detail: "Four PDF workers active",
+            queuedPdfs: 12, runningPdfs: 4,
+        },
+    } } });
+    assert.equal(card.card.dataset.repositoryOperation, "indexing");
+    assert.equal(card.stateIcon.dataset.repositoryOperation, "indexing");
+    assert.match(card.stateIcon.className, /bb-repository-state--working/);
+    assert.equal(card.progressContainer.hidden, false);
+    assert.equal(card.progressBar.hasAttribute("value"), false, "Unknown indexing percent is not fabricated");
+    assert.equal(card.progressLabel.textContent, "Running");
+
+    await page.poll({ overrides: { 1: {
+        active: false, hasActiveWork: false, state: "ready",
+        activity: {
+            active: false, operation: "idle", phase: "idle", progress: null,
+            label: "Ready", detail: "",
+        },
+    } } });
+    assert.equal(card.card.dataset.repositoryOperation, "");
+    assert.equal(card.stateIcon.dataset.repositoryOperation, "");
+    assert.match(card.stateIcon.className, /bb-repository-state--ready/);
+    assert.equal(card.progressContainer.hidden, true);
+    assert.equal(card.progressBar.hasAttribute("value"), false);
 });
 
 test("ready Git repositories display their queued and running PDF work instead of a green tick", async () => {

@@ -7,19 +7,54 @@
     <meta name="referrer" content="no-referrer">
     <title>{% block title %}{{ page_title|default:"Dashboard" }} · OWL{% endblock %}</title>
     <link rel="stylesheet" href="{% static 'vendor/bootstrap/bootstrap.min.css' %}">
-    <link rel="stylesheet" href="{% static 'owl/owl.css' %}?v=stable-background-indexing-v1">
+    <link rel="stylesheet" href="{% static 'owl/owl.css' %}?v=repository-activity-v1">
     {% block extra_head %}{% endblock %}
 </head>
 <body class="{% block body_class %}{% endblock %}" data-theme="{% block theme_default %}light{% endblock %}">
     <script nonce="{{ csp_nonce }}" data-theme-bootstrap>
         (() => {
             // Run before visible markup, without waiting for the deferred UI bundle.
-            let theme = document.body.dataset.theme === "dark" ? "dark" : "light";
+            const themeStorageKey = "owl-theme";
+            const themeDayStorageKey = "owl-theme-day";
+            const themeSystemStorageKey = "owl-theme-system";
+            const validTheme = (value) => value === "light" || value === "dark";
+            const localDay = () => {
+                const now = new Date();
+                const pad = (value) => String(value).padStart(2, "0");
+                return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+            };
+            const pageTheme = document.body.dataset.theme === "dark" ? "dark" : "light";
+            let systemTheme = null;
             try {
-                const saved = window.localStorage.getItem("owl-theme");
-                if (saved === "light" || saved === "dark") theme = saved;
+                const query = typeof window.matchMedia === "function"
+                    ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+                if (query && typeof query.matches === "boolean") {
+                    systemTheme = query.matches ? "dark" : "light";
+                }
             } catch {
-                // Restricted storage keeps the page's own default theme.
+                // Older or restricted browsers retain the saved/page fallback below.
+            }
+
+            const today = localDay();
+            let theme = systemTheme || pageTheme;
+            try {
+                const savedTheme = window.localStorage.getItem(themeStorageKey);
+                const savedDay = window.localStorage.getItem(themeDayStorageKey);
+                const savedSystemTheme = window.localStorage.getItem(themeSystemStorageKey);
+                if (systemTheme === null && validTheme(savedTheme)) {
+                    theme = savedTheme;
+                } else if (savedDay === today && validTheme(savedTheme)
+                    && savedSystemTheme === systemTheme) {
+                    // Preserve a manual selection only for today while the OS setting is unchanged.
+                    theme = savedTheme;
+                }
+                window.localStorage.setItem(themeStorageKey, theme);
+                window.localStorage.setItem(themeDayStorageKey, today);
+                if (systemTheme !== null) {
+                    window.localStorage.setItem(themeSystemStorageKey, systemTheme);
+                }
+            } catch {
+                // Restricted storage still follows the current OS theme for this visit.
             }
             document.body.dataset.theme = theme;
             document.documentElement.dataset.theme = theme;
@@ -88,7 +123,7 @@
         <a href="{% url 'core:system_status' %}">View system status</a>
     </footer>
     {% endblock %}
-    <script src="{% static 'owl/owl.js' %}?v=stable-background-indexing-v1" defer></script>
+    <script src="{% static 'owl/owl.js' %}?v=repository-activity-v1" defer></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

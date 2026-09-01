@@ -15,6 +15,7 @@ from django.db import close_old_connections, connection
 from bitbucket_search.models import (
     BitbucketRepository,
     PDFDocument,
+    PDFDocumentLifecycle,
     PDFExtractionJob,
     PDFExtractionJobStatus,
     PDFIndexState,
@@ -184,6 +185,18 @@ def test_three_controllers_parse_same_and_other_repositories_concurrently(
         == 3
     )
     assert PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING).count() == 0
+    for claimed in claims:
+        entries = list(claimed.operation_log_entries.order_by("id"))
+        assert len({entry.pk for entry in entries}) == len(entries)
+        assert entries[0].event == "indexing_claimed"
+        assert entries[-1].event == "indexing_completed"
+        assert sum(entry.event == "indexing_completed" for entry in entries) == 1
+        assert [entry.phase for entry in entries if entry.event == "indexing_phase_changed"] == [
+            "validating",
+            "hashing",
+            "extracting",
+            "publishing",
+        ]
     with repository_checkout_lock(first_repository.pk, blocking=False):
         pass
 
@@ -210,6 +223,40 @@ def test_simultaneous_claims_never_exceed_the_global_capacity(parallel_targets, 
     claimed_ids = [job_id for job_id in claimed if job_id is not None]
     assert len(claimed_ids) == len(set(claimed_ids)) == 2
     assert PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING).count() == 2
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_unavailable_sweeps_publish_one_terminal_event(parallel_targets, request):
+    if _run_with_file_backed_database(request.node.nodeid):
+        return
+    _repository, documents = parallel_targets("cancel-race", 1)
+    document = documents[0]
+    job = PDFExtractionJob.objects.get(document=document)
+    PDFDocument.objects.filter(pk=document.pk).update(lifecycle_state=PDFDocumentLifecycle.REMOVED)
+    sweepers_ready = Barrier(2)
+
+    def sweep():
+        close_old_connections()
+        try:
+            sweepers_ready.wait(timeout=5)
+            return pdf_indexing.sweep_pdf_extraction_queue().cancelled_job_ids
+        finally:
+            connection.close()
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _number: sweep(), range(2)))
+
+    job.refresh_from_db()
+    assert job.status == PDFExtractionJobStatus.CANCELLED
+    assert job.error_code == "extraction_target_unavailable"
+    assert sum(job.pk in cancelled_ids for cancelled_ids in results) == 1
+    entries = list(job.operation_log_entries.filter(event="indexing_cancelled"))
+    assert len(entries) == 1
+    assert entries[0].message == (
+        "PDF indexing was cancelled because the document is no longer active in an enabled "
+        "repository."
+    )
 
 
 @pytest.mark.django_db

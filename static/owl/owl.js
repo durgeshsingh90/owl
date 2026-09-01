@@ -21,12 +21,15 @@
         timer.stale ||= sinceCheck > 45000;
         const elapsed = timer.elapsed + (timer.stale ? 0 : sinceCheck);
         element.hidden = false;
-        element.textContent = `${timer.label} · ${workerElapsed(elapsed)}${timer.stale ? " (last check)" : ""}`;
+        const elapsedLabel = workerElapsed(elapsed);
+        element.textContent = element.dataset.workerCompact === "true"
+            ? `${elapsedLabel}${timer.stale ? " · last" : ""}`
+            : `${timer.label} · ${elapsedLabel}${timer.stale ? " (last check)" : ""}`;
         element.title = timer.stale
             ? "Status unavailable. Elapsed time at the last successful check."
-            : timer.kind === "indexing"
+            : timer.operation === "indexing"
                 ? "Elapsed time for the longest-running current PDF indexing worker."
-                : "Elapsed time since this repository worker started.";
+                : `Elapsed time since this Git ${timer.operation === "clone" ? "clone" : "pull"} started.`;
         element.dataset.workerStale = String(timer.stale);
         element.setAttribute("aria-live", "off");
     };
@@ -53,8 +56,11 @@
             }
             const startedAt = Date.parse(timing?.startedAt || "");
             const observedAt = Date.parse(timing?.observedAt || "");
+            const operation = ["clone", "pull", "indexing"].includes(timing?.operation)
+                ? timing.operation
+                : timing?.kind === "indexing" ? "indexing" : timing?.kind === "sync" ? "pull" : "";
             if (!Number.isFinite(startedAt) || !Number.isFinite(observedAt) || startedAt > observedAt
-                || !["sync", "indexing"].includes(timing?.kind)) {
+                || !operation) {
                 this.remove(element);
                 return;
             }
@@ -63,7 +69,8 @@
                 elapsed: observedAt - startedAt,
                 receivedAt: workerNow(),
                 label: String(timing.label || "Running"),
-                kind: timing.kind,
+                kind: operation === "indexing" ? "indexing" : "sync",
+                operation,
                 stale: false,
             };
             workerTimers.set(element, timer);
@@ -99,10 +106,27 @@
             observedAt: element.dataset.workerObservedAt,
             label: element.dataset.workerLabel,
             kind: element.dataset.workerKind,
+            operation: element.dataset.workerOperation,
         });
     });
 
     const themeStorageKey = "owl-theme";
+    const themeDayStorageKey = "owl-theme-day";
+    const themeSystemStorageKey = "owl-theme-system";
+    const localThemeDay = () => {
+        const now = new Date();
+        const pad = (value) => String(value).padStart(2, "0");
+        return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    };
+    let systemThemeQuery = null;
+    try {
+        systemThemeQuery = typeof window.matchMedia === "function"
+            ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+    } catch {
+        // A restricted matchMedia implementation leaves the bootstrap fallback in place.
+    }
+    const currentSystemTheme = () => systemThemeQuery
+        ? (systemThemeQuery.matches ? "dark" : "light") : null;
 
     const applyTheme = (theme) => {
         document.body.dataset.theme = theme;
@@ -118,15 +142,32 @@
         });
     };
 
-    try {
-        const savedTheme = window.localStorage.getItem(themeStorageKey);
-        if (savedTheme === "light" || savedTheme === "dark") {
-            applyTheme(savedTheme);
-        } else {
-            applyTheme(document.body.dataset.theme || "light");
+    const persistTheme = (theme) => {
+        try {
+            window.localStorage.setItem(themeStorageKey, theme);
+            window.localStorage.setItem(themeDayStorageKey, localThemeDay());
+            const systemTheme = currentSystemTheme();
+            if (systemTheme !== null) {
+                window.localStorage.setItem(themeSystemStorageKey, systemTheme);
+            }
+        } catch {
+            // Theme selection still applies for this visit when browser storage is unavailable.
         }
-    } catch {
-        applyTheme(document.body.dataset.theme || "light");
+    };
+
+    applyTheme(document.body.dataset.theme === "dark" ? "dark" : "light");
+
+    if (systemThemeQuery) {
+        const followSystemTheme = (event) => {
+            const theme = event.matches ? "dark" : "light";
+            applyTheme(theme);
+            persistTheme(theme);
+        };
+        if (typeof systemThemeQuery.addEventListener === "function") {
+            systemThemeQuery.addEventListener("change", followSystemTheme);
+        } else if (typeof systemThemeQuery.addListener === "function") {
+            systemThemeQuery.addListener(followSystemTheme);
+        }
     }
 
     document.addEventListener("click", (event) => {
@@ -137,11 +178,7 @@
 
         const nextTheme = document.body.dataset.theme === "dark" ? "light" : "dark";
         applyTheme(nextTheme);
-        try {
-            window.localStorage.setItem(themeStorageKey, nextTheme);
-        } catch {
-            // Theme selection still applies for this visit when browser storage is unavailable.
-        }
+        persistTheme(nextTheme);
     });
 
     document.addEventListener("click", (event) => {
@@ -332,6 +369,16 @@
         const statusPanel = statusCenter?.querySelector("[data-repository-status-panel]");
         const statusIndicator = statusCenter?.querySelector("[data-repository-status-indicator]");
         const statusLive = statusCenter?.querySelector("[data-repository-status-live]");
+        const statusIdleIcon = statusCenter?.querySelector("[data-repository-status-idle-icon]");
+        const statusActivities = statusCenter?.querySelector("[data-repository-status-activities]");
+        const statusActivityNodes = new Map(
+            [...(statusCenter?.querySelectorAll("[data-repository-status-activity]") || [])]
+                .map((element) => [element.dataset.repositoryStatusActivity, {
+                    element,
+                    progress: element.querySelector("[data-repository-status-activity-progress]"),
+                    timer: element.querySelector("[data-repository-worker-timer]"),
+                }]),
+        );
         const backgroundState = statusCenter?.querySelector("[data-notification-background-state]");
         const progressCard = statusCenter?.querySelector("[data-notification-progress-card]");
         const progressLabel = statusCenter?.querySelector("[data-notification-progress-label]");
@@ -371,10 +418,12 @@
         ]);
         const gitLogVisible = (elements) => {
             if (gitLogsSuspended || document.hidden || !statusPanel || statusPanel.hidden
-                || !elements.details.open || !elements.gitLog.open || elements.row.isConnected === false) {
+                || !elements.details.open || (!elements.gitLog.open && !elements.indexLog.open)
+                || elements.row.isConnected === false) {
                 return false;
             }
-            const bounds = elements.gitLog.getBoundingClientRect?.();
+            const visibleLog = elements.indexLog.open ? elements.indexLog : elements.gitLog;
+            const bounds = visibleLog.getBoundingClientRect?.();
             const listBounds = repositoryList?.getBoundingClientRect?.();
             const panelBounds = statusPanel.getBoundingClientRect?.();
             return !bounds || !listBounds
@@ -390,6 +439,7 @@
                 state.inFlight = false;
                 state.needsRefresh = true;
                 elements.gitLogOutput.setAttribute("aria-busy", "false");
+                elements.indexLogOutput.setAttribute("aria-busy", "false");
             }
         };
         const synchronizeGitLogs = () => {
@@ -428,10 +478,14 @@
             const controller = state.controller;
             const timeout = controller ? window.setTimeout(() => controller.abort(), 10000) : null;
             elements.gitLogOutput.setAttribute("aria-busy", "true");
+            elements.indexLogOutput.setAttribute("aria-busy", "true");
             if (!state.loaded) {
                 elements.gitLogMessage.hidden = false;
                 elements.gitLogMessage.textContent = "Loading Git output…";
                 elements.gitLogStatus.textContent = "Loading…";
+                elements.indexLogMessage.hidden = false;
+                elements.indexLogMessage.textContent = "Loading PDF indexing activity…";
+                elements.indexLogStatus.textContent = "Loading…";
             }
             try {
                 const response = await window.fetch(state.url, {
@@ -452,7 +506,13 @@
                 if (String(payload.repositoryId) !== state.repositoryId || !gitLogStatuses.has(payload.status)
                     || typeof payload.log !== "string"
                     || (payload.jobId !== null && (!Number.isSafeInteger(payload.jobId) || payload.jobId < 1))) {
-                    throw new Error("Git output is unavailable.");
+                    throw new Error("Repository logs are unavailable.");
+                }
+                const indexing = payload.indexing;
+                if (indexing !== undefined && (indexing === null || typeof indexing !== "object"
+                    || !Array.isArray(indexing.lines) || !indexing.counts
+                    || typeof indexing.counts !== "object")) {
+                    throw new Error("Repository logs are unavailable.");
                 }
                 // Keep a second client-side bound even if an older endpoint returns too much output.
                 const received = payload.log.replace(/\r\n?/g, "\n");
@@ -484,8 +544,51 @@
                 elements.gitLogTruncated.hidden = !clipped;
                 elements.gitLog.dataset.status = payload.status;
                 elements.gitLog.dataset.jobId = payload.jobId === null ? "" : String(payload.jobId);
+                const indexLines = indexing
+                    ? indexing.lines.filter((line) => typeof line === "string")
+                        .map((line) => line.replace(/\r\n?/g, "\n"))
+                    : [];
+                const receivedIndex = indexLines.join("\n");
+                const indexOutput = receivedIndex.slice(-131072).split("\n").slice(-200).join("\n");
+                const indexClipped = Boolean(indexing?.truncated) || receivedIndex !== indexOutput;
+                const previousIndexTop = elements.indexLogOutput.scrollTop;
+                const indexAtBottom = !state.loaded || elements.indexLogOutput.scrollHeight
+                    - previousIndexTop - elements.indexLogOutput.clientHeight <= 12;
+                elements.indexLogOutput.hidden = !indexOutput;
+                if (elements.indexLogOutput.textContent !== indexOutput) {
+                    elements.indexLogOutput.textContent = indexOutput;
+                    elements.indexLogOutput.scrollTop = indexAtBottom
+                        ? elements.indexLogOutput.scrollHeight : previousIndexTop;
+                }
+                const indexCount = (name) => Math.max(0, Number.parseInt(indexing?.counts?.[name], 10) || 0);
+                const total = indexCount("total");
+                const queued = indexCount("queued");
+                const running = indexCount("running");
+                const succeeded = indexCount("succeeded");
+                const failed = indexCount("failed");
+                const interrupted = indexCount("interrupted");
+                const cancelled = indexCount("cancelled");
+                const workerLimit = Math.max(0, Number.parseInt(indexing?.workerLimit, 10) || 0);
+                elements.indexLogStatus.textContent = indexing
+                    ? `${queued} queued · ${running} running${workerLimit ? ` of ${workerLimit}` : ""}`
+                        + ` · ${succeeded} succeeded attempts · ${failed} failed`
+                        + ` · ${interrupted} interrupted · ${cancelled} cancelled`
+                    : "Unavailable";
+                elements.indexLogStatus.title = indexing?.updatedAt
+                    ? `Last indexing update: ${formatNotificationDate(indexing.updatedAt, "Time unavailable")}` : "";
+                elements.indexLogMessage.hidden = Boolean(indexOutput);
+                elements.indexLogMessage.textContent = !indexing
+                    ? "PDF indexing activity is unavailable from this OWL version."
+                    : total === 0 ? "No PDF indexing jobs have been recorded for this repository."
+                        : queued || running ? "Waiting for the next PDF indexing transition…"
+                            : "No indexing transition output was recorded for these jobs.";
+                elements.indexLogTruncated.hidden = !indexClipped;
+                elements.indexLog.dataset.active = String(Boolean(indexing?.active));
+                elements.indexStop.hidden = !(queued || running) || !state.cancelUrl;
+                elements.indexStop.disabled = false;
                 state.loaded = true;
-                state.terminal = !["queued", "running"].includes(payload.status);
+                state.terminal = !["queued", "running"].includes(payload.status)
+                    && !Boolean(indexing?.active);
             } catch (_error) {
                 if (generation !== state.generation || !gitLogVisible(elements)) {
                     return;
@@ -495,6 +598,11 @@
                 elements.gitLogMessage.textContent = state.loaded
                     ? "Could not load Git output. Showing the last check."
                     : "Could not load Git output. Retrying while this log is open…";
+                elements.indexLogStatus.textContent = "Unavailable";
+                elements.indexLogMessage.hidden = false;
+                elements.indexLogMessage.textContent = state.loaded
+                    ? "Could not load PDF indexing activity. Showing the last check."
+                    : "Could not load PDF indexing activity. Retrying while this log is open…";
                 state.terminal = false;
             } finally {
                 window.clearTimeout(timeout);
@@ -503,6 +611,7 @@
                     state.controller = null;
                     state.nextPollAt = workerNow() + gitLogPollDelay;
                     elements.gitLogOutput.setAttribute("aria-busy", "false");
+                    elements.indexLogOutput.setAttribute("aria-busy", "false");
                     synchronizeGitLogs();
                 }
             }
@@ -531,7 +640,7 @@
         // One read-only snapshot feeds two independent panels; do not duplicate
         // polling requests or the hidden daily-scheduler submissions.
         const notificationPanel = createHeaderPanel(center, toggle, panel, "notifications", () => void load());
-        const backgroundPanel = createHeaderPanel(statusCenter, statusToggle, statusPanel, "background status", () => {
+        const backgroundPanel = createHeaderPanel(statusCenter, statusToggle, statusPanel, "repository logs", () => {
             void load();
             refreshVisibleGitLogs();
         }, synchronizeGitLogs);
@@ -701,18 +810,59 @@
             const gitLogTruncated = createNotificationElement("p", "notification-repository__git-log-note", "Showing the most recent Git output.");
             gitLogTruncated.hidden = true;
             gitLog.append(gitLogSummary, gitLogMessage, gitLogOutput, gitLogTruncated);
-            body.append(fullName, detail, updated, lastOutcome, lastSuccess, gitLog, link, statusLink);
+            const indexLog = createNotificationElement("details", "notification-repository__git-log notification-repository__index-log");
+            indexLog.setAttribute("data-repository-index-log", "");
+            const indexLogSummary = createNotificationElement("summary", "notification-repository__git-log-toggle");
+            const indexLogLabel = createNotificationElement("span", "", "PDF indexing log");
+            const indexLogStatus = createNotificationElement("span", "notification-repository__git-log-status", "Not loaded");
+            indexLogSummary.append(indexLogLabel, indexLogStatus);
+            const indexLogMessage = createNotificationElement("p", "notification-repository__git-log-message", "Open to load PDF indexing activity.");
+            indexLogMessage.setAttribute("role", "status");
+            const indexLogOutput = createNotificationElement("pre", "notification-repository__git-log-output notification-repository__index-log-output");
+            indexLogOutput.tabIndex = 0;
+            indexLogOutput.setAttribute("aria-live", "off");
+            indexLogOutput.hidden = true;
+            const indexLogTruncated = createNotificationElement("p", "notification-repository__git-log-note", "Showing the latest indexing transitions. View full logs for every PDF attempt.");
+            indexLogTruncated.hidden = true;
+            const indexStop = createNotificationElement("button", "notification-repository__index-stop", "Stop indexing");
+            indexStop.type = "button";
+            indexStop.hidden = true;
+            indexLog.append(indexLogSummary, indexLogMessage, indexLogOutput, indexLogTruncated, indexStop);
+            statusLink.textContent = "View full logs";
+            body.append(fullName, detail, updated, lastOutcome, lastSuccess, gitLog, indexLog, link, statusLink);
             details.append(summary, body);
             row.append(details);
             const elements = {
                 row, details, summary, icon, name, status, time, timer, logPreview, previewLines, fullName, detail, updated,
                 lastSuccess, lastOutcome, link, statusLink, gitLog, gitLogSummary, gitLogStatus,
-                gitLogMessage, gitLogOutput, gitLogTruncated,
+                gitLogMessage, gitLogOutput, gitLogTruncated, indexLog, indexLogSummary,
+                indexLogStatus, indexLogMessage, indexLogOutput, indexLogTruncated,
+                indexStop,
                 gitLogState: {
-                    repositoryId: "", url: "", version: "", loaded: false, terminal: false,
+                    repositoryId: "", url: "", cancelUrl: "", version: "", loaded: false, terminal: false,
                     needsRefresh: true, nextPollAt: 0, inFlight: false, generation: 0, controller: null,
                 },
             };
+            indexStop.addEventListener("click", async () => {
+                if (!elements.gitLogState.cancelUrl || indexStop.disabled) return;
+                indexStop.disabled = true;
+                try {
+                    const response = await post(elements.gitLogState.cancelUrl);
+                    const payload = await response.json();
+                    indexStop.hidden = true;
+                    elements.indexLogStatus.textContent = "Stopping…";
+                    elements.indexLogMessage.hidden = false;
+                    elements.indexLogMessage.textContent = "Revoking queued and active PDF indexing attempts…";
+                    elements.gitLogState.needsRefresh = true;
+                    elements.gitLogState.terminal = false;
+                    elements.gitLogState.nextPollAt = 0;
+                    announce(payload.detail || `PDF indexing stop requested for ${elements.fullName.textContent}.`);
+                    if (gitLogVisible(elements)) void loadGitLog(elements);
+                } catch (error) {
+                    indexStop.disabled = false;
+                    announce(error.message);
+                }
+            });
             const logToggled = () => {
                 if (gitLogVisible(elements)) {
                     elements.gitLogState.needsRefresh = true;
@@ -720,6 +870,7 @@
                 synchronizeGitLogs();
             };
             gitLog.addEventListener("toggle", logToggled);
+            indexLog.addEventListener("toggle", logToggled);
             details.addEventListener("toggle", logToggled);
             return elements;
         };
@@ -735,8 +886,8 @@
                 if (repositoryMessage) {
                     repositoryMessage.hidden = false;
                     repositoryMessage.textContent = repositoryRows.size
-                        ? "Status unavailable · showing the last check."
-                        : "Repository status is temporarily unavailable.";
+                        ? "Logs unavailable · showing the last check."
+                        : "Repository logs are temporarily unavailable.";
                 }
                 return;
             }
@@ -773,21 +924,41 @@
                     ? item.statusTone
                     : item.status === "ready" ? "success" : item.status === "failed" ? "error"
                         : ["queued", "checking_connection", "cloning", "refreshing", "cataloging", "indexing"].includes(item.status) ? "progress" : "neutral";
+                const operation = ["clone", "pull", "indexing"].includes(item.operation)
+                    ? item.operation : "";
+                const operationNames = { clone: "Clone", pull: "Pull", indexing: "Index" };
+                const suppliedProgress = Number(item.progress);
+                const hasProgress = item.progress !== null && item.progress !== undefined
+                    && Number.isFinite(suppliedProgress);
+                const operationProgress = hasProgress
+                    ? `${Math.round(Math.min(100, Math.max(0, suppliedProgress)))}%`
+                    : item.activity?.state === "queued" ? "Queued" : "Running";
                 elements.row.dataset.tone = tone;
-                elements.icon.textContent = tone === "success" ? "✓" : tone === "error" ? "!" : tone === "progress" ? "" : "·";
+                elements.row.dataset.operation = operation;
+                elements.icon.textContent = operation === "clone" ? "↓" : operation === "pull" ? "↻"
+                    : operation === "indexing" ? "⌕"
+                        : tone === "success" ? "✓" : tone === "error" ? "!" : tone === "progress" ? "" : "·";
                 elements.name.textContent = name;
-                elements.status.textContent = compactStatuses[item.status] || status;
+                elements.status.textContent = operation
+                    ? `${operationNames[operation]} · ${operationProgress}`
+                    : compactStatuses[item.status] || status;
+                elements.status.title = item.phaseLabel || status;
                 const logState = elements.gitLogState;
                 const logsUrl = localTargetPath(item.logsUrl);
+                const cancelIndexingUrl = localTargetPath(item.cancelIndexingUrl);
                 const gitActive = ["queued", "checking_connection", "cloning", "refreshing", "cataloging"].includes(item.status);
+                const indexingActive = item.status === "indexing";
+                elements.indexStop.hidden = !indexingActive || !cancelIndexingUrl;
+                elements.indexStop.disabled = false;
                 // The shared status poll already carries these two redacted lines;
                 // previews need neither a disclosure click nor per-repository requests.
                 const preview = Array.isArray(item.logPreview)
                     ? item.logPreview.filter((line) => typeof line === "string" && line.trim())
                         .slice(-2).map((line) => line.replace(/[\r\n]+/g, " ").slice(0, 1024))
                     : [];
-                if (!preview.length && gitActive) {
-                    preview.push(item.status === "queued" ? "Waiting for Git worker…" : "Waiting for Git output…");
+                if (!preview.length && (gitActive || indexingActive)) {
+                    preview.push(indexingActive ? "Waiting for PDF indexing output…"
+                        : item.status === "queued" ? "Waiting for Git worker…" : "Waiting for Git output…");
                 }
                 elements.logPreview.hidden = !preview.length;
                 elements.logPreview.setAttribute("aria-label", `Latest Git output for ${name}`);
@@ -803,7 +974,7 @@
                     lineElement.title = line;
                 });
                 const logVersion = JSON.stringify([
-                    logsUrl, gitActive, item.workerTiming?.kind === "sync" ? item.workerTiming.startedAt : "",
+                    logsUrl, item.status || "", item.updatedAt || "", item.workerTiming?.startedAt || "",
                     item.lastOutcomeAt || "", item.lastOutcome || "",
                 ]);
                 if (logState.version !== logVersion) {
@@ -814,12 +985,19 @@
                         elements.gitLogStatus.textContent = "Checking…";
                         elements.gitLogMessage.textContent = "Checking for the latest Git output…";
                         elements.gitLogMessage.hidden = false;
+                        elements.indexLogStatus.textContent = "Checking…";
+                        elements.indexLogMessage.textContent = "Checking for the latest PDF indexing activity…";
+                        elements.indexLogMessage.hidden = false;
                     }
                 }
                 logState.repositoryId = id;
                 logState.url = logsUrl;
+                logState.cancelUrl = cancelIndexingUrl;
+                elements.indexStop.setAttribute("aria-label", `Stop PDF indexing for ${name}`);
                 elements.gitLogSummary.setAttribute("aria-label", `Git log for ${name}`);
                 elements.gitLogOutput.setAttribute("aria-label", `Git output for ${name}`);
+                elements.indexLogSummary.setAttribute("aria-label", `PDF indexing log for ${name}`);
+                elements.indexLogOutput.setAttribute("aria-label", `PDF indexing activity for ${name}`);
                 if (!logsUrl) {
                     elements.gitLogOutput.hidden = true;
                     elements.gitLogOutput.textContent = "";
@@ -827,6 +1005,12 @@
                     elements.gitLogStatus.textContent = "Unavailable";
                     elements.gitLogMessage.textContent = "Git output is not available for this repository.";
                     elements.gitLogMessage.hidden = false;
+                    elements.indexLogOutput.hidden = true;
+                    elements.indexLogOutput.textContent = "";
+                    elements.indexLogTruncated.hidden = true;
+                    elements.indexLogStatus.textContent = "Unavailable";
+                    elements.indexLogMessage.textContent = "PDF indexing activity is not available for this repository.";
+                    elements.indexLogMessage.hidden = false;
                 }
                 elements.time.textContent = compactRepositoryDate(item.updatedAt);
                 elements.time.dateTime = item.updatedAt || "";
@@ -936,6 +1120,67 @@
             }
         };
 
+        const renderRepositoryActivities = (snapshot) => {
+            if (!statusCenter || !statusActivities || !statusIdleIcon) {
+                return;
+            }
+            const known = snapshot && Array.isArray(snapshot.items);
+            if (!known) {
+                statusActivities.dataset.stale = "true";
+                statusActivityNodes.forEach(({ element, timer }) => {
+                    if (!element.hidden) {
+                        repositoryTimers.stale(timer);
+                    }
+                });
+                return;
+            }
+
+            statusActivities.dataset.stale = "false";
+            const summaries = Array.isArray(snapshot.activities) ? snapshot.activities : [];
+            let visibleCount = 0;
+            ["clone", "pull", "indexing"].forEach((operation) => {
+                const nodes = statusActivityNodes.get(operation);
+                if (!nodes) {
+                    return;
+                }
+                const activity = summaries.find((entry) =>
+                    entry && entry.active && entry.operation === operation);
+                nodes.element.hidden = !activity;
+                nodes.element.setAttribute("aria-hidden", String(!activity));
+                if (!activity) {
+                    repositoryTimers.remove(nodes.timer);
+                    return;
+                }
+
+                visibleCount += 1;
+                const suppliedProgress = Number(activity.progress);
+                const hasProgress = activity.progress !== null && activity.progress !== undefined
+                    && Number.isFinite(suppliedProgress);
+                const progressValue = Math.round(Math.min(100, Math.max(0, suppliedProgress)));
+                const progressLabel = hasProgress ? `${progressValue}%`
+                    : activity.state === "queued" ? "Queued" : "Running";
+                if (nodes.progress) {
+                    nodes.progress.textContent = progressLabel;
+                }
+                nodes.element.title = `${activity.label || operation}: ${activity.detail || progressLabel}`;
+                nodes.element.setAttribute(
+                    "aria-label",
+                    `${activity.label || operation}, ${progressLabel}${activity.detail ? `, ${activity.detail}` : ""}`,
+                );
+                repositoryTimers.update(nodes.timer, {
+                    startedAt: activity.startedAt,
+                    observedAt: activity.observedAt,
+                    label: activity.label,
+                    kind: operation === "indexing" ? "indexing" : "sync",
+                    operation,
+                });
+            });
+            const hasActivities = visibleCount > 0;
+            statusActivities.hidden = !hasActivities;
+            statusIdleIcon.hidden = hasActivities;
+            statusCenter.dataset.hasActivities = String(hasActivities);
+        };
+
         const renderBackgroundIndicator = (snapshot, refresh = {}, schedule = {}) => {
             if (!statusCenter || !backgroundPanel) {
                 return;
@@ -967,7 +1212,8 @@
                     : !known ? "unknown" : allReady ? "ready" : "neutral";
             const summary = parts.join("; ") || (allReady ? "All repositories up to date" : "No background work running");
             statusCenter.dataset.state = state;
-            statusToggle.title = `Background status: ${summary}`;
+            renderRepositoryActivities(snapshot);
+            statusToggle.title = `Repository logs: ${summary}`;
             if (statusIndicator) {
                 statusIndicator.hidden = false;
             }

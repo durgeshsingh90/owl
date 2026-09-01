@@ -6,6 +6,9 @@
     <button class="bb-repository-tool" type="submit" name="operation" value="exclude" form="bb-repository-selection-form" title="Exclude selected repositories from refresh" aria-label="Exclude selected repositories from refresh" data-selected-exclude disabled>
         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="M9.5 8.5v7M14.5 8.5v7"/></svg>
     </button>
+    <button class="bb-repository-tool bb-repository-tool--stop" type="submit" name="operation" value="stop_indexing" form="bb-repository-selection-form" title="Select a repository with active PDF indexing to stop" aria-label="Select a repository with active PDF indexing to stop" data-selected-stop-indexing disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="M9 9h6v6H9z"/></svg>
+    </button>
     <button class="bb-repository-tool bb-repository-tool--danger" type="submit" name="operation" value="remove" form="bb-repository-selection-form" title="Select repositories to delete" aria-label="Select repositories to delete" data-delete-locked="true" data-selected-remove disabled>
         <span class="bb-repository-delete-lock" aria-hidden="true" data-selected-delete-lock-icon>🔒</span>
     </button>

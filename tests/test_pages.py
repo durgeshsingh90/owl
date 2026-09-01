@@ -22,7 +22,7 @@ def loopback_client(client):
         ("/bookmarks/settings/", "Confluence Settings"),
         ("/pdfs/", "Bitbucket Search"),
         ("/pdfs/repositories/", "Bitbucket Search"),
-        ("/pdfs/status/", "Repository sync activity"),
+        ("/pdfs/status/", "Repository logs"),
         ("/system-status/", "System Status"),
     ],
 )
@@ -267,7 +267,7 @@ def test_bookmark_search_feedback_precedes_active_filters_without_revealing_hidd
             "/pdfs/status/",
             "bitbucket",
             "Bitbucket Search functions",
-            "Index & refresh status",
+            "Repository logs",
         ),
     ],
 )
@@ -349,7 +349,7 @@ def test_bitbucket_search_uses_the_repository_workspace_shell(loopback_client):
     assert "Index &amp; refresh status" not in repository_rail.group(1)
     assert "Search PDFs" not in mobile_functions.group(1)
     assert 'href="/pdfs/repositories/">Repositories</a>' in mobile_functions.group(1)
-    assert 'href="/pdfs/status/">Sync status</a>' in mobile_functions.group(1)
+    assert 'href="/pdfs/status/">Repository logs</a>' in mobile_functions.group(1)
     assert 'role="status" aria-live="polite" aria-atomic="true"' in html
     assert re.search(
         r'<summary class="bb-add-repository" aria-label="Add a new repository">.*?New.*?</summary>',
@@ -500,17 +500,17 @@ def test_pdf_search_page_exposes_active_indexing_and_phrase_controls(loopback_cl
     assert "PDF indexing and search are not active yet" not in html
 
 
-def test_bitbucket_status_page_reports_active_daily_refresh_instead_of_a_placeholder(
+def test_bitbucket_logs_page_reports_workers_and_daily_refresh_instead_of_a_placeholder(
     loopback_client,
 ):
     response = loopback_client.get("/pdfs/status/")
     html = response.content.decode()
 
     assert response.status_code == 200
-    assert "Repository sync activity" in html
+    assert "Repository logs" in html
     assert "Daily automation" in html
-    assert "Repository workers" in html
-    assert "PDF catalogue" in html
+    assert "Git workers" in html
+    assert "PDF index workers" in html
     assert "This feature is not active yet" not in html
 
 

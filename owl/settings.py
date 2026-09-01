@@ -294,6 +294,11 @@ PDF_MAX_EXTRACTION_WORKERS = _env_int(
     max(1, min((os.cpu_count() or 2) - 1, 4)),
     minimum=1,
 )
+if PDF_MAX_EXTRACTION_WORKERS > 8:
+    raise ImproperlyConfigured(
+        "PDF_MAX_EXTRACTION_WORKERS must be at most 8 so isolated PDF parsers "
+        "cannot exhaust local memory or overwhelm SQLite publication."
+    )
 PDF_EXTRACTION_TIMEOUT_SECONDS = _env_int(
     "PDF_EXTRACTION_TIMEOUT_SECONDS",
     600,

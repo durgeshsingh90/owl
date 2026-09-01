@@ -8,7 +8,7 @@ import ipaddress
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import wraps
 from pathlib import PurePosixPath, PureWindowsPath
 from urllib.parse import urlencode, urlsplit
@@ -17,7 +17,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.core.paginator import EmptyPage, Page, PageNotAnInteger, Paginator
 from django.db import OperationalError
-from django.db.models import Case, DateTimeField, F, Value, When
+from django.db.models import Case, Count, DateTimeField, F, When
 from django.http import Http404, HttpRequest, HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
@@ -34,7 +34,11 @@ from bitbucket_search.models import (
     PDFDocument,
     PDFDocumentAddedEvidence,
     PDFDocumentLifecycle,
+    PDFExtractionJob,
+    PDFExtractionJobStatus,
     PDFIndexState,
+    RepositoryOperationLogChannel,
+    RepositoryOperationLogEntry,
     RepositoryRemovalRecovery,
     RepositorySyncJob,
     RepositorySyncJobStatus,
@@ -47,12 +51,13 @@ from bitbucket_search.services.document_actions import (
     open_registered_pdfs,
     reveal_registered_pdf,
 )
-from bitbucket_search.services.git_output import bounded_git_output
+from bitbucket_search.services.git_output import bounded_git_output, sanitize_git_output
 from bitbucket_search.services.git_sync import RepositorySyncError, managed_repository_path
 from bitbucket_search.services.logging_events import get_logger, log_event
 from bitbucket_search.services.path_safety import has_disallowed_path_characters
 from bitbucket_search.services.pdf_indexing import (
     ExtractionStatusSnapshot,
+    cancel_repository_pdf_extractions,
     extraction_status_snapshot,
 )
 from bitbucket_search.services.pdf_local_policy import frozen_pdf_path
@@ -113,6 +118,7 @@ class PDFTimelineRow:
     project_label: str
     added_by_label: str
     added_date_label: str
+    added_date_source_label: str
     added_date_detail: str
     history_label: str
     local_policy_state: str = ""
@@ -363,18 +369,30 @@ def _repository_added_at(document: PDFDocument) -> datetime | None:
     return None
 
 
+def _timeline_display_at(document: PDFDocument) -> datetime:
+    """Return the timestamp displayed in the timeline with its source labelled separately."""
+
+    return _repository_added_at(document) or document.discovered_at
+
+
 def _timeline_row(
     document: PDFDocument,
     *,
     search_hit: PDFSearchHit | None = None,
 ) -> PDFTimelineRow:
     added_at = _repository_added_at(document)
+    displayed_at = _timeline_display_at(document)
     if added_at is not None:
         added_by = f"{document.added_commit.author_name} · Git author"
+        added_source = "Git addition"
         added_detail = f"Original Git addition · {_display_datetime(added_at)}"
     else:
         added_by = "Unavailable in available Git history"
-        added_detail = "Original addition not found in available Git history."
+        added_source = "First seen by OWL"
+        added_detail = (
+            f"First seen by OWL · {_display_datetime(displayed_at)}. "
+            "Original Git-added date is unavailable in the synchronized history."
+        )
 
     history_label = (
         "Available history" if document.repository.history_is_shallow else "Full reachable history"
@@ -396,11 +414,8 @@ def _timeline_row(
         path_copy_available=path_copy_available,
         project_label=_project_label(document.repository),
         added_by_label=added_by,
-        added_date_label=(
-            _display_date(timezone.localtime(added_at).date())
-            if added_at is not None
-            else "Unavailable"
-        ),
+        added_date_label=_display_date(timezone.localtime(displayed_at).date()),
+        added_date_source_label=added_source,
         added_date_detail=added_detail,
         history_label=history_label,
         local_policy_state=local_policy.state if local_policy is not None else "",
@@ -416,17 +431,17 @@ def _pdf_timeline_page(page_number: object) -> tuple[Page, tuple[PDFTimelineGrou
         )
         .select_related("repository", "added_commit", "last_commit", "local_policy")
         .annotate(
-            repository_added_at=Case(
+            timeline_display_at=Case(
                 When(
                     added_evidence=PDFDocumentAddedEvidence.CONFIRMED,
                     added_commit__isnull=False,
                     then=F("added_commit__committed_at"),
                 ),
-                default=Value(None),
+                default=F("discovered_at"),
                 output_field=DateTimeField(),
             )
         )
-        .order_by(F("repository_added_at").desc(nulls_last=True), "-id")
+        .order_by(F("timeline_display_at").desc(), "-id")
     )
     paginator = Paginator(queryset, settings.BITBUCKET_PDF_PAGE_SIZE)
     try:
@@ -440,11 +455,8 @@ def _pdf_timeline_page(page_number: object) -> tuple[Page, tuple[PDFTimelineGrou
     today = timezone.localdate()
     grouped: OrderedDict[str, tuple[str, str, list[PDFTimelineRow]]] = OrderedDict()
     for document in page.object_list:
-        if document.repository_added_at is None:
-            key, label, detail = "repo-date-unavailable", "Repo date unavailable", ""
-        else:
-            timeline_date = timezone.localtime(document.repository_added_at).date()
-            key, label, detail = _timeline_bucket(timeline_date, today=today)
+        timeline_date = timezone.localtime(document.timeline_display_at).date()
+        key, label, detail = _timeline_bucket(timeline_date, today=today)
         if key not in grouped:
             grouped[key] = (label, detail, [])
         grouped[key][2].append(_timeline_row(document))
@@ -644,6 +656,7 @@ def _extraction_payload(snapshot: ExtractionStatusSnapshot) -> dict[str, object]
         )
     )
     return {
+        "workerLimit": settings.PDF_MAX_EXTRACTION_WORKERS,
         "queuedJobs": snapshot.queued_jobs,
         "runningJobs": snapshot.running_jobs,
         "failedJobs": snapshot.failed_jobs,
@@ -1922,7 +1935,18 @@ def _selected_removal_context(repository_ids: tuple[int, ...]) -> dict[str, obje
                 "path": path,
                 "pdf_count": repository.pdf_count if repository else 0,
                 "vsdx_count": repository.vsdx_count if repository else 0,
-                "busy": bool(repository and repository.has_active_work),
+                "git_busy": bool(
+                    repository
+                    and (
+                        repository.has_active_sync
+                        or repository.activity["queuedSyncJobs"]
+                        or repository.activity["runningSyncJobs"]
+                    )
+                ),
+                "pdf_indexing": bool(
+                    repository
+                    and (repository.activity["queuedPdfs"] or repository.activity["runningPdfs"])
+                ),
                 "removal_incomplete": recovery is not None,
             }
         )
@@ -1931,7 +1955,6 @@ def _selected_removal_context(repository_ids: tuple[int, ...]) -> dict[str, obje
         "page_title": "Remove selected repositories",
         "selected_repositories": rows,
         "repository_count": len(rows),
-        "repository_busy": any(row["busy"] for row in rows),
         "cancel_url": reverse("bitbucket_search:index"),
     }
 
@@ -1942,15 +1965,6 @@ def _remove_selected_repositories(
     context = _selected_removal_context(repository_ids)
     if request.POST.get("confirmed") != "yes":
         return render(request, "bitbucket_search/repositories_remove.html", context)
-    if context["repository_busy"]:
-        return _selected_repository_error(
-            request,
-            RepositoryLifecycleError(
-                "repository_busy",
-                "Wait for the selected repositories' Git and PDF workers to finish before removing them.",
-            ),
-        )
-
     removed_ids = []
     failures = []
     for repository_id in repository_ids:
@@ -2002,7 +2016,7 @@ def selected_repositories(request: HttpRequest) -> HttpResponse:
     operation = request.POST.get("operation")
     excluded = request.POST.get("excluded")
     try:
-        if operation not in {"refresh", "exclude", "remove"}:
+        if operation not in {"refresh", "exclude", "stop_indexing", "remove"}:
             raise RepositoryLifecycleError(
                 "invalid_repository_operation", "Choose a valid repository action."
             )
@@ -2046,10 +2060,16 @@ def selected_repositories(request: HttpRequest) -> HttpResponse:
     completed_ids = []
     jobs = []
     failures = []
+    stopped_queued = 0
+    stopped_running = 0
     for repository_id in repository_ids:
         try:
             if operation == "exclude":
                 set_repository_refresh_excluded(repository_id, excluded=excluded == "yes")
+            elif operation == "stop_indexing":
+                stopped = cancel_repository_pdf_extractions(repository_id)
+                stopped_queued += stopped.queued_jobs
+                stopped_running += stopped.running_jobs
             else:
                 queued = queue_repository_refresh(repository_id)
                 if queued.job.status == RepositorySyncJobStatus.QUEUED:
@@ -2087,10 +2107,23 @@ def selected_repositories(request: HttpRequest) -> HttpResponse:
     workers_started, launch_failed = (
         _wake_queued_repository_workers(job_ids=tuple(jobs)) if jobs else (0, False)
     )
-    action = (
-        "Queued background refresh for" if operation == "refresh" else "Updated refresh policy for"
-    )
-    detail = f"{action} {len(completed_ids)} of {len(repository_ids)} selected repositories."
+    if operation == "refresh":
+        detail = (
+            f"Queued background refresh for {len(completed_ids)} of "
+            f"{len(repository_ids)} selected repositories."
+        )
+    elif operation == "stop_indexing":
+        stopped_total = stopped_queued + stopped_running
+        detail = (
+            f"Stopped {stopped_total} PDF indexing "
+            f"{'attempt' if stopped_total == 1 else 'attempts'} across "
+            f"{len(completed_ids)} of {len(repository_ids)} selected repositories."
+        )
+    else:
+        detail = (
+            f"Updated refresh policy for {len(completed_ids)} of "
+            f"{len(repository_ids)} selected repositories."
+        )
     if failures:
         detail += f" {len(failures)} could not be updated; reload before trying them again."
     if launch_failed:
@@ -2101,12 +2134,25 @@ def selected_repositories(request: HttpRequest) -> HttpResponse:
             {
                 "state": "partial"
                 if failures
-                else ("queued" if operation == "refresh" else "updated"),
+                else (
+                    "queued"
+                    if operation == "refresh"
+                    else "cancelled"
+                    if operation == "stop_indexing" and stopped_queued + stopped_running
+                    else "idle"
+                    if operation == "stop_indexing"
+                    else "updated"
+                ),
                 "detail": detail,
                 "completedIds": completed_ids,
                 "completedCount": len(completed_ids),
                 "workersStarted": workers_started,
                 "workerWakeupFailed": launch_failed,
+                "cancelled": {
+                    "queued": stopped_queued,
+                    "running": stopped_running,
+                    "total": stopped_queued + stopped_running,
+                },
                 "failures": failures,
                 "repositories": [_repository_payload(repository) for repository in updated],
             },
@@ -2141,7 +2187,17 @@ def remove_repository_view(request: HttpRequest, repository_id: int) -> HttpResp
         "repository_id": repository_id,
         "repository_name": repository.display_name if repository else recovery.display_name,
         "repository_path": "",
-        "repository_busy": bool(repository and repository.has_active_work),
+        "repository_git_busy": bool(
+            repository
+            and (
+                repository.has_active_sync
+                or repository.activity["queuedSyncJobs"]
+                or repository.activity["runningSyncJobs"]
+            )
+        ),
+        "repository_pdf_indexing": bool(
+            repository and (repository.activity["queuedPdfs"] or repository.activity["runningPdfs"])
+        ),
         "removal_incomplete": recovery is not None,
         "removal_database_deleted": bool(recovery and recovery.database_deleted),
         "cancel_url": reverse("bitbucket_search:index"),
@@ -2480,11 +2536,141 @@ def repository_status(request: HttpRequest) -> JsonResponse:
     )
 
 
+_INDEX_LOG_PAGE_SIZE = 100
+_INDEX_LOG_PANEL_LINES = 100
+_INDEX_EVENT_PAGE_SIZE = 200
+
+
+def _operation_log_line(entry: RepositoryOperationLogEntry) -> str:
+    """Render one already-safe row as inert, consistently formatted console text."""
+
+    message = sanitize_git_output(entry.message).replace("\n", " ")
+    if not message:
+        return ""
+    occurred_at = entry.occurred_at.astimezone(UTC)
+    stamp = occurred_at.strftime("%H:%M:%S UTC")
+    severity = str(entry.severity or "info").upper()
+    label = str(entry.phase or entry.channel or "worker").replace("_", "-")[:32]
+    details: list[str] = []
+    extraction_job = getattr(entry, "extraction_job", None)
+    if extraction_job is not None:
+        relative_path = sanitize_git_output(extraction_job.target_relative_path).replace("\n", " ")
+        if relative_path:
+            details.append(relative_path)
+    if entry.progress is not None:
+        details.append(f"{entry.progress}%")
+    if entry.worker_pid is not None:
+        details.append(f"worker {entry.worker_pid}")
+    suffix = f" · {' · '.join(details)}" if details else ""
+    return f"{stamp} {severity} [{label}] {message}{suffix}"
+
+
+def _selected_git_log(job: RepositorySyncJob | None) -> tuple[str, bool]:
+    """Return the complete retained event log, with a legacy-tail fallback."""
+
+    if job is None:
+        return "", False
+    entries = tuple(
+        RepositoryOperationLogEntry.objects.filter(sync_job=job)
+        .exclude(channel=RepositoryOperationLogChannel.INDEXING)
+        .select_related("extraction_job")
+        .order_by("id")
+    )
+    lines = tuple(filter(None, (_operation_log_line(entry) for entry in entries)))
+    if lines:
+        return "\n".join(lines), bool(job.operation_log_truncated)
+    safe_log, clipped = bounded_git_output(job.output_log)
+    return safe_log, bool(clipped or job.output_log_truncated)
+
+
+def _index_job_counts(jobs) -> dict[str, int]:
+    counts = {
+        status: 0
+        for status in (
+            PDFExtractionJobStatus.QUEUED,
+            PDFExtractionJobStatus.RUNNING,
+            PDFExtractionJobStatus.SUCCEEDED,
+            PDFExtractionJobStatus.FAILED,
+            PDFExtractionJobStatus.INTERRUPTED,
+            PDFExtractionJobStatus.CANCELLED,
+        )
+    }
+    for row in jobs.order_by().values("status").annotate(total=Count("id")):
+        if row["status"] in counts:
+            counts[row["status"]] = row["total"]
+    counts["total"] = sum(counts.values())
+    return counts
+
+
+def _indexing_log_payload(repository_id: int) -> dict[str, object]:
+    jobs = PDFExtractionJob.objects.filter(document__repository_id=repository_id)
+    counts = _index_job_counts(jobs)
+    event_rows = tuple(
+        RepositoryOperationLogEntry.objects.filter(
+            repository_id=repository_id,
+            channel=RepositoryOperationLogChannel.INDEXING,
+        )
+        .select_related("extraction_job")
+        .order_by("-id")[: _INDEX_LOG_PANEL_LINES + 1]
+    )
+    truncated = len(event_rows) > _INDEX_LOG_PANEL_LINES
+    visible_events = tuple(reversed(event_rows[:_INDEX_LOG_PANEL_LINES]))
+    lines = tuple(filter(None, (_operation_log_line(entry) for entry in visible_events)))
+    recent_jobs: tuple[PDFExtractionJob, ...] = ()
+    if not lines:
+        # Databases upgraded from the earlier status-only implementation still
+        # receive useful durable job rows before any new transition event exists.
+        recent_jobs = tuple(jobs.order_by("-requested_at", "-id")[:_INDEX_LOG_PANEL_LINES])
+        fallback_lines = []
+        for job in reversed(recent_jobs):
+            observed_at = job.completed_at or job.heartbeat_at or job.started_at or job.requested_at
+            stamp = observed_at.astimezone(UTC).strftime("%H:%M:%S UTC")
+            path = sanitize_git_output(job.target_relative_path).replace("\n", " ")
+            level = (
+                "ERROR"
+                if job.status
+                in {
+                    PDFExtractionJobStatus.FAILED,
+                    PDFExtractionJobStatus.INTERRUPTED,
+                }
+                else "INFO"
+            )
+            fallback_lines.append(
+                f"{stamp} {level} [{job.phase or 'indexing'}] "
+                f"{job.get_status_display()} · {path} · {job.progress}%"
+            )
+        lines = tuple(fallback_lines)
+        truncated = counts["total"] > len(recent_jobs)
+    latest_event_at = visible_events[-1].occurred_at if visible_events else None
+    latest_job_at = None
+    if recent_jobs:
+        latest_job = recent_jobs[0]
+        latest_job_at = (
+            latest_job.heartbeat_at
+            or latest_job.completed_at
+            or latest_job.started_at
+            or latest_job.requested_at
+        )
+    return {
+        "workerLimit": settings.PDF_MAX_EXTRACTION_WORKERS,
+        "active": bool(
+            counts[PDFExtractionJobStatus.QUEUED] or counts[PDFExtractionJobStatus.RUNNING]
+        ),
+        "countsKind": "attempts",
+        "counts": counts,
+        "lines": lines,
+        "truncated": truncated,
+        "updatedAt": (latest_event_at or latest_job_at).isoformat()
+        if latest_event_at or latest_job_at
+        else None,
+    }
+
+
 @require_GET
 @never_cache
 @_logged_web_action("repository_logs", quiet=True)
 def repository_logs(request: HttpRequest, repository_id: int) -> JsonResponse:
-    """Read only one repository's latest bounded, redacted Git transport log."""
+    """Expose redacted Git output plus durable parallel PDF indexing activity."""
 
     local_error = _require_local_action(request)
     if local_error:
@@ -2517,6 +2703,48 @@ def repository_logs(request: HttpRequest, repository_id: int) -> JsonResponse:
             "updatedAt": job.output_log_updated_at.isoformat()
             if job and job.output_log_updated_at
             else None,
+            "indexing": _indexing_log_payload(repository_id),
+        }
+    )
+
+
+@require_POST
+@csrf_protect
+@never_cache
+@_logged_web_action("repository_index_cancel")
+def cancel_repository_indexing(request: HttpRequest, repository_id: int) -> HttpResponse:
+    """Abruptly stop only the selected repository's active PDF extraction jobs."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    repository = get_object_or_404(
+        BitbucketRepository.objects.only("id", "display_name"), pk=repository_id
+    )
+    try:
+        result = cancel_repository_pdf_extractions(repository)
+    except BitbucketRepository.DoesNotExist as error:
+        raise Http404("Repository not found.") from error
+    detail = (
+        f"Stopped {result.total_jobs} PDF indexing "
+        f"{'attempt' if result.total_jobs == 1 else 'attempts'} for {repository.display_name}."
+        if result.total_jobs
+        else f"{repository.display_name} has no active PDF indexing attempts."
+    )
+    if request.POST.get("return_to") == "logs":
+        messages.success(request, detail)
+        return redirect(f"{reverse('bitbucket_search:index_status')}?repository={repository.pk}")
+    return JsonResponse(
+        {
+            "repositoryId": repository.pk,
+            "state": result.state,
+            "detail": detail,
+            "cancelled": {
+                "queued": result.queued_jobs,
+                "running": result.running_jobs,
+                "total": result.total_jobs,
+            },
+            "indexing": _indexing_log_payload(repository.pk),
         }
     )
 
@@ -2525,7 +2753,7 @@ def repository_logs(request: HttpRequest, repository_id: int) -> JsonResponse:
 @never_cache
 @_logged_web_action("pdf_index_status", quiet=True)
 def index_status(request: HttpRequest) -> HttpResponse:
-    """Show a truthful summary of durable repository background jobs."""
+    """Show complete retained Git output and paginated PDF indexing history."""
 
     repositories = repository_status_snapshot()
     for repository in repositories:
@@ -2544,6 +2772,149 @@ def index_status(request: HttpRequest) -> HttpResponse:
     )
     extraction_status = extraction_status_snapshot()
     automation = _automation_payload(repositories)
+    selected_repository = None
+    requested_repository_id = request.GET.get("repository", "")
+    if requested_repository_id.isdigit():
+        requested_id = int(requested_repository_id)
+        selected_repository = next(
+            (repository for repository in repositories if repository.pk == requested_id),
+            None,
+        )
+    if selected_repository is None and repositories:
+        selected_repository = repositories[0]
+
+    git_jobs: tuple[RepositorySyncJob, ...] = ()
+    selected_git_job = None
+    selected_git_log = ""
+    selected_git_log_truncated = False
+    index_jobs: tuple[PDFExtractionJob, ...] = ()
+    index_job_has_newer = False
+    index_job_has_older = False
+    index_job_newer_after = None
+    index_job_older_before = None
+    index_job_before = None
+    index_job_after = None
+    index_event_log = ""
+    index_event_count = 0
+    index_event_has_newer = False
+    index_event_has_older = False
+    index_event_newer_after = None
+    index_event_older_before = None
+    index_event_before = None
+    index_event_after = None
+    index_job_counts = _index_job_counts(PDFExtractionJob.objects.none())
+    index_needs_attention = bool(
+        extraction_status.failed_jobs
+        or extraction_status.interrupted_jobs
+        or extraction_status.stale_documents
+    )
+    if selected_repository is not None:
+        git_jobs = tuple(
+            RepositorySyncJob.objects.filter(repository=selected_repository)
+            .defer("output_log")
+            .order_by("-requested_at", "-id")
+        )
+        requested_git_job_id = request.GET.get("git_job", "")
+        if requested_git_job_id.isdigit():
+            requested_job_id = int(requested_git_job_id)
+            selected_git_job = next(
+                (job for job in git_jobs if job.pk == requested_job_id),
+                None,
+            )
+        if selected_git_job is None and git_jobs:
+            selected_git_job = git_jobs[0]
+        if selected_git_job is not None:
+            # The run list defers the compatibility tail. Load only the selected
+            # run's tail for upgraded databases that have no append-only rows.
+            selected_git_job = RepositorySyncJob.objects.get(pk=selected_git_job.pk)
+            selected_git_log, selected_git_log_truncated = _selected_git_log(selected_git_job)
+
+        index_job_query = PDFExtractionJob.objects.filter(document__repository=selected_repository)
+        index_job_counts = _index_job_counts(index_job_query)
+        requested_job_before = request.GET.get("index_job_before", "")
+        requested_job_after = request.GET.get("index_job_after", "")
+        if requested_job_before.isdigit() and int(requested_job_before) > 0:
+            index_job_before = int(requested_job_before)
+        elif requested_job_after.isdigit() and int(requested_job_after) > 0:
+            index_job_after = int(requested_job_after)
+
+        if index_job_before is not None:
+            job_batch = tuple(
+                index_job_query.filter(pk__lt=index_job_before).order_by("-id")[
+                    : _INDEX_LOG_PAGE_SIZE + 1
+                ]
+            )
+            index_jobs = job_batch[:_INDEX_LOG_PAGE_SIZE]
+            index_job_has_newer = True
+            index_job_has_older = len(job_batch) > _INDEX_LOG_PAGE_SIZE
+        elif index_job_after is not None:
+            job_batch = tuple(
+                index_job_query.filter(pk__gt=index_job_after).order_by("id")[
+                    : _INDEX_LOG_PAGE_SIZE + 1
+                ]
+            )
+            index_jobs = tuple(reversed(job_batch[:_INDEX_LOG_PAGE_SIZE]))
+            index_job_has_newer = len(job_batch) > _INDEX_LOG_PAGE_SIZE
+            index_job_has_older = True
+        else:
+            job_batch = tuple(index_job_query.order_by("-id")[: _INDEX_LOG_PAGE_SIZE + 1])
+            index_jobs = job_batch[:_INDEX_LOG_PAGE_SIZE]
+            index_job_has_older = len(job_batch) > _INDEX_LOG_PAGE_SIZE
+
+        if index_jobs:
+            if index_job_has_newer:
+                index_job_newer_after = index_jobs[0].pk
+            if index_job_has_older:
+                index_job_older_before = index_jobs[-1].pk
+        index_needs_attention = PDFDocument.objects.filter(
+            repository=selected_repository,
+            lifecycle_state=PDFDocumentLifecycle.ACTIVE,
+            index_state__in=(PDFIndexState.FAILED, PDFIndexState.STALE_ERROR),
+        ).exists()
+        index_events = RepositoryOperationLogEntry.objects.filter(
+            repository=selected_repository,
+            channel=RepositoryOperationLogChannel.INDEXING,
+        ).select_related("extraction_job")
+        requested_before = request.GET.get("index_event_before", "")
+        requested_after = request.GET.get("index_event_after", "")
+        if requested_before.isdigit() and int(requested_before) > 0:
+            index_event_before = int(requested_before)
+        elif requested_after.isdigit() and int(requested_after) > 0:
+            index_event_after = int(requested_after)
+
+        if index_event_before is not None:
+            event_batch = tuple(
+                index_events.filter(pk__lt=index_event_before).order_by("-id")[
+                    : _INDEX_EVENT_PAGE_SIZE + 1
+                ]
+            )
+            event_rows = event_batch[:_INDEX_EVENT_PAGE_SIZE]
+            index_event_has_newer = True
+            index_event_has_older = len(event_batch) > _INDEX_EVENT_PAGE_SIZE
+        elif index_event_after is not None:
+            event_batch = tuple(
+                index_events.filter(pk__gt=index_event_after).order_by("id")[
+                    : _INDEX_EVENT_PAGE_SIZE + 1
+                ]
+            )
+            event_rows = tuple(reversed(event_batch[:_INDEX_EVENT_PAGE_SIZE]))
+            index_event_has_newer = len(event_batch) > _INDEX_EVENT_PAGE_SIZE
+            index_event_has_older = True
+        else:
+            event_batch = tuple(index_events.order_by("-id")[: _INDEX_EVENT_PAGE_SIZE + 1])
+            event_rows = event_batch[:_INDEX_EVENT_PAGE_SIZE]
+            index_event_has_older = len(event_batch) > _INDEX_EVENT_PAGE_SIZE
+
+        if event_rows:
+            index_event_count = len(event_rows)
+            if index_event_has_newer:
+                index_event_newer_after = event_rows[0].pk
+            if index_event_has_older:
+                index_event_older_before = event_rows[-1].pk
+        # Each stable ID window renders oldest to newest inside the console.
+        index_event_log = "\n".join(
+            filter(None, (_operation_log_line(entry) for entry in reversed(event_rows)))
+        )
     return render(
         request,
         "bitbucket_search/status.html",
@@ -2551,9 +2922,7 @@ def index_status(request: HttpRequest) -> HttpResponse:
             "active_app": "bitbucket",
             "active_section": "index_status",
             "active_nav": "index_status",
-            "page_title": "Index & Refresh Status",
-            "eyebrow": "Durable background repository worker",
-            "heading": "Repository sync activity",
+            "page_title": "Repository Logs",
             "repositories": repositories,
             "repository_count": len(repositories),
             "enabled_repository_count": sum(repository.enabled for repository in repositories),
@@ -2565,6 +2934,31 @@ def index_status(request: HttpRequest) -> HttpResponse:
             "pdf_count": sum(repository.pdf_count for repository in repositories),
             "extraction_status": extraction_status,
             "repo_worker_limit": settings.BITBUCKET_MAX_REPO_WORKERS,
-            "status_message": "Repository background worker status",
+            "index_worker_limit": settings.PDF_MAX_EXTRACTION_WORKERS,
+            "selected_repository": selected_repository,
+            "git_jobs": git_jobs,
+            "selected_git_job": selected_git_job,
+            "selected_git_log": selected_git_log,
+            "selected_git_log_truncated": selected_git_log_truncated,
+            "index_jobs": index_jobs,
+            "index_job_page_size": _INDEX_LOG_PAGE_SIZE,
+            "index_job_has_newer": index_job_has_newer,
+            "index_job_has_older": index_job_has_older,
+            "index_job_newer_after": index_job_newer_after,
+            "index_job_older_before": index_job_older_before,
+            "index_job_before": index_job_before,
+            "index_job_after": index_job_after,
+            "index_event_log": index_event_log,
+            "index_event_count": index_event_count,
+            "index_event_page_size": _INDEX_EVENT_PAGE_SIZE,
+            "index_event_has_newer": index_event_has_newer,
+            "index_event_has_older": index_event_has_older,
+            "index_event_newer_after": index_event_newer_after,
+            "index_event_older_before": index_event_older_before,
+            "index_event_before": index_event_before,
+            "index_event_after": index_event_after,
+            "index_job_counts": index_job_counts,
+            "index_needs_attention": index_needs_attention,
+            "status_message": "Repository operation logs",
         },
     )

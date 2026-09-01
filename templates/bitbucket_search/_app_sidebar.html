@@ -15,7 +15,7 @@
 
         <section class="app-side-nav__group" aria-labelledby="bitbucket-status-heading">
             <h3 id="bitbucket-status-heading">Diagnostics</h3>
-            <a href="{% url 'bitbucket_search:index_status' %}"{% if active_section == 'index_status' %} aria-current="page" class="is-active"{% endif %}>Index &amp; refresh status</a>
+            <a href="{% url 'bitbucket_search:index_status' %}"{% if active_section == 'index_status' %} aria-current="page" class="is-active"{% endif %}>Repository logs</a>
             <a href="{% url 'core:system_status' %}">System status</a>
         </section>
     </nav>

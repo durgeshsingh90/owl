@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from django.db.models import F, Min, Q
+from django.db.models import Avg, Count, F, Min, Q
 from django.utils import timezone
 
 from bitbucket_search.models import (
@@ -49,6 +49,27 @@ def running_pdf_worker_starts(*, observed_at: datetime) -> dict[int, datetime]:
     }
 
 
+def running_pdf_worker_activity(*, observed_at: datetime) -> dict[int, dict[str, object]]:
+    """One batched query for the timer and honest active-worker progress per repository."""
+
+    return {
+        row["document__repository_id"]: {
+            "started_at": row["started_at"],
+            "progress": int(round(row["progress"])) if row["progress"] is not None else None,
+            "running_jobs": row["running_jobs"],
+        }
+        for row in current_pdf_extraction_jobs()
+        .filter(running_pdf_start_filter(observed_at))
+        .values("document__repository_id")
+        .annotate(
+            started_at=Min("started_at"),
+            progress=Avg("progress"),
+            running_jobs=Count("id"),
+        )
+        .order_by()
+    }
+
+
 def worker_timing(
     *,
     observed_at: datetime,
@@ -56,13 +77,17 @@ def worker_timing(
     sync_started_at: datetime | None = None,
     sync_operation: str | None = None,
     sync_phase: str | None = None,
+    sync_progress: int | None = None,
     indexing_started_at: datetime | None = None,
-) -> dict[str, str] | None:
+    indexing_progress: int | None = None,
+) -> dict[str, object] | None:
     """Use a real RUNNING job's start, never queue time or repository state."""
 
     if sync_status == RepositorySyncJobStatus.RUNNING:
         started_at = sync_started_at
         kind = "sync"
+        operation = "clone" if sync_operation == RepositorySyncOperation.CLONE else "pull"
+        progress = sync_progress
         if sync_phase == RepositorySyncPhase.CHECKING_CONNECTION:
             label = "Checking connection"
         elif sync_phase in (RepositorySyncPhase.DISCOVERING, RepositorySyncPhase.FINALIZING):
@@ -74,6 +99,8 @@ def worker_timing(
     else:
         started_at = indexing_started_at
         kind = "indexing"
+        operation = "indexing"
+        progress = indexing_progress
         label = "Indexing PDFs"
     if (
         not isinstance(started_at, datetime)
@@ -86,4 +113,9 @@ def worker_timing(
         "observedAt": observed_at.isoformat(),
         "label": label,
         "kind": kind,
+        "operation": operation,
+        "phase": sync_phase if kind == "sync" else "extracting",
+        "phaseLabel": label,
+        "progress": max(0, min(int(progress), 100)) if progress is not None else None,
+        "progressScope": "job" if kind == "sync" else "running_workers_average",
     }

@@ -38,10 +38,10 @@ def test_repository_status_panel_owns_current_status_and_background_schedule():
     ((_, indicator),) = elements.with_hook("data-repository-status-indicator")
     assert status_root["data-state"] == "unknown"
     assert indicator["aria-hidden"] == "true"
-    assert "Repository status" in html
-    assert "Current status of all repositories" in html
-    assert "Latest Git output · updates live while running." in html
-    assert "Loading repository status…" in html
+    assert "Repository logs" in html
+    assert "Current activity and logs for all repositories" in html
+    assert "Latest Git output and PDF indexing activity · updates live while workers run." in html
+    assert "Loading repository logs…" in html
     for hook in ("repositories", "repository-count", "repository-message", "repository-list"):
         assert len(elements.with_hook(f"data-notification-{hook}")) == 1
     ((list_tag, list_attrs),) = elements.with_hook("data-notification-repository-list")
@@ -60,6 +60,50 @@ def test_repository_status_panel_owns_current_status_and_background_schedule():
     assert not any(tag in {"form", "iframe"} for tag, _attrs in elements.elements)
     assert "csrfmiddlewaretoken" not in html
     assert "data-bitbucket-schedule-tick-form" not in html
+
+
+def test_repository_activity_icons_and_progress_hooks_are_distinct_and_accessible():
+    html = _render("owl/_repository_status.html")
+    elements = _Elements(html)
+
+    assert len(elements.with_hook("data-repository-status-idle-icon")) == 1
+    ((_, activities),) = elements.with_hook("data-repository-status-activities")
+    assert "hidden" in activities
+    operation_nodes = elements.with_hook("data-repository-status-activity")
+    assert [attrs["data-repository-status-activity"] for _, attrs in operation_nodes] == [
+        "clone",
+        "pull",
+        "indexing",
+    ]
+    assert all(attrs["aria-hidden"] == "true" and "hidden" in attrs for _, attrs in operation_nodes)
+    assert len(elements.with_hook("data-repository-status-activity-progress")) == 3
+    compact_timers = elements.with_hook("data-repository-worker-timer")
+    assert len(compact_timers) == 3
+    assert all(
+        attrs["data-worker-compact"] == "true" and "hidden" in attrs for _, attrs in compact_timers
+    )
+    for operation in ("clone", "pull", "indexing"):
+        assert f"repository-status__activity--{operation}" in html
+
+    owl_css = (PROJECT_ROOT / "static/owl/owl.css").read_text()
+    repository_template = (
+        PROJECT_ROOT / "templates/bitbucket_search/_repository_list.html"
+    ).read_text()
+    repository_css = (PROJECT_ROOT / "static/bitbucket_search/bitbucket_search.css").read_text()
+    for operation in ("clone", "pull", "indexing"):
+        assert f".repository-status__activity--{operation}" in owl_css
+        assert f"bb-state-icon--{operation}" in repository_template
+        assert f'[data-repository-operation="{operation}"]' in repository_css
+    for hook in (
+        "data-repository-operation",
+        "data-repository-progress",
+        "data-repository-progress-bar",
+        "data-repository-progress-label",
+        "data-worker-operation",
+    ):
+        assert hook in repository_template
+    assert ".bb-repository-progress progress:not([value])" in repository_css
+    assert "bb-progress-indeterminate" in repository_css
 
 
 def test_notification_bell_contains_history_and_keeps_its_existing_hidden_forms_once():
@@ -81,7 +125,7 @@ def test_notification_bell_contains_history_and_keeps_its_existing_hidden_forms_
         "activity",
     ):
         assert not elements.with_hook(f"data-notification-{hook}")
-    assert "Repository status" not in html
+    assert "Repository logs" not in html
     assert "Confluence schedule" not in html
     assert "Git log" not in html
     assert "data-repository-status-center" not in html

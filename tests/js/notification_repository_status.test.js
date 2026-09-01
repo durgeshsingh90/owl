@@ -222,7 +222,18 @@ const repository = (id, overrides = {}) => ({
     detail: "Last sync completed successfully.",
     targetPath: `/pdfs/?repository=${id}`,
     statusTargetPath: "/pdfs/status/",
+    cancelIndexingUrl: `/pdfs/repositories/${id}/indexing/cancel/`,
     ...overrides,
+});
+
+const payloadWithActivities = (items, activities) => payload(items, {
+    repositoryStatuses: {
+        items,
+        total: items.length,
+        activeCount: items.filter((item) => item.statusTone === "progress").length,
+        failedCount: items.filter((item) => item.status === "failed").length,
+        activities,
+    },
 });
 
 const boot = (...responses) => bootWithTimers([], ...responses);
@@ -247,10 +258,27 @@ async function bootPage(initialTimers, logResponses, ...responses) {
         "last-success", "retry-row", "retry", "repository-list", "repository-count",
         "repository-message",
     ];
-    [...notificationHooks, ...statusHooks, "status-toggle", "status-panel", "status-indicator", "status-live"]
+    [...notificationHooks, ...statusHooks, "status-toggle", "status-panel", "status-indicator", "status-live",
+        "status-idle-icon", "status-activities"]
         .forEach((name) => hooks.set(name, new Element()));
+    const statusActivityNodes = new Map(["clone", "pull", "indexing"].map((operation) => {
+        const element = new Element("span");
+        const progress = new Element("span");
+        const timer = new Element("small");
+        element.dataset.repositoryStatusActivity = operation;
+        element.hidden = true;
+        timer.dataset.workerCompact = "true";
+        timer.hidden = true;
+        element.append(progress, timer);
+        element.querySelector = (selector) => selector === "[data-repository-status-activity-progress]"
+            ? progress : selector === "[data-repository-worker-timer]" ? timer : null;
+        return [operation, { element, progress, timer }];
+    }));
+    hooks.get("status-activities").hidden = true;
+    statusActivityNodes.forEach(({ element }) => hooks.get("status-activities").append(element));
     notificationHooks.forEach((name) => center.append(hooks.get(name)));
-    [...statusHooks, "status-toggle", "status-panel", "status-indicator", "status-live"]
+    [...statusHooks, "status-toggle", "status-panel", "status-indicator", "status-live",
+        "status-idle-icon", "status-activities"]
         .forEach((name) => statusCenter.append(hooks.get(name)));
     hooks.get("panel").hidden = true;
     hooks.get("status-panel").hidden = true;
@@ -264,6 +292,8 @@ async function bootPage(initialTimers, logResponses, ...responses) {
             : selector.replace("[data-notification-", "").replace("]", "");
         return notificationHooks.includes(name) ? null : hooks.get(name) || null;
     };
+    statusCenter.querySelectorAll = (selector) => selector === "[data-repository-status-activity]"
+        ? [...statusActivityNodes.values()].map(({ element }) => element) : [];
     const timers = [];
     const timeoutDelays = new Map();
     const activeTimeouts = new Set();
@@ -335,6 +365,7 @@ async function bootPage(initialTimers, logResponses, ...responses) {
         hooks,
         center,
         statusCenter,
+        statusActivityNodes,
         requests,
         intervals,
         flush,
@@ -471,7 +502,7 @@ test("repository names stay text and unsafe navigation targets are disabled", as
     assert.equal(body.children.at(-1).hidden, true);
 });
 
-test("status opens separately from notifications and switching panels never marks alerts read", async () => {
+test("repository logs open separately from notifications and switching panels never marks alerts read", async () => {
     const page = await boot(payload([repository(1)], { unread_count: 3 }));
     const { hooks } = page;
     assert.equal(page.center.contains(hooks.get("repository-list")), false);
@@ -480,7 +511,7 @@ test("status opens separately from notifications and switching panels never mark
     await page.click("status-toggle");
     assert.equal(hooks.get("status-panel").hidden, false);
     assert.equal(hooks.get("panel").hidden, true);
-    assert.match(hooks.get("status-toggle").getAttribute("aria-label"), /^Close background status/);
+    assert.match(hooks.get("status-toggle").getAttribute("aria-label"), /^Close repository logs/);
     assert.equal(hooks.get("badge").textContent, "3");
     await page.click("toggle");
     assert.equal(hooks.get("status-panel").hidden, true);
@@ -532,6 +563,103 @@ test("background indicator tracks current status independently of unread alerts 
     assert.equal(page.statusCenter.dataset.state, "unknown");
     await page.poll();
     assert.equal(page.statusCenter.dataset.state, "neutral");
+});
+
+test("clone, pull and indexing render together with honest progress, compact timers and operation-specific rows", async () => {
+    const cloneTiming = workerTiming({ operation: "clone", label: "Cloning repository" });
+    const indexingTiming = workerTiming({
+        operation: "indexing", kind: "indexing", label: "Indexing PDFs",
+        startedAt: "2026-08-30T11:59:00Z",
+    });
+    const items = [
+        repository(1, {
+            status: "cloning", statusLabel: "Downloading repository", statusTone: "progress",
+            operation: "clone", progress: 37, phaseLabel: "Receiving Git objects",
+            activity: { state: "running" }, workerTiming: cloneTiming,
+        }),
+        repository(2, {
+            status: "queued", statusLabel: "Queued", statusTone: "progress",
+            operation: "pull", progress: null, phaseLabel: "Git pull queued",
+            activity: { state: "queued" }, workerTiming: null,
+        }),
+        repository(3, {
+            status: "indexing", statusLabel: "Reading PDF text", statusTone: "progress",
+            operation: "indexing", progress: null, phaseLabel: "Extracting PDF text",
+            activity: { state: "running" }, workerTiming: indexingTiming,
+        }),
+    ];
+    const activities = [
+        {
+            active: true, operation: "clone", state: "running", progress: 37,
+            label: "Git clone", detail: "Receiving Git objects",
+            startedAt: cloneTiming.startedAt, observedAt: cloneTiming.observedAt,
+        },
+        {
+            active: true, operation: "pull", state: "queued", progress: null,
+            label: "Git pull", detail: "Waiting for a Git worker",
+            startedAt: null, observedAt: cloneTiming.observedAt,
+        },
+        {
+            active: true, operation: "indexing", state: "running", progress: null,
+            label: "PDF indexing", detail: "Two PDF workers active",
+            startedAt: indexingTiming.startedAt, observedAt: indexingTiming.observedAt,
+        },
+    ];
+    const page = await boot(
+        payloadWithActivities(items, activities),
+        new Error("offline"),
+        payloadWithActivities(items.map((item) => repository(item.id)), []),
+    );
+
+    assert.equal(page.hooks.get("status-idle-icon").hidden, true);
+    assert.equal(page.hooks.get("status-activities").hidden, false);
+    assert.equal(page.hooks.get("status-activities").dataset.stale, "false");
+    const clone = page.statusActivityNodes.get("clone");
+    const pull = page.statusActivityNodes.get("pull");
+    const indexing = page.statusActivityNodes.get("indexing");
+    assert.deepEqual(
+        [clone.element.hidden, pull.element.hidden, indexing.element.hidden],
+        [false, false, false],
+    );
+    assert.deepEqual(
+        [clone.progress.textContent, pull.progress.textContent, indexing.progress.textContent],
+        ["37%", "Queued", "Running"],
+    );
+    assert.equal(clone.timer.textContent, "02:05");
+    assert.equal(pull.timer.hidden, true, "Queued work never fabricates a start time");
+    assert.equal(indexing.timer.textContent, "01:00");
+    assert.match(clone.element.getAttribute("aria-label"), /Git clone, 37%/);
+    assert.match(pull.element.getAttribute("aria-label"), /Git pull, Queued/);
+    assert.match(indexing.element.getAttribute("aria-label"), /PDF indexing, Running/);
+
+    const rows = page.hooks.get("repository-list").children;
+    assert.deepEqual(rows.map((row) => row.dataset.operation), ["clone", "pull", "indexing"]);
+    assert.deepEqual(
+        rows.map((row) => row.children[0].children[0].children[0].textContent),
+        ["↓", "↻", "⌕"],
+    );
+    assert.deepEqual(
+        rows.map((row) => row.children[0].children[0].children[2].textContent),
+        ["Clone · 37%", "Pull · Queued", "Index · Running"],
+    );
+
+    page.advance(3000);
+    assert.equal(clone.timer.textContent, "02:08");
+    assert.equal(indexing.timer.textContent, "01:03");
+    await page.poll();
+    assert.equal(page.hooks.get("status-activities").dataset.stale, "true");
+    assert.equal(clone.timer.textContent, "02:05 · last");
+    assert.equal(indexing.timer.textContent, "01:00 · last");
+    assert.equal(page.activeClocks(), 0, "An outage freezes every compact activity timer");
+
+    await page.poll();
+    assert.equal(page.hooks.get("status-activities").hidden, true);
+    assert.equal(page.hooks.get("status-idle-icon").hidden, false);
+    assert.deepEqual(
+        [clone.element.hidden, pull.element.hidden, indexing.element.hidden],
+        [true, true, true],
+    );
+    assert.deepEqual([clone.timer.hidden, pull.timer.hidden, indexing.timer.hidden], [true, true, true]);
 });
 
 test("Confluence activity and retries belong to status, not the notification badge", async () => {
@@ -651,6 +779,24 @@ const gitOutput = (overrides = {}) => ({
     updatedAt: "2026-08-30T12:00:00Z", ...overrides,
 });
 
+const indexingOutput = (overrides = {}) => gitOutput({
+    status: "succeeded", operation: "refresh", log: "Git refresh complete.",
+    indexing: {
+        workerLimit: 4,
+        active: true,
+        counts: {
+            total: 5006, queued: 4996, running: 4, succeeded: 0,
+            failed: 2, interrupted: 1, cancelled: 3,
+        },
+        lines: [
+            "12:00:00 UTC INFO [validating] Validating the PDF extraction target. · docs/a.pdf · 5% · worker 101",
+            "12:00:01 UTC INFO [extracting] Extracting searchable PDF text. · docs/a.pdf · 60% · worker 101",
+        ],
+        truncated: false, updatedAt: "2026-08-30T12:00:01Z",
+        ...overrides,
+    },
+});
+
 const logFor = (page, index = 0) => {
     const details = page.hooks.get("repository-list").children[index].children[0];
     const log = details.children[1].children.find((child) => child.className === "notification-repository__git-log");
@@ -660,9 +806,27 @@ const logFor = (page, index = 0) => {
     };
 };
 
+const indexLogFor = (page, index = 0) => {
+    const details = page.hooks.get("repository-list").children[index].children[0];
+    const log = details.children[1].children.find((child) => child.className.includes("notification-repository__index-log"));
+    return {
+        details, log, summary: log.children[0], status: log.children[0].children[1],
+        message: log.children[1], output: log.children[2], truncated: log.children[3],
+        stop: log.children[4],
+    };
+};
+
 async function openLog(page, index = 0) {
     if (page.hooks.get("status-panel").hidden) { await page.click("status-toggle"); }
     const elements = logFor(page, index);
+    await page.toggle(elements.details, true);
+    await page.toggle(elements.log, true);
+    return elements;
+}
+
+async function openIndexLog(page, index = 0) {
+    if (page.hooks.get("status-panel").hidden) { await page.click("status-toggle"); }
+    const elements = indexLogFor(page, index);
     await page.toggle(elements.details, true);
     await page.toggle(elements.log, true);
     return elements;
@@ -707,6 +871,71 @@ test("Git output is inert text in a keyboard-focusable console with the supplied
     assert.equal(elements.status.textContent, "Clone · Live");
     assert.match(elements.details.children[0].textContent, /Checking connection/);
     assert.equal(page.hooks.get("repository-list").children[0].dataset.tone, "progress");
+});
+
+test("PDF indexing log shows bounded parallel-worker progress and keeps polling after Git completes", async () => {
+    const page = await bootWithLogs([indexingOutput()], payload([logRepository({
+        status: "indexing", statusLabel: "Reading PDF text", statusTone: "progress",
+    })]));
+    const elements = await openIndexLog(page);
+    assert.equal(elements.summary.getAttribute("aria-label"), "PDF indexing log for repository-1");
+    assert.equal(elements.output.tagName, "pre");
+    assert.equal(elements.output.tabIndex, 0);
+    assert.equal(elements.output.getAttribute("aria-live"), "off");
+    assert.match(elements.output.textContent, /docs\/a\.pdf/);
+    assert.match(elements.output.textContent, /Extracting searchable PDF text/);
+    assert.equal(
+        elements.status.textContent,
+        "4996 queued · 4 running of 4 · 0 succeeded attempts · 2 failed · 1 interrupted · 3 cancelled",
+    );
+    assert.equal(elements.truncated.hidden, true);
+    assert.equal(elements.stop.hidden, false);
+    assert.equal(elements.stop.getAttribute("aria-label"), "Stop PDF indexing for repository-1");
+    assert.equal(page.activeLogPolls(), 1, "Indexing activity keeps the log live after Git is complete");
+});
+
+test("PDF indexing can be stopped directly from the repository log popup", async () => {
+    const stopped = indexingOutput({
+        active: false,
+        counts: {
+            total: 5006, queued: 0, running: 0, succeeded: 0,
+            failed: 2, interrupted: 1, cancelled: 5003,
+        },
+    });
+    const page = await bootWithLogs(
+        [indexingOutput(), stopped],
+        payload([logRepository({
+            status: "indexing", statusLabel: "Reading PDF text", statusTone: "progress",
+        })]),
+    );
+    const elements = await openIndexLog(page);
+
+    await elements.stop.listeners.get("click")({ target: elements.stop });
+    await page.flush();
+
+    const request = page.requests.find(({ url, options }) =>
+        url === "/pdfs/repositories/1/indexing/cancel/" && options.method === "POST");
+    assert.ok(request, "The popup posts only to the selected repository cancellation endpoint");
+    assert.equal(request.options.headers["X-Requested-With"], "XMLHttpRequest");
+    assert.equal(elements.stop.hidden, true);
+    assert.match(elements.status.textContent, /^0 queued · 0 running/);
+});
+
+test("closing an in-flight repository log clears busy state on both consoles", async () => {
+    const page = await bootWithLogs([
+        (options) => new Promise((resolve) => {
+            options.signal.addEventListener("abort", () => resolve(indexingOutput()));
+        }),
+    ], payload([logRepository()]));
+    const elements = await openIndexLog(page);
+    const gitElements = logFor(page);
+    assert.equal(gitElements.output.getAttribute("aria-busy"), "true");
+    assert.equal(elements.output.getAttribute("aria-busy"), "true");
+
+    await page.toggle(elements.log, false);
+
+    assert.equal(gitElements.output.getAttribute("aria-busy"), "false");
+    assert.equal(elements.output.getAttribute("aria-busy"), "false");
 });
 
 test("empty Git logs distinguish not started, queued, running and completed runs", async () => {

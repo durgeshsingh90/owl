@@ -142,9 +142,18 @@ def test_exclusion_freezes_searchable_openable_bytes_and_keeps_git_clean(registe
     assert document.open_count == 7
     assert document.indexed_revision_id is not None
     assert queued.status == PDFExtractionJobStatus.CANCELLED
+    cancellation = queued.operation_log_entries.get(event="indexing_cancelled")
+    assert cancellation.severity == "warning"
+    assert cancellation.phase == queued.phase
+    assert cancellation.progress == queued.progress
+    assert cancellation.occurred_at == queued.completed_at
+    assert cancellation.message == (
+        "PDF indexing was cancelled because its local refresh rule changed."
+    )
     again = pdf_local_policy.exclude_registered_pdf(document.pk)
     assert again.pk == document.pk
     assert PDFLocalPolicy.objects.count() == 1
+    assert queued.operation_log_entries.filter(event="indexing_cancelled").count() == 1
 
 
 def test_resume_retains_snapshot_until_successful_publication(
@@ -352,6 +361,7 @@ def test_dirty_checkout_is_preserved_and_queued_job_cancellation_rolls_back(regi
     assert pdf_path.read_bytes() == b"preserve synthetic local edits"
     job.refresh_from_db()
     assert job.status == PDFExtractionJobStatus.QUEUED
+    assert not job.operation_log_entries.exists()
     assert not PDFLocalPolicy.objects.exists()
 
 

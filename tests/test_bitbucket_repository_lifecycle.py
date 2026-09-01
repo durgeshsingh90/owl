@@ -32,7 +32,7 @@ from bitbucket_search.models import (
     RepositorySyncState,
     RepositorySyncTrigger,
 )
-from bitbucket_search.services import repository_lifecycle, repository_sync
+from bitbucket_search.services import pdf_indexing, repository_lifecycle, repository_sync
 from bitbucket_search.services.git_sync import RepositorySyncError, managed_repository_path
 from bitbucket_search.services.repository_lifecycle import (
     RepositoryLifecycleError,
@@ -247,33 +247,91 @@ def test_removal_cleans_owned_files_records_and_fts_but_keeps_shared_data(
 def test_removal_rejects_active_sync_without_file_changes(stored_repository, status):
     repository, checkout, _snapshots, _staging = stored_repository
     RepositorySyncJob.objects.create(repository=repository, operation="refresh", status=status)
+    pdf_job = _extraction(_pdf(repository), PDFExtractionJobStatus.QUEUED)
     with pytest.raises(RepositoryLifecycleError, match="background refresh") as caught:
         remove_repository(repository.pk, confirmed=True)
     assert caught.value.code == "repository_busy"
     assert checkout.exists() and BitbucketRepository.objects.filter(pk=repository.pk).exists()
+    assert not RepositoryRemovalRecovery.objects.exists()
+    pdf_job.refresh_from_db()
+    assert pdf_job.status == PDFExtractionJobStatus.QUEUED
 
 
 @pytest.mark.parametrize("status", [PDFExtractionJobStatus.QUEUED, PDFExtractionJobStatus.RUNNING])
-def test_removal_rejects_active_pdf_work(stored_repository, status):
+def test_removal_cancels_active_pdf_work_before_deleting(stored_repository, status, monkeypatch):
     repository, checkout, _snapshots, _staging = stored_repository
-    _extraction(_pdf(repository), status)
-    with pytest.raises(RepositoryLifecycleError) as caught:
-        remove_repository(repository.pk, confirmed=True)
-    assert caught.value.code == "pdf_extraction_busy"
-    assert checkout.exists()
+    job = _extraction(_pdf(repository), status)
+    observed = {}
+    delete_database_records = repository_lifecycle._delete_database_records
+    cancel_extractions = repository_lifecycle.cancel_repository_pdf_extractions
+
+    def inspect_removal_barrier(repository_id):
+        recovery = RepositoryRemovalRecovery.objects.get(repository_id=repository_id)
+        observed["intent_committed_before_cancel"] = not recovery.database_deleted
+        assert pdf_indexing.claim_next_extraction_job() is None
+        return cancel_extractions(repository_id)
+
+    def inspect_cancelled_job(locked_repository):
+        job.refresh_from_db()
+        recovery = RepositoryRemovalRecovery.objects.get(repository_id=repository.pk)
+        observed.update(
+            status=job.status,
+            error_code=job.error_code,
+            recovery_database_deleted=recovery.database_deleted,
+            cancellation_logs=job.operation_log_entries.filter(event="indexing_cancelled").count(),
+        )
+        delete_database_records(locked_repository)
+
+    monkeypatch.setattr(
+        repository_lifecycle,
+        "_delete_database_records",
+        inspect_cancelled_job,
+    )
+    monkeypatch.setattr(
+        repository_lifecycle,
+        "cancel_repository_pdf_extractions",
+        inspect_removal_barrier,
+    )
+
+    result = remove_repository(repository.pk, confirmed=True)
+
+    assert result.repository_id == repository.pk
+    assert observed == {
+        "intent_committed_before_cancel": True,
+        "status": PDFExtractionJobStatus.CANCELLED,
+        "error_code": "indexing_cancelled_by_user",
+        "recovery_database_deleted": False,
+        "cancellation_logs": 1,
+    }
+    assert not checkout.exists()
+    assert not BitbucketRepository.objects.filter(pk=repository.pk).exists()
+    assert not RepositoryRemovalRecovery.objects.exists()
 
 
-def test_removal_rejects_checkout_reader_and_requires_confirmation(stored_repository):
+def test_removal_retains_intent_when_checkout_reader_outlives_bounded_wait(
+    stored_repository, monkeypatch
+):
     repository, checkout, _snapshots, _staging = stored_repository
     with pytest.raises(RepositoryLifecycleError) as caught:
         remove_repository(repository.pk)
     assert caught.value.code == "repository_delete_confirmation_required"
+    monkeypatch.setattr(repository_lifecycle, "_REMOVAL_CHECKOUT_WAIT_SECONDS", 0)
     with (
         repository_checkout_lock(repository.pk, blocking=False, shared=True),
         pytest.raises(RepositoryLifecycleError) as caught,
     ):
         remove_repository(repository.pk, confirmed=True)
-    assert caught.value.code == "repository_busy" and checkout.exists()
+    assert caught.value.code == "repository_removal_pending"
+    assert "Retry removal" in caught.value.summary
+    recovery = RepositoryRemovalRecovery.objects.get(repository_id=repository.pk)
+    assert not recovery.database_deleted and recovery.quarantine_manifest == []
+    assert checkout.exists() and BitbucketRepository.objects.filter(pk=repository.pk).exists()
+
+    result = remove_repository(repository.pk, confirmed=True)
+
+    assert result.repository_id == repository.pk
+    assert not checkout.exists()
+    assert not RepositoryRemovalRecovery.objects.exists()
 
 
 @pytest.mark.parametrize("variant", ["stored_path", "checkout", "nested", "snapshot", "root"])
@@ -325,7 +383,9 @@ def test_database_failure_restores_quarantined_trees(stored_repository, monkeypa
     assert BitbucketRepository.objects.filter(pk=repository.pk).exists()
     assert PDFDocument.objects.filter(pk=document.pk).exists()
     assert PDFTextRevision.objects.filter(pk=revision.pk).exists()
-    assert not RepositoryRemovalRecovery.objects.exists()
+    recovery = RepositoryRemovalRecovery.objects.get(repository_id=repository.pk)
+    assert not recovery.database_deleted
+    assert recovery.quarantine_manifest
 
 
 def test_cleanup_failure_is_tracked_and_same_removal_action_retries(stored_repository, monkeypatch):
@@ -372,7 +432,9 @@ def test_partial_quarantine_move_failure_restores_all_originals(stored_repositor
         remove_repository(repository.pk, confirmed=True)
     assert all(path.exists() for path in (checkout, snapshots, staging))
     assert BitbucketRepository.objects.filter(pk=repository.pk).exists()
-    assert not RepositoryRemovalRecovery.objects.exists()
+    recovery = RepositoryRemovalRecovery.objects.get(repository_id=repository.pk)
+    assert not recovery.database_deleted
+    assert recovery.quarantine_manifest
 
 
 def test_interrupted_journal_blocks_new_work_and_retry_restores_then_removes(
