@@ -30,9 +30,13 @@ from bookmark_manager.services.bookmark_refresh import queue_due_scheduled_refre
 from bookmark_manager.services.logging_events import get_logger as get_bookmark_logger
 from bookmark_manager.services.logging_events import log_event as log_bookmark_event
 from bookmark_manager.services.notifications import publish_notification
+from semantic_search.services.jobs import sweep_semantic_index_queue
+from semantic_search.services.logging_events import get_logger as get_semantic_logger
+from semantic_search.services.logging_events import log_event as log_semantic_event
 
 logger = get_bookmark_logger("supervisor")
 bitbucket_logger = get_logger("supervisor")
+semantic_logger = get_semantic_logger("supervisor")
 SCHEDULER_EVENT_KEY = "confluence-refresh:scheduler"
 
 
@@ -145,6 +149,21 @@ def _resident_bitbucket_worker_specs() -> tuple[tuple[str, str], ...]:
     )
 
 
+def _resident_semantic_worker_specs() -> tuple[tuple[str, str], ...]:
+    """Describe the independent local embedding pool shared by both applications."""
+
+    if not settings.SEMANTIC_SEARCH_ENABLED:
+        return ()
+    return tuple(
+        (f"semantic-index-{worker_number}", "semantic_index_worker")
+        for worker_number in range(1, settings.SEMANTIC_MAX_WORKERS + 1)
+    )
+
+
+def _resident_worker_specs() -> tuple[tuple[str, str], ...]:
+    return (*_resident_bitbucket_worker_specs(), *_resident_semantic_worker_specs())
+
+
 def _launch_resident_bitbucket_worker(command: str) -> subprocess.Popen[bytes]:
     """Start one supervised queue controller owned by ``run_owl``."""
 
@@ -164,7 +183,7 @@ def _launch_resident_bitbucket_worker(command: str) -> subprocess.Popen[bytes]:
                 "--no-startup-index-sweep",
             )
         )
-    elif command == "bitbucket_index_worker":
+    elif command in {"bitbucket_index_worker", "semantic_index_worker"}:
         arguments.append("--no-startup-sweep")
 
     try:
@@ -270,7 +289,7 @@ def _bitbucket_queue_loop(stop_event: threading.Event, *, poll_seconds: int) -> 
         logging.INFO,
         "bitbucket_supervisor_started",
         worker_pid=os.getpid(),
-        worker_count=len(_resident_bitbucket_worker_specs()),
+        worker_count=len(_resident_worker_specs()),
     )
     try:
         _run_bitbucket_queue_loop(stop_event, poll_seconds=poll_seconds)
@@ -296,9 +315,12 @@ def _run_bitbucket_queue_loop(stop_event: threading.Event, *, poll_seconds: int)
     """Sweep durable queues and supervise their bounded resident controllers."""
 
     workers: dict[str, subprocess.Popen[bytes]] = {}
-    startup_sweep_pending = True
+    startup_pdf_sweep_pending = True
+    startup_semantic_sweep_pending = True
+    next_semantic_reconcile_at = 0.0
     repository_workers_active = resident_repository_workers_active()
     failed_previous_pass = False
+    semantic_failed_previous_pass = False
 
     def publish_repository_worker_state(active: bool) -> None:
         nonlocal repository_workers_active
@@ -337,10 +359,34 @@ def _run_bitbucket_queue_loop(stop_event: threading.Event, *, poll_seconds: int)
                 stage = "repository_lease_recovery"
                 repository_status_snapshot()
                 stage = "pdf_lease_recovery"
-                sweep_pdf_extraction_queue(interrupt_running=startup_sweep_pending)
-                startup_sweep_pending = False
+                sweep_pdf_extraction_queue(interrupt_running=startup_pdf_sweep_pending)
+                startup_pdf_sweep_pending = False
+                monotonic_now = time.monotonic()
+                if monotonic_now >= next_semantic_reconcile_at:
+                    next_semantic_reconcile_at = monotonic_now + settings.SEMANTIC_RECONCILE_SECONDS
+                    try:
+                        sweep_semantic_index_queue(interrupt_running=startup_semantic_sweep_pending)
+                    except Exception as exc:
+                        semantic_failed_previous_pass = True
+                        log_semantic_event(
+                            semantic_logger,
+                            logging.ERROR,
+                            "semantic_reconciliation_failed",
+                            error=exc,
+                            stage="lease_recovery",
+                        )
+                    else:
+                        startup_semantic_sweep_pending = False
+                        if semantic_failed_previous_pass:
+                            log_semantic_event(
+                                semantic_logger,
+                                logging.INFO,
+                                "semantic_reconciliation_recovered",
+                                stage="lease_recovery",
+                            )
+                        semantic_failed_previous_pass = False
 
-                for role, command in _resident_bitbucket_worker_specs():
+                for role, command in _resident_worker_specs():
                     worker = workers.get(role)
                     return_code = worker.poll() if worker is not None else None
                     if worker is not None and return_code is not None:
@@ -422,6 +468,7 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(
                 "OWL started its Confluence scheduler and daily Bitbucket/PDF queue supervisor."
+                " Local PDF/bookmark semantic workers are supervised in parallel."
             )
         )
         try:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from unittest.mock import Mock
@@ -37,12 +38,23 @@ def test_resident_worker_specs_preserve_configured_pdf_concurrency(settings):
     )
 
 
+def test_resident_semantic_worker_specs_preserve_configured_concurrency(settings):
+    settings.SEMANTIC_SEARCH_ENABLED = True
+    settings.SEMANTIC_MAX_WORKERS = 2
+
+    assert run_owl._resident_semantic_worker_specs() == (
+        ("semantic-index-1", "semantic_index_worker"),
+        ("semantic-index-2", "semantic_index_worker"),
+    )
+
+
 def test_resident_supervisor_recovers_leases_before_launch_and_stops_owned_workers(
     monkeypatch,
     settings,
 ):
     settings.BITBUCKET_MAX_REPO_WORKERS = 2
     settings.PDF_MAX_EXTRACTION_WORKERS = 3
+    settings.SEMANTIC_MAX_WORKERS = 2
     stop_event = threading.Event()
     events: list[tuple[str, object]] = []
     launched: list[_ResidentProcess] = []
@@ -75,6 +87,11 @@ def test_resident_supervisor_recovers_leases_before_launch_and_stops_owned_worke
             stop_event.set()
 
     monkeypatch.setattr(run_owl, "sweep_pdf_extraction_queue", extraction_sweep)
+    monkeypatch.setattr(
+        run_owl,
+        "sweep_semantic_index_queue",
+        lambda *, interrupt_running=False: events.append(("semantic-sweep", interrupt_running)),
+    )
 
     def launch(command):
         process = _ResidentProcess(command)
@@ -91,10 +108,11 @@ def test_resident_supervisor_recovers_leases_before_launch_and_stops_owned_worke
 
     run_owl._bitbucket_queue_loop(stop_event, poll_seconds=0)
 
-    assert events[:3] == [
+    assert events[:4] == [
         ("daily-schedule", None),
         ("repository-sweep", None),
         ("extraction-sweep", True),
+        ("semantic-sweep", True),
     ]
     assert [process.role for process in launched] == [
         "bitbucket_sync_worker",
@@ -102,10 +120,15 @@ def test_resident_supervisor_recovers_leases_before_launch_and_stops_owned_worke
         "bitbucket_index_worker",
         "bitbucket_index_worker",
         "bitbucket_index_worker",
+        "semantic_index_worker",
+        "semantic_index_worker",
     ]
     assert [event[1] for event in events if event[0] == "extraction-sweep"] == [
         True,
         False,
+    ]
+    assert [event[1] for event in events if event[0] == "semantic-sweep"] == [
+        True,
     ]
     assert [event for event in events if event[0] == "daily-schedule"] == [
         ("daily-schedule", None),
@@ -144,6 +167,85 @@ def test_resident_supervisor_clears_stale_marker_when_sweep_fails_before_launch(
 
     assert resident_states == [False]
     launch.assert_not_called()
+
+
+def test_semantic_reconciliation_failure_does_not_block_other_recovery_or_workers(
+    monkeypatch,
+    settings,
+):
+    settings.BITBUCKET_MAX_REPO_WORKERS = 1
+    settings.PDF_MAX_EXTRACTION_WORKERS = 1
+    settings.SEMANTIC_SEARCH_ENABLED = True
+    settings.SEMANTIC_MAX_WORKERS = 1
+    stop_event = threading.Event()
+    events: list[tuple[str, object]] = []
+    launched: list[_ResidentProcess] = []
+    semantic_error = RuntimeError("synthetic semantic reconciliation failure")
+
+    monkeypatch.setattr(
+        run_owl,
+        "queue_due_daily_repository_refreshes",
+        lambda: events.append(("daily-schedule", None)),
+    )
+    monkeypatch.setattr(
+        run_owl,
+        "repository_status_snapshot",
+        lambda: events.append(("repository-sweep", None)),
+    )
+    monkeypatch.setattr(
+        run_owl,
+        "sweep_pdf_extraction_queue",
+        lambda *, interrupt_running=False: events.append(("extraction-sweep", interrupt_running)),
+    )
+
+    def fail_semantic_reconciliation(*, interrupt_running=False):
+        events.append(("semantic-sweep", interrupt_running))
+        raise semantic_error
+
+    monkeypatch.setattr(
+        run_owl,
+        "sweep_semantic_index_queue",
+        fail_semantic_reconciliation,
+    )
+    semantic_logs: list[tuple[object, int, str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        run_owl,
+        "log_semantic_event",
+        lambda logger, level, event, **fields: semantic_logs.append((logger, level, event, fields)),
+    )
+
+    def launch(command):
+        process = _ResidentProcess(command)
+        launched.append(process)
+        events.append(("launch", command))
+        if len(launched) == 3:
+            stop_event.set()
+        return process
+
+    monkeypatch.setattr(run_owl, "_launch_resident_bitbucket_worker", launch)
+    monkeypatch.setattr(run_owl, "_stop_resident_bitbucket_worker", Mock())
+
+    run_owl._bitbucket_queue_loop(stop_event, poll_seconds=0)
+
+    assert events[:4] == [
+        ("daily-schedule", None),
+        ("repository-sweep", None),
+        ("extraction-sweep", True),
+        ("semantic-sweep", True),
+    ]
+    assert [process.role for process in launched] == [
+        "bitbucket_sync_worker",
+        "bitbucket_index_worker",
+        "semantic_index_worker",
+    ]
+    assert semantic_logs == [
+        (
+            run_owl.semantic_logger,
+            logging.ERROR,
+            "semantic_reconciliation_failed",
+            {"error": semantic_error, "stage": "lease_recovery"},
+        )
+    ]
 
 
 def test_resident_supervisor_clears_marker_when_live_worker_dies_during_exception(
@@ -198,6 +300,8 @@ def test_resident_launcher_disables_detached_helpers_only_for_sync_worker(
     sync_arguments = popen.call_args.args[0]
     run_owl._launch_resident_bitbucket_worker("bitbucket_index_worker")
     index_arguments = popen.call_args.args[0]
+    run_owl._launch_resident_bitbucket_worker("semantic_index_worker")
+    semantic_arguments = popen.call_args.args[0]
 
     assert sync_arguments[-4:] == [
         "bitbucket_sync_worker",
@@ -206,6 +310,7 @@ def test_resident_launcher_disables_detached_helpers_only_for_sync_worker(
         "--no-startup-index-sweep",
     ]
     assert index_arguments[-2:] == ["bitbucket_index_worker", "--no-startup-sweep"]
+    assert semantic_arguments[-2:] == ["semantic_index_worker", "--no-startup-sweep"]
     assert "--no-spawn-index-workers" not in index_arguments
     assert popen.call_args.kwargs["cwd"] == settings.BASE_DIR
     assert popen.call_args.kwargs["start_new_session"] is (os.name != "nt")

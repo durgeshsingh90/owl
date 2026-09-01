@@ -12,6 +12,8 @@ _TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,80}\Z")
 _FIELDS = frozenset(
     [
         "repository_id",
+        "source_id",
+        "source_type",
         "job_id",
         "document_id",
         "policy_id",
@@ -47,6 +49,8 @@ _FIELDS = frozenset(
         "errno",
         "winerror",
         "indexed_count",
+        "embedded_count",
+        "chunk_count",
         "removed_count",
         "skipped_count",
         "result_count",
@@ -72,6 +76,7 @@ _KNOWN_EXCEPTION_MODULES = (
     "subprocess",
     "bitbucket_search.services",
     "bookmark_manager.services",
+    "semantic_search.services",
 )
 _CONTEXT: ContextVar[dict[str, object] | None] = ContextVar("owl_log_context", default=None)
 
@@ -100,7 +105,7 @@ def get_logger(component: str, *, namespace: str) -> logging.Logger:
     """Select one application hierarchy without accepting arbitrary logger names."""
 
     if (
-        namespace not in {"owl.bitbucket", "owl.bookmarks"}
+        namespace not in {"owl.bitbucket", "owl.bookmarks", "owl.semantic"}
         or not isinstance(component, str)
         or not _TOKEN.fullmatch(component)
     ):
@@ -150,7 +155,9 @@ def _exception_context(error: BaseException) -> list[str]:
         module = str(frame.f_globals.get("__name__", ""))
         function = frame.f_code.co_name.replace("<", "").replace(">", "")
         if (
-            module.startswith(("bitbucket_search.", "bookmark_manager.", "core."))
+            module.startswith(
+                ("bitbucket_search.", "bookmark_manager.", "semantic_search.", "core.")
+            )
             and _TOKEN.fullmatch(module)
             and _TOKEN.fullmatch(function)
         ):

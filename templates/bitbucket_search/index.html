@@ -342,6 +342,7 @@
                         {% if search_active %}
                             {% if search_page.total %}
                             Showing <strong>{{ search_page.start_index }}–{{ search_page.end_index }} of {{ search_page.total }} matching PDFs</strong>
+                            {% if search_page.semantic_fallback_used %}<span>Related extracted-text matches because no exact phrase matched</span>{% endif %}
                             {% else %}
                             Showing <strong>0 matching PDFs</strong>
                             {% endif %}

@@ -54,6 +54,27 @@ def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
     return parsed
 
 
+def _env_float(
+    name: str,
+    default: float,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ImproperlyConfigured(f"{name} must be a number.") from exc
+    if minimum is not None and parsed < minimum:
+        raise ImproperlyConfigured(f"{name} must be at least {minimum}.")
+    if maximum is not None and parsed > maximum:
+        raise ImproperlyConfigured(f"{name} must be at most {maximum}.")
+    return parsed
+
+
 def _env_csv(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
     value = os.getenv(name)
     if value is None:
@@ -133,6 +154,8 @@ IMPORTS_ROOT = OWL_DATA_ROOT / "imports"
 BACKUPS_ROOT = OWL_DATA_ROOT / "backups"
 INDEXES_ROOT = OWL_DATA_ROOT / "indexes"
 TEMP_ROOT = OWL_DATA_ROOT / "tmp"
+MODEL_ROOT = OWL_DATA_ROOT / "models"
+SEMANTIC_MODEL_CACHE_ROOT = MODEL_ROOT / "semantic"
 
 for runtime_directory in (
     DATABASE_ROOT,
@@ -147,6 +170,8 @@ for runtime_directory in (
     BACKUPS_ROOT,
     INDEXES_ROOT,
     TEMP_ROOT,
+    MODEL_ROOT,
+    SEMANTIC_MODEL_CACHE_ROOT,
 ):
     _create_private_directory(runtime_directory)
 
@@ -340,6 +365,60 @@ PDF_MAX_PROCESS_MEMORY_BYTES = _env_int(
     1_073_741_824,
     minimum=67_108_864,
 )
+SEMANTIC_SEARCH_ENABLED = _env_bool("SEMANTIC_SEARCH_ENABLED", True)
+SEMANTIC_MODEL_ID = os.getenv("SEMANTIC_MODEL_ID", "BAAI/bge-small-en-v1.5").strip()
+SEMANTIC_MODEL_REPOSITORY = os.getenv(
+    "SEMANTIC_MODEL_REPOSITORY",
+    "Qdrant/bge-small-en-v1.5-onnx-Q",
+).strip()
+SEMANTIC_MODEL_REVISION = os.getenv(
+    "SEMANTIC_MODEL_REVISION",
+    "c32e6154d1bb7a0e47c5e745fd895e7700f44385",
+).strip()
+SEMANTIC_MODEL_PATH = os.getenv("SEMANTIC_MODEL_PATH", "").strip()
+SEMANTIC_MODEL_OFFLINE = _env_bool("SEMANTIC_MODEL_OFFLINE", False)
+if not SEMANTIC_MODEL_ID or not SEMANTIC_MODEL_REPOSITORY or not SEMANTIC_MODEL_REVISION:
+    raise ImproperlyConfigured(
+        "SEMANTIC_MODEL_ID, SEMANTIC_MODEL_REPOSITORY, and SEMANTIC_MODEL_REVISION cannot be blank."
+    )
+SEMANTIC_MODEL_VERSION = (
+    f"fastembed-0.8.0:{SEMANTIC_MODEL_ID}:{SEMANTIC_MODEL_REPOSITORY}@{SEMANTIC_MODEL_REVISION}"
+)
+SEMANTIC_MAX_WORKERS = _env_int(
+    "SEMANTIC_MAX_WORKERS",
+    2,
+    minimum=1,
+)
+if SEMANTIC_MAX_WORKERS > 4:
+    raise ImproperlyConfigured(
+        "SEMANTIC_MAX_WORKERS must be at most 4 so local model copies do not exhaust memory."
+    )
+SEMANTIC_EMBEDDING_BATCH_SIZE = _env_int("SEMANTIC_EMBEDDING_BATCH_SIZE", 64, minimum=1)
+SEMANTIC_CHUNK_MAX_CHARACTERS = _env_int("SEMANTIC_CHUNK_MAX_CHARACTERS", 1_800, minimum=256)
+SEMANTIC_CHUNK_OVERLAP_CHARACTERS = _env_int("SEMANTIC_CHUNK_OVERLAP_CHARACTERS", 180, minimum=0)
+if SEMANTIC_CHUNK_OVERLAP_CHARACTERS >= SEMANTIC_CHUNK_MAX_CHARACTERS:
+    raise ImproperlyConfigured(
+        "SEMANTIC_CHUNK_OVERLAP_CHARACTERS must be smaller than SEMANTIC_CHUNK_MAX_CHARACTERS."
+    )
+SEMANTIC_CHUNKER_VERSION = (
+    "semantic-chunks-v1:"
+    f"max={SEMANTIC_CHUNK_MAX_CHARACTERS}:"
+    f"overlap={SEMANTIC_CHUNK_OVERLAP_CHARACTERS}"
+)
+SEMANTIC_WORKER_IDLE_SECONDS = _env_int("SEMANTIC_WORKER_IDLE_SECONDS", 15, minimum=1)
+SEMANTIC_JOB_LEASE_SECONDS = _env_int("SEMANTIC_JOB_LEASE_SECONDS", 900, minimum=60)
+SEMANTIC_JOB_MAX_AUTOMATIC_RETRIES = _env_int("SEMANTIC_JOB_MAX_AUTOMATIC_RETRIES", 2, minimum=0)
+SEMANTIC_JOB_RETRY_SECONDS = _env_int("SEMANTIC_JOB_RETRY_SECONDS", 300, minimum=5)
+SEMANTIC_FAILED_RETRY_SECONDS = _env_int("SEMANTIC_FAILED_RETRY_SECONDS", 3_600, minimum=60)
+SEMANTIC_SWEEP_BATCH_SIZE = _env_int("SEMANTIC_SWEEP_BATCH_SIZE", 500, minimum=1)
+SEMANTIC_RECONCILE_SECONDS = _env_int("SEMANTIC_RECONCILE_SECONDS", 60, minimum=10)
+SEMANTIC_SEARCH_TOP_K = _env_int("SEMANTIC_SEARCH_TOP_K", 250, minimum=10)
+SEMANTIC_RERANK_SOURCE_CANDIDATES = _env_int(
+    "SEMANTIC_RERANK_SOURCE_CANDIDATES",
+    300,
+    minimum=10,
+)
+SEMANTIC_SEARCH_MIN_SCORE = _env_float("SEMANTIC_SEARCH_MIN_SCORE", 0.55, minimum=-1.0, maximum=1.0)
 NEW_DURATION_DAYS = _env_int("NEW_DURATION_DAYS", 30, minimum=1)
 UPDATED_DURATION_DAYS = _env_int("UPDATED_DURATION_DAYS", 30, minimum=1)
 OPEN_ALL_CONFIRM_THRESHOLD = _env_int("OPEN_ALL_CONFIRM_THRESHOLD", 10, minimum=1)
@@ -352,6 +431,7 @@ DJANGO_LOG_LEVEL = _env_log_level("DJANGO_LOG_LEVEL", "INFO")
 OWL_LOG_LEVEL = _env_log_level("OWL_LOG_LEVEL", "INFO")
 BITBUCKET_LOG_LEVEL = _env_log_level("BITBUCKET_LOG_LEVEL", "DEBUG")
 BOOKMARK_LOG_LEVEL = _env_log_level("BOOKMARK_LOG_LEVEL", "DEBUG")
+SEMANTIC_LOG_LEVEL = _env_log_level("SEMANTIC_LOG_LEVEL", "DEBUG")
 OWL_LOG_MAX_BYTES = _env_int("OWL_LOG_MAX_BYTES", 5_242_880, minimum=1_024)
 OWL_LOG_BACKUP_COUNT = _env_int("OWL_LOG_BACKUP_COUNT", 3, minimum=1)
 
@@ -366,6 +446,7 @@ INSTALLED_APPS = [
     "core.apps.CoreConfig",
     "bookmark_manager.apps.BookmarkManagerConfig",
     "bitbucket_search.apps.BitbucketSearchConfig",
+    "semantic_search.apps.SemanticSearchConfig",
 ]
 
 MIDDLEWARE = [
@@ -453,6 +534,11 @@ LOGGING = {
             "format": "{asctime} {levelname} {name} pid={process} thread={threadName}: {message}",
             "style": "{",
         },
+        "semantic": {
+            "()": "core.logging.SecretSafeFormatter",
+            "format": "{asctime} {levelname} {name} pid={process} thread={threadName}: {message}",
+            "style": "{",
+        },
     },
     "handlers": {
         "console": {
@@ -518,6 +604,31 @@ LOGGING = {
             "delay": True,
             "formatter": "bookmarks",
         },
+        "semantic_console": {
+            "class": "logging.StreamHandler",
+            "level": OWL_LOG_LEVEL,
+            "formatter": "semantic",
+        },
+        "semantic_file": {
+            "class": "core.logging.ProcessSafeRotatingFileHandler",
+            "filename": LOG_ROOT / "semantic.log",
+            "level": SEMANTIC_LOG_LEVEL,
+            "maxBytes": OWL_LOG_MAX_BYTES,
+            "backupCount": OWL_LOG_BACKUP_COUNT,
+            "encoding": "utf-8",
+            "delay": True,
+            "formatter": "semantic",
+        },
+        "semantic_errors": {
+            "class": "core.logging.ProcessSafeRotatingFileHandler",
+            "filename": LOG_ROOT / "semantic-errors.log",
+            "level": "ERROR",
+            "maxBytes": OWL_LOG_MAX_BYTES,
+            "backupCount": OWL_LOG_BACKUP_COUNT,
+            "encoding": "utf-8",
+            "delay": True,
+            "formatter": "semantic",
+        },
     },
     "loggers": {
         "owl.bookmarks": {
@@ -539,6 +650,16 @@ LOGGING = {
         },
         "bitbucket_search": {
             "handlers": ["bitbucket_console", "bitbucket_file", "bitbucket_errors"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+        "owl.semantic": {
+            "handlers": ["semantic_console", "semantic_file", "semantic_errors"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+        "semantic_search": {
+            "handlers": ["semantic_console", "semantic_file", "semantic_errors"],
             "level": "DEBUG",
             "propagate": False,
         },

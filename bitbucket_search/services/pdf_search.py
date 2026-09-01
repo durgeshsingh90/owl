@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from time import perf_counter
 
 from django.db import DatabaseError, connection, transaction
-from django.db.models import F, Func
+from django.db.models import Case, F, Func, IntegerField, When
 from django.db.models.functions import Lower
 
 from bitbucket_search.models import PDFDocument, PDFDocumentLifecycle
@@ -22,6 +22,8 @@ from bitbucket_search.services.pdf_search_query import (
     PDFSearchScope,
     PDFSearchSort,
 )
+from semantic_search.models import SemanticSourceType
+from semantic_search.services.search import semantic_search
 
 METADATA_FTS_TABLE = "bitbucket_search_pdf_metadata_fts"
 PAGE_FTS_TABLE = "bitbucket_search_pdf_page_fts"
@@ -87,6 +89,7 @@ class PDFSearchPage:
     page: int
     page_size: int
     page_count: int
+    semantic_fallback_used: bool = False
 
     @property
     def has_next(self) -> bool:
@@ -204,6 +207,20 @@ def search_documents(query: PDFSearchQuery) -> PDFSearchPage:
     )
     try:
         result = _search_documents(query)
+        if result.total == 0 and query.has_query and PDFSearchScope.CONTENT in query.scopes:
+            try:
+                semantic_result = _semantic_fallback_page(query)
+            except Exception as error:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "pdf_semantic_fallback_failed",
+                    error=error,
+                    stage="semantic_fallback",
+                )
+            else:
+                if semantic_result.total:
+                    result = semantic_result
     except Exception as error:
         log_event(
             logger,
@@ -275,6 +292,120 @@ def _search_documents(query: PDFSearchQuery) -> PDFSearchPage:
         for document, score, _candidate_best_page in selected
     )
     return PDFSearchPage(query, results, total, query.page, query.page_size, page_count)
+
+
+def _semantic_fallback_page(query: PDFSearchQuery) -> PDFSearchPage:
+    """Search related local PDF content only after exact FTS returned no documents."""
+
+    eligible = _eligible_semantic_documents(query)
+    allowed_revision_ids = frozenset(
+        eligible.order_by()
+        .exclude(indexed_revision_id__isnull=True)
+        .values_list("indexed_revision_id", flat=True)
+        .distinct()
+    )
+    if not allowed_revision_ids:
+        return PDFSearchPage(query, (), 0, query.page, query.page_size, 0)
+    semantic_query = " ".join(chip.display for chip in query.chips)
+    matches = semantic_search(
+        SemanticSourceType.PDF_REVISION,
+        semantic_query,
+        allowed_source_ids=allowed_revision_ids,
+    )
+    if not matches:
+        return PDFSearchPage(query, (), 0, query.page, query.page_size, 0)
+
+    match_by_revision = {match.source_id: match for match in matches}
+    documents = eligible.filter(indexed_revision_id__in=tuple(match_by_revision))
+    if query.sort == PDFSearchSort.RELEVANCE:
+        rank = Case(
+            *(
+                When(indexed_revision_id=match.source_id, then=position)
+                for position, match in enumerate(matches)
+            ),
+            default=len(matches),
+            output_field=IntegerField(),
+        )
+        documents = documents.annotate(semantic_rank=rank).order_by(
+            "semantic_rank", Lower("filename"), "pk"
+        )
+    else:
+        documents = documents.order_by(*_filtered_order_by(query.sort))
+
+    total = documents.count()
+    page_count = math.ceil(total / query.page_size) if total else 0
+    if page_count and query.page > page_count:
+        return PDFSearchPage(
+            query,
+            (),
+            total,
+            query.page,
+            query.page_size,
+            page_count,
+            semantic_fallback_used=True,
+        )
+    start = (query.page - 1) * query.page_size
+    selected = tuple(
+        documents.select_related(
+            "repository",
+            "added_commit",
+            "last_commit",
+            "indexed_revision",
+            "local_policy",
+        )[start : start + query.page_size]
+    )
+    results: list[PDFSearchHit] = []
+    label = semantic_query if len(semantic_query) <= 120 else f"{semantic_query[:119].rstrip()}…"
+    for document in selected:
+        match = match_by_revision[document.indexed_revision_id]
+        page_numbers = (match.page_number,) if match.page_number is not None else ()
+        results.append(
+            PDFSearchHit(
+                document=document,
+                score=match.score,
+                explanations=(
+                    PDFChipExplanation(
+                        chip=label,
+                        scopes=("Related PDF content",),
+                        page_numbers=page_numbers,
+                    ),
+                ),
+                best_page_number=match.page_number,
+                snippet=(PDFSnippetPart(match.snippet),) if match.snippet else (),
+            )
+        )
+    return PDFSearchPage(
+        query=query,
+        results=tuple(results),
+        total=total,
+        page=query.page,
+        page_size=query.page_size,
+        page_count=page_count,
+        semantic_fallback_used=True,
+    )
+
+
+def _eligible_semantic_documents(query: PDFSearchQuery):
+    queryset = PDFDocument.objects.filter(
+        lifecycle_state=PDFDocumentLifecycle.ACTIVE,
+        repository__enabled=True,
+        indexed_revision__isnull=False,
+    )
+    if query.repository_ids:
+        queryset = queryset.filter(repository_id__in=query.repository_ids)
+    if query.index_states:
+        queryset = queryset.filter(index_state__in=tuple(query.index_states))
+    if query.committer_names:
+        _register_sqlite_search_functions()
+        queryset = queryset.annotate(
+            committer_search_key=Func(
+                F("last_commit__committer_name"),
+                function="owl_pdf_normalize",
+            )
+        ).filter(
+            committer_search_key__in=tuple(_normalized(name) for name in query.committer_names)
+        )
+    return queryset
 
 
 def _filter_documents_without_text_query(query: PDFSearchQuery) -> PDFSearchPage:

@@ -89,7 +89,7 @@
                 </dl>
                 <p class="knowledge-metric-note">
                     {% if database_stats.available %}
-                        Approximate storage and row totals were measured <time datetime="{{ database_stats.measured_at|date:'c' }}">{{ database_stats.measured_at|date:"j M Y, H:i:s T" }}</time>. They may take up to 15 minutes to reflect recent changes.
+                        Approximate storage and row totals were measured <time datetime="{{ database_stats.measured_at|date:'c' }}">{{ database_stats.measured_at|date:"d M Y, H:i:s T" }}</time>. They may take up to 15 minutes to reflect recent changes.
                     {% else %}
                         {{ database_stats.detail|default:"Database statistics are temporarily unavailable." }}
                     {% endif %}

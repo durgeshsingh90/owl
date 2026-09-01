@@ -189,6 +189,7 @@
             >Add bookmark</button>
             {% if bookmark_form.page.errors %}<div class="field-error" role="alert">{{ bookmark_form.page.errors|striptags }}</div>{% endif %}
             <p class="field-help">Search as you type. Separate words with spaces to match each word independently. Paste a URL to find its saved URL or Confluence Page ID; when no match exists, press Enter to add it.</p>
+            {% if query_result.semantic_fallback_used %}<p class="inline-message" role="status" data-state="success">Showing related stored-text matches because the exact multi-word search found none.</p>{% endif %}
             {% if url_search_active %}
             <p class="inline-message" role="status" data-url-search-result data-state="{% if url_identity_match_count %}match{% else %}ready{% endif %}">
                 {% if url_identity_match_count %}

@@ -22,6 +22,13 @@ from bitbucket_search.services.repository_lifecycle import (
     remove_repository,
     set_repository_refresh_excluded,
 )
+from semantic_search.models import (
+    SemanticChunk,
+    SemanticIndex,
+    SemanticIndexJob,
+    SemanticIndexJobStatus,
+    SemanticSourceType,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -106,6 +113,34 @@ def test_exclusion_preserves_search_people_and_dashboard(lifecycle_catalogue, cl
 
 def test_removal_updates_search_people_dashboard_and_keeps_shared_text(lifecycle_catalogue, client):
     (selected, other), revision = lifecycle_catalogue
+    semantic_index = SemanticIndex.objects.create(
+        source_type=SemanticSourceType.PDF_REVISION,
+        pdf_revision=revision,
+        content_hash="b" * 64,
+        model_version="repository-removal-test-model-v1",
+        chunker_version="repository-removal-test-chunker-v1",
+        dimensions=3,
+        centroid_vector=b"\x00" * 12,
+        chunk_count=1,
+        character_count=20,
+    )
+    semantic_chunk = SemanticChunk.objects.create(
+        index=semantic_index,
+        ordinal=0,
+        page_number=1,
+        chunk_text="Sharedlifecycle text",
+        text_hash="c" * 64,
+        vector=b"\x00" * 12,
+        character_count=20,
+    )
+    semantic_job = SemanticIndexJob.objects.create(
+        source_type=SemanticSourceType.PDF_REVISION,
+        pdf_revision=revision,
+        target_content_hash="b" * 64,
+        target_model_version="repository-removal-test-model-v1",
+        target_chunker_version="repository-removal-test-chunker-v1",
+        status=SemanticIndexJobStatus.SUCCEEDED,
+    )
     remove_repository(selected.pk, confirmed=True)
 
     matches = search_documents(PDFSearchQuery(chips=("Sharedlifecycle",)))
@@ -120,6 +155,9 @@ def test_removal_updates_search_people_dashboard_and_keeps_shared_text(lifecycle
     assert dashboard.total_commits == 1
     assert [person.name for person in dashboard.people] == ["Committer 2"]
     assert PDFTextRevision.objects.filter(pk=revision.pk).exists()
+    assert SemanticIndex.objects.filter(pk=semantic_index.pk).exists()
+    assert SemanticChunk.objects.filter(pk=semantic_chunk.pk).exists()
+    assert SemanticIndexJob.objects.filter(pk=semantic_job.pk).exists()
     assert not managed_repository_path(selected).exists()
     assert managed_repository_path(other).is_dir()
 
@@ -127,4 +165,7 @@ def test_removal_updates_search_people_dashboard_and_keeps_shared_text(lifecycle
     assert search_documents(PDFSearchQuery(chips=("Sharedlifecycle",))).total == 0
     assert not PDFTextRevision.objects.filter(pk=revision.pk).exists()
     assert not PDFTextPage.objects.exists()
+    assert not SemanticIndex.objects.filter(pk=semantic_index.pk).exists()
+    assert not SemanticChunk.objects.filter(pk=semantic_chunk.pk).exists()
+    assert not SemanticIndexJob.objects.filter(pk=semantic_job.pk).exists()
     assert git_people_summaries() == ()

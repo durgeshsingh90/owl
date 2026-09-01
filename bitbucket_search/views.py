@@ -1066,7 +1066,10 @@ def _index_context(
                 PDFTimelineGroup(
                     key="search-results",
                     label="Search results",
-                    detail=f"Page {search_page.page} · up to {search_page.page_size} results",
+                    detail=(
+                        "Related-content fallback · " if search_page.semantic_fallback_used else ""
+                    )
+                    + f"Page {search_page.page} · up to {search_page.page_size} results",
                     rows=search_rows,
                 ),
             )

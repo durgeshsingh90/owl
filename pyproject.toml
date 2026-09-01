@@ -11,7 +11,10 @@ requires-python = ">=3.13,<3.15"
 dependencies = [
     "cryptography==50.0.0",
     "Django==6.1",
+    "fastembed==0.8.0",
+    "huggingface-hub==1.29.0",
     "keyring==25.7.0",
+    "numpy==2.5.2",
     "pypdf==6.16.2",
     "python-dotenv==1.2.3",
 ]
@@ -30,7 +33,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["owl*", "core*", "bookmark_manager*", "bitbucket_search*"]
+include = ["owl*", "core*", "bookmark_manager*", "bitbucket_search*", "semantic_search*"]
 
 [tool.uv]
 required-version = "==0.12.5"
@@ -79,7 +82,7 @@ line-ending = "lf"
 
 [tool.coverage.run]
 branch = true
-source = ["owl", "core", "bookmark_manager", "bitbucket_search"]
+source = ["owl", "core", "bookmark_manager", "bitbucket_search", "semantic_search"]
 omit = [
     "*/migrations/*",
     "*/tests/*",

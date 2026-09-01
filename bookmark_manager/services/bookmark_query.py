@@ -17,7 +17,7 @@ from enum import StrEnum
 from time import perf_counter
 from typing import Any, Self
 
-from django.db.models import F, Q, QuerySet
+from django.db.models import Case, F, IntegerField, Q, QuerySet, When
 from django.db.models.functions import Lower
 from django.utils import timezone
 
@@ -34,6 +34,8 @@ from bookmark_manager.models import (
 from bookmark_manager.services.confluence_validation import extract_page_id_from_url
 from bookmark_manager.services.logging_events import get_logger, log_event
 from bookmark_manager.services.web_bookmarks import WebBookmarkError, canonicalize_web_url
+from semantic_search.models import SemanticSourceType
+from semantic_search.services.search import semantic_search
 
 logger = get_logger("search")
 
@@ -366,6 +368,7 @@ class BookmarkQueryResult:
     counts: BookmarkQueryCounts
     sort: BookmarkSort
     flat_mode: bool
+    semantic_fallback_used: bool = False
 
     @property
     def active_filter_count(self) -> int:
@@ -441,10 +444,19 @@ def _query_bookmarks(
             if bookmark.recency_at(at=observation_time) in requested
         ]
         queryset = queryset.filter(pk__in=matching_ids)
+    semantic_fallback_used = False
     if query.search:
-        queryset = _apply_local_search(queryset, query.search)
+        exact_queryset = _apply_local_search(queryset, query.search)
+        if exact_queryset.exists() or _url_identity_filter(query.search) is not None:
+            queryset = exact_queryset
+        else:
+            queryset, semantic_fallback_used = _apply_semantic_fallback(
+                queryset,
+                query.search,
+            )
 
-    queryset = _apply_sort(queryset, query.sort)
+    if not semantic_fallback_used:
+        queryset = _apply_sort(queryset, query.sort)
     bookmarks = tuple(queryset)
     matched_node_ids = frozenset(bookmark.tree_node_id for bookmark in bookmarks)
     visible_node_ids = visible_node_ids_with_ancestors(matched_node_ids)
@@ -456,6 +468,7 @@ def _query_bookmarks(
         counts=_query_counts(bookmarks, at=observation_time),
         sort=query.sort,
         flat_mode=sort_requires_flat_mode(query.sort),
+        semantic_fallback_used=semantic_fallback_used,
     )
 
 
@@ -617,6 +630,46 @@ def _apply_local_search(queryset: QuerySet[Bookmark], raw_search: str) -> QueryS
             Q(pk__in=direct_ids) | Q(tree_node_id__in=path_node_ids)
         ).distinct()
     return queryset
+
+
+def _apply_semantic_fallback(
+    queryset: QuerySet[Bookmark],
+    raw_search: str,
+) -> tuple[QuerySet[Bookmark], bool]:
+    """Use local vectors only when the existing exact multi-word search found nothing."""
+
+    allowed_ids = frozenset(queryset.order_by().values_list("pk", flat=True))
+    if not allowed_ids:
+        return queryset.none(), False
+    try:
+        matches = semantic_search(
+            SemanticSourceType.BOOKMARK,
+            raw_search,
+            allowed_source_ids=allowed_ids,
+        )
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "bookmark_semantic_fallback_failed",
+            error=exc,
+            result_count=0,
+        )
+        return queryset.none(), False
+    matching_ids = tuple(match.source_id for match in matches)
+    if not matching_ids:
+        return queryset.none(), False
+    semantic_rank = Case(
+        *(When(pk=source_id, then=position) for position, source_id in enumerate(matching_ids)),
+        default=len(matching_ids),
+        output_field=IntegerField(),
+    )
+    return (
+        queryset.filter(pk__in=matching_ids)
+        .annotate(semantic_rank=semantic_rank)
+        .order_by("semantic_rank", "pk"),
+        True,
+    )
 
 
 def matching_bookmarks_for_url(value: str) -> tuple[Bookmark, ...]:

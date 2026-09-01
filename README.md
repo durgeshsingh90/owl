@@ -196,6 +196,58 @@ on the computer running OWL. Keep additional private host overrides in the ignor
 VSDX extraction and OCR remain out of scope. Image-only PDFs are catalogued and reported as having
 no machine-readable text; OWL does not invent text that the parser cannot read.
 
+### Shared local semantic search
+
+OWL adds semantic search as a second, local retrieval layer for both apps. Existing exact search
+still runs first; only when it returns no matches does OWL show related-content results. Bitbucket
+Search embeds the text from published PDF revisions, retaining page numbers for result snippets.
+Bookmark Manager embeds each bookmark's stored title, stored page text, notes, and tags. This
+includes saved Confluence text and any metadata already stored for an ordinary web bookmark, but
+OWL never fetches an ordinary bookmark URL merely to create an embedding.
+
+Semantic queries keep one compact centroid per source in memory, select a bounded candidate set,
+then stream candidate chunks from SQLite for page-level reranking. This keeps search memory tied to
+the number of PDFs and bookmarks rather than the total number of extracted pages; the rerank bound
+is configurable when a larger recall window is worth more query work.
+
+Embedding follows the normal source lifecycle:
+
+- a newly published PDF text revision or saved bookmark queues durable semantic work;
+- changed PDF text, bookmark text, notes, or tags queues a replacement, and the new chunks are
+  published atomically only if they still match the current source content;
+- deleting a bookmark or an unreferenced PDF revision cascades to its semantic jobs, index, chunks,
+  and vectors. Removing a repository therefore removes semantic data unique to that repository;
+  a byte-identical PDF revision stays indexed while another managed PDF still uses it. None of
+  these actions deletes or changes a remote Git, Confluence, or web source.
+
+`run_owl` supervises a separate pool of semantic workers, so PDF revisions and bookmarks can be
+embedded in parallel without blocking Git, PDF extraction, bookmark refresh, or web requests.
+Each worker owns one local model session. `SEMANTIC_MAX_WORKERS=2` is the default; use two or three
+on a machine with enough memory, and no more than four. Inspect durable progress without changing
+it with the command below. Startup reconciliation also queues existing stored sources that do not
+yet have a current index, so an upgrade backfills them without re-cloning or re-fetching content.
+
+```bash
+python manage.py semantic_status
+```
+
+The first semantic worker downloads the pinned retrieval model (about 67 MB) into
+`OWL_DATA_ROOT/models/semantic/` unless `SEMANTIC_MODEL_PATH` points to a provisioned local model.
+Only model files are downloaded: PDF text, bookmark text, queries, embeddings, and indexes remain
+on this computer and are never uploaded by semantic search. After the model is cached, set
+`SEMANTIC_MODEL_OFFLINE=true` to prohibit further model downloads. Set
+`SEMANTIC_SEARCH_ENABLED=false` to disable semantic indexing and fallback search completely.
+
+The main tuning settings in `.env` are `SEMANTIC_MAX_WORKERS`,
+`SEMANTIC_EMBEDDING_BATCH_SIZE`, `SEMANTIC_CHUNK_MAX_CHARACTERS`,
+`SEMANTIC_CHUNK_OVERLAP_CHARACTERS`, `SEMANTIC_RECONCILE_SECONDS`,
+`SEMANTIC_SEARCH_TOP_K`,
+`SEMANTIC_RERANK_SOURCE_CANDIDATES`, and
+`SEMANTIC_SEARCH_MIN_SCORE`. Model identity is pinned by `SEMANTIC_MODEL_ID`,
+`SEMANTIC_MODEL_REPOSITORY`, and `SEMANTIC_MODEL_REVISION`; change those together only when you
+intend OWL to rebuild the local corpus. Restart OWL and its workers after changing semantic
+settings.
+
 ### Shared utilities
 
 **System Status** provides a redacted local health summary for OWL's database, configuration, and

@@ -101,7 +101,10 @@ def run(args: argparse.Namespace) -> int:
         print(f"Applying {len(pending)} database updates before starting workers...", flush=True)
         call_command("migrate", interactive=False)
     connection.close()
-    print("Starting OWL and its background Git/PDF workers. Press Ctrl+C to stop.", flush=True)
+    print(
+        "Starting OWL and its background Git, PDF, and semantic workers. Press Ctrl+C to stop.",
+        flush=True,
+    )
     call_command("run_owl", *([args.addrport] if args.addrport else []))
     return 0
 
