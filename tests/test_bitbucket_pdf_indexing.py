@@ -34,6 +34,7 @@ from bitbucket_search.services.git_sync import managed_repository_path
 from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 from bitbucket_search.services.pdf_indexing import (
     PDF_INDEX_VERSION,
+    _extractor_environment,
     StagedPDFExtraction,
     StagedPDFPage,
     claim_next_extraction_job,
@@ -47,6 +48,15 @@ from bitbucket_search.services.pdf_indexing import (
 )
 
 pytestmark = pytest.mark.django_db
+
+
+def test_extractor_keeps_python_user_site_visible_for_windows_user_installs(monkeypatch):
+    monkeypatch.setenv("PYTHONNOUSERSITE", "1")
+
+    environment = _extractor_environment()
+
+    assert "PYTHONNOUSERSITE" not in environment
+    assert environment["PYTHONUTF8"] == "1"
 
 
 @pytest.fixture
