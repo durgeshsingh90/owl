@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -286,20 +287,40 @@ def test_worker_wakeup_exception_is_error_logged_with_job_id(bitbucket_logs, mon
     _assert_private(bitbucket_logs)
 
 
-def test_swallowed_schedule_database_failure_is_error_logged(bitbucket_logs, monkeypatch):
+def test_swallowed_schedule_database_contention_is_logged_as_deferred(bitbucket_logs, monkeypatch):
+    request = RequestFactory().post("/pdfs/repositories/schedule/tick/", REMOTE_ADDR="127.0.0.1")
+    request._dont_enforce_csrf_checks = True
+    sqlite_error = sqlite3.OperationalError("database is locked")
+    sqlite_error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    database_error = OperationalError(PRIVATE_TEXT)
+    database_error.__cause__ = sqlite_error
+    monkeypatch.setattr(
+        views,
+        "queue_due_daily_repository_refreshes",
+        Mock(side_effect=database_error),
+    )
+
+    assert views.tick_repository_schedule(request).status_code == 202
+    deferred = _events(bitbucket_logs, "repository_schedule_deferred")[0]
+    assert deferred.levelno == logging.INFO
+    assert "stage=schedule_tick" in deferred.getMessage()
+    assert "status=database_busy" in deferred.getMessage()
+    _assert_private(bitbucket_logs)
+
+
+def test_schedule_database_failure_is_not_hidden_as_contention(bitbucket_logs, monkeypatch):
     request = RequestFactory().post("/pdfs/repositories/schedule/tick/", REMOTE_ADDR="127.0.0.1")
     request._dont_enforce_csrf_checks = True
     monkeypatch.setattr(
         views,
         "queue_due_daily_repository_refreshes",
-        Mock(side_effect=OperationalError(PRIVATE_TEXT)),
+        Mock(side_effect=OperationalError("database unavailable")),
     )
 
-    assert views.tick_repository_schedule(request).status_code == 202
-    failure = _events(bitbucket_logs, "repository_schedule_request_failed")[0]
-    assert failure.levelno == logging.ERROR
-    assert "stage=schedule_tick" in failure.getMessage()
-    _assert_private(bitbucket_logs)
+    with pytest.raises(OperationalError, match="database unavailable"):
+        views.tick_repository_schedule(request)
+
+    assert not _events(bitbucket_logs, "repository_schedule_deferred")
 
 
 @pytest.mark.parametrize(

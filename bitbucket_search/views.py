@@ -6,6 +6,7 @@ import calendar
 import hashlib
 import ipaddress
 import logging
+import sqlite3
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
@@ -2624,16 +2625,26 @@ def tick_repository_schedule(request: HttpRequest) -> JsonResponse:
         queued = queue_due_daily_repository_refreshes()
         workers_started, launch_failed = _wake_queued_repository_workers()
     except OperationalError as error:
+        cause = error.__cause__
+        sqlite_code = getattr(cause, "sqlite_errorcode", None)
+        is_database_busy = (
+            isinstance(cause, sqlite3.Error)
+            and isinstance(sqlite_code, int)
+            and sqlite_code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+        )
+        if not is_database_busy:
+            raise
         # Another short SQLite writer can temporarily own the database. The
         # browser retries this idempotent tick, and any jobs already committed
         # remain durable for the resident worker pool.
         log_event(
             logger,
-            logging.ERROR,
-            "repository_schedule_request_failed",
+            logging.INFO,
+            "repository_schedule_deferred",
             error=error,
             queued_count=len(queued),
             stage="schedule_tick",
+            status="database_busy",
         )
         return JsonResponse(
             {

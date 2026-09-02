@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from html import escape
 from pathlib import Path
@@ -32,6 +33,15 @@ from bitbucket_search.services import repository_sync
 from bitbucket_search.services.operation_logs import append_operation_log_entry
 from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 from bitbucket_search.services.repository_sync import repository_status_snapshot
+
+
+def _sqlite_busy_operational_error() -> OperationalError:
+    sqlite_error = sqlite3.OperationalError("database is locked")
+    sqlite_error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    error = OperationalError("database is locked")
+    error.__cause__ = sqlite_error
+    return error
+
 
 pytestmark = pytest.mark.django_db
 
@@ -1594,7 +1604,7 @@ def test_repository_schedule_tick_returns_busy_when_daily_queue_hits_sqlite_lock
     loopback_client,
     monkeypatch,
 ):
-    queue = Mock(side_effect=OperationalError("database is locked"))
+    queue = Mock(side_effect=_sqlite_busy_operational_error())
     wake = Mock()
     monkeypatch.setattr("bitbucket_search.views.queue_due_daily_repository_refreshes", queue)
     monkeypatch.setattr("bitbucket_search.views._wake_queued_repository_workers", wake)
@@ -1617,7 +1627,7 @@ def test_repository_schedule_tick_returns_busy_when_wakeup_reservation_hits_sqli
 ):
     queued = (Mock(),)
     queue = Mock(return_value=queued)
-    wake = Mock(side_effect=OperationalError("database is locked"))
+    wake = Mock(side_effect=_sqlite_busy_operational_error())
     monkeypatch.setattr("bitbucket_search.views.queue_due_daily_repository_refreshes", queue)
     monkeypatch.setattr("bitbucket_search.views._wake_queued_repository_workers", wake)
 

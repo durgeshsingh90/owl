@@ -285,7 +285,9 @@ BITBUCKET_SECRET_BACKEND = (
     os.getenv("BITBUCKET_SECRET_BACKEND", CONFLUENCE_SECRET_BACKEND).strip().casefold() or "auto"
 )
 BITBUCKET_HISTORY_YEARS = _env_int("BITBUCKET_HISTORY_YEARS", 3, minimum=1)
-BITBUCKET_MAX_REPO_WORKERS = _env_int("BITBUCKET_MAX_REPO_WORKERS", 5, minimum=1)
+# Four independent repository controllers keep the Git side of the pipeline
+# moving while completed repositories feed the separate PDF worker pool.
+BITBUCKET_MAX_REPO_WORKERS = 4
 BITBUCKET_GIT_TIMEOUT_SECONDS = _env_int("BITBUCKET_GIT_TIMEOUT_SECONDS", 3_600, minimum=60)
 BITBUCKET_CONNECTION_TIMEOUT_SECONDS = min(
     _env_int("BITBUCKET_CONNECTION_TIMEOUT_SECONDS", 20, minimum=1), 120
@@ -329,6 +331,15 @@ if PDF_MAX_EXTRACTION_WORKERS > 10:
     raise ImproperlyConfigured(
         "PDF_MAX_EXTRACTION_WORKERS must be at most 10 so isolated PDF parsers "
         "cannot exhaust local memory or overwhelm SQLite publication."
+    )
+# A large repository cannot monopolise the parser pool. Idle capacity is
+# reassigned to other ready repositories, with at most three active parsers per
+# repository at any instant.
+PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY = 3
+if PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY > PDF_MAX_EXTRACTION_WORKERS:
+    raise ImproperlyConfigured(
+        "PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY cannot exceed "
+        "PDF_MAX_EXTRACTION_WORKERS."
     )
 PDF_EXTRACTION_TIMEOUT_SECONDS = _env_int(
     "PDF_EXTRACTION_TIMEOUT_SECONDS",

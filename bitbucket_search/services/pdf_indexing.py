@@ -1213,7 +1213,10 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
                 repository_sync_active=Exists(active_sync),
                 repository_running=repository_running,
             )
-            .filter(repository_sync_active=False)
+            .filter(
+                repository_sync_active=False,
+                repository_running__lt=settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY,
+            )
             .order_by("repository_running", "requested_at", "id")
             .values_list("id", flat=True)
             .first()

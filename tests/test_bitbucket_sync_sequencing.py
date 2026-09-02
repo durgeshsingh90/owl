@@ -315,6 +315,42 @@ def test_extraction_claims_wait_for_repository_sync(status):
     assert extraction.status == PDFExtractionJobStatus.QUEUED
 
 
+def test_extraction_workers_are_capped_per_repository_and_reuse_released_slot(settings):
+    settings.PDF_MAX_EXTRACTION_WORKERS = 10
+    settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY = 3
+    repository = _repository("Worker distribution")
+    checkout = _checkout(repository)
+    for number in range(5):
+        relative_path = f"docs/Worker-{number}.pdf"
+        path = checkout / relative_path
+        path.write_bytes(_CONTENT + str(number).encode())
+        PDFDocument.objects.create(
+            repository=repository,
+            filename=path.name,
+            relative_path=relative_path,
+            file_size=path.stat().st_size,
+            git_blob_id=f"{number + 1:040x}",
+            last_seen_commit=_COMMIT,
+        )
+    pdf_indexing.queue_repository_pdf_extractions(repository)
+
+    running = [pdf_indexing.claim_next_extraction_job() for _number in range(3)]
+
+    assert all(running)
+    assert pdf_indexing.claim_next_extraction_job() is None
+    PDFExtractionJob.objects.filter(pk=running[0].pk).update(
+        status=PDFExtractionJobStatus.SUCCEEDED,
+        completed_at=timezone.now(),
+    )
+    replacement = pdf_indexing.claim_next_extraction_job()
+    assert replacement is not None
+    assert replacement.document.repository_id == repository.pk
+    assert PDFExtractionJob.objects.filter(
+        document__repository=repository,
+        status=PDFExtractionJobStatus.RUNNING,
+    ).count() == 3
+
+
 @pytest.mark.parametrize(
     "status", [RepositorySyncJobStatus.QUEUED, RepositorySyncJobStatus.RUNNING]
 )

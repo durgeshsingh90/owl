@@ -40,9 +40,13 @@ def test_resident_worker_specs_preserve_configured_pdf_concurrency(settings):
 
 def test_default_pdf_worker_pool_uses_ten_supervised_processes(settings):
     specs = run_owl._resident_bitbucket_worker_specs()
+    repository_specs = [spec for spec in specs if spec[1] == "bitbucket_sync_worker"]
     pdf_specs = [spec for spec in specs if spec[1] == "bitbucket_index_worker"]
 
+    assert settings.BITBUCKET_MAX_REPO_WORKERS == 4
+    assert len(repository_specs) == 4
     assert settings.PDF_MAX_EXTRACTION_WORKERS == 10
+    assert settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY == 3
     assert len(pdf_specs) == 10
     assert pdf_specs[0] == ("pdf-index-1", "bitbucket_index_worker")
     assert pdf_specs[-1] == ("pdf-index-10", "bitbucket_index_worker")
