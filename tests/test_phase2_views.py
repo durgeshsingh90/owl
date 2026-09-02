@@ -140,12 +140,16 @@ def test_first_use_page_has_accessible_settings_gear_dialog_and_blank_pat(loopba
     html = response_html(response)
 
     assert response.status_code == 200
-    assert 'aria-label="Confluence settings"' in html
-    assert 'title="Confluence settings — Not configured"' in html
+    assert 'aria-label="Integration settings"' in html
+    assert 'title="Confluence and Bitbucket settings"' in html
     assert 'data-settings-fallback="/bookmarks/settings/"' in html
     assert "<dialog" in html
     assert 'aria-labelledby="confluence-settings-heading"' in html
     assert 'data-open-on-load="false"' in html
+    dialog = html.split('<dialog class="settings-dialog"', 1)[1]
+    assert "Confluence connection" in dialog
+    assert "Bitbucket HTTPS credentials" in dialog
+    assert "Bookmark data" not in dialog
     assert "Confluence text search is optional" not in html
     assert 'aria-describedby="bookmark-connection-help"' not in html
     assert "No bookmarks saved yet" in html

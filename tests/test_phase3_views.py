@@ -2362,7 +2362,7 @@ def test_phase_three_tree_renders_keyboard_aria_and_safe_dom_hooks(loopback_clie
     assert "data-delete-selected" in html
     assert 'data-delete-locked="true"' in html
     assert "🔒" in html
-    assert "bookmarks.js?v=repository-git-log-v1" in html
+    assert "bookmarks.js?v=connection-health-v1" in html
     assert f'name="bookmark_ids" value="{bookmark.pk}"' in html
     assert 'form="bulk-delete-bookmarks"' in html
     assert "data-productivity-form" in html

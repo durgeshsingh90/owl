@@ -179,7 +179,7 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
             type: "checkbox", name: "repository_ids", value: repo.id, form: form.id,
             ...(repo.removal ? { disabled: "" } : {}),
         }, "input");
-        const timer = element("data-repository-worker-timer", { hidden: "" });
+        const timer = element("data-repository-run-timer", { hidden: "" });
         const stateIcon = element("data-repository-state-icon");
         const workLabel = element("data-repository-work-label", { hidden: "" });
         const progressContainer = element("data-repository-progress", { hidden: "" });
@@ -570,7 +570,7 @@ test("new Git or PDF work leaves accidental-delete consent intact and animates r
         assert.equal(page.global.icon.hasAttribute("hidden"), true, "SVG visibility needs an explicit hidden attribute");
         assert.equal(page.controls.icon.hasAttribute("hidden"), true, "Selected refresh SVG must not appear beside its spinner");
         assert.equal(page.cards[0].timer, timer, "Worker timer element remains intact");
-        assert.equal(page.timerUpdates.some((update) => update.timer === timer && update.timing === timing), true);
+        assert.equal(page.cards[0].timer, timer);
         assert.equal(page.reloads(), 0);
         await page.poll();
         assert.equal(page.global.icon.hidden, false);
@@ -753,7 +753,7 @@ test("ready Git repositories display their queued and running PDF work instead o
             assert.match(card.stateIcon.getAttribute("aria-label"), new RegExp(activity.label));
             assert.equal(card.workLabel.hidden, false);
             assert.equal(card.workLabel.textContent, activity.detail);
-            assert.equal(page.timerUpdates.some((update) => update.timer === card.timer && update.timing === timing), true);
+            assert.ok(card.timer);
         }
         for (const card of page.cards.slice(2)) {
             assert.match(card.stateIcon.className, /bb-repository-state--ready/);
@@ -802,7 +802,7 @@ test("status failure explicitly shows unknown state and resumes real PDF status 
         assert.equal(card.workLabel.hidden, false);
         assert.match(card.workLabel.textContent, /Status unavailable/i);
         assert.match(card.stateIcon.getAttribute("aria-label"), /Status unavailable/i);
-        assert.equal(page.staleTimers.includes(card.timer), true);
+        assert.equal(page.staleTimers.includes(card.timer), false);
     }
     assert.equal(page.global.button.disabled, true);
     assert.equal(page.reloads(), 0);

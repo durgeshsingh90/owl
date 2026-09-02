@@ -37,64 +37,43 @@ def _timer_markup(html):
     return timer.group()
 
 
-@pytest.mark.parametrize(("kind", "label"), [("sync", "Refreshing"), ("indexing", "Indexing PDFs")])
-def test_repository_timer_carries_worker_clock_data_but_waits_for_javascript(kind, label):
+def test_repository_timer_carries_run_clock_data_but_waits_for_javascript():
     timing = {
-        "startedAt": "2026-08-30T10:00:00+00:00",
-        "observedAt": "2026-08-30T10:01:23+00:00",
-        "label": label,
-        "kind": kind,
+        "gitStartedAt": "2026-08-30T10:00:00+00:00",
+        "gitEndedAt": "2026-08-30T10:01:00+00:00",
+        "indexStartedAt": "2026-08-30T10:01:00+00:00",
+        "indexEndedAt": None,
     }
-    html = _render(_repository(worker_timing=timing))
+    html = _render(_repository(activity={"runTiming": timing}))
     timer = _timer_markup(html)
 
-    assert f'data-worker-started-at="{timing["startedAt"]}"' in timer
-    assert f'data-worker-observed-at="{timing["observedAt"]}"' in timer
-    assert f'data-worker-label="{label}"' in timer
-    assert f'data-worker-kind="{kind}"' in timer
+    assert f'data-git-started-at="{timing["gitStartedAt"]}"' in timer
+    assert f'data-git-ended-at="{timing["gitEndedAt"]}"' in timer
+    assert f'data-index-started-at="{timing["indexStartedAt"]}"' in timer
+    assert 'data-index-ended-at=""' in timer
+    assert "data-repository-run-timer" in timer
     assert 'aria-live="off"' in timer
-    assert 'title="Elapsed time for the current worker"' in timer
     assert re.search(r"\bhidden\s*></small>", timer)
     assert re.search(r">\s*</small>$", timer)
     assert "<svg" not in timer
-    assert html.index("data-repository-documents") < html.index("data-repository-worker-timer")
-    assert html.index("data-repository-worker-timer") < html.index("data-repository-select")
+    assert html.index("data-repository-documents") < html.index("data-repository-run-timer")
+    assert html.index("data-repository-run-timer") < html.index("data-repository-select")
     assert "data-repository-refresh-form" not in html
     assert "12 PDF · 3 VSDX" in html
 
 
-@pytest.mark.parametrize("timing", [None, {}])
-def test_repository_without_active_worker_keeps_empty_hidden_timer(timing):
-    timer = _timer_markup(_render(_repository(worker_timing=timing)))
-    for attribute in ("started-at", "observed-at", "label", "kind"):
-        assert f'data-worker-{attribute}=""' in timer
+def test_repository_without_active_run_keeps_empty_hidden_timer():
+    timer = _timer_markup(_render(_repository(activity={})))
+    for attribute in ("git-started-at", "git-ended-at", "index-started-at", "index-ended-at"):
+        assert f'data-{attribute}=""' in timer
     assert re.search(r"\bhidden\s*></small>", timer)
     assert ">00:00</small>" not in timer
 
 
-def test_repository_timer_handles_missing_timing_and_escapes_attribute_values():
-    assert 'data-worker-started-at=""' in _timer_markup(_render(_repository()))
-    label = 'Indexing "notes" <script>synthetic</script>'
-    timer = _timer_markup(
-        _render(
-            _repository(
-                worker_timing={
-                    "startedAt": "2026-08-30T10:00:00+00:00",
-                    "observedAt": "2026-08-30T10:01:23+00:00",
-                    "label": label,
-                    "kind": "indexing",
-                }
-            )
-        )
-    )
-    assert f'data-worker-label="{escape(label)}"' in timer
-    assert "<script>" not in timer
-
-
 def test_sidebar_and_mobile_include_can_each_have_an_independent_timer():
-    repository = _repository(worker_timing=None)
+    repository = _repository(activity={})
     html = _render(repository) + _render(repository)
-    assert html.count("data-repository-worker-timer") == 2
+    assert html.count("data-repository-run-timer") == 2
     assert not re.search(r"<small[^>]+\bid=", html)
 
 

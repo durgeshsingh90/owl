@@ -192,7 +192,7 @@ def test_remove_controls_and_status_include_git_and_pdf_worker_activity(
     assert 'disabled aria-busy="true"' in refresh_form.group()
     assert "data-refresh-all-icon hidden" in refresh_form.group()
     assert "data-refresh-all-spinner hidden" not in refresh_form.group()
-    assert "data-repository-worker-timer" in html
+    assert "data-repository-run-timer" in html
     confirmation = local_client.get(
         reverse("bitbucket_search:repository_remove", args=(repository.pk,))
     )

@@ -194,13 +194,24 @@ def with_repository_activity(
         .values_list("repository_id", "total")
     )
     pdf_attempt_counts: dict[int, Counter] = defaultdict(Counter)
+    pdf_run_timing: dict[int, dict[str, datetime | None]] = defaultdict(
+        lambda: {"started_at": None, "completed_at": None}
+    )
     for row in (
         latest_repository_pdf_run_jobs().filter(document__repository_id__in=repository_ids)
         .values("document__repository_id", "status")
-        .annotate(total=Count("id"))
+        .annotate(total=Count("id"), first_requested_at=Min("requested_at"), last_completed_at=Max("completed_at"))
         .order_by()
     ):
-        pdf_attempt_counts[row["document__repository_id"]][row["status"]] = row["total"]
+        repository_id = row["document__repository_id"]
+        pdf_attempt_counts[repository_id][row["status"]] = row["total"]
+        timing = pdf_run_timing[repository_id]
+        started_at = row["first_requested_at"]
+        completed_at = row["last_completed_at"]
+        if started_at is not None and (timing["started_at"] is None or started_at < timing["started_at"]):
+            timing["started_at"] = started_at
+        if completed_at is not None and (timing["completed_at"] is None or completed_at > timing["completed_at"]):
+            timing["completed_at"] = completed_at
     sync_counts: dict[int, Counter] = defaultdict(Counter)
     sync_jobs: dict[int, dict[str, dict[str, object]]] = defaultdict(dict)
     for row in (
@@ -305,6 +316,18 @@ def with_repository_activity(
             operations.append(sync_activity)
         current_queued = current_pdfs[PDFExtractionJobStatus.QUEUED]
         current_running = current_pdfs[PDFExtractionJobStatus.RUNNING]
+        attempts = pdf_attempt_counts[repository.pk]
+        attempt_total = sum(attempts.values())
+        attempt_finished = sum(
+            attempts[status]
+            for status in (
+                PDFExtractionJobStatus.SUCCEEDED,
+                PDFExtractionJobStatus.FAILED,
+                PDFExtractionJobStatus.INTERRUPTED,
+                PDFExtractionJobStatus.CANCELLED,
+            )
+        )
+        run_progress = round(attempt_finished * 100 / attempt_total) if attempt_total else None
         indexing_activity = None
         if current_queued or current_running:
             running_metrics = pdf_metrics[repository.pk].get(PDFExtractionJobStatus.RUNNING, {})
@@ -314,8 +337,8 @@ def with_repository_activity(
                 phase="extracting" if current_running else "pdf_queued",
                 phase_label="Extracting PDF text" if current_running else "PDF extraction queued",
                 detail=_pdf_detail(current_queued, current_running, 0),
-                progress=running_metrics.get("current_progress"),
-                progress_scope="running_workers_average",
+                progress=run_progress,
+                progress_scope="current_run_completion",
                 started_at=running_metrics.get("current_started_at"),
                 observed_at=observed_at,
                 queued_jobs=current_queued,
@@ -378,6 +401,17 @@ def with_repository_activity(
                 "failed": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.FAILED],
                 "interrupted": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.INTERRUPTED],
                 "cancelled": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.CANCELLED],
+            },
+            "runTiming": {
+                "gitStartedAt": repository.last_sync_started_at.isoformat() if repository.last_sync_started_at else None,
+                "gitEndedAt": repository.last_sync_completed_at.isoformat() if repository.last_sync_completed_at else None,
+                "indexStartedAt": pdf_run_timing[repository.pk]["started_at"].isoformat() if pdf_run_timing[repository.pk]["started_at"] else None,
+                "indexEndedAt": (
+                    pdf_run_timing[repository.pk]["completed_at"].isoformat()
+                    if pdf_run_timing[repository.pk]["completed_at"] and not current_queued and not current_running
+                    else None
+                ),
+                "observedAt": observed_at.isoformat(),
             },
         }
     return repositories

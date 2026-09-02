@@ -315,7 +315,7 @@ def test_activity_reads_are_batched_and_do_not_change_jobs_or_contact_git(monkey
     with CaptureQueriesContext(connection) as queries:
         with_repository_activity(repositories)
         summary = repository_work_summary(repositories)
-    assert len(queries) == 2
+    assert len(queries) == 4
     assert all(query["sql"].lstrip().upper().startswith("SELECT") for query in queries)
     assert tuple(PDFExtractionJob.objects.order_by("pk").values()) == before
     assert summary["activeRepositories"] == 20
@@ -354,7 +354,7 @@ def test_empty_work_summary_is_read_only_and_idle(django_assert_num_queries):
     assert summary["label"] == "Idle"
 
 
-def test_parallel_pdf_progress_is_explicitly_the_running_worker_average():
+def test_parallel_pdf_progress_uses_stable_current_run_completion():
     repository = _repository()
     _pdf_job(repository, PDFExtractionJobStatus.RUNNING, progress=25)
     _pdf_job(repository, PDFExtractionJobStatus.RUNNING, progress=75)
@@ -364,10 +364,26 @@ def test_parallel_pdf_progress_is_explicitly_the_running_worker_average():
 
     activity = repository.activity
     assert activity["operation"] == "indexing"
-    assert activity["progress"] == 50
-    assert activity["progressScope"] == "running_workers_average"
+    assert activity["progress"] == 0
+    assert activity["progressScope"] == "current_run_completion"
     assert activity["operations"][0]["queuedJobs"] == 1
     assert activity["operations"][0]["runningJobs"] == 2
     summary = repository_work_summary((repository,))["activities"][0]
-    assert summary["progress"] == 50
+    assert summary["progress"] == 0
     assert summary["progressScope"] == "running_jobs_average"
+
+
+def test_latest_run_counts_ignore_attempts_for_an_old_document_revision():
+    repository = _repository()
+    stale = _pdf_job(repository, PDFExtractionJobStatus.FAILED, current=False)
+    current = _pdf_job(repository, PDFExtractionJobStatus.QUEUED)
+    run_id = "90f5b36e-3347-4f73-9643-4784ecca90ba"
+    stale.run_id = run_id
+    current.run_id = run_id
+    stale.save(update_fields=("run_id",))
+    current.save(update_fields=("run_id",))
+
+    with_repository_activity((repository,))
+
+    assert repository.activity["pdfCounts"]["queued"] == 1
+    assert repository.activity["pdfCounts"]["failed"] == 0

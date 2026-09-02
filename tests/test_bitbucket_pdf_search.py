@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
+from importlib import import_module
 from pathlib import Path
 
 import pytest
@@ -135,6 +136,28 @@ def test_fts_tables_and_triggers_search_metadata_and_page_text():
         "Private Link",
         "DDoS",
     }
+
+
+def test_search_recreates_missing_derived_fts_tables_from_canonical_records():
+    repository = _repository("Repairable")
+    document = _indexed_document(
+        repository,
+        filename="Stablecoin design.pdf",
+        path="payments/Stablecoin design.pdf",
+        pages=("Stablecoin settlement controls",),
+        digest="r",
+    )
+    migration = import_module("bitbucket_search.migrations.0004_pdf_fts_indexes")
+    with connection.cursor() as cursor:
+        for statement in (*migration.DROP_PAGE_FTS, *migration.DROP_METADATA_FTS):
+            cursor.execute(statement)
+    assert search_index_available() is False
+
+    result = search_documents(PDFSearchQuery(chips=("Stablecoin",)))
+
+    assert search_index_available() is True
+    assert result.total == 1
+    assert result.results[0].document == document
 
 
 def test_metadata_fts_tracks_document_and_repository_renames():

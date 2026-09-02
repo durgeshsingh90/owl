@@ -280,10 +280,11 @@ def test_filtered_clone_fallback_is_warning_but_final_failure_is_error(
         git_sync,
         "_run_streaming",
         Mock(
-            side_effect=[
-                RepositorySyncError("clone_failed", PRIVATE_VALUE),
-                RepositorySyncError("clone_failed", PRIVATE_VALUE),
-            ]
+                side_effect=[
+                    RepositorySyncError("clone_failed", PRIVATE_VALUE),
+                    RepositorySyncError("clone_failed", PRIVATE_VALUE),
+                    RepositorySyncError("clone_failed", PRIVATE_VALUE),
+                ]
         ),
     )
 

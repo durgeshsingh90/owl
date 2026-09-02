@@ -6,7 +6,8 @@ import logging
 import math
 import unicodedata
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from importlib import import_module
 from time import perf_counter
 
 from django.db import DatabaseError, connection, transaction
@@ -90,6 +91,7 @@ class PDFSearchPage:
     page_size: int
     page_count: int
     semantic_fallback_used: bool = False
+    elapsed_seconds: float = 0.0
 
     @property
     def has_next(self) -> bool:
@@ -168,6 +170,44 @@ def rebuild_search_index() -> None:
     )
 
 
+def ensure_search_index_available() -> bool:
+    """Recreate missing derived FTS tables from canonical records when possible."""
+
+    if search_index_available():
+        return True
+    migration = import_module("bitbucket_search.migrations.0004_pdf_fts_indexes")
+    started = perf_counter()
+    try:
+        with transaction.atomic(), connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (%s, %s)",
+                (METADATA_FTS_TABLE, PAGE_FTS_TABLE),
+            )
+            existing = {row[0] for row in cursor.fetchall()}
+            if METADATA_FTS_TABLE not in existing:
+                for statement in migration.CREATE_METADATA_FTS:
+                    cursor.execute(statement)
+            if PAGE_FTS_TABLE not in existing:
+                for statement in migration.CREATE_PAGE_FTS:
+                    cursor.execute(statement)
+    except DatabaseError as error:
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_search_index_auto_repair_failed",
+            error=error,
+            stage="index_repair",
+        )
+        return False
+    log_event(
+        logger,
+        logging.INFO,
+        "pdf_search_index_auto_repaired",
+        elapsed_ms=round((perf_counter() - started) * 1000),
+    )
+    return search_index_available()
+
+
 @transaction.atomic
 def _rebuild_search_index() -> None:
     with connection.cursor() as cursor:
@@ -230,6 +270,8 @@ def search_documents(query: PDFSearchQuery) -> PDFSearchPage:
             elapsed_ms=round((perf_counter() - started) * 1000),
         )
         raise
+    elapsed_seconds = max(0.0, perf_counter() - started)
+    result = replace(result, elapsed_seconds=elapsed_seconds)
     log_event(
         logger,
         logging.DEBUG,
@@ -237,7 +279,7 @@ def search_documents(query: PDFSearchQuery) -> PDFSearchPage:
         result_count=len(result.results),
         count=result.total,
         page_count=result.page_count,
-        elapsed_ms=round((perf_counter() - started) * 1000),
+        elapsed_ms=round(elapsed_seconds * 1000),
     )
     return result
 
@@ -245,7 +287,7 @@ def search_documents(query: PDFSearchQuery) -> PDFSearchPage:
 def _search_documents(query: PDFSearchQuery) -> PDFSearchPage:
     if not query.has_query:
         return _filter_documents_without_text_query(query)
-    if not search_index_available():
+    if not ensure_search_index_available():
         return PDFSearchPage(query, (), 0, query.page, query.page_size, 0)
     _register_sqlite_search_functions()
     selected_rows, total = _query_candidate_page(query)

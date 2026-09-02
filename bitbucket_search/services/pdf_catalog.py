@@ -777,9 +777,15 @@ def _build_repository_pdf_catalog(
 
     can_reuse_history = (
         repository.metadata_indexed_commit == result_commit
-        and repository.history_is_shallow == bool(shallow_boundaries)
+        # A shallow repository can gain reachable commits while remaining shallow.
+        # Re-read its path history so newly available author evidence is published.
+        and not repository.history_is_shallow
+        and not shallow_boundaries
         and not any(state == PDFLocalPolicyState.RESUMING for _, state, _ in policy_signature)
         and repository.pdf_documents.filter(lifecycle_state=PDFDocumentLifecycle.ACTIVE).exists()
+        and not repository.pdf_documents.filter(
+            lifecycle_state=PDFDocumentLifecycle.ACTIVE,
+        ).exclude(added_evidence=PDFDocumentAddedEvidence.CONFIRMED).exists()
     )
     if can_reuse_history:
         log_event(

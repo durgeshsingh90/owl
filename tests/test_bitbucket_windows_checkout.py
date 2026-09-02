@@ -506,6 +506,6 @@ def test_conservative_clone_uses_fresh_staging_when_failed_clone_cannot_be_clean
     monkeypatch.setattr(git_sync.shutil, "rmtree", Mock(side_effect=_windows_error()))
     with pytest.raises(git_sync.RepositorySyncError):
         git_sync._clone(repository, Mock())
-    assert len(attempted) == 2
+    assert len(attempted) == 3
     assert attempted[0] != attempted[1]
     assert all(path.is_dir() for path in attempted)

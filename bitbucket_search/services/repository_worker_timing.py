@@ -49,6 +49,14 @@ def latest_repository_pdf_run_jobs():
             Q(run_id=F("_latest_repository_run_id"))
             | Q(run_id__isnull=True, _latest_repository_run_id__isnull=True)
         )
+        .filter(
+            document__lifecycle_state=PDFDocumentLifecycle.ACTIVE,
+            document__local_policy__isnull=True,
+            target_git_blob_id=F("document__git_blob_id"),
+            target_relative_path=F("document__relative_path"),
+            target_file_size=F("document__file_size"),
+            target_extractor_version=PDF_EXTRACTOR_VERSION,
+        )
     )
 
 

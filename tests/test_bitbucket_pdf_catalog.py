@@ -404,3 +404,26 @@ def test_second_publish_at_same_commit_preserves_confirmed_addition_evidence(
     assert document.added_commit_id == original_added_commit_id
     assert document.timeline_basis == PDFDocumentTimelineBasis.GIT_ADDED
     assert document.timeline_at == original_timeline_at == added_at
+
+
+def test_same_commit_rebuilds_legacy_unavailable_addition_evidence(settings, tmp_path):
+    repository, checkout = _repository(settings, tmp_path)
+    _initialize_repository(checkout)
+    (checkout / "Recover-author.pdf").write_bytes(b"recover author")
+    _git("add", ".", cwd=checkout)
+    commit_hash = _commit(checkout, "Add recoverable PDF")
+    observed_at = timezone.now()
+    _publish(repository, commit_hash, observed_at=observed_at)
+    PDFDocument.objects.filter(repository=repository).update(
+        added_evidence=PDFDocumentAddedEvidence.NOT_FOUND,
+        added_commit=None,
+    )
+    repository.metadata_indexed_commit = commit_hash
+    repository.save(update_fields=("metadata_indexed_commit", "updated_at"))
+
+    rebuilt = _publish(repository, commit_hash, observed_at=observed_at + timedelta(minutes=1))
+
+    document = PDFDocument.objects.get(repository=repository)
+    assert rebuilt.documents[0].added_evidence == PDFDocumentAddedEvidence.CONFIRMED
+    assert document.added_evidence == PDFDocumentAddedEvidence.CONFIRMED
+    assert document.added_commit is not None

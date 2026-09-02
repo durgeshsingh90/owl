@@ -17,7 +17,7 @@
             <span class="bb-repository-card__copy">
                 <strong data-repository-name title="{{ repository.display_name }}">{{ repository.display_name }}</strong>
                 <small data-repository-documents>{{ repository.pdf_count }} PDF · {{ repository.vsdx_count }} VSDX</small>
-                <small class="bb-repository-index-counts" data-repository-index-counts title="PDF indexing attempts">Queued {{ repository.activity.pdfCounts.queued }} · Passed {{ repository.activity.pdfCounts.passed }} · Failed {{ repository.activity.pdfCounts.failed }} · Cancelled {{ repository.activity.pdfCounts.cancelled }} · Workers {{ repository.activity.pdfCounts.running }}/{{ index_worker_limit }}</small>
+                <small class="bb-repository-index-counts" data-repository-index-counts title="Current PDF indexing run"{% if repository.activity.pdfCounts.failed == 0 and repository.activity.pdfCounts.cancelled == 0 and repository.activity.pdfCounts.passed and not repository.activity.pdfCounts.running and not repository.activity.pdfCounts.queued %} hidden{% endif %}>Passed {{ repository.activity.pdfCounts.passed }} · Failed {{ repository.activity.pdfCounts.failed }} · Cancelled {{ repository.activity.pdfCounts.cancelled }} · Workers {{ repository.activity.pdfCounts.running }}/{{ index_worker_limit }}</small>
                 <small class="bb-repository-work-label" data-repository-work-label title="{{ repository.activity.detail }}"{% if not repository.activity.active %} hidden{% endif %}>{{ repository.activity.detail }}</small>
                 <span class="bb-repository-progress" data-repository-progress{% if not repository.activity.active or not repository.activity.operation %} hidden{% endif %}>
                     <progress data-repository-progress-bar max="100"{% if repository.activity.progress is not None %} value="{{ repository.activity.progress }}"{% endif %}></progress>
@@ -27,13 +27,11 @@
                 <a class="bb-repository-removal-retry" data-repository-removal-retry href="{% url 'bitbucket_search:repository_remove' repository.pk %}"{% if not repository.has_removal_pending %} hidden{% endif %}>Removal incomplete · Retry removal</a>
                 <small
                     class="bb-repository-worker-timer"
-                    data-repository-worker-timer
-                    data-worker-started-at="{{ repository.worker_timing.startedAt|default:'' }}"
-                    data-worker-observed-at="{{ repository.worker_timing.observedAt|default:'' }}"
-                    data-worker-label="{{ repository.worker_timing.label|default:'' }}"
-                    data-worker-kind="{{ repository.worker_timing.kind|default:'' }}"
-                    data-worker-operation="{{ repository.worker_timing.operation|default:'' }}"
-                    title="Elapsed time for the current worker"
+                    data-repository-run-timer
+                    data-git-started-at="{{ repository.activity.runTiming.gitStartedAt|default:'' }}"
+                    data-git-ended-at="{{ repository.activity.runTiming.gitEndedAt|default:'' }}"
+                    data-index-started-at="{{ repository.activity.runTiming.indexStartedAt|default:'' }}"
+                    data-index-ended-at="{{ repository.activity.runTiming.indexEndedAt|default:'' }}"
                     aria-live="off"
                     hidden
                 ></small>

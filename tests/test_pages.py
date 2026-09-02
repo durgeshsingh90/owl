@@ -129,7 +129,8 @@ def test_bookmark_manager_topbar_matches_the_app_workspace_contract(loopback_cli
     assert "bookmark-connection-summary" not in html
     assert "bookmarks.css?v=workspace-ui-v24" in html
     assert 'aria-label="Applications"' in html
-    assert 'aria-label="Confluence settings"' in html
+    assert 'aria-label="Integration settings"' in html
+    assert 'aria-label="Import bookmarks"' in html
     assert "data-theme-toggle" in html
     assert html.count('id="main-content"') == 1
     assert '<header class="app-header">' not in html
@@ -428,8 +429,13 @@ def test_bookmark_manager_settings_gear_has_the_required_accessible_name(loopbac
     response = loopback_client.get("/bookmarks/")
     html = response.content.decode()
 
-    assert 'aria-label="Confluence settings"' in html
+    assert 'aria-label="Integration settings"' in html
     assert 'data-settings-fallback="/bookmarks/settings/"' in html
+    assert 'aria-label="Import bookmarks"' in html
+    dialog = html.split('<dialog class="settings-dialog"', 1)[1]
+    assert "Confluence connection" in dialog
+    assert "Bitbucket HTTPS credentials" in dialog
+    assert "Bookmark data" not in dialog
     sidebar = re.search(
         r'<nav class="app-side-nav" aria-label="Bookmark Manager functions">(.*?)</nav>',
         html,

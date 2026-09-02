@@ -337,7 +337,7 @@ def reveal_pdf_in_folder(path: Path) -> None:
     if sys.platform == "darwin":
         _run_native_action(["/usr/bin/open", "-R", str(path)], action="reveal")
     elif sys.platform == "win32":
-        _start_file_windows(path.parent, action="reveal")
+        _run_native_action(["explorer.exe", f"/select,{path}"], action="reveal")
     elif sys.platform.startswith("linux"):
         _run_native_action(
             [_linux_opener(action="reveal"), str(path.parent)],

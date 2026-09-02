@@ -75,7 +75,7 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
     assert "bitbucket_search/bitbucket_search.css?v=repository-progress-v3" in html
-    assert "bitbucket_search/bitbucket_search.js?v=repository-progress-v3" in html
+    assert "bitbucket_search/bitbucket_search.js?v=repository-progress-v4" in html
     assert 'name="confirmed"' not in html
 
 
@@ -178,8 +178,8 @@ def test_bitbucket_topbar_omits_settings_icon_and_preserves_other_controls(
         for control in controls
     )
     assert "data-settings-open" not in topbar_html
-    assert "data-repository-status-toggle" in topbar_html
-    assert 'aria-label="Open repository logs"' in topbar_html
+    assert "data-repository-status-toggle" not in topbar_html
+    assert 'aria-label="Open repository logs"' not in topbar_html
     assert "data-notification-toggle" in topbar_html
     assert 'aria-label="Open notifications"' in topbar_html
     assert '<summary class="bb-icon-button" aria-label="Applications">' in topbar_html
@@ -728,12 +728,8 @@ def test_git_ready_repository_shows_pdf_worker_phase_in_sidebar_and_refresh_tool
         assert label is not None
         assert " hidden" not in label.group()
         assert label.group(1).strip() == escape(activity["detail"] or activity["label"])
-        assert "data-repository-worker-timer" in card
-        if running:
-            assert 'data-worker-kind="indexing"' in card
-            assert 'data-worker-started-at=""' not in card
-        else:
-            assert 'data-worker-started-at=""' in card, "Queued jobs do not invent a running timer"
+        assert "data-repository-run-timer" in card
+        assert 'data-index-started-at=""' not in card
     for card in _repository_cards(html, idle.pk):
         assert "bb-repository-state--ready" in card
         assert "bb-repository-state--working" not in card
@@ -1440,7 +1436,7 @@ def test_ready_repository_renders_green_tick_counts_and_shared_action_selection(
         assert "data-repository-select" in card
         assert "data-repository-refresh-form" not in card
         assert "data-repository-menu" not in card
-        assert "data-repository-worker-timer" in card
+        assert "data-repository-run-timer" in card
         assert "Repository is ready." not in card
         assert "Daily refresh due" not in card
         assert "data-repository-state-label" not in card

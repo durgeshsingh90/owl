@@ -2,11 +2,11 @@
     <header class="settings-panel__header">
         <div>
             <p class="eyebrow">Secure local connection</p>
-            <h2 id="confluence-settings-heading" data-settings-heading tabindex="-1">Confluence Settings</h2>
-            <p>Connect Bookmark Manager to one trusted Confluence Data Center origin.</p>
+            <h2 id="confluence-settings-heading" data-settings-heading tabindex="-1">Integration Settings</h2>
+            <p>Configure the Confluence and Bitbucket connections used by OWL.</p>
         </div>
         {% if panel_mode == "dialog" %}
-        <button class="icon-button" type="button" aria-label="Close Confluence settings" data-settings-close>×</button>
+        <button class="icon-button" type="button" aria-label="Close integration settings" data-settings-close>×</button>
         {% endif %}
     </header>
 
@@ -150,6 +150,7 @@
             </form>
         </section>
 
+        {% if panel_mode == "page" %}
         <section class="settings-data" aria-labelledby="bookmark-data-settings-heading">
             <div>
                 <h3 id="bookmark-data-settings-heading">Bookmark data</h3>
@@ -212,6 +213,7 @@
                 </form>
             </div>
         </section>
+        {% endif %}
 
         {% if configuration.source == "keyring" or configuration.source == "database" %}
         <div class="danger-zone">

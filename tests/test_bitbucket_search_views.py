@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -144,6 +145,7 @@ def test_search_html_paginates_at_one_hundred_and_preserves_canonical_query(
     assert response.status_code == 200
     assert html.count("data-pdf-row") == 100
     assert "1–100 of 101 matching PDFs" in html
+    assert re.search(r"\(\d+\.\d{2} seconds\)", html)
     assert "up to 100 results per page" in html
     assert "chip=Guide" in html
     assert "page=2" in html
@@ -365,6 +367,6 @@ def test_repository_status_includes_extraction_counts(client):
         "indexedDocuments": 1,
         "staleDocuments": 0,
         "active": False,
-        "workerLimit": 4,
+        "workerLimit": 8,
         "publicationSignature": "0:1:0:0:0",
     }

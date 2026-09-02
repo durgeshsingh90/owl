@@ -238,16 +238,20 @@ def test_linux_open_and_reveal_use_xdg_open_without_a_shell(monkeypatch, tmp_pat
     assert all(arguments.kwargs["shell"] is False for arguments in run.call_args_list)
 
 
-def test_windows_open_and_reveal_use_startfile(monkeypatch, tmp_path):
+def test_windows_open_uses_startfile_and_reveal_selects_in_explorer(monkeypatch, tmp_path):
     pdf_path = tmp_path / "folder" / "report.pdf"
     startfile = Mock()
+    run = Mock(return_value=subprocess.CompletedProcess([], 0))
     monkeypatch.setattr(document_actions.sys, "platform", "win32")
     monkeypatch.setattr(document_actions.os, "startfile", startfile, raising=False)
+    monkeypatch.setattr(document_actions.subprocess, "run", run)
 
     document_actions.open_pdf_native(pdf_path)
     document_actions.reveal_pdf_in_folder(pdf_path)
 
-    assert startfile.call_args_list == [call(str(pdf_path)), call(str(pdf_path.parent))]
+    startfile.assert_called_once_with(str(pdf_path))
+    assert run.call_args.args[0] == ["explorer.exe", f"/select,{pdf_path}"]
+    assert run.call_args.kwargs["shell"] is False
 
 
 @pytest.mark.parametrize(

@@ -99,7 +99,7 @@ def test_repository_activity_icons_and_progress_hooks_are_distinct_and_accessibl
         "data-repository-progress",
         "data-repository-progress-bar",
         "data-repository-progress-label",
-        "data-worker-operation",
+        "data-repository-run-timer",
     ):
         assert hook in repository_template
     assert ".bb-repository-progress progress:not([value])" in repository_css
@@ -193,7 +193,7 @@ def test_both_popovers_have_distinct_accessible_toggle_dialog_and_live_region(te
         "bitbucket_search/index.html",
     ),
 )
-def test_each_rendered_shell_has_status_before_bell_once_without_duplicate_dialog_ids(template):
+def test_each_rendered_shell_has_notification_once_and_no_repository_logs_control(template):
     html = render_to_string(
         template,
         {
@@ -205,17 +205,18 @@ def test_each_rendered_shell_has_status_before_bell_once_without_duplicate_dialo
         request=RequestFactory().get("/"),
     )
     elements = _Elements(html)
-    for prefix in ("repository-status", "notification"):
-        for suffix in ("center", "toggle", "panel", "live"):
-            assert len(elements.with_hook(f"data-{prefix}-{suffix}")) == 1
-    assert html.index("data-repository-status-center") < html.index("data-notification-center")
+    for suffix in ("center", "toggle", "panel", "live"):
+        assert len(elements.with_hook(f"data-notification-{suffix}")) == 1
+    assert not elements.with_hook("data-repository-status-center")
+    assert not elements.with_hook("data-repository-status-toggle")
+    assert not elements.with_hook("data-repository-status-panel")
     assert len(elements.with_hook("data-bitbucket-schedule-tick-form")) == 1
     panel_ids = [
         attrs["id"]
         for _tag, attrs in elements.elements
-        if "data-repository-status-panel" in attrs or "data-notification-panel" in attrs
+        if "data-notification-panel" in attrs
     ]
-    assert len(set(panel_ids)) == 2
+    assert len(set(panel_ids)) == 1
     id_counts = Counter(attrs["id"] for _tag, attrs in elements.elements if "id" in attrs)
     assert all(id_counts[panel_id] == 1 for panel_id in panel_ids)
     assert html.count('class="notification-center__csrf"') == 1

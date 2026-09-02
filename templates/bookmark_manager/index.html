@@ -65,7 +65,6 @@
                     <span class="global-refresh-control__track" aria-hidden="true"><span data-global-refresh-progress style="width: {{ refresh_status.progress }}%"></span></span>
                 </span>
             </form>
-            {% include "owl/_repository_status.html" %}
             {% include "owl/_notification_center.html" %}
             <details class="bookmark-app-switcher">
                 <summary class="bookmark-icon-button" aria-label="Applications">
@@ -77,11 +76,19 @@
                     <a class="nav-link" href="{% url 'bitbucket_search:index' %}">Bitbucket Search</a>
                 </nav>
             </details>
+            <a
+                class="bookmark-icon-button bookmark-icon-button--import"
+                href="{% url 'bookmark_manager:settings' %}#bookmark-import"
+                aria-label="Import bookmarks"
+                title="Import bookmarks"
+            >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v12M7.5 10.5 12 15l4.5-4.5"/><path d="M5 14v5h14v-5"/></svg>
+            </a>
             <button
                 class="bookmark-icon-button bookmark-icon-button--settings"
                 type="button"
-                aria-label="Confluence settings"
-                title="Confluence settings — {{ configuration.label }}"
+                aria-label="Integration settings"
+                title="Confluence and Bitbucket settings"
                 data-settings-open
                 data-settings-fallback="{% url 'bookmark_manager:settings' %}"
             >

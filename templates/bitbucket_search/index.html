@@ -171,7 +171,6 @@
                         </small>
                     </span>
                 </form>
-                {% include "owl/_repository_status.html" %}
                 {% include "owl/_notification_center.html" %}
                 <details class="bb-app-switcher">
                     <summary class="bb-icon-button" aria-label="Applications">
@@ -348,6 +347,7 @@
                             {% else %}
                             Showing <strong>0 matching PDFs</strong>
                             {% endif %}
+                            <span class="bb-search-elapsed">({{ search_page.elapsed_seconds|floatformat:2 }} seconds)</span>
                         {% elif pdf_document_count %}
                         Showing <strong><b data-pdf-visible-start>{{ pdf_page.start_index }}</b>–<b data-pdf-visible-end>{{ pdf_page.end_index }}</b> of {{ pdf_document_count }} PDFs</strong>
                         {% else %}
@@ -561,6 +561,6 @@
 {% block global_status %}{% endblock %}
 
 {% block scripts %}
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-progress-v3" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-progress-v4" defer></script>
 <script src="{% static 'bitbucket_search/people_sort.js' %}?v=people-sort-v1" defer></script>
 {% endblock %}

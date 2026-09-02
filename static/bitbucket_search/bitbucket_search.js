@@ -352,6 +352,59 @@
     const cardsFor = (repositoryId) =>
         document.querySelectorAll(`[data-repository-id="${repositoryId}"]`);
 
+    const elapsedLabel = (milliseconds) => {
+        const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+        const pad = (value) => String(value).padStart(2, "0");
+        const minutes = Math.floor(seconds / 60);
+        return minutes < 60
+            ? `${pad(minutes)}:${pad(seconds % 60)}`
+            : `${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}:${pad(seconds % 60)}`;
+    };
+    const parsedTime = (value) => {
+        const timestamp = Date.parse(value || "");
+        return Number.isFinite(timestamp) ? timestamp : null;
+    };
+    const renderRepositoryRunTimer = (element, timing = null) => {
+        if (!element) return;
+        if (timing) {
+            element.dataset.gitStartedAt = timing.gitStartedAt || "";
+            element.dataset.gitEndedAt = timing.gitEndedAt || "";
+            element.dataset.indexStartedAt = timing.indexStartedAt || "";
+            element.dataset.indexEndedAt = timing.indexEndedAt || "";
+        }
+        const now = Date.now();
+        const gitStart = parsedTime(element.dataset.gitStartedAt);
+        const gitEnd = parsedTime(element.dataset.gitEndedAt);
+        const indexStart = parsedTime(element.dataset.indexStartedAt);
+        const indexEnd = parsedTime(element.dataset.indexEndedAt);
+        const totalStart = gitStart ?? indexStart;
+        if (totalStart === null) {
+            element.hidden = true;
+            element.textContent = "";
+            return;
+        }
+        const gitDuration = gitStart === null ? null : Math.max(0, (gitEnd ?? now) - gitStart);
+        const indexDuration = indexStart === null ? null : Math.max(0, (indexEnd ?? now) - indexStart);
+        const totalEnd = indexStart !== null ? (indexEnd ?? now) : (gitEnd ?? now);
+        const totalDuration = Math.max(0, totalEnd - totalStart);
+        const parts = [];
+        if (gitDuration !== null) parts.push(`Git ${elapsedLabel(gitDuration)}`);
+        if (indexDuration !== null) parts.push(`Index ${elapsedLabel(indexDuration)}`);
+        element.textContent = `${parts.join(" · ")} / Total ${elapsedLabel(totalDuration)}`;
+        element.title = "Elapsed Git, current indexing run, and total run time";
+        element.hidden = false;
+    };
+    document.querySelectorAll("[data-repository-run-timer]").forEach((element) => {
+        renderRepositoryRunTimer(element);
+    });
+    if (typeof window.setInterval === "function") {
+        window.setInterval(() => {
+            document.querySelectorAll("[data-repository-run-timer]").forEach((element) => {
+                renderRepositoryRunTimer(element);
+            });
+        }, 1000);
+    }
+
     const updateRepository = (repository) => {
         const working = Boolean(repository.activity?.active || repository.hasActiveWork || repository.active);
         const workLabel = repository.activity?.label || repository.workerTiming?.label || "Repository work in progress";
@@ -364,8 +417,8 @@
         const progressValue = hasProgress
             ? Math.round(Math.min(100, Math.max(0, suppliedProgress))) : null;
         cardsFor(repository.id).forEach((card) => {
-            window.OWLRepositoryTimers?.update(
-                card.querySelector("[data-repository-worker-timer]"), repository.workerTiming,
+            renderRepositoryRunTimer(
+                card.querySelector("[data-repository-run-timer]"), repository.activity?.runTiming,
             );
             card.dataset.repositoryState = repository.state;
             card.dataset.repositoryOperation = operation;
@@ -430,9 +483,15 @@
             const indexCounts = card.querySelector("[data-repository-index-counts]");
             if (indexCounts) {
                 const counts = repository.activity?.pdfCounts || {};
-                indexCounts.textContent = `Queued ${Number(counts.queued || 0)} · Passed ${Number(counts.passed || 0)}`
-                    + ` · Failed ${Number(counts.failed || 0)} · Cancelled ${Number(counts.cancelled || 0)}`
+                const queued = Number(counts.queued || 0);
+                const running = Number(counts.running || 0);
+                const passed = Number(counts.passed || 0);
+                const failed = Number(counts.failed || 0);
+                const cancelled = Number(counts.cancelled || 0);
+                indexCounts.textContent = `Passed ${passed} · Failed ${failed} · Cancelled ${cancelled}`
                     + ` · Workers ${Number(counts.running || 0)}/${Number(repository.indexWorkerLimit || 0)}`;
+                indexCounts.hidden = failed === 0 && cancelled === 0 && passed > 0
+                    && running === 0 && queued === 0;
             }
             const exclusionBadge = card.querySelector("[data-repository-exclusion]");
             if (exclusionBadge) {
