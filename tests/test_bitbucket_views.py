@@ -782,8 +782,8 @@ def test_git_ready_repository_shows_pdf_worker_phase_in_sidebar_and_refresh_tool
             r"<small[^>]+data-repository-work-label[^>]*>(.*?)</small>", card, re.DOTALL
         )
         assert label is not None
-        assert " hidden" not in label.group()
-        assert label.group(1).strip() == escape(activity["detail"] or activity["label"])
+        assert (" hidden" in label.group()) is (running == 0)
+        assert label.group(1).strip() == escape(activity["detail"])
         assert "data-repository-run-timer" not in card
         assert "data-repository-success-ticks" in card
     for card in _repository_cards(html, idle.pk):
@@ -1411,6 +1411,12 @@ def test_repository_status_is_compact_and_never_returns_the_remote_url(loopback_
     assert payload["repositories"][0]["automatic"]["maxRetries"] == 3
     assert payload["automation"]["enabled"] is True
     assert payload["automation"]["state"] == "due"
+    assert payload["workerLimits"] == {
+        "git": 4,
+        "indexing": 1,
+        "publication": 1,
+        "total": 6,
+    }
     assert len(payload["catalog"]["publicationSignature"]) == 64
     assert payload["totals"] == {
         "repositories": 1,
@@ -1493,6 +1499,8 @@ def test_ready_repository_renders_green_tick_counts_and_shared_action_selection(
         assert "data-repository-menu" not in card
         assert "data-repository-run-timer" not in card
         assert "data-repository-success-ticks" in card
+        assert "data-repository-remaining" in card
+        assert "Remaining 0 PDFs" in card
         assert "Repository is ready." not in card
         assert "Daily refresh due" not in card
         assert "data-repository-state-label" not in card

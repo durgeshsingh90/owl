@@ -34,6 +34,7 @@ from bitbucket_search.services.git_sync import managed_repository_path
 from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 from bitbucket_search.services.pdf_indexing import (
     PDF_INDEX_VERSION,
+    cancel_repository_pdf_extractions,
     _extractor_environment,
     StagedPDFExtraction,
     StagedPDFPage,
@@ -45,6 +46,7 @@ from bitbucket_search.services.pdf_indexing import (
     queue_repository_pdf_extractions,
     run_isolated_pdf_extractor,
     sweep_pdf_extraction_queue,
+    work_one_publication_job,
 )
 
 pytestmark = pytest.mark.django_db
@@ -165,6 +167,110 @@ def test_queue_is_idempotent_and_same_indexed_blob_queues_zero(indexed_pdf_targe
     assert after_success.queued_job_ids == ()
     assert document.indexed_git_blob_id == document.git_blob_id
     assert document.index_state == PDFIndexState.READY
+
+
+def test_extractor_stages_then_dedicated_writer_publishes(indexed_pdf_target):
+    repository, document, pdf_path = indexed_pdf_target
+    queue_repository_pdf_extractions(repository)
+    claimed = claim_next_extraction_job()
+
+    staged_job = execute_claimed_extraction_job(
+        claimed.pk,
+        extraction_runner=lambda _path, _heartbeat: _ready_stage(
+            pdf_path,
+            "Durable staged architecture text",
+        ),
+        defer_publication=True,
+    )
+
+    staged_job.refresh_from_db()
+    document.refresh_from_db()
+    assert staged_job.status == PDFExtractionJobStatus.RUNNING
+    assert staged_job.phase == PDFExtractionJobPhase.PUBLISHING
+    assert staged_job.worker_pid is None
+    assert document.index_state == PDFIndexState.PENDING
+
+    published = work_one_publication_job()
+
+    document.refresh_from_db()
+    assert published.pk == staged_job.pk
+    assert published.status == PDFExtractionJobStatus.SUCCEEDED
+    assert document.index_state == PDFIndexState.READY
+    assert tuple(document.indexed_revision.pages.values_list("extracted_text", flat=True)) == (
+        "Durable staged architecture text",
+    )
+
+
+def test_staged_publication_survives_supervisor_restart(indexed_pdf_target):
+    repository, document, pdf_path = indexed_pdf_target
+    queue_repository_pdf_extractions(repository)
+    claimed = claim_next_extraction_job()
+    staged_job = execute_claimed_extraction_job(
+        claimed.pk,
+        extraction_runner=lambda _path, _heartbeat: _ready_stage(pdf_path, "Restart-safe text"),
+        defer_publication=True,
+    )
+    PDFExtractionJob.objects.filter(pk=staged_job.pk).update(worker_pid=987654)
+
+    recovered = sweep_pdf_extraction_queue(interrupt_running=True)
+
+    staged_job.refresh_from_db()
+    assert recovered.queued_job_ids == ()
+    assert staged_job.status == PDFExtractionJobStatus.RUNNING
+    assert staged_job.phase == PDFExtractionJobPhase.PUBLISHING
+    assert staged_job.worker_pid is None
+    published = work_one_publication_job()
+    document.refresh_from_db()
+    assert published.status == PDFExtractionJobStatus.SUCCEEDED
+    assert document.indexed_revision.pages.get().extracted_text == "Restart-safe text"
+
+
+def test_cancelling_repository_discards_durable_staged_publication(indexed_pdf_target, settings):
+    repository, _document, pdf_path = indexed_pdf_target
+    queue_repository_pdf_extractions(repository)
+    claimed = claim_next_extraction_job()
+    staged_job = execute_claimed_extraction_job(
+        claimed.pk,
+        extraction_runner=lambda _path, _heartbeat: _ready_stage(pdf_path, "Cancelled text"),
+        defer_publication=True,
+    )
+    staged_path = Path(settings.BITBUCKET_TEMP_ROOT) / "pdf-publication" / f"job-{staged_job.pk}.json"
+    assert staged_path.is_file()
+
+    result = cancel_repository_pdf_extractions(repository)
+
+    staged_job.refresh_from_db()
+    assert result.cancelled_job_ids == (staged_job.pk,)
+    assert staged_job.status == PDFExtractionJobStatus.CANCELLED
+    assert not staged_path.exists()
+    assert work_one_publication_job() is None
+
+
+def test_parser_continues_while_writer_has_previous_result(indexed_pdf_target):
+    repository, _document, first_path = indexed_pdf_target
+    second_path = first_path.with_name("Second.pdf")
+    second_path.write_bytes(b"%PDF second queued target")
+    PDFDocument.objects.create(
+        repository=repository,
+        filename=second_path.name,
+        relative_path="docs/Second.pdf",
+        file_size=second_path.stat().st_size,
+        git_blob_id="2" * 40,
+        last_seen_commit="b" * 40,
+    )
+    queue_repository_pdf_extractions(repository)
+    first = claim_next_extraction_job()
+    execute_claimed_extraction_job(
+        first.pk,
+        extraction_runner=lambda _path, _heartbeat: _ready_stage(first_path, "First staged text"),
+        defer_publication=True,
+    )
+
+    second = claim_next_extraction_job()
+
+    assert second is not None
+    assert second.pk != first.pk
+    assert second.document.repository_id == repository.pk
 
 
 def test_claim_path_never_runs_repository_wide_reconciliation(

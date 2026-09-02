@@ -18,10 +18,13 @@
             <span class="bb-repository-card__copy">
                 <strong data-repository-name title="{{ repository.display_name }}">{{ repository.display_name }}</strong>
                 <small data-repository-documents>{{ repository.pdf_count }} PDF · {{ repository.vsdx_count }} VSDX</small>
-                <small class="bb-repository-work-label" data-repository-work-label title="{{ repository.activity.detail }}"{% if not repository.activity.active %} hidden{% endif %}>{{ repository.activity.detail }}</small>
-                <span class="bb-repository-progress" data-repository-progress{% if not repository.activity.active or not repository.activity.operation %} hidden{% endif %}>
+                {% with queued_pdfs=repository.activity.queuedPdfs|default:0 running_pdfs=repository.activity.runningPdfs|default:0 %}
+                {% with remaining_pdfs=queued_pdfs|add:running_pdfs %}<small class="bb-repository-remaining" data-repository-remaining{% if not remaining_pdfs %} hidden{% endif %}>Remaining {{ remaining_pdfs }} PDF{{ remaining_pdfs|pluralize }}</small>{% endwith %}
+                {% endwith %}
+                <small class="bb-repository-work-label" data-repository-work-label title="{{ repository.activity.detail }}"{% if not repository.activity.runningPdfs and not repository.activity.runningSyncJobs %} hidden{% endif %}>{{ repository.activity.detail }}</small>
+                <span class="bb-repository-progress" data-repository-progress{% if not repository.activity.active or not repository.activity.operation or repository.activity.phase == "sync_queued" or repository.activity.phase == "pdf_queued" %} hidden{% endif %}>
                     <progress data-repository-progress-bar max="100"{% if repository.activity.progress is not None %} value="{{ repository.activity.progress }}"{% endif %}></progress>
-                    <small data-repository-progress-label>{% if repository.activity.progress is not None %}{{ repository.activity.progress }}%{% elif repository.activity.phase == "sync_queued" or repository.activity.phase == "pdf_queued" %}Queued{% else %}Running{% endif %}</small>
+                    <small data-repository-progress-label>{% if repository.activity.progress is not None %}{{ repository.activity.progress }}%{% else %}Running{% endif %}</small>
                 </span>
                 <small class="bb-repository-exclusion" data-repository-exclusion{% if not repository.exclude_from_refresh %} hidden{% endif %} title="Skipped by Refresh all and scheduled refreshes; manual refresh is still available">Refresh excluded</small>
                 <a class="bb-repository-removal-retry" data-repository-removal-retry href="{% url 'bitbucket_search:repository_remove' repository.pk %}"{% if not repository.has_removal_pending %} hidden{% endif %}>Removal incomplete · Retry removal</a>

@@ -168,10 +168,10 @@
                         <span class="bb-refresh-all__spinner" aria-hidden="true" data-refresh-all-spinner hidden></span>
                     </button>
                     <span class="bb-refresh-all__meta" id="bb-refresh-all-description" role="status" aria-live="polite" aria-atomic="true">
-                        <strong data-refresh-all-label>
+                        <strong class="visually-hidden" data-refresh-all-label>
                             {% if refresh_all_active_count %}{{ repository_work_summary.label }}{% elif not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %}Refresh all unavailable{% else %}Refresh all repositories{% endif %}
                         </strong>
-                        <small data-refresh-all-detail>
+                        <small class="visually-hidden" data-refresh-all-detail>
                             {% if refresh_all_active_count %}
                             {{ repository_work_summary.detail }}
                             {% elif not repository_count %}
@@ -188,8 +188,16 @@
                             <progress max="100" data-overall-progress-bar></progress>
                             <small data-overall-progress-label>Preparing current run…</small>
                         </span>
-                        <small class="bb-overall-counts" data-overall-counts>{% if refresh_all_active_count %}Calculating current-run counts…{% else %}Idle · {{ repository_count }} repositories ready{% endif %}</small>
-                        <small class="bb-overall-timing" data-overall-timing{% if not refresh_all_active_count %} hidden{% endif %}>Elapsed 00:00 · ETA calculating…</small>
+                        <span class="bb-overall-summary-row">
+                            <small class="bb-overall-counts" data-overall-counts>{% if refresh_all_active_count %}Calculating workers…{% else %}Workers 0 running{% endif %}</small>
+                            <details class="bb-overall-details">
+                                <summary>Details</summary>
+                                <span class="bb-overall-details__panel">
+                                    <small data-overall-pdf-counts>PDF current-run counts unavailable</small>
+                                    <small data-overall-git-counts>Git current-run counts unavailable</small>
+                                </span>
+                            </details>
+                        </span>
                     </span>
                 </form>
                 {% include "owl/_notification_center.html" %}

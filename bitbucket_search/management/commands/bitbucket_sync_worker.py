@@ -13,6 +13,7 @@ from django.db import OperationalError, close_old_connections
 from bitbucket_search.services.logging_events import get_logger, log_event
 from bitbucket_search.services.pdf_indexing import (
     launch_index_worker,
+    launch_pdf_writer,
     sweep_pdf_extraction_queue,
     work_one_extraction_job,
 )
@@ -141,6 +142,16 @@ class Command(BaseCommand):
                 # Durable claiming still keeps the global running-job count at or
                 # below the same setting, including this sync worker.
                 if spawn_index_workers:
+                    try:
+                        launch_pdf_writer()
+                    except OSError as exc:
+                        log_event(
+                            logger,
+                            logging.ERROR,
+                            "repository_worker_pdf_writer_spawn_failed",
+                            error=exc,
+                            stage="pdf_writer_launch",
+                        )
                     for _worker_number in range(settings.PDF_MAX_EXTRACTION_WORKERS):
                         try:
                             launch_index_worker()

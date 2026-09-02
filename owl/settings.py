@@ -323,19 +323,16 @@ BITBUCKET_SEARCH_PAGE_SIZE = min(
     _env_int("BITBUCKET_SEARCH_PAGE_SIZE", 100, minimum=10),
     100,
 )
-# Local deployment setting: this workstation has 20 logical CPUs and 64 GB RAM.
-# Run ten PDF parsers across repositories; claims are balanced by the number of
-# active jobs per repository while SQLite publication remains serialized.
-PDF_MAX_EXTRACTION_WORKERS = 10
-if PDF_MAX_EXTRACTION_WORKERS > 10:
-    raise ImproperlyConfigured(
-        "PDF_MAX_EXTRACTION_WORKERS must be at most 10 so isolated PDF parsers "
-        "cannot exhaust local memory or overwhelm SQLite publication."
-    )
-# A large repository cannot monopolise the parser pool. Idle capacity is
-# reassigned to other ready repositories, with at most three active parsers per
-# repository at any instant.
-PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY = 3
+# One parser feeds one dedicated SQLite publisher. This intentionally favours
+# predictable local performance over CPU saturation.
+PDF_MAX_EXTRACTION_WORKERS = 1
+# Keep the extractor at most two PDFs ahead of the database publisher.
+PDF_MAX_STAGED_PUBLICATIONS = 2
+# Process one repository's PDF queue at a time. Its single parser can begin the
+# next PDF after handing the previous result to the publisher; every other
+# repository remains queued until the active repository has no running work.
+PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES = 1
+PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY = 1
 if PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY > PDF_MAX_EXTRACTION_WORKERS:
     raise ImproperlyConfigured(
         "PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY cannot exceed "

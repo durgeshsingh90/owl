@@ -146,6 +146,7 @@ def _resident_bitbucket_worker_specs() -> tuple[tuple[str, str], ...]:
             (f"pdf-index-{worker_number}", "bitbucket_index_worker")
             for worker_number in range(1, extraction_workers + 1)
         ),
+        ("pdf-writer-1", "bitbucket_pdf_writer"),
     )
 
 

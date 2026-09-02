@@ -35,21 +35,21 @@ def test_resident_worker_specs_preserve_configured_pdf_concurrency(settings):
         ("repository-sync-3", "bitbucket_sync_worker"),
         ("pdf-index-1", "bitbucket_index_worker"),
         ("pdf-index-2", "bitbucket_index_worker"),
+        ("pdf-writer-1", "bitbucket_pdf_writer"),
     )
 
 
-def test_default_pdf_worker_pool_uses_ten_supervised_processes(settings):
+def test_default_pdf_pipeline_uses_one_extractor_and_one_writer(settings):
     specs = run_owl._resident_bitbucket_worker_specs()
     repository_specs = [spec for spec in specs if spec[1] == "bitbucket_sync_worker"]
     pdf_specs = [spec for spec in specs if spec[1] == "bitbucket_index_worker"]
 
     assert settings.BITBUCKET_MAX_REPO_WORKERS == 4
     assert len(repository_specs) == 4
-    assert settings.PDF_MAX_EXTRACTION_WORKERS == 10
-    assert settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY == 3
-    assert len(pdf_specs) == 10
-    assert pdf_specs[0] == ("pdf-index-1", "bitbucket_index_worker")
-    assert pdf_specs[-1] == ("pdf-index-10", "bitbucket_index_worker")
+    assert settings.PDF_MAX_EXTRACTION_WORKERS == 1
+    assert settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY == 1
+    assert pdf_specs == [("pdf-index-1", "bitbucket_index_worker")]
+    assert ("pdf-writer-1", "bitbucket_pdf_writer") in specs
 
 
 def test_resident_semantic_worker_specs_preserve_configured_concurrency(settings):
@@ -134,6 +134,7 @@ def test_resident_supervisor_recovers_leases_before_launch_and_stops_owned_worke
         "bitbucket_index_worker",
         "bitbucket_index_worker",
         "bitbucket_index_worker",
+        "bitbucket_pdf_writer",
         "semantic_index_worker",
         "semantic_index_worker",
     ]
@@ -250,6 +251,7 @@ def test_semantic_reconciliation_failure_does_not_block_other_recovery_or_worker
     assert [process.role for process in launched] == [
         "bitbucket_sync_worker",
         "bitbucket_index_worker",
+        "bitbucket_pdf_writer",
         "semantic_index_worker",
     ]
     assert semantic_logs == [

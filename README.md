@@ -361,22 +361,21 @@ The address and port default come from `run_owl`, not the launcher. Normally ope
 Direct `python manage.py run_owl` remains available when you manage database updates yourself.
 
 `run_owl` starts the local website, its resident weekly Confluence scheduler, a bounded parallel
-Bitbucket repository-worker pool, and a separate bounded PDF-worker pool. The Bitbucket supervisor
+Bitbucket repository-worker pool, one PDF extraction worker, and one dedicated database writer. The Bitbucket supervisor
 queues every enabled repository at 11:00 in `OWL_TIME_ZONE` (Europe/Dublin by default). Each failed
 daily attempt waits two hours before retrying, with one initial attempt and at most three retries
-during that day's cycle. Repository and PDF worker limits are configured independently in
-`owl/settings.py` with `BITBUCKET_MAX_REPO_WORKERS` and `PDF_MAX_EXTRACTION_WORKERS`.
-The PDF limit is global, configured as eight for the target workstation, and permits concurrent PDFs
-from the same repository. A different repository can index while another downloads.
+during that day's cycle. Worker limits are configured in `owl/settings.py`.
+PDF extraction is intentionally configured for one repository and one PDF at a time. The extractor
+hands each validated result to a durable staging file and can then read the next PDF while the
+dedicated writer saves the previous PDF's pages and search index to SQLite. Other repositories remain
+queued until the active repository's PDF run completes. Git downloads can continue independently.
 The Repository logs page shows the configured limit, active workers, every durable PDF
 attempt, and the retained redacted Git clone/refresh output. Select a repository there and use
 **Stop indexing now** to cancel its queued attempts and revoke active parser leases; an active
 isolated parser is terminated when its next one-second heartbeat observes the revoked lease.
 The same repository-scoped action is available from the sidebar selection toolbar.
-On another machine, set `PDF_MAX_EXTRACTION_WORKERS` in Django settings between 1 and 8.
-Values above 8 are rejected because
-each isolated parser can use substantial memory and SQLite still publishes through one writer.
-Only short queue/publication writes are serialized; PDF parsing stays parallel.
+The sidebar and top status panel show the number of PDFs remaining in the current run. Extraction
+results waiting for the writer survive an OWL restart and resume from their durable staging files.
 Restart OWL and all background workers after upgrading so every process uses the new
 shared-reader/exclusive-writer checkout locking.
 

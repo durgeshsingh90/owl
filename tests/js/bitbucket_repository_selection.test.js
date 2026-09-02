@@ -149,6 +149,8 @@ function boot({
         progressBar: element("data-overall-progress-bar", { max: "100" }, "progress"),
         progressLabel: element("data-overall-progress-label", {}, "small"),
         counts: element("data-overall-counts", {}, "small"),
+        pdfCounts: element("data-overall-pdf-counts", {}, "small"),
+        gitCounts: element("data-overall-git-counts", {}, "small"),
         timing: element("data-overall-timing", { hidden: "" }, "small"),
     };
     global.progress.appendChild(global.progressBar);
@@ -228,11 +230,13 @@ function boot({
         card.appendChild(workLabel);
         card.appendChild(progressContainer);
         card.appendChild(element("data-repository-documents"));
+        const remaining = element("data-repository-remaining", { hidden: "" }, "small");
+        card.appendChild(remaining);
         card.appendChild(element("data-repository-exclusion"));
         workspace.appendChild(card);
         return {
             card, checkbox, timer, stateIcon, workLabel,
-            progressContainer, progressBar, progressLabel,
+            progressContainer, progressBar, progressLabel, remaining,
         };
     });
     const document = new Element("document", {}, [workspace]);
@@ -300,7 +304,7 @@ function boot({
         },
         filter(value) { filter.value = value; filter.dispatch("input"); },
         submit(control) { return form.dispatch("submit", { submitter: controls[control] }); },
-        async poll({ overrides = {}, extraction = {}, work, fail = false } = {}) {
+        async poll({ overrides = {}, extraction = {}, work, workerLimits, fail = false } = {}) {
             const payload = {
                 repositories: repositories.map((repo) => ({
                     id: repo.id, name: `Repository ${repo.id}`, state: "ready", stateLabel: "Ready",
@@ -317,6 +321,7 @@ function boot({
                     active: false, queuedJobs: 0, runningJobs: 0, pendingDocuments: 0,
                     indexedDocuments: repositories.length, publicationSignature: "extraction-initial", ...extraction,
                 },
+                ...(workerLimits ? { workerLimits } : {}),
                 ...(work ? { work } : {}),
             };
             responses.push(fail ? new Error("Synthetic status outage") : payload);
@@ -734,7 +739,7 @@ test("extraction work without per-repository sync keeps the global spinner activ
     assert.equal(page.reloads(), 0, "Settled completion still uses the existing reload confirmation");
 });
 
-test("a reopened page rebuilds overall progress and elapsed time from persisted job state", async () => {
+test("a reopened page rebuilds overall progress and compact worker counts", async () => {
     const persistedWork = {
         active: true,
         label: "Extracting PDF text",
@@ -762,6 +767,7 @@ test("a reopened page rebuilds overall progress and elapsed time from persisted 
             },
         } },
         extraction: { active: true, queuedJobs: 6, runningJobs: 4 },
+        workerLimits: { git: 4, indexing: 10, total: 14 },
         work: persistedWork,
     };
 
@@ -774,9 +780,10 @@ test("a reopened page rebuilds overall progress and elapsed time from persisted 
         assert.equal(page.global.progress.hidden, false);
         assert.equal(page.global.progressBar.value, 58);
         assert.equal(page.global.progressLabel.textContent, "58%");
-        assert.match(page.global.counts.textContent, /PDF 6 queued · 4 running/);
-        assert.match(page.global.counts.textContent, /12 passed · 1 failed/);
-        assert.match(page.global.timing.textContent, /Elapsed 01:00/);
+        assert.match(page.global.counts.textContent, /Workers 4 running \/ 14 total/);
+        assert.match(page.global.pdfCounts.textContent, /PDF · 10 remaining · 12 passed · 4 running · 1 failed · 0 cancelled/);
+        assert.match(page.global.gitCounts.textContent, /Git · 0 queued · 0 working · 0 completed/);
+        assert.equal(page.global.timing.hidden, true);
     }
 });
 
@@ -856,9 +863,9 @@ test("repository polling selects clone, pull and indexing states with determinat
     } } });
     assert.equal(card.card.dataset.repositoryOperation, "pull");
     assert.equal(card.stateIcon.dataset.repositoryOperation, "pull");
-    assert.equal(card.progressContainer.hidden, false);
+    assert.equal(card.progressContainer.hidden, true);
     assert.equal(card.progressBar.hasAttribute("value"), false, "Queued pull stays indeterminate");
-    assert.equal(card.progressLabel.textContent, "Queued");
+    assert.equal(card.progressLabel.textContent, "Running");
 
     await page.poll({ overrides: { 1: {
         active: false, hasActiveWork: true, state: "ready",
@@ -911,8 +918,10 @@ test("ready Git repositories display their queued and running PDF work instead o
             assert.match(card.stateIcon.className, /bb-repository-state--working/);
             assert.doesNotMatch(card.stateIcon.className, /bb-repository-state--ready/);
             assert.match(card.stateIcon.getAttribute("aria-label"), new RegExp(activity.label));
-            assert.equal(card.workLabel.hidden, false);
-            assert.equal(card.workLabel.textContent, activity.detail);
+            assert.equal(card.workLabel.hidden, running === 0);
+            assert.equal(card.workLabel.textContent, running ? activity.detail : "");
+            assert.equal(card.remaining.hidden, false);
+            assert.equal(card.remaining.textContent, `Remaining ${queued + running} PDFs`);
             assert.ok(card.timer);
         }
         for (const card of page.cards.slice(2)) {

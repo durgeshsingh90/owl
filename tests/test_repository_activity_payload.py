@@ -100,10 +100,10 @@ def test_git_ready_repository_exposes_pdf_work_instead_of_idle(queued, running):
     assert payload["activity"]["phase"] == ("extracting" if running else "pdf_queued")
     assert payload["activity"]["queuedPdfs"] == queued
     assert payload["activity"]["runningPdfs"] == running
-    if queued:
-        assert f"{queued} PDFs queued" in payload["activity"]["detail"]
     if running:
         assert f"{running} PDFs extracting" in payload["activity"]["detail"]
+    else:
+        assert payload["activity"]["detail"] == ""
     assert payload["activity"]["pendingCleanupJobs"] == 0
 
 
@@ -202,7 +202,7 @@ def test_mixed_current_and_obsolete_pdf_jobs_report_counts_without_losing_cleanu
     assert repository.activity["runningPdfs"] == 1
     assert repository.activity["pendingCleanupJobs"] == 1
     assert repository.activity["detail"] == (
-        "1 PDF extracting · 1 PDF queued · 1 earlier PDF job awaiting cleanup"
+        "1 PDF extracting · 1 earlier PDF job awaiting cleanup"
     )
 
 
@@ -220,9 +220,9 @@ def test_running_git_stage_remains_visible_beside_pdf_counts_without_duplicate_s
     _sync_job(repository, phase=RepositorySyncPhase.FINALIZING)
     _pdf_job(repository)
     with_repository_activity((repository,))
-    assert repository.activity["detail"] == "Updating catalogue · 1 PDF queued"
+    assert repository.activity["detail"] == "Updating catalogue"
     assert repository_work_summary((repository,))["detail"] == (
-        f"{repository.display_name}: Updating catalogue · 1 PDF queued"
+        f"{repository.display_name}: Updating catalogue"
     )
 
 

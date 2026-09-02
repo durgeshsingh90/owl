@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from django.db import close_old_connections, connection
+from django.utils import timezone
 
 from bitbucket_search.models import (
     BitbucketRepository,
@@ -124,7 +125,7 @@ def _run_with_file_backed_database(node_id):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_three_controllers_parse_same_and_other_repositories_concurrently(
+def test_single_controller_claims_only_one_pdf(
     parallel_targets, request
 ):
     # Shared-cache in-memory SQLite immediately raises SQLITE_LOCKED (262)
@@ -133,17 +134,14 @@ def test_three_controllers_parse_same_and_other_repositories_concurrently(
     # in a disposable file-backed child; its database name prevents recursion.
     if _run_with_file_backed_database(request.node.nodeid):
         return
-    first_repository, first_documents = parallel_targets("first", 2)
+    first_repository, first_documents = parallel_targets("first", 3)
     second_repository, second_documents = parallel_targets("second", 1)
     claims = [pdf_indexing.claim_next_extraction_job() for _ in range(3)]
-    assert len({job.pk for job in claims}) == 3
-    # Fair claiming gives the other repository a slot before the first takes two.
-    assert [job.document.repository_id for job in claims[:2]] == [
-        first_repository.pk,
-        second_repository.pk,
-    ]
+    assert claims[0] is not None
+    assert claims[0].document.repository_id == first_repository.pk
+    assert claims[1:] == [None, None]
     assert pdf_indexing.claim_next_extraction_job() is None
-    parsing_together = Barrier(3)
+    parsing_together = Barrier(1)
 
     def execute(job_id, repository_id):
         close_old_connections()
@@ -171,21 +169,23 @@ def test_three_controllers_parse_same_and_other_repositories_concurrently(
             connection.close()
             close_old_connections()
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = [executor.submit(execute, job.pk, job.document.repository_id) for job in claims]
+    claimed_jobs = [job for job in claims if job is not None]
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        futures = [executor.submit(execute, job.pk, job.document.repository_id) for job in claimed_jobs]
         results = [future.result(timeout=20) for future in futures]
 
-    assert len({connection_id for connection_id, _status in results}) == 3
+    assert len({connection_id for connection_id, _status in results}) == 1
     assert {status for _connection_id, status in results} == {PDFExtractionJobStatus.SUCCEEDED}
     assert (
         PDFDocument.objects.filter(
-            pk__in=[document.pk for document in first_documents + second_documents],
+            pk__in=[document.pk for document in first_documents],
             index_state=PDFIndexState.READY,
         ).count()
-        == 3
+        == 1
     )
+    assert PDFExtractionJob.objects.get(document=second_documents[0]).status == "queued"
     assert PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING).count() == 0
-    for claimed in claims:
+    for claimed in claimed_jobs:
         entries = list(claimed.operation_log_entries.order_by("id"))
         assert len({entry.pk for entry in entries}) == len(entries)
         assert entries[0].event == "indexing_claimed"
@@ -221,30 +221,32 @@ def test_simultaneous_claims_never_exceed_the_global_capacity(parallel_targets, 
         claimed = list(executor.map(lambda _number: claim(), range(6)))
 
     claimed_ids = [job_id for job_id in claimed if job_id is not None]
-    assert len(claimed_ids) == len(set(claimed_ids)) == 2
-    assert PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING).count() == 2
+    assert len(claimed_ids) == len(set(claimed_ids)) == 1
+    assert PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING).count() == 1
 
 
 @pytest.mark.django_db
-def test_ten_worker_claims_are_balanced_across_repositories(parallel_targets, settings):
+def test_workers_finish_one_repository_before_claiming_the_next(parallel_targets, settings):
     repositories = [parallel_targets(f"balanced-{number}", 4)[0] for number in range(4)]
     settings.PDF_MAX_EXTRACTION_WORKERS = 10
+    settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY = 3
+    settings.PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES = 1
 
-    claims = [pdf_indexing.claim_next_extraction_job() for _number in range(10)]
+    claims = [pdf_indexing.claim_next_extraction_job() for _number in range(3)]
 
     assert all(job is not None for job in claims)
     claimed_repository_ids = [job.document.repository_id for job in claims]
-    assert claimed_repository_ids[:4] == [repository.pk for repository in repositories]
-    assert {
-        repository.pk: claimed_repository_ids.count(repository.pk) for repository in repositories
-    } == {
-        repositories[0].pk: 3,
-        repositories[1].pk: 3,
-        repositories[2].pk: 2,
-        repositories[3].pk: 2,
-    }
+    assert claimed_repository_ids == [repositories[0].pk] * 3
     assert pdf_indexing.claim_next_extraction_job() is None
-    assert PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING).count() == 10
+
+    PDFExtractionJob.objects.filter(document__repository=repositories[0]).update(
+        status=PDFExtractionJobStatus.SUCCEEDED,
+        completed_at=timezone.now(),
+    )
+    next_claim = pdf_indexing.claim_next_extraction_job()
+
+    assert next_claim is not None
+    assert next_claim.document.repository_id == repositories[1].pk
 
 
 @pytest.mark.django_db(transaction=True)

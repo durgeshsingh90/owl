@@ -49,8 +49,6 @@ def _pdf_detail(queued: int, running: int, cleanup: int) -> str:
     parts = []
     if running:
         parts.append(f"{running} PDF{'s' if running != 1 else ''} extracting")
-    if queued:
-        parts.append(f"{queued} PDF{'s' if queued != 1 else ''} queued")
     if cleanup:
         parts.append(f"{cleanup} earlier PDF job{'s' if cleanup != 1 else ''} awaiting cleanup")
     return " · ".join(parts)

@@ -76,60 +76,32 @@
         label: initialRefreshAllState?.workLabel || "",
         detail: initialRefreshAllState?.workDetail || "",
     };
-    let overallRunStartedAt = null;
     let overallWasActive = false;
     let overallDisplayedProgress = 0;
     let overallSnapshot = null;
     const repositoryNoun = (count) => (count === 1 ? "repository" : "repositories");
-    const clockLabel = (milliseconds) => {
-        const seconds = Math.max(0, Math.floor(milliseconds / 1000));
-        const minutes = Math.floor(seconds / 60);
-        const pad = (value) => String(value).padStart(2, "0");
-        return minutes < 60
-            ? `${pad(minutes)}:${pad(seconds % 60)}`
-            : `${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}:${pad(seconds % 60)}`;
-    };
-    const persistedOverallStart = (snapshot) => {
-        if (!snapshot) return null;
-        const starts = [];
-        const remember = (value) => {
-            const milliseconds = Date.parse(value || "");
-            if (Number.isFinite(milliseconds) && milliseconds <= Date.now()) starts.push(milliseconds);
+    const renderOverallStatus = (repositories = null, extraction = null, work = null, workerLimits = null) => {
+        if (repositories) overallSnapshot = {
+            repositories,
+            extraction: extraction || {},
+            work: work || {},
+            workerLimits: workerLimits || {},
         };
-        (snapshot.work?.activities || []).forEach((activity) => remember(activity.startedAt));
-        snapshot.repositories.forEach((repository) => {
-            remember(repository.workerTiming?.startedAt);
-            (repository.activity?.operations || []).forEach((operation) => remember(operation.startedAt));
-        });
-        return starts.length ? Math.min(...starts) : null;
-    };
-    const renderOverallStatus = (repositories = null, extraction = null, work = null) => {
-        if (repositories) overallSnapshot = { repositories, extraction: extraction || {}, work: work || {} };
         const snapshot = overallSnapshot;
         const active = snapshot
             ? snapshot.repositories.some((repository) => repository.active || repository.hasActiveWork)
                 || Boolean(snapshot.extraction?.active)
             : activeRepositoryCount > 0 || extractionWorkActive;
-        if (active) {
-            const persistedStartedAt = persistedOverallStart(snapshot);
-            if (!overallWasActive) {
-                overallRunStartedAt = persistedStartedAt ?? Date.now();
-                overallDisplayedProgress = 0;
-            } else if (
-                persistedStartedAt !== null &&
-                (overallRunStartedAt === null || persistedStartedAt < overallRunStartedAt)
-            ) {
-                overallRunStartedAt = persistedStartedAt;
-            }
+        if (active && !overallWasActive) {
+            overallDisplayedProgress = 0;
         } else if (!active) {
-            overallRunStartedAt = null;
             overallDisplayedProgress = 0;
         }
         overallWasActive = active;
 
         let queuedGit = 0;
         let runningGit = 0;
-        let queuedPdf = Number(snapshot?.extraction?.queuedJobs || 0);
+        let completedGit = 0;
         let runningPdf = Number(snapshot?.extraction?.runningJobs || 0);
         let passed = 0;
         let failed = 0;
@@ -139,8 +111,13 @@
         let indexProgressTotal = 0;
         let indexProgressWeight = 0;
         (snapshot?.repositories || []).forEach((repository) => {
-            queuedGit += Number(repository.activity?.queuedSyncJobs || 0);
-            runningGit += Number(repository.activity?.runningSyncJobs || 0);
+            const repositoryQueuedGit = Number(repository.activity?.queuedSyncJobs || 0);
+            const repositoryRunningGit = Number(repository.activity?.runningSyncJobs || 0);
+            queuedGit += repositoryQueuedGit;
+            runningGit += repositoryRunningGit;
+            if (repository.gitSucceeded && !repositoryQueuedGit && !repositoryRunningGit) {
+                completedGit += 1;
+            }
             const counts = repository.activity?.pdfCounts || {};
             passed += Number(counts.passed || 0);
             failed += Number(counts.failed || 0) + Number(counts.interrupted || 0);
@@ -165,16 +142,16 @@
         if (active && measuredProgress !== null) {
             overallDisplayedProgress = Math.max(overallDisplayedProgress, measuredProgress);
         }
-        const elapsed = overallRunStartedAt === null ? 0 : Date.now() - overallRunStartedAt;
-        const eta = active && overallDisplayedProgress > 0 && overallDisplayedProgress < 100
-            ? elapsed * (100 - overallDisplayedProgress) / overallDisplayedProgress
-            : null;
+        const totalWorkerLimit = Number(snapshot?.workerLimits?.total || 0);
+        const runningWorkers = runningGit + runningPdf;
 
         refreshAllForms.forEach((form) => {
             const progress = form.querySelector("[data-overall-progress]");
             const bar = form.querySelector("[data-overall-progress-bar]");
             const progressLabel = form.querySelector("[data-overall-progress-label]");
             const counts = form.querySelector("[data-overall-counts]");
+            const pdfCounts = form.querySelector("[data-overall-pdf-counts]");
+            const gitCounts = form.querySelector("[data-overall-git-counts]");
             const timing = form.querySelector("[data-overall-timing]");
             if (progress) progress.hidden = !active;
             if (bar) {
@@ -183,13 +160,14 @@
             }
             if (progressLabel) progressLabel.textContent = measuredProgress === null
                 ? "Working…" : `${overallDisplayedProgress}%`;
-            if (counts) counts.textContent = active
-                ? `Git ${queuedGit} queued · ${runningGit} running · PDF ${queuedPdf} queued · ${runningPdf} running · ${passed} passed · ${failed} failed · ${cancelled} cancelled · Workers ${runningGit + runningPdf} running`
-                : `Idle · ${snapshot?.repositories?.length ?? repositoryCount} repositories ready`;
-            if (timing) {
-                timing.hidden = !active;
-                timing.textContent = `Elapsed ${clockLabel(elapsed)} · ETA ${eta === null ? "calculating…" : clockLabel(eta)}`;
+            if (counts) counts.textContent = `Workers ${active ? runningWorkers : 0} running / ${totalWorkerLimit || "–"} total`;
+            if (pdfCounts) {
+                const remainingPdf = Number(snapshot?.extraction?.queuedJobs || 0)
+                    + Number(snapshot?.extraction?.runningJobs || 0);
+                pdfCounts.textContent = `PDF · ${remainingPdf} remaining · ${passed} passed · ${active ? runningPdf : 0} running · ${failed} failed · ${cancelled} cancelled`;
             }
+            if (gitCounts) gitCounts.textContent = `Git · ${active ? queuedGit : 0} queued · ${active ? runningGit : 0} working · ${completedGit} completed`;
+            if (timing) timing.hidden = true;
         });
     };
     const setRefreshIconBusy = (icon, busy) => {
@@ -201,7 +179,7 @@
         else icon.removeAttribute("hidden");
     };
 
-    const updateRefreshAllButtons = (repositories, extraction, work) => {
+    const updateRefreshAllButtons = (repositories, extraction, work, workerLimits) => {
         if (work) workSummary = work;
         else if (repositories) workSummary = { label: "", detail: "" };
         if (extraction) {
@@ -296,7 +274,7 @@
             if (spinner) spinner.hidden = hasOverallVisual || !busy;
             setRefreshIconBusy(icon, hasOverallVisual ? false : busy);
         });
-        renderOverallStatus(repositories, extraction, work);
+        renderOverallStatus(repositories, extraction, work, workerLimits);
     };
 
     updateRefreshAllButtons();
@@ -594,14 +572,17 @@
             }
             const workStatus = card.querySelector("[data-repository-work-label]");
             if (workStatus) {
-                workStatus.textContent = working ? workDetail : "";
-                workStatus.title = working ? workDetail : "";
-                workStatus.hidden = !working;
+                const visiblyRunning = Number(repository.activity?.runningSyncJobs || 0) > 0
+                    || Number(repository.activity?.runningPdfs || 0) > 0;
+                workStatus.textContent = visiblyRunning ? workDetail : "";
+                workStatus.title = visiblyRunning ? workDetail : "";
+                workStatus.hidden = !visiblyRunning;
             }
             const progressContainer = card.querySelector("[data-repository-progress]");
             const progressBar = card.querySelector("[data-repository-progress-bar]");
             const progressLabel = card.querySelector("[data-repository-progress-label]");
-            const showProgress = working && Boolean(operation);
+            const queuedOnly = String(repository.activity?.phase || "").includes("queued");
+            const showProgress = working && Boolean(operation) && !queuedOnly;
             if (progressContainer) {
                 progressContainer.hidden = !showProgress;
                 progressContainer.title = showProgress ? workDetail : "";
@@ -616,12 +597,18 @@
             }
             if (progressLabel) {
                 progressLabel.textContent = progressValue !== null
-                    ? `${progressValue}%`
-                    : String(repository.activity?.phase || "").includes("queued") ? "Queued" : "Running";
+                    ? `${progressValue}%` : "Running";
             }
             const documents = card.querySelector("[data-repository-documents]");
             if (documents) {
                 documents.textContent = `${repository.pdfCount} PDF · ${repository.vsdxCount} VSDX`;
+            }
+            const remaining = card.querySelector("[data-repository-remaining]");
+            if (remaining) {
+                const remainingCount = Number(repository.activity?.queuedPdfs || 0)
+                    + Number(repository.activity?.runningPdfs || 0);
+                remaining.textContent = `Remaining ${remainingCount} PDF${remainingCount === 1 ? "" : "s"}`;
+                remaining.hidden = remainingCount === 0;
             }
             const ticks = card.querySelector("[data-repository-success-ticks]");
             if (ticks) {
@@ -735,7 +722,12 @@
             const payload = await response.json();
             payload.repositories.forEach(updateRepository);
             repositoryStatusPending = false;
-            updateRefreshAllButtons(payload.repositories, payload.extraction, payload.work);
+            updateRefreshAllButtons(
+                payload.repositories,
+                payload.extraction,
+                payload.work,
+                payload.workerLimits,
+            );
             const knownRepositoryIds = new Set(payload.repositories.map((repository) => String(repository.id)));
             repositoryCheckboxes().forEach((checkbox) => {
                 if (!knownRepositoryIds.has(checkbox.value)) {

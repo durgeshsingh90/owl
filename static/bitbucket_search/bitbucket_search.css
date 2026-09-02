@@ -1345,6 +1345,12 @@ html.bb-operation-blocked { cursor: wait; }
     white-space: nowrap;
 }
 
+.bb-repository-remaining {
+    color: var(--bb-amber);
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+}
+
 .bb-refresh-all__meta strong {
     color: var(--bb-text-soft);
     font-size: 0.66rem;
@@ -1386,6 +1392,66 @@ html.bb-operation-blocked { cursor: wait; }
 .bb-overall-timing {
     margin: 0 !important;
     font-variant-numeric: tabular-nums;
+}
+
+.bb-overall-summary-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    min-width: 0;
+}
+
+.bb-overall-details {
+    position: relative;
+    flex: none;
+}
+
+.bb-overall-details summary {
+    color: var(--bb-text-soft);
+    cursor: pointer;
+    font-size: 0.66rem;
+    font-weight: 700;
+    list-style: none;
+    white-space: nowrap;
+}
+
+.bb-overall-details summary::-webkit-details-marker {
+    display: none;
+}
+
+.bb-overall-details summary::after {
+    content: "⌄";
+    display: inline-block;
+    margin-left: 0.22rem;
+    transition: transform 0.16s ease;
+}
+
+.bb-overall-details[open] summary::after {
+    transform: rotate(180deg);
+}
+
+.bb-overall-details__panel {
+    position: absolute;
+    z-index: 40;
+    top: calc(100% + 0.45rem);
+    right: 0;
+    display: grid;
+    width: max-content;
+    min-width: 21rem;
+    max-width: min(30rem, 75vw);
+    gap: 0.4rem;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid var(--bb-border);
+    border-radius: 0.65rem;
+    background: var(--bb-panel-strong, #151d36);
+    box-shadow: 0 0.8rem 2rem rgb(0 0 0 / 28%);
+}
+
+.bb-overall-details__panel small {
+    overflow: visible;
+    color: var(--bb-text-soft);
+    white-space: normal;
 }
 
 .bb-refresh-all__meta small {

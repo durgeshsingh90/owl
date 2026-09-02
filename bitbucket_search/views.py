@@ -2699,6 +2699,16 @@ def repository_status(request: HttpRequest) -> JsonResponse:
                 "publicationSignature": _catalog_publication_signature(repositories),
             },
             "extraction": _extraction_payload(extraction_status),
+            "workerLimits": {
+                "git": settings.BITBUCKET_MAX_REPO_WORKERS,
+                "indexing": settings.PDF_MAX_EXTRACTION_WORKERS,
+                "publication": 1,
+                "total": (
+                    settings.BITBUCKET_MAX_REPO_WORKERS
+                    + settings.PDF_MAX_EXTRACTION_WORKERS
+                    + 1
+                ),
+            },
             "totals": {
                 "repositories": len(repositories),
                 "pdfs": sum(repository.pdf_count for repository in repositories),
