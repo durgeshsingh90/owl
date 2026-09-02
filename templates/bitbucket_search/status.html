@@ -35,9 +35,10 @@
             <div class="status-card__heading"><span class="status-symbol" aria-hidden="true">PDF</span><div><h2>Selected repository PDF indexing</h2><strong>{{ index_job_counts.running }} active for this repository · global pool limit {{ index_worker_limit|default:"—" }}</strong></div></div>
             <p>{{ index_job_counts.queued }} queued · {{ index_job_counts.succeeded }} succeeded attempts · {{ index_job_counts.failed }} failed · {{ index_job_counts.interrupted }} interrupted · {{ index_job_counts.cancelled }} cancelled.</p>
             {% if index_job_counts.queued or index_job_counts.running %}
-            <form class="bb-stop-indexing-form" method="post" action="{% url 'bitbucket_search:repository_index_cancel' selected_repository.pk %}">
+            <form class="bb-stop-indexing-form" method="post" action="{% url 'bitbucket_search:repository_index_cancel' selected_repository.pk %}" data-confirm-pdf-index-cancel="Stop all queued and currently running PDF indexing attempts for {{ selected_repository.display_name }}? Completed PDFs will remain indexed.">
                 {% csrf_token %}
                 <input type="hidden" name="return_to" value="logs">
+                <input type="hidden" name="confirmed" value="yes">
                 <button type="submit">Stop indexing now</button>
                 <small>Stops this repository's queued attempts and revokes active parser leases.</small>
             </form>

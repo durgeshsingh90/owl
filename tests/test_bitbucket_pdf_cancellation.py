@@ -276,6 +276,7 @@ def test_repository_cancellation_endpoint_returns_counts_and_current_state(
 
     response = client.post(
         url,
+        {"confirmed": "yes"},
         HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         REMOTE_ADDR="127.0.0.1",
     )
@@ -288,7 +289,7 @@ def test_repository_cancellation_endpoint_returns_counts_and_current_state(
     assert response.json()["indexing"]["counts"][PDFExtractionJobStatus.CANCELLED] == 2
     assert client.get(url, REMOTE_ADDR="127.0.0.1").status_code == 405
 
-    repeated = client.post(url, REMOTE_ADDR="127.0.0.1")
+    repeated = client.post(url, {"confirmed": "yes"}, REMOTE_ADDR="127.0.0.1")
     assert repeated.status_code == 200
     assert repeated.json()["state"] == "idle"
     assert repeated.json()["cancelled"] == {"queued": 0, "running": 0, "total": 0}
@@ -309,10 +310,12 @@ def test_repository_logs_offer_native_stop_and_return_to_the_same_repository(
     assert f'action="{cancel_url}"' in html
     assert "Stop indexing now" in html
     assert 'name="return_to" value="logs"' in html
+    assert 'name="confirmed" value="yes"' in html
+    assert "data-confirm-pdf-index-cancel" in html
 
     response = client.post(
         cancel_url,
-        {"return_to": "logs"},
+        {"return_to": "logs", "confirmed": "yes"},
         REMOTE_ADDR="127.0.0.1",
     )
 
@@ -330,9 +333,13 @@ def test_repository_cancellation_endpoint_rejects_non_loopback_and_missing_repos
     url = reverse("bitbucket_search:repository_index_cancel", args=(repository.pk,))
 
     assert client.post(url, REMOTE_ADDR="203.0.113.8").status_code == 403
+    unconfirmed = client.post(url, REMOTE_ADDR="127.0.0.1")
+    assert unconfirmed.status_code == 400
+    assert unconfirmed.json()["code"] == "indexing_cancellation_confirmation_required"
     assert (
         client.post(
             reverse("bitbucket_search:repository_index_cancel", args=(repository.pk + 999,)),
+            {"confirmed": "yes"},
             REMOTE_ADDR="127.0.0.1",
         ).status_code
         == 404

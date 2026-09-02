@@ -317,6 +317,8 @@ async function bootPage(initialTimers, logResponses, ...responses) {
     };
     let lastResponse;
     let lastLogResponse;
+    const confirmations = [];
+    const confirmationAnswers = [];
     const window = {
         localStorage: { getItem() { return null; }, setItem() {} },
         matchMedia: () => ({ matches: false }),
@@ -339,6 +341,10 @@ async function bootPage(initialTimers, logResponses, ...responses) {
             windowListeners.set(name, [...(windowListeners.get(name) || []), fn]);
         },
         dispatchEvent() {},
+        confirm(message) {
+            confirmations.push(message);
+            return confirmationAnswers.length ? confirmationAnswers.shift() : false;
+        },
         AbortController,
         async fetch(url, options) {
             requests.push({ url, options });
@@ -368,6 +374,8 @@ async function bootPage(initialTimers, logResponses, ...responses) {
         statusActivityNodes,
         requests,
         intervals,
+        confirmations,
+        confirmNext(answer = true) { confirmationAnswers.push(answer); },
         flush,
         logRequests: () => requests.filter(({ url }) => url.endsWith("/logs/")),
         activeLogPolls: () => [...activeTimeouts].filter((id) => timers[id - 1].name === "synchronizeGitLogs").length,
@@ -912,11 +920,23 @@ test("PDF indexing can be stopped directly from the repository log popup", async
 
     await elements.stop.listeners.get("click")({ target: elements.stop });
     await page.flush();
+    assert.equal(
+        page.requests.some(({ url, options }) =>
+            url === "/pdfs/repositories/1/indexing/cancel/" && options.method === "POST"),
+        false,
+        "Declining confirmation must never cancel the repository queue",
+    );
+
+    page.confirmNext();
+    await elements.stop.listeners.get("click")({ target: elements.stop });
+    await page.flush();
 
     const request = page.requests.find(({ url, options }) =>
         url === "/pdfs/repositories/1/indexing/cancel/" && options.method === "POST");
     assert.ok(request, "The popup posts only to the selected repository cancellation endpoint");
     assert.equal(request.options.headers["X-Requested-With"], "XMLHttpRequest");
+    assert.equal(String(request.options.body), "confirmed=yes");
+    assert.match(page.confirmations.at(-1), /Stop all queued and currently running/);
     assert.equal(elements.stop.hidden, true);
     assert.match(elements.status.textContent, /^0 queued · 0 running/);
 });

@@ -1,6 +1,14 @@
 (() => {
     "use strict";
 
+    document.querySelectorAll("[data-confirm-pdf-index-cancel]").forEach((form) => {
+        form.addEventListener("submit", (event) => {
+            if (!window.confirm(form.dataset.confirmPdfIndexCancel)) {
+                event.preventDefault();
+            }
+        });
+    });
+
     // One local clock serves the repository rail and the separate status panel.
     // Only server-confirmed running jobs register a timer; ticking never polls or queues work.
     const workerTimers = new Map();
@@ -845,9 +853,14 @@
             };
             indexStop.addEventListener("click", async () => {
                 if (!elements.gitLogState.cancelUrl || indexStop.disabled) return;
+                const repositoryName = elements.fullName.textContent || "this repository";
+                if (!window.confirm(
+                    `Stop all queued and currently running PDF indexing attempts for ${repositoryName}? `
+                    + "Completed PDFs will remain indexed.",
+                )) return;
                 indexStop.disabled = true;
                 try {
-                    const response = await post(elements.gitLogState.cancelUrl);
+                    const response = await post(elements.gitLogState.cancelUrl, { confirmed: "yes" });
                     const payload = await response.json();
                     indexStop.hidden = true;
                     elements.indexLogStatus.textContent = "Stopping…";

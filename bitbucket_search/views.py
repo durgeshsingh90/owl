@@ -2844,6 +2844,14 @@ def cancel_repository_indexing(request: HttpRequest, repository_id: int) -> Http
     local_error = _require_local_action(request)
     if local_error:
         return local_error
+    if request.POST.get("confirmed") != "yes":
+        return JsonResponse(
+            {
+                "code": "indexing_cancellation_confirmation_required",
+                "detail": "Confirm the stop action before cancelling PDF indexing attempts.",
+            },
+            status=400,
+        )
     repository = get_object_or_404(
         BitbucketRepository.objects.only("id", "display_name"), pk=repository_id
     )
