@@ -524,7 +524,7 @@
 </div>
 
 <dialog class="settings-dialog" aria-labelledby="confluence-settings-heading" data-settings-dialog data-open-on-load="{% if open_settings %}true{% else %}false{% endif %}">
-    {% include "bookmark_manager/_settings_panel.html" with panel_mode="dialog" return_to="index" configuration=configuration settings_form=settings_form import_form=import_form last_import_run=last_import_run inline_error=inline_error csrf_token=csrf_token only %}
+    {% include "bookmark_manager/_settings_panel.html" with panel_mode="dialog" return_to="index" configuration=configuration settings_form=settings_form bitbucket_credential_form=bitbucket_credential_form bitbucket_credential_summaries=bitbucket_credential_summaries import_form=import_form last_import_run=last_import_run inline_error=inline_error csrf_token=csrf_token only %}
 </dialog>
 {% endblock %}
 

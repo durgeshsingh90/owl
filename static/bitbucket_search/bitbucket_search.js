@@ -207,8 +207,10 @@
         disable("[data-selected-remove]", destructiveUnavailable, deleteTitle);
         workspace.querySelectorAll("[data-selected-remove]").forEach((button) => {
             button.dataset.deleteLocked = String(!deletionUnlocked);
-            const icon = button.querySelector("[data-selected-delete-lock-icon]");
-            if (icon) icon.textContent = deletionUnlocked ? "🔓" : "🔒";
+            const lockIcon = button.querySelector("[data-selected-delete-lock-icon]");
+            const deleteIcon = button.querySelector("[data-selected-delete-action-icon]");
+            if (lockIcon) lockIcon.hidden = deletionUnlocked;
+            if (deleteIcon) deleteIcon.hidden = !deletionUnlocked;
         });
         workspace.querySelectorAll("[data-selected-exclude]").forEach((button) => {
             button.setAttribute("aria-pressed", String(allExcluded));

@@ -281,6 +281,9 @@ BITBUCKET_ALLOWED_HOSTS = _env_csv(
     "BITBUCKET_ALLOWED_HOSTS",
     ("bitbucket.org", "github.com", "scm.mastercard.int"),
 )
+BITBUCKET_SECRET_BACKEND = (
+    os.getenv("BITBUCKET_SECRET_BACKEND", CONFLUENCE_SECRET_BACKEND).strip().casefold() or "auto"
+)
 BITBUCKET_HISTORY_YEARS = _env_int("BITBUCKET_HISTORY_YEARS", 3, minimum=1)
 BITBUCKET_MAX_REPO_WORKERS = _env_int("BITBUCKET_MAX_REPO_WORKERS", 5, minimum=1)
 BITBUCKET_GIT_TIMEOUT_SECONDS = _env_int("BITBUCKET_GIT_TIMEOUT_SECONDS", 3_600, minimum=60)

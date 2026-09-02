@@ -33,6 +33,13 @@
     const testButton = settingsForm?.querySelector("[data-test-connection]");
     const saveSettingsButton = settingsForm?.querySelector("[data-save-settings]");
     const testResult = settingsForm?.querySelector("[data-connection-test-result]");
+    const bitbucketCredentialForm = document.querySelector("[data-bitbucket-credential-form]");
+    const bitbucketTokenInput = bitbucketCredentialForm?.querySelector(
+        "input[type='password'], input[data-bitbucket-token-input]",
+    );
+    const showBitbucketTokenButton = bitbucketCredentialForm?.querySelector(
+        "[data-show-bitbucket-token]",
+    );
 
     const resetSettingsForm = () => {
         settingsForm?.reset();
@@ -49,6 +56,14 @@
         if (testResult) {
             testResult.textContent = "No connection test has run for the current values.";
             testResult.dataset.state = "idle";
+        }
+        bitbucketCredentialForm?.reset();
+        if (bitbucketTokenInput) {
+            bitbucketTokenInput.type = "password";
+        }
+        if (showBitbucketTokenButton) {
+            showBitbucketTokenButton.textContent = "Show";
+            showBitbucketTokenButton.setAttribute("aria-pressed", "false");
         }
     };
 
@@ -75,7 +90,18 @@
         patInput.focus();
     });
 
-    settingsForm?.querySelectorAll("[data-settings-cancel]").forEach((button) => {
+    showBitbucketTokenButton?.addEventListener("click", () => {
+        if (!bitbucketTokenInput) {
+            return;
+        }
+        const showing = bitbucketTokenInput.type === "text";
+        bitbucketTokenInput.type = showing ? "password" : "text";
+        showBitbucketTokenButton.textContent = showing ? "Show" : "Hide";
+        showBitbucketTokenButton.setAttribute("aria-pressed", String(!showing));
+        bitbucketTokenInput.focus();
+    });
+
+    document.querySelectorAll("[data-settings-cancel]").forEach((button) => {
         button.addEventListener("click", () => {
             resetSettingsForm();
             settingsDialog?.close();
@@ -336,6 +362,17 @@
                 testResult,
                 form.querySelector("button[type='submit']"),
             );
+        });
+    });
+
+    document.querySelectorAll("[data-remove-bitbucket-credential-form]").forEach((form) => {
+        form.addEventListener("submit", (event) => {
+            const confirmed = window.confirm(
+                "Remove this saved Bitbucket HTTPS credential? Repositories, downloaded files, and indexes will remain available.",
+            );
+            if (!confirmed) {
+                event.preventDefault();
+            }
         });
     });
 

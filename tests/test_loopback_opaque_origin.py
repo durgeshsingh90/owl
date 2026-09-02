@@ -8,7 +8,16 @@ from django.conf import settings
 from django.test import Client, override_settings
 from django.urls import reverse
 
-from bitbucket_search.models import BitbucketRepository, RepositorySyncJob
+from bitbucket_search.models import (
+    BitbucketHTTPSCredential,
+    BitbucketHTTPSCredentialKind,
+    BitbucketRepository,
+    RepositorySyncJob,
+)
+from bitbucket_search.services.https_credentials import (
+    CLOUD_ORIGIN,
+    reset_https_secret_store_cache,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -101,6 +110,49 @@ def test_loopback_schedule_tick_accepts_opaque_origin_form_with_valid_csrf_token
         "queued": 0,
         "workersStarted": 0,
     }
+
+
+@override_settings(
+    BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",),
+    BITBUCKET_SECRET_BACKEND="database",
+    SECRET_KEY="synthetic-loopback-credential-test-key-only-not-for-real-use-0123456789",
+)
+def test_loopback_bitbucket_https_credentials_accept_opaque_origin_with_valid_csrf_token():
+    reset_https_secret_store_cache()
+    client = _csrf_client(host="127.0.0.1:8000")
+    csrf_token = _csrf_token(client)
+
+    saved = client.post(
+        reverse("bookmark_manager:bitbucket_https_credential_save"),
+        {
+            "csrfmiddlewaretoken": csrf_token,
+            "origin": CLOUD_ORIGIN,
+            "credential_kind": BitbucketHTTPSCredentialKind.CLOUD_API_TOKEN,
+            "account_name": "",
+            "token": "synthetic-loopback-browser-value-4917-never-valid",
+            "return_to": "settings",
+        },
+        HTTP_ORIGIN="null",
+    )
+
+    assert saved.status_code == 302
+    assert saved.url == reverse("bookmark_manager:settings")
+    assert BitbucketHTTPSCredential.objects.filter(origin=CLOUD_ORIGIN).exists()
+
+    removed = client.post(
+        reverse("bookmark_manager:bitbucket_https_credential_remove"),
+        {
+            "csrfmiddlewaretoken": csrf_token,
+            "origin": CLOUD_ORIGIN,
+            "confirm": "remove-bitbucket-credential",
+            "return_to": "settings",
+        },
+        HTTP_ORIGIN="null",
+    )
+
+    assert removed.status_code == 302
+    assert removed.url == reverse("bookmark_manager:settings")
+    assert not BitbucketHTTPSCredential.objects.exists()
 
 
 @override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))

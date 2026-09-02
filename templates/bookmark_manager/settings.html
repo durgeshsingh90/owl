@@ -14,7 +14,7 @@
 {% block content %}
 <div class="page-stack page-stack--narrow">
     <a class="text-link" href="{% url 'bookmark_manager:index' %}">← Back to Bookmark Manager</a>
-    {% include "bookmark_manager/_settings_panel.html" with panel_mode="page" return_to="settings" configuration=configuration settings_form=settings_form import_form=import_form last_import_run=last_import_run inline_error=inline_error csrf_token=csrf_token only %}
+    {% include "bookmark_manager/_settings_panel.html" with panel_mode="page" return_to="settings" configuration=configuration settings_form=settings_form bitbucket_credential_form=bitbucket_credential_form bitbucket_credential_summaries=bitbucket_credential_summaries import_form=import_form last_import_run=last_import_run inline_error=inline_error csrf_token=csrf_token only %}
 </div>
 {% endblock %}
 

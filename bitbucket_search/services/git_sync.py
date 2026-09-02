@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import errno
 import logging
 import os
@@ -14,11 +15,13 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
-from contextvars import copy_context
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.utils import timezone
@@ -77,6 +80,116 @@ _GIT_COMMAND_OPERATIONS = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class GitHTTPSCredential:
+    """One in-memory Basic credential for an HTTPS repository operation."""
+
+    username: str
+    token: str
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _GitHTTPSAuthorization:
+    scope_url: str
+    header: str
+    secret_values: tuple[str, ...]
+
+
+_ACTIVE_GIT_HTTPS_AUTHORIZATION: ContextVar[_GitHTTPSAuthorization | None] = ContextVar(
+    "active_git_https_authorization", default=None
+)
+
+
+def _invalid_https_credential() -> RepositorySyncError:
+    return RepositorySyncError(
+        "invalid_https_credential",
+        "OWL could not prepare the saved HTTPS credential. Replace it in Settings and retry.",
+    )
+
+
+def _https_host_scope(remote_url: str) -> str | None:
+    """Return one normalized HTTPS origin suitable for Git's URL-scoped config."""
+
+    try:
+        parsed = urlsplit(remote_url)
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise RepositorySyncError(
+            "invalid_repository_url",
+            "The repository URL is invalid. Correct it before using a saved credential.",
+        ) from exc
+    if parsed.scheme.casefold() != "https":
+        return None
+    hostname = parsed.hostname
+    if not hostname:
+        raise RepositorySyncError(
+            "invalid_repository_url",
+            "The repository URL is invalid. Correct it before using a saved credential.",
+        )
+    normalized_host = hostname.casefold()
+    if ":" in normalized_host:
+        normalized_host = f"[{normalized_host}]"
+    authority = f"{normalized_host}:{port}" if port is not None else normalized_host
+    return f"https://{authority}/"
+
+
+def _build_https_authorization(
+    remote_url: str, credential: GitHTTPSCredential | None
+) -> _GitHTTPSAuthorization | None:
+    if credential is None:
+        return None
+    scope_url = _https_host_scope(remote_url)
+    if scope_url is None:
+        return None
+    username = credential.username
+    secret = credential.token
+    if (
+        not isinstance(username, str)
+        or not isinstance(secret, str)
+        or not username.strip()
+        or not secret.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in username + secret)
+    ):
+        raise _invalid_https_credential()
+    basic_value = base64.b64encode(f"{username}:{secret}".encode()).decode("ascii")
+    header = f"Authorization: Basic {basic_value}"
+    secret_values = tuple(
+        sorted(
+            {username, secret, f"{username}:{secret}", basic_value, header},
+            key=len,
+            reverse=True,
+        )
+    )
+    return _GitHTTPSAuthorization(
+        scope_url=scope_url,
+        header=header,
+        secret_values=secret_values,
+    )
+
+
+@contextmanager
+def _git_https_authorization(
+    remote_url: str, credential: GitHTTPSCredential | None
+) -> Iterator[None]:
+    """Bind a credential to this execution context and reliably remove it afterward."""
+
+    authorization = _build_https_authorization(remote_url, credential)
+    context_token = _ACTIVE_GIT_HTTPS_AUTHORIZATION.set(authorization)
+    try:
+        yield
+    finally:
+        _ACTIVE_GIT_HTTPS_AUTHORIZATION.reset(context_token)
+
+
+def _redact_active_git_credential(text: str) -> str:
+    authorization = _ACTIVE_GIT_HTTPS_AUTHORIZATION.get()
+    if authorization is None:
+        return text
+    for secret_value in authorization.secret_values:
+        text = text.replace(secret_value, "[credential removed]")
+    return text
+
+
 class _ConsoleLines:
     """Send complete lines only; never expose a clipped secret-bearing tail."""
 
@@ -103,7 +216,7 @@ class _ConsoleLines:
                 "[Git output line omitted: too long]", operation=self.operation, level="warning"
             )
         elif self.characters:
-            line = "".join(self.characters)
+            line = _redact_active_git_credential("".join(self.characters))
             prefix = line.lstrip().casefold()
             level = self.level
             if prefix.startswith(("fatal:", "error:")):
@@ -211,9 +324,23 @@ def _git_environment() -> dict[str, str]:
             "LC_ALL": "C",
         }
     )
+    config_entries: list[tuple[str, str]] = []
     if _IS_WINDOWS:
         # Apply this to OWL's child Git processes only, including their helpers.
         # Never change the user's global Git configuration or Windows registry.
+        config_entries.append(("core.longpaths", "true"))
+    authorization = _ACTIVE_GIT_HTTPS_AUTHORIZATION.get()
+    if authorization is not None:
+        # An empty value resets Git's inherited credential-helper list. The
+        # request-specific Authorization header then remains the sole HTTPS
+        # credential source for this non-interactive child process.
+        config_entries.extend(
+            (
+                ("credential.helper", ""),
+                (f"http.{authorization.scope_url}.extraHeader", authorization.header),
+            )
+        )
+    if config_entries:
         try:
             config_count = int(environment.get("GIT_CONFIG_COUNT", "0"))
             if config_count < 0:
@@ -223,9 +350,11 @@ def _git_environment() -> dict[str, str]:
                 "invalid_git_environment",
                 "Git's inherited configuration is invalid. Check GIT_CONFIG_COUNT and retry.",
             ) from exc
-        environment[f"GIT_CONFIG_KEY_{config_count}"] = "core.longpaths"
-        environment[f"GIT_CONFIG_VALUE_{config_count}"] = "true"
-        environment["GIT_CONFIG_COUNT"] = str(config_count + 1)
+        for key, value in config_entries:
+            environment[f"GIT_CONFIG_KEY_{config_count}"] = key
+            environment[f"GIT_CONFIG_VALUE_{config_count}"] = value
+            config_count += 1
+        environment["GIT_CONFIG_COUNT"] = str(config_count)
     return environment
 
 
@@ -616,7 +745,12 @@ def _run_streaming(
     try:
         # A failed reader startup or first DB-backed heartbeat must still reap
         # Git before releasing the repository's checkout lock.
-        reader = threading.Thread(target=copy_context().run, args=(read_output,), daemon=True)
+        reader_context = copy_context()
+        # Preserve repository/job logging context in the reader, but do not
+        # retain a credential in a thread that never launches Git and could be
+        # kept alive briefly by a transport child holding the output pipe.
+        reader_context.run(_ACTIVE_GIT_HTTPS_AUTHORIZATION.set, None)
+        reader = threading.Thread(target=reader_context.run, args=(read_output,), daemon=True)
         reader.start()
         reader_started = True
         deadline = time.monotonic() + settings.BITBUCKET_GIT_TIMEOUT_SECONDS
@@ -1771,6 +1905,7 @@ def synchronize_repository(
     *,
     operation: str,
     progress_callback: ProgressCallback,
+    https_credential: GitHTTPSCredential | None = None,
 ) -> RepositorySyncResult:
     """Clone once or safely fast-forward an existing OWL-managed checkout."""
 
@@ -1783,7 +1918,10 @@ def synchronize_repository(
         operation=operation,
     )
     try:
-        with logging_context(repository_id=repository.pk):
+        with (
+            _git_https_authorization(getattr(repository, "remote_url", ""), https_credential),
+            logging_context(repository_id=repository.pk),
+        ):
             result = _synchronize_repository(
                 repository, operation=operation, progress_callback=progress_callback
             )

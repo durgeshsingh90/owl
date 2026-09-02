@@ -55,7 +55,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-selected-unlock" not in html
     assert html.count("data-selected-remove disabled") == 2
     assert html.count('data-delete-locked="true"') == 2
-    assert html.count("data-selected-delete-lock-icon>🔒</span>") == 2
+    assert html.count("data-selected-delete-lock-icon") == 2
+    assert html.count("data-selected-delete-action-icon hidden") == 2
     assert html.count("data-repository-delete-status") == 1
     assert 'id="bb-repository-selection-form"' in html
     assert 'action="/pdfs/repositories/add/"' in html
@@ -120,7 +121,8 @@ def test_workspace_omits_redundant_search_navigation_and_keeps_repository_contro
     for toolbar in toolbars:
         assert len(re.findall(r"<button\b", toolbar)) == 4
         assert 'data-delete-locked="true"' in toolbar
-        assert 'aria-hidden="true" data-selected-delete-lock-icon>🔒</span>' in toolbar
+        assert "data-selected-delete-lock-icon" in toolbar
+        assert "data-selected-delete-action-icon hidden" in toolbar
     assert "data-repository-filter" in rail.group("body")
     for total in ("repositories", "pdfs", "vsdx", "bytes"):
         assert f"data-total-{total}" in rail.group("body")

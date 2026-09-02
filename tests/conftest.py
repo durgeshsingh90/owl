@@ -8,14 +8,17 @@ import pytest
 from django.conf import settings
 from django.db import connections
 
+from bitbucket_search.services.https_credentials import reset_https_secret_store_cache
 from bookmark_manager.services.secret_store import reset_secret_store_cache
 
 
 @pytest.fixture(autouse=True)
 def isolated_secret_store():
     reset_secret_store_cache()
+    reset_https_secret_store_cache()
     yield
     reset_secret_store_cache()
+    reset_https_secret_store_cache()
 
 
 def pytest_sessionfinish(session, exitstatus):

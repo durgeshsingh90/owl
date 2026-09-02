@@ -32,6 +32,13 @@ from django.views.decorators.csrf import csrf_protect
 from django.views.decorators.debug import sensitive_post_parameters
 from django.views.decorators.http import require_GET, require_POST
 
+from bitbucket_search.forms import BitbucketHTTPSCredentialForm
+from bitbucket_search.services.https_credentials import (
+    available_https_origins,
+    list_https_credential_summaries,
+    remove_https_credential,
+    save_https_credential,
+)
 from bookmark_manager.forms import (
     BookmarkCategoryRenameForm,
     BookmarkFilterForm,
@@ -464,6 +471,19 @@ def _new_settings_form(
         current_base_url=current_base_url,
         has_stored_credential=(summary.has_stored_credential and not summary.managed_externally),
         managed_externally=summary.managed_externally,
+    )
+
+
+def _new_bitbucket_https_credential_form(*, data=None) -> BitbucketHTTPSCredentialForm:
+    origins = available_https_origins()
+    initial_origin = "https://bitbucket.org:443" if "https://bitbucket.org:443" in origins else ""
+    if not initial_origin and origins:
+        initial_origin = origins[0]
+    return BitbucketHTTPSCredentialForm(
+        data=data,
+        origin_choices=origins,
+        initial={"origin": initial_origin, "credential_kind": "cloud_api_token"},
+        auto_id="id_bitbucket_https_%s",
     )
 
 
@@ -1117,6 +1137,7 @@ def _index_context(
     bookmark_form: BookmarkInputForm | None = None,
     import_form: BookmarkImportForm | None = None,
     settings_form: ConfluenceSettingsForm | None = None,
+    bitbucket_credential_form: BitbucketHTTPSCredentialForm | None = None,
     open_settings: bool = False,
     inline_error: str = "",
 ) -> dict[str, object]:
@@ -1282,6 +1303,10 @@ def _index_context(
         "page_title": "Bookmark Manager",
         "configuration": summary,
         "settings_form": settings_form or _new_settings_form(summary),
+        "bitbucket_credential_form": (
+            bitbucket_credential_form or _new_bitbucket_https_credential_form()
+        ),
+        "bitbucket_credential_summaries": list_https_credential_summaries(),
         "bookmark_form": bookmark_form or BookmarkInputForm(),
         "filter_form": filter_form,
         "saved_view_form": SavedBookmarkViewForm(),
@@ -1540,6 +1565,7 @@ def _settings_page_context(
     request: HttpRequest,
     *,
     settings_form: ConfluenceSettingsForm | None = None,
+    bitbucket_credential_form: BitbucketHTTPSCredentialForm | None = None,
     import_form: BookmarkImportForm | None = None,
     inline_error: str = "",
     status_message: str = "",
@@ -1564,6 +1590,10 @@ def _settings_page_context(
         "settings_form": (
             settings_form if settings_form is not None else _new_settings_form(summary)
         ),
+        "bitbucket_credential_form": (
+            bitbucket_credential_form or _new_bitbucket_https_credential_form()
+        ),
+        "bitbucket_credential_summaries": list_https_credential_summaries(),
         "import_form": import_form if import_form is not None else BookmarkImportForm(),
         "last_import_run": import_run,
         "inline_error": inline_error,
@@ -1581,6 +1611,12 @@ def _first_form_error(form: ConfluenceSettingsForm) -> str:
         if field_errors:
             return str(field_errors[0])
     return "Review the highlighted settings and try again."
+
+
+def _settings_destination(request: HttpRequest) -> str:
+    if request.POST.get("return_to") == "settings":
+        return "bookmark_manager:settings"
+    return "bookmark_manager:index"
 
 
 @require_POST
@@ -1715,11 +1751,7 @@ def save_settings(request: HttpRequest) -> HttpResponse:
     if not result.success:
         return _render_settings_failure(request, form, result.detail)
 
-    target = (
-        "bookmark_manager:settings"
-        if request.POST.get("return_to") == "settings"
-        else "bookmark_manager:index"
-    )
+    target = _settings_destination(request)
     return redirect(target)
 
 
@@ -1756,12 +1788,86 @@ def remove_settings(request: HttpRequest) -> HttpResponse:
                 status=400,
             )
         return HttpResponse(result.detail, status=400)
-    target = (
-        "bookmark_manager:settings"
-        if request.POST.get("return_to") == "settings"
-        else "bookmark_manager:index"
-    )
+    target = _settings_destination(request)
     return redirect(target)
+
+
+def _render_bitbucket_credential_failure(
+    request: HttpRequest,
+    form: BitbucketHTTPSCredentialForm,
+    detail: str,
+) -> HttpResponse:
+    form.add_error(None, detail)
+    if request.POST.get("return_to") == "settings":
+        return render(
+            request,
+            "bookmark_manager/settings.html",
+            _settings_page_context(
+                request,
+                bitbucket_credential_form=form,
+                status_message=detail,
+            ),
+            status=400,
+        )
+    return render(
+        request,
+        "bookmark_manager/index.html",
+        _index_context(
+            request,
+            bitbucket_credential_form=form,
+            open_settings=True,
+            inline_error=detail,
+        ),
+        status=400,
+    )
+
+
+@require_POST
+@csrf_protect
+@sensitive_post_parameters("token")
+@never_cache
+@_logged_view
+def save_bitbucket_https_credential(request: HttpRequest) -> HttpResponse:
+    """Save one origin-bound HTTPS token without modifying repository URLs."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    if _action_is_rate_limited(request, "save-bitbucket-https-credential"):
+        return HttpResponse("Wait briefly before saving an HTTPS credential again.", status=429)
+    form = _new_bitbucket_https_credential_form(data=request.POST)
+    if not form.is_valid():
+        return _render_bitbucket_credential_failure(request, form, _first_form_error(form))
+    result = save_https_credential(
+        origin=form.cleaned_data["origin"],
+        kind=form.cleaned_data["credential_kind"],
+        username=form.cleaned_data["account_name"],
+        token=form.cleaned_data["token"],
+    )
+    if not result.success:
+        return _render_bitbucket_credential_failure(request, form, result.detail)
+    return redirect(_settings_destination(request))
+
+
+@require_POST
+@csrf_protect
+@never_cache
+@_logged_view
+def remove_bitbucket_https_credential(request: HttpRequest) -> HttpResponse:
+    """Remove one HTTPS token while retaining repositories, checkouts, and indexes."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    if request.POST.get("confirm") != "remove-bitbucket-credential":
+        return HttpResponseBadRequest("Confirmation is required before removing the credential.")
+    if _action_is_rate_limited(request, "remove-bitbucket-https-credential"):
+        return HttpResponse("Wait briefly before removing an HTTPS credential again.", status=429)
+    result = remove_https_credential(request.POST.get("origin", ""))
+    if not result.success:
+        form = _new_bitbucket_https_credential_form()
+        return _render_bitbucket_credential_failure(request, form, result.detail)
+    return redirect(_settings_destination(request))
 
 
 @require_POST
@@ -2420,11 +2526,7 @@ def import_bookmarks(request: HttpRequest) -> HttpResponse:
             status=400,
         )
     _publish_import_completion(result.run)
-    destination = (
-        reverse("bookmark_manager:settings")
-        if request.POST.get("return_to") == "settings"
-        else reverse("bookmark_manager:index")
-    )
+    destination = reverse(_settings_destination(request))
     return redirect(f"{destination}?{urlencode({'import_run': result.run.pk})}")
 
 

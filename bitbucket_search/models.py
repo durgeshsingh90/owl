@@ -186,6 +186,55 @@ class RepositoryOperationLogSeverity(models.TextChoices):
     ERROR = "error", "Error"
 
 
+class BitbucketHTTPSCredentialKind(models.TextChoices):
+    """Supported non-interactive Bitbucket HTTPS credential shapes."""
+
+    CLOUD_API_TOKEN = "cloud_api_token", "Bitbucket Cloud API token"
+    CLOUD_ACCESS_TOKEN = "cloud_access_token", "Bitbucket Cloud access token"
+    USERNAME_TOKEN = "basic_token", "Username and access token"
+
+
+class BitbucketHTTPSCredentialSource(models.TextChoices):
+    """Secure backend containing one Bitbucket HTTPS credential envelope."""
+
+    KEYRING = "keyring", "Operating-system credential store"
+    DATABASE = "database", "Encrypted local database"
+
+
+class BitbucketHTTPSCredentialState(models.TextChoices):
+    """User-facing verification state for one saved HTTPS credential."""
+
+    STORED_UNVERIFIED = "stored_unverified", "Stored — not verified"
+    CONNECTED = "connected", "Connected"
+    INVALID_CREDENTIAL = "invalid_credential", "Invalid credential"
+
+
+class BitbucketHTTPSCredential(models.Model):
+    """One origin-bound Bitbucket HTTPS secret with no plaintext credential fields."""
+
+    origin = models.URLField(max_length=2048, unique=True)
+    kind = models.CharField(max_length=32, choices=BitbucketHTTPSCredentialKind)
+    credential_source = models.CharField(
+        max_length=20,
+        choices=BitbucketHTTPSCredentialSource,
+        default=BitbucketHTTPSCredentialSource.DATABASE,
+    )
+    credential_ciphertext = models.TextField(blank=True, editable=False)
+    state = models.CharField(
+        max_length=32,
+        choices=BitbucketHTTPSCredentialState,
+        default=BitbucketHTTPSCredentialState.STORED_UNVERIFIED,
+    )
+    configured_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["origin"]
+
+    def __str__(self) -> str:
+        return self.origin
+
+
 class BitbucketRepository(models.Model):
     """One approved Git repository managed in OWL's private media area."""
 

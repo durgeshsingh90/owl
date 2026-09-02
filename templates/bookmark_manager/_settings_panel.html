@@ -11,6 +11,11 @@
     </header>
 
     <div class="settings-panel__body">
+        <section class="settings-integration" aria-labelledby="confluence-connection-settings-heading">
+        <div>
+            <h3 id="confluence-connection-settings-heading">Confluence connection</h3>
+            <p class="field-help">Connect Bookmark Manager to one trusted Confluence Data Center origin.</p>
+        </div>
         <div class="configuration-summary" data-state="{{ configuration.state }}">
             <span class="configuration-summary__icon" aria-hidden="true">{% if configuration.state == "connected" %}✓{% else %}i{% endif %}</span>
             <div>
@@ -65,6 +70,85 @@
                 {% endif %}
             </div>
         </form>
+        </section>
+
+        <section class="settings-integration" aria-labelledby="bitbucket-https-settings-heading">
+            <div>
+                <h3 id="bitbucket-https-settings-heading">Bitbucket HTTPS credentials</h3>
+                <p class="field-help">Save a token for private clone and pull operations. OWL uses it only for the exact HTTPS origin shown below and keeps repository URLs credential-free.</p>
+            </div>
+
+            {% if bitbucket_credential_summaries %}
+            <div class="credential-list" aria-label="Saved Bitbucket HTTPS credentials">
+                {% for credential in bitbucket_credential_summaries %}
+                <article class="credential-card" data-state="{{ credential.state }}">
+                    <div>
+                        <strong>{{ credential.origin }}</strong>
+                        <span>{{ credential.label }}</span>
+                        <small>
+                            {% if credential.kind == "cloud_api_token" %}Atlassian API token
+                            {% elif credential.kind == "cloud_access_token" %}Repository, project, or workspace access token
+                            {% else %}Account name + HTTP access token{% endif %}
+                            · {% if credential.source == "keyring" %}OS credential store{% else %}Encrypted local database{% endif %}
+                        </small>
+                    </div>
+                    <form method="post" action="{% url 'bookmark_manager:bitbucket_https_credential_remove' %}" data-remove-bitbucket-credential-form>
+                        {% csrf_token %}
+                        <input type="hidden" name="return_to" value="{{ return_to }}">
+                        <input type="hidden" name="origin" value="{{ credential.origin }}">
+                        <input type="hidden" name="confirm" value="remove-bitbucket-credential">
+                        <button class="button button--danger button--small" type="submit">Remove</button>
+                    </form>
+                </article>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="configuration-summary" data-state="not_configured">
+                <span class="configuration-summary__icon" aria-hidden="true">i</span>
+                <div><h3>No HTTPS credential saved</h3><p>SSH and any external Git credential manager continue to work as before.</p></div>
+            </div>
+            {% endif %}
+
+            {% if bitbucket_credential_form.non_field_errors %}
+            <div class="form-errors" role="alert">{{ bitbucket_credential_form.non_field_errors|striptags }}</div>
+            {% endif %}
+            <form class="settings-form" method="post" action="{% url 'bookmark_manager:bitbucket_https_credential_save' %}" data-bitbucket-credential-form>
+                {% csrf_token %}
+                <input type="hidden" name="return_to" value="{{ return_to }}">
+                <div class="form-field">
+                    {{ bitbucket_credential_form.origin.label_tag }}
+                    {{ bitbucket_credential_form.origin }}
+                    <p class="field-help">Credentials are isolated by scheme, hostname, and port. Hosts come only from <code>BITBUCKET_ALLOWED_HOSTS</code> and connected HTTPS repositories.</p>
+                    {% for error in bitbucket_credential_form.origin.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+                </div>
+                <div class="form-field">
+                    {{ bitbucket_credential_form.credential_kind.label_tag }}
+                    {{ bitbucket_credential_form.credential_kind }}
+                    <p class="field-help">For Bitbucket Cloud, an Atlassian API token is the usual choice across several repositories; a repository/project/workspace token is narrower. For Bitbucket Data Center, choose account name + HTTP access token.</p>
+                    {% for error in bitbucket_credential_form.credential_kind.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+                </div>
+                <div class="form-field">
+                    {{ bitbucket_credential_form.account_name.label_tag }}
+                    {{ bitbucket_credential_form.account_name }}
+                    <p class="field-help">Cloud token types use Atlassian's required fixed Git account name automatically.</p>
+                    {% for error in bitbucket_credential_form.account_name.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+                </div>
+                <div class="form-field">
+                    {{ bitbucket_credential_form.token.label_tag }}
+                    <div class="secret-entry">
+                        {{ bitbucket_credential_form.token }}
+                        <button class="button button--secondary" type="button" aria-pressed="false" data-show-bitbucket-token>Show</button>
+                    </div>
+                    {% if bitbucket_credential_form.token.help_text %}<p class="field-help">{{ bitbucket_credential_form.token.help_text }}</p>{% endif %}
+                    {% for error in bitbucket_credential_form.token.errors %}<p class="field-error">{{ error }}</p>{% endfor %}
+                </div>
+                <p class="credential-permission-note"><strong>Permission:</strong> repository read is sufficient for OWL clone and pull. Do not grant write, admin, or delete unless another tool genuinely needs it.</p>
+                <div class="form-actions">
+                    <button class="button button--primary" type="submit">Save HTTPS credential</button>
+                    {% if panel_mode == "dialog" %}<button class="button button--secondary" type="button" data-settings-cancel>Cancel</button>{% endif %}
+                </div>
+            </form>
+        </section>
 
         <section class="settings-data" aria-labelledby="bookmark-data-settings-heading">
             <div>

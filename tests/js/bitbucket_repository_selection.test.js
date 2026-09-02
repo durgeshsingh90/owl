@@ -119,7 +119,8 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
         exclude: element("data-selected-exclude", { type: "submit", name: "operation", value: "exclude", disabled: "" }, "button"),
         stop: element("data-selected-stop-indexing", { type: "submit", name: "operation", value: "stop_indexing", disabled: "" }, "button"),
         remove: element("data-selected-remove", { type: "submit", name: "operation", value: "remove", disabled: "", "data-delete-locked": "true" }, "button"),
-        deleteIcon: element("data-selected-delete-lock-icon", {}, "span"),
+        lockIcon: element("data-selected-delete-lock-icon", {}, "svg"),
+        deleteIcon: element("data-selected-delete-action-icon", { hidden: "" }, "svg"),
         excluded: element("data-selected-excluded-value", { type: "hidden", name: "excluded", value: "yes" }, "input"),
         count: element("data-repository-selection-count"),
         spinner: element("data-selected-refresh-spinner", { hidden: "" }),
@@ -133,7 +134,7 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
     controlCopies.forEach((copy) => {
         copy.refresh.appendChild(copy.icon);
         copy.refresh.appendChild(copy.spinner);
-        copy.deleteIcon.textContent = "🔒";
+        copy.remove.appendChild(copy.lockIcon);
         copy.remove.appendChild(copy.deleteIcon);
         [copy.refresh, copy.exclude, copy.stop, copy.remove, copy.excluded, copy.count].forEach((node) => form.appendChild(node));
     });
@@ -296,7 +297,8 @@ test("selection enables a single locked delete control that arms on its first cl
     assert.equal(page.controls.exclude.disabled, false);
     assert.equal(page.controls.remove.disabled, false, "An idle selection can click the locked button to arm it");
     assert.equal(page.controls.remove.dataset.deleteLocked, "true");
-    assert.equal(page.controls.deleteIcon.textContent, "🔒");
+    assert.equal(page.controls.lockIcon.hidden, false);
+    assert.equal(page.controls.deleteIcon.hidden, true);
     assert.equal(page.controls.remove.title, "Unlock deletion for 1 selected repository");
     assert.equal(page.controls.remove.getAttribute("aria-label"), page.controls.remove.title);
     const click = page.unlock();
@@ -307,12 +309,14 @@ test("selection enables a single locked delete control that arms on its first cl
     assert.equal(page.global.button.disabled, false, "Arming does not start a repository request");
     assert.equal(page.controls.remove.disabled, false);
     assert.equal(page.controls.remove.dataset.deleteLocked, "false");
-    assert.equal(page.controls.deleteIcon.textContent, "🔓");
+    assert.equal(page.controls.lockIcon.hidden, true);
+    assert.equal(page.controls.deleteIcon.hidden, false);
     assert.equal(page.controls.remove.title, "Click again to delete 1 selected repository from this computer");
     assert.equal(page.controls.remove.getAttribute("aria-label"), page.controls.remove.title);
     page.select(1);
     assert.equal(page.controls.remove.dataset.deleteLocked, "true", "Changing the selected target set relocks deletion");
-    assert.equal(page.controls.deleteIcon.textContent, "🔒");
+    assert.equal(page.controls.lockIcon.hidden, false);
+    assert.equal(page.controls.deleteIcon.hidden, true);
     assert.equal(page.controls.remove.title, "Unlock deletion for 2 selected repositories");
     assert.match(page.controls.count.textContent, /2/);
     page.select(0, false);
@@ -344,14 +348,15 @@ test("the same lock icon state is shared across desktop and mobile delete contro
         for (const copy of page.controlCopies) {
             assert.equal(copy.remove.disabled, false);
             assert.equal(copy.remove.dataset.deleteLocked, String(locked));
-            assert.equal(copy.deleteIcon.textContent, locked ? "🔒" : "🔓");
+            assert.equal(copy.lockIcon.hidden, !locked);
+            assert.equal(copy.deleteIcon.hidden, locked);
             assert.equal(copy.remove.title, locked
                 ? "Unlock deletion for 1 selected repository"
                 : "Click again to delete 1 selected repository from this computer");
         }
     };
     assertCopies(true);
-    assert.equal(page.controlCopies[1].deleteIcon.dispatch("click").defaultPrevented, true,
+    assert.equal(page.controlCopies[1].lockIcon.dispatch("click").defaultPrevented, true,
         "Clicking the icon inside the mobile control arms the same shared button state");
     assertCopies(false);
     assert.match(page.deleteStatus.textContent, /unlocked.*10 seconds/i);
@@ -370,7 +375,8 @@ test("delete automatically relocks after ten seconds without changing the select
     assert.equal(page.controls.remove.dataset.deleteLocked, "false");
     page.advanceTime(1);
     assert.equal(page.controls.remove.dataset.deleteLocked, "true");
-    assert.equal(page.controls.deleteIcon.textContent, "🔒");
+    assert.equal(page.controls.lockIcon.hidden, false);
+    assert.equal(page.controls.deleteIcon.hidden, true);
     assert.equal(page.deleteTimers().length, 0);
     assert.equal(page.controls.remove.disabled, false, "The user can start another explicit unlock cycle");
     assert.equal(page.cards[0].checkbox.checked, true);
@@ -561,7 +567,8 @@ test("new Git or PDF work leaves accidental-delete consent intact and animates r
         await page.poll({ overrides: { 1: { ...work, activity, workerTiming: timing } } });
         assert.equal(page.controls.remove.disabled, false);
         assert.equal(page.controls.remove.dataset.deleteLocked, "false");
-        assert.equal(page.controls.deleteIcon.textContent, "🔓");
+        assert.equal(page.controls.lockIcon.hidden, true);
+        assert.equal(page.controls.deleteIcon.hidden, false);
         assert.equal(page.deleteTimers().length, 1);
         assert.match(page.controls.remove.title, /click again to delete/i);
         assert.equal(page.controls.stop.disabled, !stopEnabled);

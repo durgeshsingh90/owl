@@ -28,6 +28,8 @@ _LOCAL_BITBUCKET_MUTATIONS = frozenset(
         "bitbucket_search:repository_refresh",
         "bitbucket_search:repository_schedule_tick",
         "bitbucket_search:repositories_refresh_all",
+        "bookmark_manager:bitbucket_https_credential_save",
+        "bookmark_manager:bitbucket_https_credential_remove",
     }
 )
 

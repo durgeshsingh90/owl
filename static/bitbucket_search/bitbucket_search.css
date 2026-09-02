@@ -271,11 +271,6 @@
     background: var(--bb-amber-soft);
 }
 
-.bb-repository-delete-lock {
-    font-size: 17px;
-    line-height: 1;
-}
-
 .bb-repository-tool--danger[data-delete-locked="false"]:not(:disabled) {
     box-shadow: 0 0 0 2px var(--bb-danger-soft);
 }

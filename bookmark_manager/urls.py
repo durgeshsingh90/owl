@@ -38,4 +38,14 @@ urlpatterns = [
     path("settings/test/", views.test_connection, name="settings_test"),
     path("settings/save/", views.save_settings, name="settings_save"),
     path("settings/remove/", views.remove_settings, name="settings_remove"),
+    path(
+        "settings/bitbucket-https/save/",
+        views.save_bitbucket_https_credential,
+        name="bitbucket_https_credential_save",
+    ),
+    path(
+        "settings/bitbucket-https/remove/",
+        views.remove_bitbucket_https_credential,
+        name="bitbucket_https_credential_remove",
+    ),
 ]

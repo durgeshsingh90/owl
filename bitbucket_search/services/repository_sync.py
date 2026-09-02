@@ -34,9 +34,14 @@ from bitbucket_search.models import (
 )
 from bitbucket_search.services.git_output import RepositoryGitLog, emit_git_output, flush_git_output
 from bitbucket_search.services.git_sync import (
+    GitHTTPSCredential,
     RepositorySyncError,
     managed_repository_path,
     synchronize_repository,
+)
+from bitbucket_search.services.https_credentials import (
+    HTTPSCredentialUnavailable,
+    resolve_https_credential,
 )
 from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
 from bitbucket_search.services.pdf_catalog import (
@@ -1509,11 +1514,29 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
             )
 
     try:
-        result = synchronize_repository(
-            job.repository,
-            operation=job.operation,
-            progress_callback=save_progress,
+        try:
+            saved_https_credential = resolve_https_credential(job.repository.remote_url)
+        except HTTPSCredentialUnavailable as exc:
+            raise RepositorySyncError(
+                "https_credential_unavailable",
+                "The saved HTTPS credential is unavailable. Replace or remove it in Settings, "
+                "then retry this repository.",
+            ) from exc
+        git_https_credential = (
+            GitHTTPSCredential(
+                username=saved_https_credential.username,
+                token=saved_https_credential.token,
+            )
+            if saved_https_credential is not None
+            else None
         )
+        sync_options = {
+            "operation": job.operation,
+            "progress_callback": save_progress,
+        }
+        if git_https_credential is not None:
+            sync_options["https_credential"] = git_https_credential
+        result = synchronize_repository(job.repository, **sync_options)
         stage = "pdf_catalog_build"
         log_event(
             logger,
