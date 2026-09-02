@@ -336,6 +336,13 @@ def reveal_pdf_in_folder(path: Path) -> None:
     path = Path(path)
     if sys.platform == "darwin":
         _run_native_action(["/usr/bin/open", "-R", str(path)], action="reveal")
+        # NSWorkspace can reveal the item in an existing background Finder
+        # window without activating it. Ask LaunchServices to bring Finder
+        # forward after the selection has been made.
+        _run_native_action(
+            ["/usr/bin/open", "-b", "com.apple.finder"],
+            action="reveal",
+        )
     elif sys.platform == "win32":
         _run_native_action(["explorer.exe", f"/select,{path}"], action="reveal")
     elif sys.platform.startswith("linux"):

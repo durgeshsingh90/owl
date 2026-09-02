@@ -2827,9 +2827,9 @@ html.bb-operation-blocked { cursor: wait; }
 }
 
 .bb-content {
-    width: min(100%, 1600px);
+    width: 100%;
     min-width: 0;
-    margin: 0 auto;
+    margin: 0;
     padding: 1rem clamp(1rem, 1.6vw, 1.35rem) 1.35rem;
 }
 
@@ -4004,6 +4004,26 @@ html.bb-operation-blocked { cursor: wait; }
 .bb-pagination nav span[data-pdf-next-page-end] {
     color: var(--bb-muted-low);
     border-color: var(--bb-line);
+}
+
+@media (min-width: 2200px) {
+    .bitbucket-workspace {
+        grid-template-columns:
+            clamp(314px, 14vw, 420px)
+            minmax(0, 1fr)
+            clamp(284px, 11vw, 340px);
+    }
+
+    .bb-results-table .bb-column-select { width: 3%; }
+    .bb-results-table .bb-column-name { width: 20%; }
+    .bb-results-table .bb-column-path { width: 23%; }
+    .bb-results-table .bb-column-project { width: 8%; }
+    .bb-results-table .bb-column-repository { width: 10%; }
+    .bb-results-table .bb-column-added { width: 9%; }
+    .bb-results-table .bb-column-author { width: 10%; }
+    .bb-results-table .bb-column-status { width: 7%; }
+    .bb-results-table .bb-column-opens { width: 4%; }
+    .bb-results-table .bb-column-actions { width: 6%; }
 }
 
 @media (max-width: 1280px) {

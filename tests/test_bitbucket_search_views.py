@@ -299,6 +299,24 @@ def test_search_input_is_full_width_enter_first_and_submits_scope_sentinel(clien
     assert ".bb-search-submit" not in stylesheet
 
 
+def test_wide_workspace_uses_available_space_for_long_names():
+    stylesheet = (
+        Path(__file__).parents[1] / "static" / "bitbucket_search" / "bitbucket_search.css"
+    ).read_text(encoding="utf-8")
+
+    content_rule = re.search(r"\.bb-content\s*\{(?P<body>[^}]*)\}", stylesheet)
+    assert content_rule is not None
+    assert "width: 100%;" in content_rule.group("body")
+    assert "margin: 0;" in content_rule.group("body")
+    assert "1600px" not in content_rule.group("body")
+
+    wide_rule_start = stylesheet.index("@media (min-width: 2200px)")
+    wide_rule_end = stylesheet.index("@media (max-width: 1280px)", wide_rule_start)
+    wide_rule = stylesheet[wide_rule_start:wide_rule_end]
+    assert "clamp(314px, 14vw, 420px)" in wide_rule
+    assert ".bb-results-table .bb-column-name { width: 20%; }" in wide_rule
+
+
 @pytest.mark.parametrize(
     "query",
     [

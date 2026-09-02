@@ -90,7 +90,7 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=blocking-repository-actions-v1" in html
+    assert "bitbucket_search/bitbucket_search.css?v=wide-workspace-v1" in html
     assert "bitbucket_search/bitbucket_search.js?v=blocking-repository-actions-v1" in html
     assert "data-repository-operation-overlay" in html
     assert "bitbucket_search/icons/work-in-progress.gif" in html
@@ -1429,6 +1429,55 @@ def test_repository_status_is_compact_and_never_returns_the_remote_url(loopback_
     serialized = response.content.decode()
     assert "ssh://" not in serialized
     assert "/private/synthetic/path" not in serialized
+
+
+def test_topbar_connection_test_runs_ssh_probe_before_repository_checks(
+    loopback_client,
+    monkeypatch,
+):
+    BitbucketRepository.objects.create(
+        display_name="architecture",
+        canonical_remote_key="bitbucket.org/workspace/architecture",
+        remote_url="ssh://git@bitbucket.org/workspace/architecture.git",
+        sync_state=RepositorySyncState.READY,
+    )
+    calls = []
+    monkeypatch.setattr(
+        bitbucket_views,
+        "probe_bitbucket_ssh_connection",
+        lambda: calls.append("ssh"),
+    )
+    monkeypatch.setattr(
+        bitbucket_views,
+        "test_repository_connection",
+        lambda *_args, **_kwargs: calls.append("repository"),
+    )
+
+    response = loopback_client.post(reverse("bitbucket_search:repository_connection_test"))
+
+    assert response.status_code == 200
+    assert calls == ["ssh", "repository"]
+    assert response.json()["ssh"] == {"host": "bitbucket.org", "connected": True}
+    assert response.json()["detail"] == "SSH key authentication and 1 repository connections passed."
+
+
+def test_topbar_connection_test_reports_ssh_key_failure(loopback_client, monkeypatch):
+    monkeypatch.setattr(
+        bitbucket_views,
+        "probe_bitbucket_ssh_connection",
+        Mock(
+            side_effect=bitbucket_views.RepositorySyncError(
+                "connection_auth_failed", "safe"
+            )
+        ),
+    )
+
+    response = loopback_client.post(reverse("bitbucket_search:repository_connection_test"))
+
+    assert response.status_code == 400
+    assert response.json()["state"] == "failed"
+    assert response.json()["ssh"] == {"host": "bitbucket.org", "connected": False}
+    assert response.json()["detail"] == "Bitbucket SSH key authentication failed."
 
 
 def test_repository_poller_tracks_daily_idle_and_catalog_publication_contract():

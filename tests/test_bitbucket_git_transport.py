@@ -105,6 +105,36 @@ def test_preflight_uses_real_remote_and_local_git_config_without_showing_metadat
     assert all(call.kwargs["timeout"] <= 1 for call in process.communicate.call_args_list)
 
 
+def test_bitbucket_ssh_probe_uses_batch_mode_and_accepts_authenticated_exit_one(monkeypatch):
+    process = Mock(returncode=1)
+    process.communicate.return_value = (
+        "",
+        "authenticated via ssh key. You can use git to connect to Bitbucket.",
+    )
+    spawn = Mock(return_value=process)
+    monkeypatch.setattr(git_sync.subprocess, "Popen", spawn)
+
+    git_sync.probe_bitbucket_ssh_connection()
+
+    arguments, options = spawn.call_args
+    assert arguments[0][0:2] == ["ssh", "-T"]
+    assert "BatchMode=yes" in arguments[0]
+    assert arguments[0][-1] == "git@bitbucket.org"
+    assert options["stdin"] == subprocess.DEVNULL
+    assert options["env"]["SSH_ASKPASS_REQUIRE"] == "never"
+
+
+def test_bitbucket_ssh_probe_rejects_missing_key(monkeypatch):
+    process = Mock(returncode=255)
+    process.communicate.return_value = ("", "Permission denied (publickey).")
+    monkeypatch.setattr(git_sync.subprocess, "Popen", Mock(return_value=process))
+
+    with pytest.raises(git_sync.RepositorySyncError) as captured:
+        git_sync.probe_bitbucket_ssh_connection()
+
+    assert captured.value.code == "connection_auth_failed"
+
+
 def test_preflight_timeout_has_separate_limit_heartbeats_and_reaps_process(monkeypatch, settings):
     settings.BITBUCKET_GIT_TIMEOUT_SECONDS = 3600
     settings.BITBUCKET_CONNECTION_TIMEOUT_SECONDS = 2

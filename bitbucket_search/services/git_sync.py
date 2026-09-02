@@ -483,6 +483,36 @@ def test_repository_connection(
         _check_connection(repository, lambda _phase, _progress, _message: None)
 
 
+def probe_bitbucket_ssh_connection() -> None:
+    """Verify Bitbucket Cloud SSH authentication with the user's configured keys."""
+
+    timeout = settings.BITBUCKET_CONNECTION_TIMEOUT_SECONDS
+    emit_git_output("Checking Bitbucket SSH key authentication…", operation="connection")
+    _run_capture(
+        (
+            "ssh",
+            "-T",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectionAttempts=1",
+            "-o",
+            f"ConnectTimeout={max(1, int(timeout))}",
+            "git@bitbucket.org",
+        ),
+        failure_code="connection_check_failed",
+        failure_summary=(
+            "SSH could not test Bitbucket authentication. Check that SSH is installed and retry."
+        ),
+        timeout_seconds=timeout,
+        failure_classifier=_connection_failure,
+        timeout_error=_connection_timeout_error(),
+        isolate_process=True,
+        accepted_return_codes=(0, 1),
+    )
+    emit_git_output("Bitbucket SSH key authentication verified.", operation="connection")
+
+
 def _abort_capture(process, *, isolate_process: bool) -> str:
     """Stop owned Git/transport children and bound cleanup after timeout/cancellation."""
 
@@ -559,6 +589,7 @@ def _run_capture(
     failure_classifier: Callable[[str], RepositorySyncError] | None = None,
     timeout_error: RepositorySyncError | None = None,
     isolate_process: bool = False,
+    accepted_return_codes: Sequence[int] = (0,),
 ) -> str:
     started_at = time.monotonic()
     operation = _git_command_operation(arguments)
@@ -640,10 +671,10 @@ def _run_capture(
         _abort_capture(process, isolate_process=isolate_process)
         raise
 
-    _emit_captured_stderr(
-        stderr, operation=operation, level="error" if process.returncode else "info"
-    )
-    if process.returncode != 0:
+    accepted_codes = frozenset(int(code) for code in accepted_return_codes)
+    succeeded = process.returncode in accepted_codes
+    _emit_captured_stderr(stderr, operation=operation, level="info" if succeeded else "error")
+    if not succeeded:
         failure = (
             failure_classifier(stderr[-32_768:])
             if failure_classifier is not None

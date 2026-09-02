@@ -57,6 +57,7 @@ from bitbucket_search.services.git_sync import (
     GitHTTPSCredential,
     RepositorySyncError,
     managed_repository_path,
+    probe_bitbucket_ssh_connection,
     test_repository_connection,
 )
 from bitbucket_search.services.https_credentials import (
@@ -1390,11 +1391,17 @@ def repositories(request: HttpRequest) -> HttpResponse:
 @never_cache
 @_logged_web_action("repository_connection_test")
 def repository_connection_test(request: HttpRequest) -> JsonResponse:
-    """Run credential-aware, read-only Git remote checks when the app opens."""
+    """Run SSH-key authentication, then read-only repository checks."""
 
     local_error = _require_local_action(request)
     if local_error:
         return local_error
+    try:
+        probe_bitbucket_ssh_connection()
+    except RepositorySyncError:
+        ssh_connected = False
+    else:
+        ssh_connected = True
     results = []
     for repository in BitbucketRepository.objects.filter(enabled=True).order_by("display_name"):
         try:
@@ -1408,18 +1415,24 @@ def repository_connection_test(request: HttpRequest) -> JsonResponse:
         else:
             results.append({"id": repository.pk, "name": repository.display_name, "connected": True})
     failed = sum(not item["connected"] for item in results)
+    connection_failed = not ssh_connected or bool(failed)
     return JsonResponse(
         {
-            "state": "connected" if not failed else "failed",
-            "label": "Git connection passed" if not failed else "Git connection failed",
+            "state": "failed" if connection_failed else "connected",
+            "label": "Git connection failed" if connection_failed else "Git connection passed",
             "detail": (
-                f"Verified {len(results)} repositories with the available stored credentials."
-                if not failed
-                else f"{failed} of {len(results)} repository connection tests failed."
+                f"SSH key authentication and {len(results)} repository connections passed."
+                if not connection_failed
+                else (
+                    "Bitbucket SSH key authentication failed."
+                    if not ssh_connected
+                    else f"{failed} of {len(results)} repository connection tests failed."
+                )
             ),
+            "ssh": {"host": "bitbucket.org", "connected": ssh_connected},
             "repositories": results,
         },
-        status=200 if not failed else 400,
+        status=400 if connection_failed else 200,
     )
 
 

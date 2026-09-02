@@ -200,7 +200,10 @@ def test_validated_pdf_path_rejects_missing_non_pdf_and_non_regular_entries(regi
     assert non_regular.value.code == "document_unavailable"
 
 
-def test_macos_open_and_reveal_use_bounded_argument_array_launches(monkeypatch, tmp_path):
+def test_macos_open_reveal_and_finder_activation_use_bounded_argument_arrays(
+    monkeypatch,
+    tmp_path,
+):
     pdf_path = tmp_path / "report.pdf"
     run = Mock(return_value=subprocess.CompletedProcess([], 0))
     monkeypatch.setattr(document_actions.sys, "platform", "darwin")
@@ -220,6 +223,7 @@ def test_macos_open_and_reveal_use_bounded_argument_array_launches(monkeypatch, 
     assert run.call_args_list == [
         call(["/usr/bin/open", str(pdf_path)], **common),
         call(["/usr/bin/open", "-R", str(pdf_path)], **common),
+        call(["/usr/bin/open", "-b", "com.apple.finder"], **common),
     ]
 
 
