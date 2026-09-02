@@ -5,7 +5,7 @@
     <li class="bb-repository-card" data-repository-id="{{ repository.pk }}" data-repository-state="{{ repository.sync_state }}" data-repository-operation="{{ repository.activity.operation|default:'' }}" data-repository-active-work="{{ repository.has_active_work|yesno:'true,false' }}" data-repository-active-sync="{{ repository.has_active_sync|yesno:'true,false' }}" data-repository-pdf-indexing-active="{% if repository.activity.queuedPdfs or repository.activity.runningPdfs %}true{% else %}false{% endif %}" data-repository-refresh-excluded="{{ repository.exclude_from_refresh|yesno:'true,false' }}" data-repository-removal-pending="{{ repository.has_removal_pending|yesno:'true,false' }}" data-repository-search-value="{{ repository.display_name }} {{ repository.canonical_remote_key }} {{ repository.default_branch }}">
         <div class="bb-repository-card__main">
             <span class="bb-repository-state bb-repository-state--{% if repository.activity.active %}working{% elif repository.git_sync_failed %}git-failed{% elif repository.pdf_index_failed_count %}indexing-failed{% else %}{{ repository.sync_state }}{% endif %}" data-repository-state-icon data-repository-operation="{{ repository.activity.operation|default:'' }}" role="img" aria-label="{{ repository.display_name }}: {% if repository.activity.active %}{{ repository.activity.label }}{% elif repository.git_sync_failed %}Git connection or pull failed{% elif repository.pdf_index_failed_count %}{{ repository.pdf_index_failed_count }} PDF indexing failures{% else %}{{ repository.get_sync_state_display }}{% endif %}" title="{% if repository.activity.active %}{{ repository.activity.detail }}{% elif repository.git_sync_failed %}Git connection or pull failed{% elif repository.pdf_index_failed_count %}{{ repository.pdf_index_failed_count }} PDF indexing failures{% else %}{{ repository.get_sync_state_display }}{% endif %}">
-                <svg class="bb-state-icon bb-state-icon--ready" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="m8.5 12 2.2 2.2 4.8-5"/></svg>
+                <span class="bb-state-icon bb-state-icon--ready bb-double-tick" aria-hidden="true" data-repository-success-ticks data-git-succeeded="{{ repository.git_succeeded|yesno:'true,false' }}" data-index-succeeded="{{ repository.index_succeeded|yesno:'true,false' }}"><i></i><i></i></span>
                 <svg class="bb-state-icon bb-state-icon--active" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v11M8 10l4 4 4-4M5 19h14"/></svg>
                 <svg class="bb-state-icon bb-state-icon--clone" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v10M8 9l4 4 4-4M5 17.5h14v3H5z"/></svg>
                 <svg class="bb-state-icon bb-state-icon--pull" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M18.5 7.5A7.5 7.5 0 0 0 6 6l-2 2M5.5 16.5A7.5 7.5 0 0 0 18 18l2-2M4 4v4h4M20 20v-4h-4"/></svg>
@@ -18,7 +18,6 @@
             <span class="bb-repository-card__copy">
                 <strong data-repository-name title="{{ repository.display_name }}">{{ repository.display_name }}</strong>
                 <small data-repository-documents>{{ repository.pdf_count }} PDF · {{ repository.vsdx_count }} VSDX</small>
-                <small class="bb-repository-index-counts" data-repository-index-counts title="Current PDF indexing run"{% if repository.activity.pdfCounts.failed == 0 and repository.activity.pdfCounts.cancelled == 0 and repository.activity.pdfCounts.passed and not repository.activity.pdfCounts.running and not repository.activity.pdfCounts.queued %} hidden{% endif %}>Passed {{ repository.activity.pdfCounts.passed }} · Failed {{ repository.activity.pdfCounts.failed }} · Cancelled {{ repository.activity.pdfCounts.cancelled }} · Workers {{ repository.activity.pdfCounts.running }}/{{ index_worker_limit }}</small>
                 <small class="bb-repository-work-label" data-repository-work-label title="{{ repository.activity.detail }}"{% if not repository.activity.active %} hidden{% endif %}>{{ repository.activity.detail }}</small>
                 <span class="bb-repository-progress" data-repository-progress{% if not repository.activity.active or not repository.activity.operation %} hidden{% endif %}>
                     <progress data-repository-progress-bar max="100"{% if repository.activity.progress is not None %} value="{{ repository.activity.progress }}"{% endif %}></progress>
@@ -26,16 +25,6 @@
                 </span>
                 <small class="bb-repository-exclusion" data-repository-exclusion{% if not repository.exclude_from_refresh %} hidden{% endif %} title="Skipped by Refresh all and scheduled refreshes; manual refresh is still available">Refresh excluded</small>
                 <a class="bb-repository-removal-retry" data-repository-removal-retry href="{% url 'bitbucket_search:repository_remove' repository.pk %}"{% if not repository.has_removal_pending %} hidden{% endif %}>Removal incomplete · Retry removal</a>
-                <small
-                    class="bb-repository-worker-timer"
-                    data-repository-run-timer
-                    data-git-started-at="{{ repository.activity.runTiming.gitStartedAt|default:'' }}"
-                    data-git-ended-at="{{ repository.activity.runTiming.gitEndedAt|default:'' }}"
-                    data-index-started-at="{{ repository.activity.runTiming.indexStartedAt|default:'' }}"
-                    data-index-ended-at="{{ repository.activity.runTiming.indexEndedAt|default:'' }}"
-                    aria-live="off"
-                    hidden
-                ></small>
             </span>
             <label class="bb-repository-select" title="Select {{ repository.display_name }}">
                 <input type="checkbox" name="repository_ids" value="{{ repository.pk }}" form="bb-repository-selection-form" data-repository-select aria-label="Select {{ repository.display_name }}">

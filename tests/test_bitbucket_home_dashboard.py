@@ -13,7 +13,13 @@ import pytest
 from django.urls import reverse
 from django.utils import timezone
 
-from bitbucket_search.models import BitbucketRepository, GitCommit, GitCommitFolder
+from bitbucket_search.models import (
+    BitbucketRepository,
+    GitCommit,
+    GitCommitFolder,
+    PDFDocument,
+    PDFDocumentLifecycle,
+)
 
 pytestmark = pytest.mark.django_db
 NOW = datetime(2026, 8, 26, 12, tzinfo=UTC)
@@ -162,6 +168,84 @@ def test_home_period_changes_all_git_rankings(
     assert nav.group(1).count('aria-current="page"') == 1
     assert GitCommit.objects.count() == 13
     assert GitCommitFolder.objects.count() == 13
+
+
+def test_home_period_ranks_active_pdf_files_by_repository_highest_to_lowest(
+    loopback_client, calendar_history
+):
+    cloud, service = calendar_history
+    pdf_rows = (
+        (
+            cloud,
+            "cloud-today-1.pdf",
+            datetime(2026, 8, 26, 8, tzinfo=UTC),
+            PDFDocumentLifecycle.ACTIVE,
+        ),
+        (
+            cloud,
+            "cloud-today-2.pdf",
+            datetime(2026, 8, 26, 9, tzinfo=UTC),
+            PDFDocumentLifecycle.ACTIVE,
+        ),
+        (
+            cloud,
+            "cloud-today-3.pdf",
+            datetime(2026, 8, 26, 10, tzinfo=UTC),
+            PDFDocumentLifecycle.ACTIVE,
+        ),
+        (
+            service,
+            "service-today-1.pdf",
+            datetime(2026, 8, 26, 8, tzinfo=UTC),
+            PDFDocumentLifecycle.ACTIVE,
+        ),
+        (
+            service,
+            "service-today-2.pdf",
+            datetime(2026, 8, 26, 9, tzinfo=UTC),
+            PDFDocumentLifecycle.ACTIVE,
+        ),
+        (
+            service,
+            "service-week-1.pdf",
+            datetime(2026, 8, 24, 8, tzinfo=UTC),
+            PDFDocumentLifecycle.ACTIVE,
+        ),
+        (
+            service,
+            "service-week-2.pdf",
+            datetime(2026, 8, 25, 8, tzinfo=UTC),
+            PDFDocumentLifecycle.ACTIVE,
+        ),
+        (
+            service,
+            "removed.pdf",
+            datetime(2026, 8, 26, 8, tzinfo=UTC),
+            PDFDocumentLifecycle.REMOVED,
+        ),
+    )
+    for repository, filename, timeline_at, lifecycle_state in pdf_rows:
+        PDFDocument.objects.create(
+            repository=repository,
+            filename=filename,
+            relative_path=f"docs/{filename}",
+            timeline_at=timeline_at,
+            lifecycle_state=lifecycle_state,
+        )
+
+    today = loopback_client.get(reverse("core:dashboard"), {"git_period": "today"})
+    week = loopback_client.get(reverse("core:dashboard"), {"git_period": "week"})
+
+    assert today.context["bitbucket_dashboard"].total_pdf_files == 5
+    assert [
+        (row.name, row.pdf_count) for row in today.context["bitbucket_dashboard"].pdf_repositories
+    ] == [("Cloud architecture", 3), ("Service architecture", 2)]
+    assert week.context["bitbucket_dashboard"].total_pdf_files == 7
+    assert [
+        (row.name, row.pdf_count) for row in week.context["bitbucket_dashboard"].pdf_repositories
+    ] == [("Service architecture", 4), ("Cloud architecture", 3)]
+    assert "5 active PDFs added today, highest to lowest" in today.content.decode()
+    assert "7 active PDFs added this week, highest to lowest" in week.content.decode()
 
 
 def test_home_activity_filters_preserve_other_sections_selection(loopback_client):

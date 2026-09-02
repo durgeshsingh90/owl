@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -130,6 +131,16 @@ class QueueAllRepositoriesResult:
     @property
     def already_running_count(self) -> int:
         return len(self.already_running)
+
+
+@dataclass(frozen=True, slots=True)
+class CancelRepositorySyncResult:
+    queued_jobs: int
+    running_jobs: int
+
+    @property
+    def total(self) -> int:
+        return self.queued_jobs + self.running_jobs
 
 
 @dataclass(frozen=True, slots=True)
@@ -1297,6 +1308,107 @@ def mark_worker_launch_failed(job_id: int) -> None:
         error_code="worker_unavailable",
         status=RepositorySyncJobStatus.FAILED,
     )
+
+
+def _terminate_repository_worker(worker_pid: int) -> None:
+    """Best-effort termination of the detached worker and its owned children."""
+
+    if worker_pid <= 0 or worker_pid == os.getpid():
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ("taskkill", "/PID", str(worker_pid), "/T", "/F"),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+        else:
+            os.killpg(worker_pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log_event(
+            logger,
+            logging.WARNING,
+            "repository_worker_cancel_signal_failed",
+            error=exc,
+            worker_pid=worker_pid,
+        )
+
+
+def cancel_repository_sync(repository_id: int) -> CancelRepositorySyncResult:
+    """Cancel this repository's durable Git work without deleting published data."""
+
+    observed_at = timezone.now()
+    worker_pids: list[int] = []
+    queued_count = 0
+    running_count = 0
+    with transaction.atomic():
+        repository = BitbucketRepository.objects.select_for_update().get(pk=repository_id)
+        jobs = tuple(
+            RepositorySyncJob.objects.select_for_update()
+            .filter(repository=repository, status__in=ACTIVE_JOB_STATUSES)
+            .order_by("id")
+        )
+        for job in jobs:
+            was_running = job.status == RepositorySyncJobStatus.RUNNING
+            updated = RepositorySyncJob.objects.filter(
+                pk=job.pk,
+                status=job.status,
+            ).update(
+                status=RepositorySyncJobStatus.CANCELLED,
+                completed_at=observed_at,
+                heartbeat_at=observed_at,
+                worker_pid=None,
+                status_message="Git operation cancelled by the user.",
+                error_code="",
+                error_summary="",
+            )
+            if updated != 1:
+                continue
+            if was_running:
+                running_count += 1
+                if job.worker_pid:
+                    worker_pids.append(job.worker_pid)
+            else:
+                queued_count += 1
+        if queued_count or running_count:
+            has_published_checkout = bool(repository.last_sync_successful_at)
+            repository.sync_state = (
+                RepositorySyncState.READY
+                if has_published_checkout
+                else RepositorySyncState.INTERRUPTED
+            )
+            repository.sync_progress = 100 if has_published_checkout else 0
+            repository.status_message = "Git operation cancelled."
+            repository.last_error_code = ""
+            repository.last_error_summary = ""
+            repository.last_sync_completed_at = observed_at
+            repository.save(
+                update_fields=(
+                    "sync_state",
+                    "sync_progress",
+                    "status_message",
+                    "last_error_code",
+                    "last_error_summary",
+                    "last_sync_completed_at",
+                )
+            )
+    for worker_pid in set(worker_pids):
+        _terminate_repository_worker(worker_pid)
+    if queued_count or running_count:
+        log_event(
+            logger,
+            logging.INFO,
+            "repository_sync_cancelled",
+            repository_id=repository_id,
+            queued_count=queued_count,
+            running_count=running_count,
+        )
+    return CancelRepositorySyncResult(queued_count, running_count)
 
 
 def claim_next_job() -> RepositorySyncJob | None:

@@ -457,7 +457,7 @@ def test_rankings_are_top_ten_but_totals_cover_every_person_repository_and_folde
 
 
 @pytest.mark.parametrize("period", tuple(ACTIVITY_PERIOD_LABELS))
-def test_dashboard_uses_six_read_only_queries_independent_of_repository_count(
+def test_dashboard_uses_eight_read_only_queries_independent_of_repository_count(
     django_assert_num_queries, period, monkeypatch
 ):
     now = datetime(2026, 8, 31, 11, 30, tzinfo=UTC)
@@ -475,7 +475,7 @@ def test_dashboard_uses_six_read_only_queries_independent_of_repository_count(
     with (
         timezone.override("UTC"),
         CaptureQueriesContext(connection) as queries,
-        django_assert_num_queries(6),
+        django_assert_num_queries(8),
     ):
         dashboard = get_bitbucket_dashboard(period, now=now)
     assert all(query["sql"].lstrip().upper().startswith("SELECT") for query in queries)
@@ -516,7 +516,7 @@ def test_reads_share_one_atomic_snapshot_without_writing_data():
         dashboard = get_bitbucket_dashboard(now=NOW)
 
     assert dashboard.total_commits == 1
-    assert snapshots == [True] * 6
+    assert snapshots == [True] * 8
     assert not connection.in_atomic_block
     assert all(
         query["sql"].lstrip().upper().startswith(("SELECT", "BEGIN", "COMMIT")) for query in queries

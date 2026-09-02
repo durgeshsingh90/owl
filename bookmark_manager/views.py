@@ -2553,6 +2553,32 @@ def import_bookmarks(request: HttpRequest) -> HttpResponse:
             ),
             status=400,
         )
+    except OperationalError:
+        detail = (
+            "Bookmark import paused because the local database is busy with background work. "
+            "No existing bookmarks were removed. Wait a moment and retry the same file."
+        )
+        if _is_async_form(request):
+            return _action_json(
+                state="busy",
+                label="Import paused",
+                detail=detail,
+                status=503,
+            )
+        form.add_error("import_file", detail)
+        if request.POST.get("return_to") == "settings":
+            return render(
+                request,
+                "bookmark_manager/settings.html",
+                _settings_page_context(request, import_form=form, inline_error=detail),
+                status=503,
+            )
+        return render(
+            request,
+            "bookmark_manager/index.html",
+            _index_context(request, import_form=form, open_settings=True, inline_error=detail),
+            status=503,
+        )
     _publish_import_completion(result.run)
     destination = reverse(_settings_destination(request))
     return redirect(f"{destination}?{urlencode({'import_run': result.run.pk})}")

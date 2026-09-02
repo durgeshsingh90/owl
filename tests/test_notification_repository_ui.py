@@ -99,7 +99,7 @@ def test_repository_activity_icons_and_progress_hooks_are_distinct_and_accessibl
         "data-repository-progress",
         "data-repository-progress-bar",
         "data-repository-progress-label",
-        "data-repository-run-timer",
+        "data-repository-success-ticks",
     ):
         assert hook in repository_template
     assert ".bb-repository-progress progress:not([value])" in repository_css

@@ -48,6 +48,8 @@ def _dashboard(**overrides):
                 commit_count=3,
             ),
         ),
+        "pdf_repositories": (SimpleNamespace(repository_id=7, name="Source notes", pdf_count=6),),
+        "total_pdf_files": 6,
         "coverage": SimpleNamespace(
             total_repositories=1,
             indexed_repositories=1,
@@ -68,20 +70,23 @@ def _render(dashboard=None, filters=()):
     )
 
 
-def test_activity_ui_shows_metrics_three_rankings_and_truthful_git_semantics():
+def test_activity_ui_shows_metrics_four_rankings_and_truthful_period_semantics():
     html = _render()
     assert 'id="bitbucket-activity-heading">Bitbucket activity</h2>' in html
     assert "<dt>Commits</dt><dd>12</dd>" in html
     assert "<dt>People</dt><dd>2</dd>" in html
     assert "<dt>Repositories</dt><dd>1</dd>" in html
     assert "<dt>Folders</dt><dd>2</dd>" in html
-    assert html.count('role="list"') == 3
-    assert html.count("Top 10") == 3
+    assert html.count('role="list"') == 4
+    assert html.count("Top 10") == 4
     assert "Commits by person" in html
     assert "Busiest repositories" in html
     assert "Busiest folders" in html
+    assert "PDF files by repository" in html
+    assert "6 active PDFs added this week, highest to lowest" in html
     assert "Git committers, not push actors" in html
-    assert "all file types, not only PDFs" in html
+    assert "Commit counts cover all file types" in html
+    assert "Git-added date when available" in html
     assert "direct parent" in html
     assert "one commit can count in several folders" in html
     assert 'href="/pdfs/?repository=7"' in html
@@ -89,7 +94,7 @@ def test_activity_ui_shows_metrics_three_rankings_and_truthful_git_semantics():
     assert re.findall(
         r'<progress class="knowledge-git-activity__bar" value="(\d+)" max="(\d+)" aria-hidden="true"></progress>',
         html,
-    ) == [("8", "8"), ("4", "8"), ("12", "12"), ("10", "10"), ("3", "10")]
+    ) == [("8", "8"), ("4", "8"), ("12", "12"), ("10", "10"), ("3", "10"), ("6", "6")]
     assert "style=" not in html
     assert "--git-activity-fill" not in html
 

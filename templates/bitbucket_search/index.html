@@ -5,7 +5,7 @@
 {% block theme_default %}dark{% endblock %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=repository-icons-v1">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=connection-status-v1">
 {% endblock %}
 
 {% block app_header %}{% endblock %}
@@ -30,7 +30,7 @@
         <input type="hidden" name="excluded" value="yes" data-selected-excluded-value>
     </form>
     <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-repository-delete-status></span>
-    <p class="bb-connection-test" role="status" aria-live="polite" data-repository-connection-result data-state="checking">Testing stored credentials and Git connections…</p>
+    {{ repository_copy_urls|json_script:"bb-repository-copy-urls" }}
     <aside class="bb-repository-rail" aria-labelledby="bb-repositories-heading">
         <a class="bb-brand" href="{% url 'core:dashboard' %}" aria-label="OWL Home">
             <span class="bb-brand__mark" aria-hidden="true">
@@ -109,17 +109,11 @@
             </a>
 
             <div class="bb-topbar__actions">
-                {{ repository_copy_urls|json_script:"bb-repository-copy-urls" }}
-                <button
-                    class="bb-icon-button"
-                    type="button"
-                    data-copy-repository-urls
-                    aria-label="Copy all repository URLs"
-                    title="Copy all repository URLs"
-                    {% if not repository_copy_urls %}disabled{% endif %}
-                >
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="8" y="7" width="11" height="13" rx="1.5"/><path d="M16 7V4H5v12h3"/></svg>
-                    <span class="visually-hidden" data-copy-repository-urls-status></span>
+                <button class="bb-connection-test" type="button" aria-live="polite" data-repository-connection-result data-state="checking" aria-label="Testing stored credentials and Git connections" title="Testing stored credentials and Git connections">
+                    <img class="bb-connection-test__icon bb-connection-test__icon--checking" src="{% static 'bitbucket_search/icons/no-connection.gif' %}" alt="" aria-hidden="true">
+                    <img class="bb-connection-test__icon bb-connection-test__icon--connected" src="{% static 'bitbucket_search/icons/connection-connected.png' %}" alt="" aria-hidden="true">
+                    <img class="bb-connection-test__icon bb-connection-test__icon--disconnected" src="{% static 'bitbucket_search/icons/connection-disconnected.png' %}" alt="" aria-hidden="true">
+                    <span class="visually-hidden" data-repository-connection-message>Testing stored credentials and Git connections…</span>
                 </button>
                 <form
                     class="bb-refresh-all bb-refresh-all--desktop{% if refresh_all_active_count %} bb-refresh-all--active{% elif not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %} bb-refresh-all--disabled{% endif %}"
@@ -161,8 +155,10 @@
                         {% endif %}
                         data-refresh-all-button
                     >
-                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-icon{% if refresh_all_active_count %} hidden{% endif %}><path d="M19 8a7.5 7.5 0 1 0 1 7"/><path d="M19 3v5h-5"/></svg>
-                        <span class="bb-refresh-all__spinner" aria-hidden="true" data-refresh-all-spinner{% if not refresh_all_active_count %} hidden{% endif %}></span>
+                        <img class="bb-refresh-all__visual bb-refresh-all__visual--idle" src="{% static 'bitbucket_search/icons/indexing.gif' %}" alt="" aria-hidden="true" data-refresh-all-visual>
+                        <img class="bb-refresh-all__visual bb-refresh-all__visual--running" src="{% static 'bitbucket_search/icons/work-in-progress.gif' %}" alt="" aria-hidden="true" data-refresh-all-running-visual>
+                        <svg class="bb-refresh-all__reload-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-icon><path d="M19 8a7.5 7.5 0 1 0 1 7"/><path d="M19 3v5h-5"/></svg>
+                        <span class="bb-refresh-all__spinner" aria-hidden="true" data-refresh-all-spinner hidden></span>
                     </button>
                     <span class="bb-refresh-all__meta" id="bb-refresh-all-description" role="status" aria-live="polite" aria-atomic="true">
                         <strong data-refresh-all-label>
@@ -181,6 +177,12 @@
                             Queue {{ refresh_all_enabled_count }} included repositor{{ refresh_all_enabled_count|pluralize:'y,ies' }} in the background
                             {% endif %}
                         </small>
+                        <span class="bb-overall-progress" data-overall-progress{% if not refresh_all_active_count %} hidden{% endif %}>
+                            <progress max="100" data-overall-progress-bar></progress>
+                            <small data-overall-progress-label>Preparing current run…</small>
+                        </span>
+                        <small class="bb-overall-counts" data-overall-counts>{% if refresh_all_active_count %}Calculating current-run counts…{% else %}Idle · {{ repository_count }} repositories ready{% endif %}</small>
+                        <small class="bb-overall-timing" data-overall-timing{% if not refresh_all_active_count %} hidden{% endif %}>Elapsed 00:00 · ETA calculating…</small>
                     </span>
                 </form>
                 {% include "owl/_notification_center.html" %}
@@ -573,6 +575,6 @@
 {% block global_status %}{% endblock %}
 
 {% block scripts %}
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-icons-v1" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=select-all-repositories-v1" defer></script>
 <script src="{% static 'bitbucket_search/people_sort.js' %}?v=people-sort-v1" defer></script>
 {% endblock %}

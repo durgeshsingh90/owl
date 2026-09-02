@@ -113,8 +113,12 @@ class Element {
 const element = (hook, attributes = {}, tag = "div") =>
     new Element(tag, { [hook]: "", ...attributes });
 
-function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = false, duplicateCopies = false } = {}) {
+function boot({
+    repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = false,
+    duplicateCopies = false, connectionResponse = null,
+} = {}) {
     const makeControls = () => ({
+        selectAll: element("data-selected-select-all", { type: "button", hidden: "", disabled: "" }, "button"),
         refresh: element("data-selected-refresh", { type: "submit", name: "operation", value: "refresh", disabled: "" }, "button"),
         exclude: element("data-selected-exclude", { type: "submit", name: "operation", value: "exclude", disabled: "" }, "button"),
         stop: element("data-selected-stop-indexing", { type: "submit", name: "operation", value: "stop_indexing", disabled: "" }, "button"),
@@ -134,14 +138,21 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
         copy.refresh.appendChild(copy.icon);
         copy.refresh.appendChild(copy.spinner);
         copy.remove.appendChild(copy.deleteIcon);
-        [copy.refresh, copy.exclude, copy.stop, copy.remove, copy.excluded, copy.count].forEach((node) => form.appendChild(node));
+        [copy.selectAll, copy.refresh, copy.exclude, copy.stop, copy.remove, copy.excluded, copy.count].forEach((node) => form.appendChild(node));
     });
     const global = {
         button: element("data-refresh-all-button", {}, "button"),
         icon: element("data-refresh-all-icon", {}, "svg"),
         spinner: element("data-refresh-all-spinner", { hidden: "" }),
         label: element("data-refresh-all-label"), detail: element("data-refresh-all-detail"),
+        progress: element("data-overall-progress", { hidden: "" }),
+        progressBar: element("data-overall-progress-bar", { max: "100" }, "progress"),
+        progressLabel: element("data-overall-progress-label", {}, "small"),
+        counts: element("data-overall-counts", {}, "small"),
+        timing: element("data-overall-timing", { hidden: "" }, "small"),
     };
+    global.progress.appendChild(global.progressBar);
+    global.progress.appendChild(global.progressLabel);
     const globalForm = element("data-repositories-refresh-all", {
         action: "/pdfs/repositories/refresh/",
         "data-repository-count": repositories.length,
@@ -152,6 +163,7 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
     Object.values(global).forEach((node) => globalForm.appendChild(node));
     const workspace = element("data-bitbucket-workspace", {
         "data-repository-status-url": "/pdfs/repositories/status/",
+        ...(connectionResponse ? { "data-repository-connection-test-url": "/pdfs/repositories/connection/test/" } : {}),
         "data-daily-refresh-enabled": "true",
         "data-extraction-active": String(initiallyExtracting),
         "data-catalog-publication-signature": "catalog-initial",
@@ -163,6 +175,12 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
     workspace.appendChild(deleteStatus);
     const filter = element("data-repository-filter", { type: "search" }, "input");
     workspace.appendChild(filter);
+    let connection = null;
+    if (connectionResponse) {
+        connection = element("data-repository-connection-result", { "data-state": "checking" }, "button");
+        connection.appendChild(element("data-repository-connection-message"));
+        workspace.appendChild(connection);
+    }
     const renderedRepositories = duplicateCopies ? repositories.flatMap((repo) => [repo, repo]) : repositories;
     const cards = renderedRepositories.map((repo) => {
         const card = element("data-repository-id", {
@@ -208,6 +226,7 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
     const staleTimers = [];
     const windows = new Map();
     const responses = [];
+    if (connectionResponse) responses.push(connectionResponse);
     let timerId = 0;
     let reloads = 0;
     let fetchCount = 0;
@@ -235,10 +254,14 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
     });
     return {
         controls, controlCopies, cards, form, global, globalForm, workspace, timerUpdates, staleTimers, deleteStatus,
+        connection,
+        settle() { return new Promise((resolve) => setImmediate(resolve)); },
+        queueResponse(response) { responses.push(response); },
         reloads: () => reloads,
         fetchCount: () => fetchCount,
         select(index, checked = true) { cards[index].checkbox.checked = checked; cards[index].checkbox.dispatch("change"); },
         unlock(copy = 0) { return controlCopies[copy].remove.dispatch("click"); },
+        selectAll(copy = 0) { return controlCopies[copy].selectAll.dispatch("click"); },
         clickRemove(copy = 0) { return controlCopies[copy].remove.dispatch("click"); },
         async pageshow() {
             responses.push(new Error("Awaiting a fresh status after restoring the page"));
@@ -287,6 +310,28 @@ function boot({ repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = fal
     };
 }
 
+test("connection test runs on load and runs again when its top-bar icon is clicked", async () => {
+    const page = boot({
+        repositories: [{ id: 1 }],
+        connectionResponse: { state: "connected", label: "Git connection passed", detail: "Verified" },
+    });
+    assert.equal(page.connection.dataset.state, "checking");
+    assert.equal(page.connection.disabled, true);
+    await page.settle();
+    assert.equal(page.fetchCount(), 1, "page initialization performs the first connection test");
+    assert.equal(page.connection.dataset.state, "connected");
+    assert.equal(page.connection.disabled, false);
+
+    page.queueResponse({ state: "failed", label: "Git connection failed", detail: "Unavailable" });
+    page.connection.dispatch("click");
+    assert.equal(page.connection.dataset.state, "checking", "click immediately restores connecting state");
+    assert.equal(page.connection.disabled, true, "parallel clicks are blocked while testing");
+    await page.settle();
+    assert.equal(page.fetchCount(), 2, "clicking the indicator performs a fresh connection test");
+    assert.equal(page.connection.dataset.state, "failed");
+    assert.equal(page.connection.disabled, false);
+});
+
 test("selection enables a single locked delete control that arms on its first click", () => {
     const page = boot();
     for (const action of ["refresh", "exclude", "stop", "remove"]) assert.equal(page.controls[action].disabled, true);
@@ -319,6 +364,24 @@ test("selection enables a single locked delete control that arms on its first cl
     for (const action of ["refresh", "exclude", "stop", "remove"]) {
         assert.equal(page.controls[action].disabled, true, `${action} requires a selection`);
     }
+});
+
+test("selecting one repository reveals an icon that selects every available repository", () => {
+    const page = boot({ repositories: [{ id: 1 }, { id: 2 }, { id: 3, removal: true }], duplicateCopies: true });
+    assert.equal(page.controls.selectAll.hidden, true);
+    page.select(0);
+    for (const controls of page.controlCopies) {
+        assert.equal(controls.selectAll.hidden, false);
+        assert.equal(controls.selectAll.disabled, false);
+        assert.equal(controls.selectAll.title, "Select all 2 repositories");
+    }
+    page.selectAll();
+    assert.equal(page.cards.filter(({ checkbox }) => checkbox.value === "1").every(({ checkbox }) => checkbox.checked), true);
+    assert.equal(page.cards.filter(({ checkbox }) => checkbox.value === "2").every(({ checkbox }) => checkbox.checked), true);
+    assert.equal(page.cards.filter(({ checkbox }) => checkbox.value === "3").every(({ checkbox }) => !checkbox.checked), true);
+    assert.equal(page.controls.count.textContent, "2 selected");
+    assert.equal(page.controls.selectAll.disabled, true);
+    assert.equal(page.controls.selectAll.getAttribute("aria-pressed"), "true");
 });
 
 test("desktop and mobile repository checkboxes stay synchronized and count unique repositories", () => {
@@ -549,7 +612,7 @@ test("expired unlock never creates a deletion confirmation", () => {
 
 test("new Git or PDF work leaves accidental-delete consent intact and animates refresh", async () => {
     for (const [work, activity, stopEnabled] of [
-        [{ active: true, hasActiveWork: true, state: "fetching" }, { queuedPdfs: 0, runningPdfs: 0 }, false],
+        [{ active: true, hasActiveWork: true, state: "fetching" }, { queuedPdfs: 0, runningPdfs: 0 }, true],
         [{ active: false, hasActiveWork: true }, { queuedPdfs: 2, runningPdfs: 1 }, true],
     ]) {
         const page = boot();
@@ -592,7 +655,7 @@ test("queued and running PDF indexing can be stopped or deleted without a worker
         page.select(0);
         await page.poll({ overrides: { 1: { hasActiveWork: true, activity } } });
         assert.equal(page.controls.stop.disabled, false);
-        assert.match(page.controls.stop.title, /stop pdf indexing/i);
+        assert.match(page.controls.stop.title, /stop active git and pdf work/i);
         assert.equal(page.controls.remove.disabled, false);
         page.unlock();
         await page.poll({ overrides: { 1: { hasActiveWork: true, activity } } });
@@ -618,6 +681,52 @@ test("extraction work without per-repository sync keeps the global spinner activ
     assert.equal(page.global.icon.hasAttribute("hidden"), false);
     assert.equal(page.global.button.disabled, false);
     assert.equal(page.reloads(), 0, "Settled completion still uses the existing reload confirmation");
+});
+
+test("a reopened page rebuilds overall progress and elapsed time from persisted job state", async () => {
+    const persistedWork = {
+        active: true,
+        label: "Extracting PDF text",
+        detail: "Repository 1: Extracting PDF text",
+        activeRepositories: 1,
+        queuedPdfs: 6,
+        runningPdfs: 4,
+        activities: [{
+            operation: "indexing", progress: 40, count: 10,
+            startedAt: "1970-01-01T00:00:40.000Z",
+        }],
+    };
+    const currentState = {
+        overrides: { 1: {
+            hasActiveWork: true,
+            workerTiming: {
+                active: true, kind: "indexing", label: "Extracting PDFs",
+                startedAt: "1970-01-01T00:00:40.000Z",
+            },
+            activity: {
+                active: true, queuedPdfs: 6, runningPdfs: 4,
+                queuedSyncJobs: 0, runningSyncJobs: 0,
+                pdfCounts: { passed: 12, failed: 1, interrupted: 0, cancelled: 0 },
+                operations: [{ operation: "indexing", progress: 40, count: 10 }],
+            },
+        } },
+        extraction: { active: true, queuedJobs: 6, runningJobs: 4 },
+        work: persistedWork,
+    };
+
+    const originalPage = boot({ repositories: [{ id: 1 }] });
+    await originalPage.poll(currentState);
+    const reopenedPage = boot({ repositories: [{ id: 1 }] });
+    await reopenedPage.poll(currentState);
+
+    for (const page of [originalPage, reopenedPage]) {
+        assert.equal(page.global.progress.hidden, false);
+        assert.equal(page.global.progressBar.value, 58);
+        assert.equal(page.global.progressLabel.textContent, "58%");
+        assert.match(page.global.counts.textContent, /PDF 6 queued · 4 running/);
+        assert.match(page.global.counts.textContent, /12 passed · 1 failed/);
+        assert.match(page.global.timing.textContent, /Elapsed 01:00/);
+    }
 });
 
 test("pending removal and completed work cannot silently unlock destructive actions", async () => {

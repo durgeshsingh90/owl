@@ -92,6 +92,23 @@
         </div>
     {% endif %}
 
+    <section class="knowledge-git-activity__ranking knowledge-git-activity__ranking--pdfs" aria-labelledby="git-pdfs-heading">
+        <div class="knowledge-git-activity__panel-heading"><h3 id="git-pdfs-heading">PDF files by repository</h3><span>Top 10</span></div>
+        <p class="knowledge-git-activity__caption">{{ bitbucket_dashboard.total_pdf_files|default:0 }} active PDF{{ bitbucket_dashboard.total_pdf_files|default:0|pluralize }} added {{ bitbucket_dashboard.label|default:"This week"|lower }}, highest to lowest</p>
+        <ol class="knowledge-git-activity__list" role="list">
+            {% for repository in bitbucket_dashboard.pdf_repositories|slice:":10" %}
+                <li>
+                    <span class="knowledge-git-activity__rank" aria-hidden="true">{{ forloop.counter }}</span>
+                    <div class="knowledge-git-activity__identity"><a href="{% url 'bitbucket_search:index' %}?repository={{ repository.repository_id }}" title="{{ repository.name }}">{{ repository.name }}</a></div>
+                    <span class="knowledge-git-activity__count">{{ repository.pdf_count }}<span class="visually-hidden"> PDF{{ repository.pdf_count|pluralize }}</span></span>
+                    <progress class="knowledge-git-activity__bar" value="{{ repository.pdf_count|unlocalize }}" max="{{ bitbucket_dashboard.pdf_repositories.0.pdf_count|unlocalize }}" aria-hidden="true"></progress>
+                </li>
+            {% empty %}
+                <li class="knowledge-git-activity__list-empty">No active PDFs were added in this period.</li>
+            {% endfor %}
+        </ol>
+    </section>
+
     {% if bitbucket_dashboard.has_repositories %}
         <p class="knowledge-git-activity__coverage">
             {{ bitbucket_dashboard.coverage.indexed_repositories }} of {{ bitbucket_dashboard.coverage.total_repositories }} repositories indexed.
@@ -101,5 +118,5 @@
             {% if bitbucket_dashboard.coverage.last_indexed_at %}Last indexed <time datetime="{{ bitbucket_dashboard.coverage.last_indexed_at|date:'c' }}">{{ bitbucket_dashboard.coverage.last_indexed_at|date:"j M Y, H:i T" }}</time>.{% endif %}
         </p>
     {% endif %}
-    <p class="knowledge-git-activity__note" id="bitbucket-activity-note">People are Git committers, not push actors. Counts cover all file types, not only PDFs. Calendar periods use {{ activity_timezone }}; weeks start Monday. Last 6 months is a rolling period. Folder counts use each changed file’s direct parent; one commit can count in several folders.</p>
+    <p class="knowledge-git-activity__note" id="bitbucket-activity-note">People are Git committers, not push actors. Commit counts cover all file types. PDF rankings count currently active files by their Git-added date when available, otherwise their first OWL discovery date. Calendar periods use {{ activity_timezone }}; weeks start Monday. Last 6 months is a rolling period. Folder counts use each changed file’s direct parent; one commit can count in several folders.</p>
 </section>

@@ -183,6 +183,21 @@ def test_record_error_is_emitted_before_failure_report_database_write(events, mo
     _assert_private(events)
 
 
+def test_short_database_lock_is_retried_before_import_failure_is_persisted(monkeypatch):
+    attempts = 0
+    monkeypatch.setattr(import_export, "DATABASE_LOCK_RETRY_DELAYS", (0, 0))
+
+    def temporarily_locked():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise OperationalError("database is locked")
+        return "saved"
+
+    assert import_export._retry_database_lock(temporarily_locked) == "saved"
+    assert attempts == 3
+
+
 def test_unexpected_normalization_failure_is_logged_even_if_handled(events, monkeypatch):
     monkeypatch.setattr(
         import_export, "_normalize_record", Mock(side_effect=RuntimeError(PRIVATE_TEXT))

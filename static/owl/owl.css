@@ -4399,6 +4399,10 @@ a.notification-card__title:hover {
 
 .knowledge-git-activity__ranking--repositories { --git-activity-accent: var(--knowledge-green); }
 .knowledge-git-activity__ranking--folders { --git-activity-accent: #a68be0; }
+.knowledge-git-activity__ranking--pdfs {
+    --git-activity-accent: var(--knowledge-accent);
+    margin-top: 0.85rem;
+}
 
 .knowledge-git-activity__panel-heading {
     display: flex;

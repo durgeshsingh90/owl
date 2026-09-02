@@ -102,6 +102,7 @@ from bitbucket_search.services.repository_lifecycle import (
 )
 from bitbucket_search.services.repository_sync import (
     RepositoryRefreshInProgress,
+    cancel_repository_sync,
     launch_sync_worker,
     mark_worker_launch_failed,
     queue_all_repository_refreshes,
@@ -1318,6 +1319,8 @@ def _repository_payload(repository: BitbucketRepository) -> dict[str, object]:
         "indexWorkerLimit": settings.PDF_MAX_EXTRACTION_WORKERS,
         "pdfIndexFailedCount": getattr(repository, "pdf_index_failed_count", 0),
         "gitSyncFailed": getattr(repository, "git_sync_failed", False),
+        "gitSucceeded": getattr(repository, "git_succeeded", False),
+        "indexSucceeded": getattr(repository, "index_succeeded", False),
         "hasRemovalPending": repository.has_removal_pending,
         "lastAttemptAt": last_attempt_at,
         "lastSuccessfulAt": (
@@ -2214,9 +2217,10 @@ def selected_repositories(request: HttpRequest) -> HttpResponse:
             if operation == "exclude":
                 set_repository_refresh_excluded(repository_id, excluded=excluded == "yes")
             elif operation == "stop_indexing":
+                stopped_git = cancel_repository_sync(repository_id)
                 stopped = cancel_repository_pdf_extractions(repository_id)
-                stopped_queued += stopped.queued_jobs
-                stopped_running += stopped.running_jobs
+                stopped_queued += stopped_git.queued_jobs + stopped.queued_jobs
+                stopped_running += stopped_git.running_jobs + stopped.running_jobs
             else:
                 queued = queue_repository_refresh(repository_id)
                 if queued.job.status == RepositorySyncJobStatus.QUEUED:
@@ -2262,8 +2266,8 @@ def selected_repositories(request: HttpRequest) -> HttpResponse:
     elif operation == "stop_indexing":
         stopped_total = stopped_queued + stopped_running
         detail = (
-            f"Stopped {stopped_total} PDF indexing "
-            f"{'attempt' if stopped_total == 1 else 'attempts'} across "
+            f"Stopped {stopped_total} active Git or PDF "
+            f"{'job' if stopped_total == 1 else 'jobs'} across "
             f"{len(completed_ids)} of {len(repository_ids)} selected repositories."
         )
     else:

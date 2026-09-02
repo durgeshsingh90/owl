@@ -21,33 +21,177 @@
     let repositoryStatusPending = false;
     const connectionResult = workspace.querySelector("[data-repository-connection-result]");
     const connectionTestUrl = workspace.dataset.repositoryConnectionTestUrl;
-    if (connectionResult && connectionTestUrl) {
+    let connectionTestPending = false;
+    const setConnectionResult = (state, label, detail) => {
+        if (!connectionResult) return;
+        const message = detail ? `${label}: ${detail}` : label;
+        connectionResult.dataset.state = state;
+        connectionResult.setAttribute("aria-label", message);
+        connectionResult.title = message;
+        const hiddenMessage = connectionResult.querySelector("[data-repository-connection-message]");
+        if (hiddenMessage) hiddenMessage.textContent = message;
+    };
+    const testRepositoryConnection = async () => {
+        if (!connectionResult || !connectionTestUrl || connectionTestPending) return;
+        connectionTestPending = true;
+        connectionResult.disabled = true;
+        setConnectionResult(
+            "checking",
+            "Testing stored credentials and Git connections",
+            "Please wait.",
+        );
         const csrf = workspace.querySelector("input[name='csrfmiddlewaretoken']")?.value || "";
-        fetch(connectionTestUrl, {
-            method: "POST",
-            headers: {"X-CSRFToken": csrf, "X-Requested-With": "XMLHttpRequest"},
-            credentials: "same-origin",
-        }).then(async (response) => {
+        try {
+            const response = await fetch(connectionTestUrl, {
+                method: "POST",
+                headers: {"X-CSRFToken": csrf, "X-Requested-With": "XMLHttpRequest"},
+                credentials: "same-origin",
+            });
             const payload = await response.json();
-            connectionResult.dataset.state = payload.state || "failed";
-            connectionResult.textContent = `${payload.label}: ${payload.detail}`;
+            if (!response.ok) throw new Error(payload.detail || "Connection test failed");
+            setConnectionResult(payload.state || "failed", payload.label, payload.detail);
             (payload.repositories || []).filter(item => !item.connected).forEach((item) => {
                 document.querySelectorAll(`[data-repository-id="${item.id}"] [data-repository-state-icon]`).forEach((icon) => {
                     icon.className = "bb-repository-state bb-repository-state--git-failed";
                     icon.title = "Git connection test failed";
                 });
             });
-        }).catch(() => {
-            connectionResult.dataset.state = "failed";
-            connectionResult.textContent = "Git connection test failed: check network, VPN, SSH agent, or stored HTTPS credentials.";
-        });
+        } catch (_error) {
+            setConnectionResult(
+                "failed",
+                "Git connection test failed",
+                "Check network, VPN, SSH agent, or stored HTTPS credentials.",
+            );
+        } finally {
+            connectionTestPending = false;
+            connectionResult.disabled = false;
+        }
+    };
+    if (connectionResult && connectionTestUrl) {
+        connectionResult.addEventListener("click", testRepositoryConnection);
+        testRepositoryConnection();
     }
     let extractionWorkActive = workspace.dataset.extractionActive === "true";
     let workSummary = {
         label: initialRefreshAllState?.workLabel || "",
         detail: initialRefreshAllState?.workDetail || "",
     };
+    let overallRunStartedAt = null;
+    let overallWasActive = false;
+    let overallDisplayedProgress = 0;
+    let overallSnapshot = null;
     const repositoryNoun = (count) => (count === 1 ? "repository" : "repositories");
+    const clockLabel = (milliseconds) => {
+        const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+        const minutes = Math.floor(seconds / 60);
+        const pad = (value) => String(value).padStart(2, "0");
+        return minutes < 60
+            ? `${pad(minutes)}:${pad(seconds % 60)}`
+            : `${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}:${pad(seconds % 60)}`;
+    };
+    const persistedOverallStart = (snapshot) => {
+        if (!snapshot) return null;
+        const starts = [];
+        const remember = (value) => {
+            const milliseconds = Date.parse(value || "");
+            if (Number.isFinite(milliseconds) && milliseconds <= Date.now()) starts.push(milliseconds);
+        };
+        (snapshot.work?.activities || []).forEach((activity) => remember(activity.startedAt));
+        snapshot.repositories.forEach((repository) => {
+            remember(repository.workerTiming?.startedAt);
+            (repository.activity?.operations || []).forEach((operation) => remember(operation.startedAt));
+        });
+        return starts.length ? Math.min(...starts) : null;
+    };
+    const renderOverallStatus = (repositories = null, extraction = null, work = null) => {
+        if (repositories) overallSnapshot = { repositories, extraction: extraction || {}, work: work || {} };
+        const snapshot = overallSnapshot;
+        const active = snapshot
+            ? snapshot.repositories.some((repository) => repository.active || repository.hasActiveWork)
+                || Boolean(snapshot.extraction?.active)
+            : activeRepositoryCount > 0 || extractionWorkActive;
+        if (active) {
+            const persistedStartedAt = persistedOverallStart(snapshot);
+            if (!overallWasActive) {
+                overallRunStartedAt = persistedStartedAt ?? Date.now();
+                overallDisplayedProgress = 0;
+            } else if (
+                persistedStartedAt !== null &&
+                (overallRunStartedAt === null || persistedStartedAt < overallRunStartedAt)
+            ) {
+                overallRunStartedAt = persistedStartedAt;
+            }
+        } else if (!active) {
+            overallRunStartedAt = null;
+            overallDisplayedProgress = 0;
+        }
+        overallWasActive = active;
+
+        let queuedGit = 0;
+        let runningGit = 0;
+        let queuedPdf = Number(snapshot?.extraction?.queuedJobs || 0);
+        let runningPdf = Number(snapshot?.extraction?.runningJobs || 0);
+        let passed = 0;
+        let failed = 0;
+        let cancelled = 0;
+        let gitProgressTotal = 0;
+        let gitProgressWeight = 0;
+        let indexProgressTotal = 0;
+        let indexProgressWeight = 0;
+        (snapshot?.repositories || []).forEach((repository) => {
+            queuedGit += Number(repository.activity?.queuedSyncJobs || 0);
+            runningGit += Number(repository.activity?.runningSyncJobs || 0);
+            const counts = repository.activity?.pdfCounts || {};
+            passed += Number(counts.passed || 0);
+            failed += Number(counts.failed || 0) + Number(counts.interrupted || 0);
+            cancelled += Number(counts.cancelled || 0);
+            (repository.activity?.operations || []).forEach((operation) => {
+                const weight = Math.max(1, Number(operation.count || 1));
+                if (operation.operation === "indexing") {
+                    indexProgressTotal += Number(operation.progress || 0) * weight;
+                    indexProgressWeight += weight;
+                } else if (operation.operation === "clone" || operation.operation === "pull") {
+                    gitProgressTotal += Number(operation.progress || 0) * weight;
+                    gitProgressWeight += weight;
+                }
+            });
+        });
+        const averageGitProgress = gitProgressWeight ? gitProgressTotal / gitProgressWeight : null;
+        const averageIndexProgress = indexProgressWeight
+            ? indexProgressTotal / indexProgressWeight : null;
+        const measuredProgress = averageIndexProgress !== null
+            ? Math.round(30 + averageIndexProgress * 0.7)
+            : averageGitProgress !== null ? Math.round(averageGitProgress * 0.3) : null;
+        if (active && measuredProgress !== null) {
+            overallDisplayedProgress = Math.max(overallDisplayedProgress, measuredProgress);
+        }
+        const elapsed = overallRunStartedAt === null ? 0 : Date.now() - overallRunStartedAt;
+        const eta = active && overallDisplayedProgress > 0 && overallDisplayedProgress < 100
+            ? elapsed * (100 - overallDisplayedProgress) / overallDisplayedProgress
+            : null;
+
+        refreshAllForms.forEach((form) => {
+            const progress = form.querySelector("[data-overall-progress]");
+            const bar = form.querySelector("[data-overall-progress-bar]");
+            const progressLabel = form.querySelector("[data-overall-progress-label]");
+            const counts = form.querySelector("[data-overall-counts]");
+            const timing = form.querySelector("[data-overall-timing]");
+            if (progress) progress.hidden = !active;
+            if (bar) {
+                if (active && measuredProgress !== null) bar.value = overallDisplayedProgress;
+                else bar.removeAttribute("value");
+            }
+            if (progressLabel) progressLabel.textContent = measuredProgress === null
+                ? "Working…" : `${overallDisplayedProgress}%`;
+            if (counts) counts.textContent = active
+                ? `Git ${queuedGit} queued · ${runningGit} running · PDF ${queuedPdf} queued · ${runningPdf} running · ${passed} passed · ${failed} failed · ${cancelled} cancelled · Workers ${runningGit + runningPdf} running`
+                : `Idle · ${snapshot?.repositories?.length ?? repositoryCount} repositories ready`;
+            if (timing) {
+                timing.hidden = !active;
+                timing.textContent = `Elapsed ${clockLabel(elapsed)} · ETA ${eta === null ? "calculating…" : clockLabel(eta)}`;
+            }
+        });
+    };
     const setRefreshIconBusy = (icon, busy) => {
         if (!icon) return;
         // SVG elements do not reflect the HTML hidden property into attributes.
@@ -148,12 +292,17 @@
             const icon = form.querySelector("[data-refresh-all-icon]");
             if (labelElement) labelElement.textContent = label;
             if (detailElement) detailElement.textContent = detail;
-            if (spinner) spinner.hidden = !busy;
-            setRefreshIconBusy(icon, busy);
+            const hasOverallVisual = Boolean(form.querySelector("[data-refresh-all-visual]"));
+            if (spinner) spinner.hidden = hasOverallVisual || !busy;
+            setRefreshIconBusy(icon, hasOverallVisual ? false : busy);
         });
+        renderOverallStatus(repositories, extraction, work);
     };
 
     updateRefreshAllButtons();
+    if (typeof window.setInterval === "function") {
+        window.setInterval(() => renderOverallStatus(), 1000);
+    }
 
     const selectionForm = workspace.querySelector("[data-repository-selection-form]");
     let deletionUnlocked = false;
@@ -187,12 +336,19 @@
         if (!selectionForm) return;
         const selected = selectedRepositoryCards();
         const count = selected.length;
+        const availableRepositoryIds = new Set(
+            repositoryCheckboxes().filter((checkbox) => !checkbox.disabled).map((checkbox) => checkbox.value),
+        );
+        const allSelected = count > 0 && count === availableRepositoryIds.size;
         const busy = selected.some((card) =>
             card.dataset.repositoryActiveWork === "true" ||
             card.dataset.repositoryActiveSync === "true",
         );
         const pdfIndexing = selected.some((card) =>
             card.dataset.repositoryPdfIndexingActive === "true",
+        );
+        const gitActive = selected.some((card) =>
+            card.dataset.repositoryActiveSync === "true",
         );
         const removalPending = selected.some((card) =>
             card.dataset.repositoryRemovalPending === "true",
@@ -212,16 +368,26 @@
             });
         };
         const suffix = `${count} selected ${repositoryNoun(count)}`;
+        workspace.querySelectorAll("[data-selected-select-all]").forEach((button) => {
+            button.hidden = count === 0;
+            button.disabled = count === 0 || allSelected;
+            button.setAttribute("aria-pressed", String(allSelected));
+            button.title = allSelected
+                ? `All ${availableRepositoryIds.size} repositories selected`
+                : `Select all ${availableRepositoryIds.size} repositories`;
+            button.setAttribute("aria-label", button.title);
+        });
         disable("[data-selected-refresh]", unavailable || busy || removalPending,
             busy ? "Selected repository work in progress" : `Refresh ${suffix}`);
         disable("[data-selected-exclude]", unavailable || removalPending,
             `${allExcluded ? "Include" : "Exclude"} ${suffix} ${allExcluded ? "in" : "from"} refresh`);
-        const stopTitle = !count ? "Select a repository with active PDF indexing to stop"
+        const stoppableWork = gitActive || pdfIndexing;
+        const stopTitle = !count ? "Select a repository with active Git or PDF work to stop"
             : repositorySubmissionPending ? "Wait for the repository request to finish"
             : removalPending ? "Use Retry removal to finish incomplete repository removal"
-            : pdfIndexing ? `Stop PDF indexing for ${suffix}`
-            : `No active PDF indexing for ${suffix}`;
-        disable("[data-selected-stop-indexing]", destructiveUnavailable || !pdfIndexing, stopTitle);
+            : stoppableWork ? `Stop active Git and PDF work for ${suffix}`
+            : `No active Git or PDF work for ${suffix}`;
+        disable("[data-selected-stop-indexing]", destructiveUnavailable || !stoppableWork, stopTitle);
         const deleteTitle = !count ? "Select repositories to delete"
             : repositorySubmissionPending ? "Wait for the repository request to finish"
             : removalPending ? "Use Retry removal to finish incomplete repository removal"
@@ -273,6 +439,17 @@
         updateSelectedRepositoryActions();
     });
     workspace.addEventListener("click", (event) => {
+        const selectAll = event.target.closest?.("[data-selected-select-all]");
+        if (selectAll) {
+            event.preventDefault();
+            if (selectAll.disabled) return;
+            repositoryCheckboxes().forEach((checkbox) => {
+                if (!checkbox.disabled) checkbox.checked = true;
+            });
+            resetDeleteLock();
+            updateSelectedRepositoryActions();
+            return;
+        }
         const button = event.target.closest?.("[data-selected-remove]");
         if (!button) return;
         updateSelectedRepositoryActions();
@@ -359,59 +536,6 @@
     const cardsFor = (repositoryId) =>
         document.querySelectorAll(`[data-repository-id="${repositoryId}"]`);
 
-    const elapsedLabel = (milliseconds) => {
-        const seconds = Math.max(0, Math.floor(milliseconds / 1000));
-        const pad = (value) => String(value).padStart(2, "0");
-        const minutes = Math.floor(seconds / 60);
-        return minutes < 60
-            ? `${pad(minutes)}:${pad(seconds % 60)}`
-            : `${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}:${pad(seconds % 60)}`;
-    };
-    const parsedTime = (value) => {
-        const timestamp = Date.parse(value || "");
-        return Number.isFinite(timestamp) ? timestamp : null;
-    };
-    const renderRepositoryRunTimer = (element, timing = null) => {
-        if (!element) return;
-        if (timing) {
-            element.dataset.gitStartedAt = timing.gitStartedAt || "";
-            element.dataset.gitEndedAt = timing.gitEndedAt || "";
-            element.dataset.indexStartedAt = timing.indexStartedAt || "";
-            element.dataset.indexEndedAt = timing.indexEndedAt || "";
-        }
-        const now = Date.now();
-        const gitStart = parsedTime(element.dataset.gitStartedAt);
-        const gitEnd = parsedTime(element.dataset.gitEndedAt);
-        const indexStart = parsedTime(element.dataset.indexStartedAt);
-        const indexEnd = parsedTime(element.dataset.indexEndedAt);
-        const totalStart = gitStart ?? indexStart;
-        if (totalStart === null) {
-            element.hidden = true;
-            element.textContent = "";
-            return;
-        }
-        const gitDuration = gitStart === null ? null : Math.max(0, (gitEnd ?? now) - gitStart);
-        const indexDuration = indexStart === null ? null : Math.max(0, (indexEnd ?? now) - indexStart);
-        const totalEnd = indexStart !== null ? (indexEnd ?? now) : (gitEnd ?? now);
-        const totalDuration = Math.max(0, totalEnd - totalStart);
-        const parts = [];
-        if (gitDuration !== null) parts.push(`Git ${elapsedLabel(gitDuration)}`);
-        if (indexDuration !== null) parts.push(`Index ${elapsedLabel(indexDuration)}`);
-        element.textContent = `${parts.join(" · ")} / Total ${elapsedLabel(totalDuration)}`;
-        element.title = "Elapsed Git, current indexing run, and total run time";
-        element.hidden = false;
-    };
-    document.querySelectorAll("[data-repository-run-timer]").forEach((element) => {
-        renderRepositoryRunTimer(element);
-    });
-    if (typeof window.setInterval === "function") {
-        window.setInterval(() => {
-            document.querySelectorAll("[data-repository-run-timer]").forEach((element) => {
-                renderRepositoryRunTimer(element);
-            });
-        }, 1000);
-    }
-
     const updateRepository = (repository) => {
         const working = Boolean(repository.activity?.active || repository.hasActiveWork || repository.active);
         const workLabel = repository.activity?.label || repository.workerTiming?.label || "Repository work in progress";
@@ -424,9 +548,6 @@
         const progressValue = hasProgress
             ? Math.round(Math.min(100, Math.max(0, suppliedProgress))) : null;
         cardsFor(repository.id).forEach((card) => {
-            renderRepositoryRunTimer(
-                card.querySelector("[data-repository-run-timer]"), repository.activity?.runTiming,
-            );
             card.dataset.repositoryState = repository.state;
             card.dataset.repositoryOperation = operation;
             card.dataset.repositoryActiveWork = String(working);
@@ -487,18 +608,11 @@
             if (documents) {
                 documents.textContent = `${repository.pdfCount} PDF · ${repository.vsdxCount} VSDX`;
             }
-            const indexCounts = card.querySelector("[data-repository-index-counts]");
-            if (indexCounts) {
-                const counts = repository.activity?.pdfCounts || {};
-                const queued = Number(counts.queued || 0);
-                const running = Number(counts.running || 0);
-                const passed = Number(counts.passed || 0);
-                const failed = Number(counts.failed || 0);
-                const cancelled = Number(counts.cancelled || 0);
-                indexCounts.textContent = `Passed ${passed} · Failed ${failed} · Cancelled ${cancelled}`
-                    + ` · Workers ${Number(counts.running || 0)}/${Number(repository.indexWorkerLimit || 0)}`;
-                indexCounts.hidden = failed === 0 && cancelled === 0 && passed > 0
-                    && running === 0 && queued === 0;
+            const ticks = card.querySelector("[data-repository-success-ticks]");
+            if (ticks) {
+                ticks.dataset.gitSucceeded = String(Boolean(repository.gitSucceeded));
+                ticks.dataset.indexSucceeded = String(Boolean(repository.indexSucceeded));
+                ticks.title = `Git ${repository.gitSucceeded ? "succeeded" : "not complete"}; PDF indexing ${repository.indexSucceeded ? "succeeded" : "not complete"}`;
             }
             const exclusionBadge = card.querySelector("[data-repository-exclusion]");
             if (exclusionBadge) {
@@ -698,9 +812,6 @@
                     workStatus.title = "Cannot confirm current work; retrying the status check";
                     workStatus.hidden = false;
                 }
-            });
-            document.querySelectorAll("[data-repository-id] [data-repository-worker-timer]").forEach((timer) => {
-                window.OWLRepositoryTimers?.stale(timer);
             });
             // An active or scheduled refresh remains recoverable. Use the same
             // bounded cadence so a temporary status failure never creates a tight loop.
@@ -1075,8 +1186,8 @@
         copyWithTextarea(text);
     };
 
-    const repositoryUrlCopyButton = document.querySelector("[data-copy-repository-urls]");
-    repositoryUrlCopyButton?.addEventListener("click", async () => {
+    document.querySelectorAll("[data-copy-repository-urls]").forEach((repositoryUrlCopyButton) => {
+        repositoryUrlCopyButton.addEventListener("click", async () => {
         const status = repositoryUrlCopyButton.querySelector("[data-copy-repository-urls-status]");
         let urls = [];
         try {
@@ -1096,6 +1207,7 @@
                 if (status) status.textContent = "";
             }, 2000);
         }
+        });
     });
 
     const pathCopyTimers = new WeakMap();

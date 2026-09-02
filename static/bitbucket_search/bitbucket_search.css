@@ -401,23 +401,37 @@
 }
 
 .bb-connection-test {
-    position: fixed;
-    right: 1rem;
-    bottom: 1rem;
-    z-index: 40;
-    max-width: min(32rem, calc(100vw - 2rem));
-    margin: 0;
-    padding: 0.65rem 0.8rem;
-    border: 1px solid var(--bb-amber);
-    border-radius: 7px;
-    color: var(--bb-text);
-    background: var(--bb-surface);
-    box-shadow: 0 12px 32px rgb(0 0 0 / 32%);
-    font-size: 0.7rem;
+    display: grid;
+    width: 38px;
+    height: 38px;
+    flex: 0 0 auto;
+    place-items: center;
+    overflow: hidden;
+    border: 1px solid var(--bb-line-strong);
+    border-radius: 9px;
+    background: rgb(255 255 255 / 92%);
+    box-shadow: 0 7px 18px rgb(0 0 0 / 20%);
+    cursor: pointer;
+    padding: 2px;
 }
+
+.bb-connection-test:disabled { cursor: wait; }
 
 .bb-connection-test[data-state="connected"] { border-color: var(--bb-success); }
 .bb-connection-test[data-state="failed"] { border-color: var(--bb-danger); }
+
+.bb-connection-test__icon {
+    display: none;
+    width: 32px;
+    height: 32px;
+    object-fit: contain;
+}
+
+.bb-connection-test[data-state="checking"] .bb-connection-test__icon--checking,
+.bb-connection-test[data-state="connected"] .bb-connection-test__icon--connected,
+.bb-connection-test[data-state="failed"] .bb-connection-test__icon--disconnected {
+    display: block;
+}
 
 .bb-repository-form label {
     color: var(--bb-text-soft);
@@ -718,6 +732,36 @@
 .bb-repository-state--interrupted .bb-state-icon--attention,
 .bb-repository-state--blocked_dirty .bb-state-icon--attention {
     display: block;
+}
+
+.bb-double-tick {
+    position: relative;
+    width: 21px;
+    height: 15px;
+    color: var(--bb-muted);
+}
+
+.bb-double-tick i {
+    position: absolute;
+    top: 1px;
+    width: 7px;
+    height: 12px;
+    border: solid currentColor;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+
+.bb-double-tick i:first-child {
+    left: 3px;
+}
+
+.bb-double-tick i:last-child {
+    left: 10px;
+}
+
+.bb-double-tick[data-git-succeeded="true"] i:first-child,
+.bb-double-tick[data-index-succeeded="true"] i:last-child {
+    color: #38a6ff;
 }
 
 .bb-repository-state--queued,
@@ -1152,7 +1196,7 @@
 
 .bb-refresh-all {
     display: flex;
-    min-width: 0;
+    min-width: min(390px, 36vw);
     align-items: center;
     gap: 0.42rem;
     margin: 0;
@@ -1163,6 +1207,41 @@
     border-color: var(--bb-line);
     color: var(--bb-amber);
     background: rgb(255 255 255 / 1.5%);
+}
+
+.bb-refresh-all__visual {
+    width: 30px;
+    height: 30px;
+    border-radius: 7px;
+    object-fit: cover;
+    filter: saturate(0.65);
+    opacity: 0.72;
+}
+
+.bb-refresh-all__visual--running {
+    display: none;
+}
+
+.bb-refresh-all--active .bb-refresh-all__visual--idle {
+    display: none;
+}
+
+.bb-refresh-all--active .bb-refresh-all__visual--running {
+    display: block;
+    filter: saturate(1.15);
+    opacity: 1;
+}
+
+.bb-refresh-all__reload-mark {
+    position: absolute;
+    right: 1px;
+    bottom: 1px;
+    width: 12px !important;
+    height: 12px !important;
+    padding: 1px;
+    border-radius: 50%;
+    color: white;
+    background: rgb(10 18 32 / 78%);
 }
 
 .bb-refresh-all__button:hover:not(:disabled) {
@@ -1204,15 +1283,10 @@
 }
 
 .bb-refresh-all__meta {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-    border: 0;
+    display: grid;
+    flex: 1;
+    min-width: 0;
+    gap: 0.1rem;
 }
 
 .bb-refresh-all__meta strong,
@@ -1235,31 +1309,36 @@
     font-size: 0.57rem;
 }
 
-.bb-refresh-all:hover .bb-refresh-all__meta,
-.bb-refresh-all:focus-within .bb-refresh-all__meta {
-    top: calc(100% + 0.55rem);
-    right: 0;
-    z-index: 50;
-    width: min(380px, calc(100vw - 2rem));
-    height: auto;
-    padding: 0.65rem 0.8rem;
-    margin: 0;
-    overflow: visible;
-    border: 1px solid var(--bb-line-strong);
-    border-radius: 8px;
-    color: var(--bb-text);
-    background: var(--bb-surface);
-    box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
-    clip-path: none;
-    white-space: normal;
-    pointer-events: none;
-}
-
 .bb-refresh-all__meta strong,
 .bb-refresh-all__meta small {
     overflow-wrap: anywhere;
     white-space: normal;
     line-height: 1.4;
+}
+
+.bb-overall-progress {
+    display: grid;
+    grid-template-columns: minmax(80px, 1fr) auto;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.bb-overall-progress[hidden],
+.bb-overall-timing[hidden] {
+    display: none;
+}
+
+.bb-overall-progress progress {
+    width: 100%;
+    height: 5px;
+    accent-color: #38a6ff;
+}
+
+.bb-overall-progress small,
+.bb-overall-counts,
+.bb-overall-timing {
+    margin: 0 !important;
+    font-variant-numeric: tabular-nums;
 }
 
 .bb-refresh-all__meta small {

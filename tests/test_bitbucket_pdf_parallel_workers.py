@@ -225,6 +225,28 @@ def test_simultaneous_claims_never_exceed_the_global_capacity(parallel_targets, 
     assert PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING).count() == 2
 
 
+@pytest.mark.django_db
+def test_ten_worker_claims_are_balanced_across_repositories(parallel_targets, settings):
+    repositories = [parallel_targets(f"balanced-{number}", 4)[0] for number in range(4)]
+    settings.PDF_MAX_EXTRACTION_WORKERS = 10
+
+    claims = [pdf_indexing.claim_next_extraction_job() for _number in range(10)]
+
+    assert all(job is not None for job in claims)
+    claimed_repository_ids = [job.document.repository_id for job in claims]
+    assert claimed_repository_ids[:4] == [repository.pk for repository in repositories]
+    assert {
+        repository.pk: claimed_repository_ids.count(repository.pk) for repository in repositories
+    } == {
+        repositories[0].pk: 3,
+        repositories[1].pk: 3,
+        repositories[2].pk: 2,
+        repositories[3].pk: 2,
+    }
+    assert pdf_indexing.claim_next_extraction_job() is None
+    assert PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING).count() == 10
+
+
 @pytest.mark.django_db(transaction=True)
 def test_concurrent_unavailable_sweeps_publish_one_terminal_event(parallel_targets, request):
     if _run_with_file_backed_database(request.node.nodeid):

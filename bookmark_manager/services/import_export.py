@@ -21,7 +21,7 @@ from functools import wraps
 from pathlib import PurePosixPath
 from urllib.parse import parse_qs, parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
 
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import F
 from django.utils import timezone
 
@@ -62,6 +62,26 @@ MAX_NOTE_LENGTH = 250_000
 MAX_TAGS_PER_BOOKMARK = 100
 MAX_HIERARCHY_DEPTH = 100
 MAX_TEXT_IMPORT_URLS = 5_000
+DATABASE_LOCK_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8)
+
+
+def _retry_database_lock(operation):
+    """Retry short SQLite writer collisions without hiding other database failures."""
+
+    for attempt, delay in enumerate((*DATABASE_LOCK_RETRY_DELAYS, None), start=1):
+        try:
+            return operation()
+        except OperationalError as exc:
+            if "locked" not in str(exc).casefold() or delay is None:
+                raise
+            log_event(
+                logger,
+                logging.WARNING,
+                "bookmark_import_database_lock_retry",
+                error=exc,
+                retry_count=attempt,
+            )
+            time.sleep(delay)
 
 _MISSING = object()
 _SAFE_ERROR_CODE = re.compile(r"^[A-Za-z0-9_.-]*$")
@@ -333,13 +353,15 @@ def import_bookmarks_document(
     safe_filename = _safe_filename(filename)
     source_sha256 = hashlib.sha256(source_bytes).hexdigest()
 
-    run = BookmarkImportRun.objects.create(
-        filename=safe_filename,
-        schema_version=schema_version,
-        source_sha256=source_sha256,
-        total_records=len(records),
-        status=BookmarkImportStatus.RUNNING,
-        started_at=import_time,
+    run = _retry_database_lock(
+        lambda: BookmarkImportRun.objects.create(
+            filename=safe_filename,
+            schema_version=schema_version,
+            source_sha256=source_sha256,
+            total_records=len(records),
+            status=BookmarkImportStatus.RUNNING,
+            started_at=import_time,
+        )
     )
     log_event(
         logger,
@@ -604,7 +626,9 @@ def import_bookmarks_document(
     else:
         run.status = BookmarkImportStatus.COMPLETED
         run.outcome = f"Imported {imported} and skipped {skipped} of {len(records)} records."
-    run.save(update_fields=["status", "outcome", "completed_at"])
+    _retry_database_lock(
+        lambda: run.save(update_fields=["status", "outcome", "completed_at"])
+    )
     return BookmarkImportResult(run=run)
 
 
@@ -644,13 +668,15 @@ def import_bookmarks_text(
     if not isinstance(import_time, datetime) or timezone.is_naive(import_time):
         raise ImportDocumentError("The import time must include a timezone.")
 
-    run = BookmarkImportRun.objects.create(
-        filename=_safe_filename(filename),
-        schema_version="text-urls-v1",
-        source_sha256=hashlib.sha256(source_bytes).hexdigest(),
-        total_records=len(urls),
-        status=BookmarkImportStatus.RUNNING,
-        started_at=import_time,
+    run = _retry_database_lock(
+        lambda: BookmarkImportRun.objects.create(
+            filename=_safe_filename(filename),
+            schema_version="text-urls-v1",
+            source_sha256=hashlib.sha256(source_bytes).hexdigest(),
+            total_records=len(urls),
+            status=BookmarkImportStatus.RUNNING,
+            started_at=import_time,
+        )
     )
     log_event(
         logger,
@@ -801,7 +827,9 @@ def import_bookmarks_text(
             f"Completed all {len(urls)} extracted URLs; added {imported} and "
             f"already present {skipped}."
         )
-    run.save(update_fields=["status", "outcome", "completed_at"])
+    _retry_database_lock(
+        lambda: run.save(update_fields=["status", "outcome", "completed_at"])
+    )
     return BookmarkImportResult(run=run)
 
 
@@ -2277,16 +2305,19 @@ def _record_failure(
         error_code=error_code,
     )
     try:
-        BookmarkImportFailure.objects.update_or_create(
-            import_run=run,
-            record_number=record_number,
-            defaults={
-                "page_id": page_id if page_id.isdecimal() and len(page_id) <= 64 else "",
-                "source_url": _safe_failure_source_url(source_url),
-                "reason": _sanitize_failure_reason(reason),
-            },
-        )
-        run.failed_records = run.failures.count()
+        def persist_failure():
+            BookmarkImportFailure.objects.update_or_create(
+                import_run=run,
+                record_number=record_number,
+                defaults={
+                    "page_id": page_id if page_id.isdecimal() and len(page_id) <= 64 else "",
+                    "source_url": _safe_failure_source_url(source_url),
+                    "reason": _sanitize_failure_reason(reason),
+                },
+            )
+            return run.failures.count()
+
+        run.failed_records = _retry_database_lock(persist_failure)
     except Exception as exc:
         log_event(
             logger,
@@ -2310,15 +2341,18 @@ def _update_run_progress(
     run.imported_records = imported
     run.skipped_records = skipped
     try:
-        run.failed_records = run.failures.count()
-        run.save(
-            update_fields=[
-                "processed_records",
-                "imported_records",
-                "skipped_records",
-                "failed_records",
-            ]
-        )
+        def persist_progress():
+            run.failed_records = run.failures.count()
+            run.save(
+                update_fields=[
+                    "processed_records",
+                    "imported_records",
+                    "skipped_records",
+                    "failed_records",
+                ]
+            )
+
+        _retry_database_lock(persist_progress)
     except Exception as exc:
         log_event(
             logger,

@@ -5,9 +5,11 @@ import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
+from unittest.mock import Mock
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import OperationalError
 from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
@@ -1861,6 +1863,28 @@ def test_import_http_journey_returns_to_settings_and_renders_partial_result(
     assert 'aria-label="Dismiss import result"' in html
     assert "data-dismiss-import-result" in html
     assert 'class="operation-failure-list"' in html
+
+
+def test_import_database_contention_returns_controlled_retry_response(
+    loopback_client, monkeypatch
+):
+    monkeypatch.setattr(
+        views,
+        "import_bookmarks_document",
+        Mock(side_effect=OperationalError("database is locked")),
+    )
+    upload = SimpleUploadedFile(
+        "bookmarks.json", b"[]", content_type="application/json"
+    )
+
+    response = loopback_client.post(
+        reverse("bookmark_manager:import"),
+        {"import_file": upload, "return_to": "settings"},
+    )
+
+    assert response.status_code == 503
+    assert "Bookmark import paused" in _html(response)
+    assert "local database is busy" in _html(response)
 
 
 def test_json_import_result_identifies_failed_record_with_sanitized_source_url(

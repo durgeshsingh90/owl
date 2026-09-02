@@ -309,7 +309,7 @@ def test_worker_wakeup_failure_keeps_selected_jobs_queued_and_reports_warning(
     assert RepositorySyncJob.objects.filter(status=RepositorySyncJobStatus.QUEUED).count() == 2
 
 
-def test_selected_stop_indexing_is_scoped_deduplicated_and_preserves_git(
+def test_selected_stop_is_scoped_deduplicated_and_cancels_git_and_indexing(
     local_client, selected_url, selected_repositories
 ):
     first, second, other = selected_repositories
@@ -347,14 +347,14 @@ def test_selected_stop_indexing_is_scoped_deduplicated_and_preserves_git(
     assert response.status_code == 200
     assert response.json()["state"] == "cancelled"
     assert response.json()["completedIds"] == [first.pk, second.pk]
-    assert response.json()["cancelled"] == {"queued": 1, "running": 1, "total": 2}
+    assert response.json()["cancelled"] == {"queued": 1, "running": 2, "total": 3}
     for job in jobs[:2]:
         job.refresh_from_db()
         assert job.status == PDFExtractionJobStatus.CANCELLED
     jobs[2].refresh_from_db()
     git_job.refresh_from_db()
     assert jobs[2].status == PDFExtractionJobStatus.RUNNING
-    assert git_job.status == RepositorySyncJobStatus.RUNNING
+    assert git_job.status == RepositorySyncJobStatus.CANCELLED
 
 
 @pytest.mark.parametrize(

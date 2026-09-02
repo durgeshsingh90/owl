@@ -183,35 +183,30 @@ def with_repository_activity(
     if not repository_ids:
         return repositories
     observed_at = at or timezone.now()
-    failed_pdf_counts = dict(
-        PDFDocument.objects.filter(
+    pdf_index_state_counts = {
+        row["repository_id"]: row
+        for row in PDFDocument.objects.filter(
             repository_id__in=repository_ids,
             lifecycle_state="active",
-            index_state__in=(PDFIndexState.FAILED, PDFIndexState.STALE_ERROR),
         )
         .values("repository_id")
-        .annotate(total=Count("id"))
-        .values_list("repository_id", "total")
-    )
+        .annotate(
+            failed=Count(
+                "id",
+                filter=Q(index_state__in=(PDFIndexState.FAILED, PDFIndexState.STALE_ERROR)),
+            ),
+            pending=Count("id", filter=Q(index_state=PDFIndexState.PENDING)),
+        )
+    }
     pdf_attempt_counts: dict[int, Counter] = defaultdict(Counter)
-    pdf_run_timing: dict[int, dict[str, datetime | None]] = defaultdict(
-        lambda: {"started_at": None, "completed_at": None}
-    )
     for row in (
         latest_repository_pdf_run_jobs().filter(document__repository_id__in=repository_ids)
         .values("document__repository_id", "status")
-        .annotate(total=Count("id"), first_requested_at=Min("requested_at"), last_completed_at=Max("completed_at"))
+        .annotate(total=Count("id"))
         .order_by()
     ):
         repository_id = row["document__repository_id"]
         pdf_attempt_counts[repository_id][row["status"]] = row["total"]
-        timing = pdf_run_timing[repository_id]
-        started_at = row["first_requested_at"]
-        completed_at = row["last_completed_at"]
-        if started_at is not None and (timing["started_at"] is None or started_at < timing["started_at"]):
-            timing["started_at"] = started_at
-        if completed_at is not None and (timing["completed_at"] is None or completed_at > timing["completed_at"]):
-            timing["completed_at"] = completed_at
     sync_counts: dict[int, Counter] = defaultdict(Counter)
     sync_jobs: dict[int, dict[str, dict[str, object]]] = defaultdict(dict)
     for row in (
@@ -263,9 +258,20 @@ def with_repository_activity(
         pdf_metrics[row["document__repository_id"]][row["status"]] = row
 
     for repository in repositories:
-        repository.pdf_index_failed_count = failed_pdf_counts.get(repository.pk, 0)
+        index_states = pdf_index_state_counts.get(repository.pk, {})
+        repository.pdf_index_failed_count = index_states.get("failed", 0)
+        repository.pdf_index_pending_count = index_states.get("pending", 0)
         repository.git_sync_failed = bool(
             repository.last_error_code or repository.sync_state == "failed"
+        )
+        repository.git_succeeded = bool(
+            repository.last_sync_successful_at and not repository.git_sync_failed
+        )
+        repository.index_succeeded = bool(
+            repository.git_succeeded
+            and repository.pdf_count > 0
+            and repository.pdf_index_failed_count == 0
+            and repository.pdf_index_pending_count == 0
         )
         sync = sync_counts[repository.pk]
         pdfs = pdf_counts[repository.pk]
@@ -401,17 +407,6 @@ def with_repository_activity(
                 "failed": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.FAILED],
                 "interrupted": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.INTERRUPTED],
                 "cancelled": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.CANCELLED],
-            },
-            "runTiming": {
-                "gitStartedAt": repository.last_sync_started_at.isoformat() if repository.last_sync_started_at else None,
-                "gitEndedAt": repository.last_sync_completed_at.isoformat() if repository.last_sync_completed_at else None,
-                "indexStartedAt": pdf_run_timing[repository.pk]["started_at"].isoformat() if pdf_run_timing[repository.pk]["started_at"] else None,
-                "indexEndedAt": (
-                    pdf_run_timing[repository.pk]["completed_at"].isoformat()
-                    if pdf_run_timing[repository.pk]["completed_at"] and not current_queued and not current_running
-                    else None
-                ),
-                "observedAt": observed_at.isoformat(),
             },
         }
     return repositories

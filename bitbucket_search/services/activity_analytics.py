@@ -17,6 +17,8 @@ from bitbucket_search.models import (
     GitCommit,
     GitCommitFolder,
     InvalidPeopleName,
+    PDFDocument,
+    PDFDocumentLifecycle,
     canonical_people_name,
 )
 from bitbucket_search.services.logging_events import get_logger, log_event
@@ -50,6 +52,13 @@ class RepositoryActivity:
 
 
 @dataclass(frozen=True, slots=True)
+class PDFRepositoryActivity:
+    repository_id: int
+    name: str
+    pdf_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class FolderActivity:
     repository_id: int
     repository_name: str
@@ -80,6 +89,8 @@ class BitbucketDashboard:
     people: tuple[PersonActivity, ...]
     repositories: tuple[RepositoryActivity, ...]
     folders: tuple[FolderActivity, ...]
+    pdf_repositories: tuple[PDFRepositoryActivity, ...]
+    total_pdf_files: int
     coverage: ActivityCoverage
 
     @property
@@ -189,6 +200,26 @@ def _build_dashboard(*, period: str, now: datetime | None) -> BitbucketDashboard
         .exclude(repository__activity_indexed_commit="")
         .order_by()
     )
+    period_end_lookup = "timeline_at__lt" if period == "last_week" else "timeline_at__lte"
+    pdf_documents = PDFDocument.objects.filter(
+        repository__enabled=True,
+        lifecycle_state=PDFDocumentLifecycle.ACTIVE,
+        timeline_at__gte=started_at,
+        **{period_end_lookup: ended_at},
+    ).order_by()
+    total_pdf_files = pdf_documents.count()
+    pdf_repositories = tuple(
+        PDFRepositoryActivity(
+            repository_id=row["repository_id"],
+            name=row["repository__display_name"],
+            pdf_count=row["pdf_count"],
+        )
+        for row in (
+            pdf_documents.values("repository_id", "repository__display_name")
+            .annotate(pdf_count=Count("id"))
+            .order_by("-pdf_count", "repository__display_name", "repository_id")[:RANKING_LIMIT]
+        )
+    )
     totals = commits.aggregate(
         total_commits=Count("id"),
         active_repositories=Count("repository_id", distinct=True),
@@ -244,6 +275,8 @@ def _build_dashboard(*, period: str, now: datetime | None) -> BitbucketDashboard
         people=all_people[:RANKING_LIMIT],
         repositories=repositories,
         folders=folders,
+        pdf_repositories=pdf_repositories,
+        total_pdf_files=total_pdf_files,
         coverage=coverage,
     )
 

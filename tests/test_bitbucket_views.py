@@ -57,8 +57,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert html.count('data-delete-locked="true"') == 2
     assert html.count("data-selected-delete-icon") == 2
     assert html.count("🗑️") == 0
-    assert html.count('/static/bitbucket_search/icons/stop.png') == 2
-    assert html.count('/static/bitbucket_search/icons/delete.png') == 2
+    assert html.count("/static/bitbucket_search/icons/stop.png") == 2
+    assert html.count("/static/bitbucket_search/icons/delete.png") == 2
     repository_template = (
         Path(__file__).parents[1] / "templates" / "bitbucket_search" / "_repository_list.html"
     ).read_text(encoding="utf-8")
@@ -80,8 +80,17 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=repository-icons-v1" in html
-    assert "bitbucket_search/bitbucket_search.js?v=repository-icons-v1" in html
+    assert "bitbucket_search/bitbucket_search.css?v=connection-status-v1" in html
+    assert "bitbucket_search/bitbucket_search.js?v=select-all-repositories-v1" in html
+    assert "bitbucket_search/icons/work-in-progress.gif" in html
+    assert "bitbucket_search/icons/connection-connected.png" in html
+    assert "bitbucket_search/icons/connection-disconnected.png" in html
+    assert "bitbucket_search/icons/no-connection.gif" in html
+    assert html.index('class="bb-topbar__actions"') < html.index(
+        "data-repository-connection-result"
+    )
+    assert 'class="bb-connection-test" type="button"' in html
+    assert "data-repository-connection-message" in html
     assert 'name="confirmed"' not in html
 
 
@@ -127,7 +136,8 @@ def test_workspace_omits_redundant_search_navigation_and_keeps_repository_contro
     )
     assert len(toolbars) == 2
     for toolbar in toolbars:
-        assert len(re.findall(r"<button\b", toolbar)) == 4
+        assert len(re.findall(r"<button\b", toolbar)) == 6
+        assert "data-selected-select-all" in toolbar
         assert 'data-delete-locked="true"' in toolbar
         assert "data-selected-delete-icon" in toolbar
         assert "🔒" in toolbar
@@ -186,7 +196,8 @@ def test_bitbucket_topbar_omits_settings_icon_and_preserves_other_controls(
     assert "data-settings-open" not in topbar_html
     assert "data-repository-status-toggle" not in topbar_html
     assert 'aria-label="Open repository logs"' not in topbar_html
-    assert 'aria-label="Copy all repository URLs"' in topbar_html
+    assert 'aria-label="Copy all repository URLs"' not in topbar_html
+    assert 'aria-label="Copy all repository URLs"' in html
     assert "data-notification-toggle" in topbar_html
     assert 'aria-label="Open notifications"' in topbar_html
     assert '<summary class="bb-icon-button" aria-label="Applications">' in topbar_html
@@ -424,8 +435,11 @@ def test_refresh_all_controls_stay_disabled_through_add_and_refresh_phases(
     assert 'disabled aria-busy="true"' in form
     assert 'data-active-repository-count="1"' in form
     _assert_refresh_work_summary(form, response.context["repository_work_summary"])
-    assert "data-refresh-all-icon hidden" in form
-    assert "data-refresh-all-spinner hidden" not in form
+    assert "data-refresh-all-icon hidden" not in form
+    assert "data-refresh-all-spinner hidden" in form
+    assert "data-refresh-all-visual" in form
+    assert "data-refresh-all-running-visual" in form
+    assert "data-overall-progress" in form
 
 
 @pytest.mark.parametrize(
@@ -759,8 +773,8 @@ def test_git_ready_repository_shows_pdf_worker_phase_in_sidebar_and_refresh_tool
         assert label is not None
         assert " hidden" not in label.group()
         assert label.group(1).strip() == escape(activity["detail"] or activity["label"])
-        assert "data-repository-run-timer" in card
-        assert 'data-index-started-at=""' not in card
+        assert "data-repository-run-timer" not in card
+        assert "data-repository-success-ticks" in card
     for card in _repository_cards(html, idle.pk):
         assert "bb-repository-state--ready" in card
         assert "bb-repository-state--working" not in card
@@ -787,8 +801,11 @@ def test_git_ready_repository_shows_pdf_worker_phase_in_sidebar_and_refresh_tool
     assert repository.display_name in payload["work"]["detail"]
     assert idle.display_name not in payload["work"]["detail"]
     assert 'disabled aria-busy="true"' in form
-    assert "data-refresh-all-icon hidden" in form
-    assert "data-refresh-all-spinner hidden" not in form
+    assert "data-refresh-all-icon hidden" not in form
+    assert "data-refresh-all-spinner hidden" in form
+    assert "data-refresh-all-visual" in form
+    assert "data-refresh-all-running-visual" in form
+    assert "data-overall-progress" in form
 
 
 @pytest.mark.parametrize(
@@ -859,7 +876,8 @@ def test_responsive_pdf_rows_override_the_generic_block_row_rule():
     assert "@media (max-width: 1280px)" in css[:responsive_start]
     assert ".bb-refresh-all--desktop {\n        display: none;" not in responsive_css
     assert ".bb-repository-selection-toolbar" in css
-    assert ".bb-refresh-all__meta {\n    position: absolute;" in css
+    assert ".bb-refresh-all__meta {\n    display: grid;" in css
+    assert ".bb-overall-progress" in css
     assert ".bb-results-table tr," in responsive_css
     assert ".bb-results-table .bb-document-row {\n        display: grid;" in responsive_css
     assert ".bb-document-row td.bb-document-cell--actions {\n    overflow: visible;" in css
@@ -874,7 +892,7 @@ def test_responsive_pdf_rows_override_the_generic_block_row_rule():
     assert ".bb-results-table .bb-document-row {\n        grid-template-areas:" in mobile_css
 
 
-def test_background_work_styles_show_an_amber_spinner_and_accessible_refresh_tooltip():
+def test_background_work_styles_show_an_animated_overall_status_and_progress():
     css = (
         Path(__file__).parents[1] / "static" / "bitbucket_search" / "bitbucket_search.css"
     ).read_text(encoding="utf-8")
@@ -889,14 +907,9 @@ def test_background_work_styles_show_an_amber_spinner_and_accessible_refresh_too
         r"\.bb-repository-state--unknown \.bb-state-icon--attention\s*\{\s*display: block;",
         css,
     )
-    tooltip = re.search(
-        r"\.bb-refresh-all:hover \.bb-refresh-all__meta,\s*"
-        r"\.bb-refresh-all:focus-within \.bb-refresh-all__meta\s*\{([^}]+)\}",
-        css,
-    )
-    assert tooltip is not None
-    for declaration in ("height: auto;", "clip-path: none;", "white-space: normal;"):
-        assert declaration in tooltip.group(1)
+    assert ".bb-refresh-all__visual" in css
+    assert ".bb-refresh-all--active .bb-refresh-all__visual" in css
+    assert ".bb-overall-progress progress" in css
     assert ".bb-repository-work-label[hidden] {\n    display: none;" in css
 
 
@@ -1467,7 +1480,8 @@ def test_ready_repository_renders_green_tick_counts_and_shared_action_selection(
         assert "data-repository-select" in card
         assert "data-repository-refresh-form" not in card
         assert "data-repository-menu" not in card
-        assert "data-repository-run-timer" in card
+        assert "data-repository-run-timer" not in card
+        assert "data-repository-success-ticks" in card
         assert "Repository is ready." not in card
         assert "Daily refresh due" not in card
         assert "data-repository-state-label" not in card

@@ -318,11 +318,12 @@ BITBUCKET_SEARCH_PAGE_SIZE = min(
     100,
 )
 # Local deployment setting: this workstation has 20 logical CPUs and 64 GB RAM.
-# Keep PDF parsing at OWL's tested maximum; SQLite publication remains serialized.
-PDF_MAX_EXTRACTION_WORKERS = 8
-if PDF_MAX_EXTRACTION_WORKERS > 8:
+# Run ten PDF parsers across repositories; claims are balanced by the number of
+# active jobs per repository while SQLite publication remains serialized.
+PDF_MAX_EXTRACTION_WORKERS = 10
+if PDF_MAX_EXTRACTION_WORKERS > 10:
     raise ImproperlyConfigured(
-        "PDF_MAX_EXTRACTION_WORKERS must be at most 8 so isolated PDF parsers "
+        "PDF_MAX_EXTRACTION_WORKERS must be at most 10 so isolated PDF parsers "
         "cannot exhaust local memory or overwhelm SQLite publication."
     )
 PDF_EXTRACTION_TIMEOUT_SECONDS = _env_int(
