@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from django.db.models import Avg, Count, F, Min, Q
+from django.db.models import Avg, Count, F, Min, OuterRef, Q, Subquery
 from django.utils import timezone
 
 from bitbucket_search.models import (
@@ -30,6 +30,26 @@ def current_pdf_extraction_jobs():
         target_file_size=F("document__file_size"),
         target_extractor_version=PDF_EXTRACTOR_VERSION,
     ).filter(Q(document__repository__enabled=True) | Q(status=PDFExtractionJobStatus.RUNNING))
+
+
+def latest_repository_pdf_run_jobs():
+    """Select attempts belonging to each repository's newest explicit indexing run."""
+
+    latest_run = (
+        PDFExtractionJob.objects.filter(
+            document__repository_id=OuterRef("document__repository_id"),
+            run_id__isnull=False,
+        )
+        .order_by("-requested_at", "-id")
+        .values("run_id")[:1]
+    )
+    return (
+        PDFExtractionJob.objects.annotate(_latest_repository_run_id=Subquery(latest_run))
+        .filter(
+            Q(run_id=F("_latest_repository_run_id"))
+            | Q(run_id__isnull=True, _latest_repository_run_id__isnull=True)
+        )
+    )
 
 
 def running_pdf_start_filter(observed_at: datetime) -> Q:

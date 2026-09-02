@@ -27,6 +27,21 @@ SENSITIVE_TEXT_PATTERNS = (
 )
 
 
+class ExpectedLoopbackDisconnectFilter(logging.Filter):
+    """Hide harmless development-server disconnect noise from local browser polling."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "django.server":
+            return True
+        message = record.getMessage()
+        if not message.startswith("- Broken pipe from "):
+            return True
+        return not any(
+            loopback in message
+            for loopback in ("'127.0.0.1'", '"127.0.0.1"', "'::1'", '"::1"')
+        )
+
+
 def redact_log_text(value: str) -> str:
     redacted = value
     for setting_name in ("CONFLUENCE_PAT", "SECRET_KEY"):

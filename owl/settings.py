@@ -521,6 +521,11 @@ DEFAULT_EXCEPTION_REPORTER = "core.debug.OWLExceptionReporter"
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        "expected_loopback_disconnect": {
+            "()": "core.logging.ExpectedLoopbackDisconnectFilter",
+        },
+    },
     "formatters": {
         "safe": {
             "()": "core.logging.SecretSafeFormatter",
@@ -547,6 +552,7 @@ LOGGING = {
         "console": {
             "class": "logging.StreamHandler",
             "formatter": "safe",
+            "filters": ["expected_loopback_disconnect"],
         },
         "local_file": {
             "class": "logging.handlers.RotatingFileHandler",
@@ -556,6 +562,7 @@ LOGGING = {
             "encoding": "utf-8",
             "delay": True,
             "formatter": "safe",
+            "filters": ["expected_loopback_disconnect"],
         },
         "bitbucket_console": {
             "class": "logging.StreamHandler",

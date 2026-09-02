@@ -667,6 +667,7 @@ class PDFExtractionJob(models.Model):
         blank=True,
         related_name="extraction_jobs",
     )
+    run_id = models.UUIDField(null=True, blank=True, db_index=True)
     target_git_blob_id = models.CharField(max_length=64)
     target_source_commit = models.CharField(max_length=64)
     target_relative_path = models.CharField(max_length=2048)

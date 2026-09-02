@@ -20,7 +20,10 @@ from bitbucket_search.models import (
     RepositorySyncOperation,
     RepositorySyncPhase,
 )
-from bitbucket_search.services.repository_worker_timing import current_pdf_extraction_jobs
+from bitbucket_search.services.repository_worker_timing import (
+    current_pdf_extraction_jobs,
+    latest_repository_pdf_run_jobs,
+)
 
 _VISIBLE_OPERATIONS = ("clone", "pull", "indexing")
 _OPERATION_LABELS = {
@@ -192,7 +195,7 @@ def with_repository_activity(
     )
     pdf_attempt_counts: dict[int, Counter] = defaultdict(Counter)
     for row in (
-        PDFExtractionJob.objects.filter(document__repository_id__in=repository_ids)
+        latest_repository_pdf_run_jobs().filter(document__repository_id__in=repository_ids)
         .values("document__repository_id", "status")
         .annotate(total=Count("id"))
         .order_by()

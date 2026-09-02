@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import timedelta
 
 import pytest
@@ -480,6 +481,28 @@ def test_repository_payload_exposes_pdf_progress_counts_and_worker_capacity(sett
         "cancelled": 1,
         "workerLimit": 4,
     }
+
+
+def test_repository_progress_counts_only_the_latest_indexing_run(settings):
+    settings.PDF_MAX_EXTRACTION_WORKERS = 4
+    repository = _repository(sync_state=RepositorySyncState.READY)
+    old_run = uuid.uuid4()
+    new_run = uuid.uuid4()
+    old_failed = _document(repository, relative_path="docs/old-failed.pdf")
+    old_cancelled = _document(repository, relative_path="docs/old-cancelled.pdf")
+    current_passed = _document(repository, relative_path="docs/current-passed.pdf")
+    current_queued = _document(repository, relative_path="docs/current-queued.pdf")
+    _extraction(old_failed, PDFExtractionJobStatus.FAILED, run_id=old_run)
+    _extraction(old_cancelled, PDFExtractionJobStatus.CANCELLED, run_id=old_run)
+    _extraction(current_passed, PDFExtractionJobStatus.SUCCEEDED, run_id=new_run)
+    _extraction(current_queued, PDFExtractionJobStatus.QUEUED, run_id=new_run)
+
+    summary = _item(repository)["indexingSummary"]
+
+    assert summary["queued"] == 1
+    assert summary["passed"] == 1
+    assert summary["failed"] == 0
+    assert summary["cancelled"] == 0
 
 
 @pytest.mark.parametrize(

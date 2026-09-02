@@ -2731,12 +2731,15 @@ def _index_job_counts(jobs) -> dict[str, int]:
 
 
 def _indexing_log_payload(repository_id: int) -> dict[str, object]:
-    jobs = PDFExtractionJob.objects.filter(document__repository_id=repository_id)
+    from bitbucket_search.services.repository_worker_timing import latest_repository_pdf_run_jobs
+
+    jobs = latest_repository_pdf_run_jobs().filter(document__repository_id=repository_id)
     counts = _index_job_counts(jobs)
     event_rows = tuple(
         RepositoryOperationLogEntry.objects.filter(
             repository_id=repository_id,
             channel=RepositoryOperationLogChannel.INDEXING,
+            extraction_job_id__in=jobs.values("id"),
         )
         .select_related("extraction_job")
         .order_by("-id")[: _INDEX_LOG_PANEL_LINES + 1]

@@ -39,6 +39,7 @@ from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 from bitbucket_search.services.repository_activity import summarize_operation_activities
 from bitbucket_search.services.repository_worker_timing import (
     current_pdf_extraction_jobs,
+    latest_repository_pdf_run_jobs,
     running_pdf_start_filter,
     worker_timing,
 )
@@ -208,7 +209,7 @@ def _document_states():
 def _extraction_states(*, observed_at):
     # Include terminal attempts for visible progress totals, while excluding jobs
     # for obsolete document revisions from the active worker calculation.
-    current = PDFExtractionJob.objects.filter(
+    current = latest_repository_pdf_run_jobs().filter(
         document__lifecycle_state=PDFDocumentLifecycle.ACTIVE,
         document__local_policy__isnull=True,
         target_git_blob_id=F("document__git_blob_id"),

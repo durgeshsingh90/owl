@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -538,6 +539,7 @@ def queue_repository_pdf_extractions(
     if locked_repository is None:
         return ExtractionQueueResult((), (), ())
     observed_at = timezone.now()
+    run_id = uuid.uuid4()
     sync_job_id = (
         repository_sync_job.pk
         if isinstance(repository_sync_job, RepositorySyncJob)
@@ -692,6 +694,7 @@ def queue_repository_pdf_extractions(
         }
         if sync_job_id is not None:
             update_values["repository_sync_job_id"] = sync_job_id
+        update_values["run_id"] = run_id
         PDFExtractionJob.objects.filter(
             pk__in=update_ids,
             status__in=_ACTIVE_JOB_STATUSES,
@@ -733,6 +736,7 @@ def queue_repository_pdf_extractions(
             PDFExtractionJob(
                 document=document,
                 repository_sync_job_id=sync_job_id,
+                run_id=run_id,
                 target_git_blob_id=document.git_blob_id,
                 target_source_commit=document.last_seen_commit,
                 target_relative_path=document.relative_path,
@@ -773,6 +777,7 @@ def queue_repository_pdf_extractions(
                             PDFExtractionJob.objects.create(
                                 document_id=proposed.document_id,
                                 repository_sync_job_id=proposed.repository_sync_job_id,
+                                run_id=proposed.run_id,
                                 target_git_blob_id=proposed.target_git_blob_id,
                                 target_source_commit=proposed.target_source_commit,
                                 target_relative_path=proposed.target_relative_path,

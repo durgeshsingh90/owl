@@ -149,6 +149,7 @@ def test_queue_is_idempotent_and_same_indexed_blob_queues_zero(indexed_pdf_targe
     assert len(first.queued_job_ids) == 1
     assert second.queued_job_ids == ()
     assert PDFExtractionJob.objects.count() == 1
+    assert PDFExtractionJob.objects.get().run_id is not None
 
     claimed = claim_next_extraction_job()
     execute_claimed_extraction_job(
