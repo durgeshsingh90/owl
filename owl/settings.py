@@ -317,11 +317,9 @@ BITBUCKET_SEARCH_PAGE_SIZE = min(
     _env_int("BITBUCKET_SEARCH_PAGE_SIZE", 100, minimum=10),
     100,
 )
-PDF_MAX_EXTRACTION_WORKERS = _env_int(
-    "PDF_MAX_EXTRACTION_WORKERS",
-    max(1, min((os.cpu_count() or 2) - 1, 4)),
-    minimum=1,
-)
+# Local deployment setting: this workstation has 20 logical CPUs and 64 GB RAM.
+# Keep PDF parsing at OWL's tested maximum; SQLite publication remains serialized.
+PDF_MAX_EXTRACTION_WORKERS = 8
 if PDF_MAX_EXTRACTION_WORKERS > 8:
     raise ImproperlyConfigured(
         "PDF_MAX_EXTRACTION_WORKERS must be at most 8 so isolated PDF parsers "
