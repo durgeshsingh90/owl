@@ -1175,6 +1175,7 @@ def _index_context(
             f"{extraction_status.pending_documents} pending"
         ),
         "repositories": repositories,
+        "index_worker_limit": settings.PDF_MAX_EXTRACTION_WORKERS,
         "repository_removal_recoveries": RepositoryRemovalRecovery.objects.exclude(
             repository_id__in=(repository.pk for repository in repositories)
         ).order_by("display_name", "id"),
@@ -1295,6 +1296,7 @@ def _repository_payload(repository: BitbucketRepository) -> dict[str, object]:
         "refreshExcluded": repository.exclude_from_refresh,
         "hasActiveWork": repository.has_active_work,
         "activity": repository.activity,
+        "indexWorkerLimit": settings.PDF_MAX_EXTRACTION_WORKERS,
         "pdfIndexFailedCount": getattr(repository, "pdf_index_failed_count", 0),
         "gitSyncFailed": getattr(repository, "git_sync_failed", False),
         "hasRemovalPending": repository.has_removal_pending,

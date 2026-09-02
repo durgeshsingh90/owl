@@ -190,6 +190,14 @@ def with_repository_activity(
         .annotate(total=Count("id"))
         .values_list("repository_id", "total")
     )
+    pdf_attempt_counts: dict[int, Counter] = defaultdict(Counter)
+    for row in (
+        PDFExtractionJob.objects.filter(document__repository_id__in=repository_ids)
+        .values("document__repository_id", "status")
+        .annotate(total=Count("id"))
+        .order_by()
+    ):
+        pdf_attempt_counts[row["document__repository_id"]][row["status"]] = row["total"]
     sync_counts: dict[int, Counter] = defaultdict(Counter)
     sync_jobs: dict[int, dict[str, dict[str, object]]] = defaultdict(dict)
     for row in (
@@ -360,6 +368,14 @@ def with_repository_activity(
             "queuedSyncJobs": queued_sync,
             "runningSyncJobs": running_sync,
             "pendingCleanupJobs": cleanup,
+            "pdfCounts": {
+                "queued": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.QUEUED],
+                "running": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.RUNNING],
+                "passed": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.SUCCEEDED],
+                "failed": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.FAILED],
+                "interrupted": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.INTERRUPTED],
+                "cancelled": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.CANCELLED],
+            },
         }
     return repositories
 

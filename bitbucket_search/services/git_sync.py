@@ -1611,7 +1611,8 @@ def _clone(
             repository.remote_url,
             str(staging),
         )
-        fallback_clone_arguments = (
+        compatible_clone_arguments = preferred_clone_arguments
+        last_resort_clone_arguments = (
             "--no-checkout",
             "--single-branch",
             "--depth=1",
@@ -1648,23 +1649,56 @@ def _clone(
             # A locked failed clone may survive best-effort cleanup on Windows.
             # Never retry into that partial directory or adopt its contents.
             staging = temp_root / f"repository-{repository.pk}-{uuid.uuid4().hex}"
-            fallback_clone_arguments = (*fallback_clone_arguments[:-1], str(staging))
+            compatible_clone_arguments = (*compatible_clone_arguments[:-1], str(staging))
             progress_callback(
                 RepositorySyncPhase.CLONING,
                 8,
-                "The server did not complete an optimized clone; retrying conservatively…",
+                "The server did not support partial clone; retrying with Git history…",
             )
             _check_connection(repository, progress_callback)
-            _run_streaming(
-                ("git", "clone", *fallback_clone_arguments),
-                phase=RepositorySyncPhase.CLONING,
-                progress_start=8,
-                progress_end=72,
-                status_message="Downloading a compatible checkout in the background…",
-                progress_callback=progress_callback,
-                failure_code="clone_failed",
-                failure_summary=filtered_error.summary,
-            )
+            try:
+                _run_streaming(
+                    ("git", "clone", *compatible_clone_arguments),
+                    phase=RepositorySyncPhase.CLONING,
+                    progress_start=8,
+                    progress_end=72,
+                    status_message="Downloading compatible repository history in the background…",
+                    progress_callback=progress_callback,
+                    failure_code="clone_failed",
+                    failure_summary=filtered_error.summary,
+                )
+            except RepositorySyncError as history_error:
+                if history_error.code != "clone_failed":
+                    raise
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "git_clone_compatibility_fallback",
+                    repository_id=repository.pk,
+                    reason="dated_history_clone_failed",
+                )
+                _remove_staging_directory(staging)
+                staging = temp_root / f"repository-{repository.pk}-{uuid.uuid4().hex}"
+                last_resort_clone_arguments = (
+                    *last_resort_clone_arguments[:-1],
+                    str(staging),
+                )
+                progress_callback(
+                    RepositorySyncPhase.CLONING,
+                    10,
+                    "Dated history is unavailable; downloading the latest revision…",
+                )
+                _check_connection(repository, progress_callback)
+                _run_streaming(
+                    ("git", "clone", *last_resort_clone_arguments),
+                    phase=RepositorySyncPhase.CLONING,
+                    progress_start=10,
+                    progress_end=72,
+                    status_message="Downloading a compatible checkout in the background…",
+                    progress_callback=progress_callback,
+                    failure_code="clone_failed",
+                    failure_summary=history_error.summary,
+                )
         clone_validation_heartbeat = _progress_heartbeat(
             progress_callback,
             phase=RepositorySyncPhase.CLONING,
@@ -1791,18 +1825,58 @@ def _refresh(
         )
     source_commit = _commit(target, heartbeat_callback=validation_heartbeat)
     _check_connection(repository, progress_callback, repository_path=target)
-    _run_streaming(
-        ("git", "-C", str(target), "fetch", "--prune", "--progress", "origin"),
-        phase=RepositorySyncPhase.FETCHING,
-        progress_start=8,
-        progress_end=70,
-        status_message="Refreshing repository data in the background…",
-        progress_callback=progress_callback,
-        failure_code="fetch_failed",
-        failure_summary=(
-            "Git could not refresh this repository. Check repository access and try again."
-        ),
-    )
+    fetch_arguments = ["git", "-C", str(target), "fetch", "--prune", "--progress"]
+    is_shallow = _git_value(
+        target,
+        "rev-parse",
+        "--is-shallow-repository",
+        code="history_state_failed",
+        summary="OWL could not determine the available Git history coverage.",
+        heartbeat_callback=validation_heartbeat,
+    ) == "true"
+    if is_shallow:
+        shallow_since = timezone.now().date() - timedelta(
+            days=365 * settings.BITBUCKET_HISTORY_YEARS
+        )
+        fetch_arguments.append(f"--shallow-since={shallow_since.isoformat()}")
+    fetch_arguments.append("origin")
+    try:
+        _run_streaming(
+            tuple(fetch_arguments),
+            phase=RepositorySyncPhase.FETCHING,
+            progress_start=8,
+            progress_end=70,
+            status_message=(
+                "Refreshing repository data and available author history…"
+                if is_shallow
+                else "Refreshing repository data in the background…"
+            ),
+            progress_callback=progress_callback,
+            failure_code="fetch_failed",
+            failure_summary=(
+                "Git could not refresh this repository. Check repository access and try again."
+            ),
+        )
+    except RepositorySyncError as history_error:
+        if not is_shallow or history_error.code != "fetch_failed":
+            raise
+        log_event(
+            logger,
+            logging.WARNING,
+            "git_fetch_history_fallback",
+            repository_id=repository.pk,
+            reason="dated_history_fetch_failed",
+        )
+        _run_streaming(
+            ("git", "-C", str(target), "fetch", "--prune", "--progress", "origin"),
+            phase=RepositorySyncPhase.FETCHING,
+            progress_start=10,
+            progress_end=70,
+            status_message="Refreshing repository data with available server history…",
+            progress_callback=progress_callback,
+            failure_code="fetch_failed",
+            failure_summary=history_error.summary,
+        )
     fetched_validation_heartbeat = _progress_heartbeat(
         progress_callback,
         phase=RepositorySyncPhase.FETCHING,

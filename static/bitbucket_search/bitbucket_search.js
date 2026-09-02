@@ -427,6 +427,13 @@
             if (documents) {
                 documents.textContent = `${repository.pdfCount} PDF · ${repository.vsdxCount} VSDX`;
             }
+            const indexCounts = card.querySelector("[data-repository-index-counts]");
+            if (indexCounts) {
+                const counts = repository.activity?.pdfCounts || {};
+                indexCounts.textContent = `Queued ${Number(counts.queued || 0)} · Passed ${Number(counts.passed || 0)}`
+                    + ` · Failed ${Number(counts.failed || 0)} · Cancelled ${Number(counts.cancelled || 0)}`
+                    + ` · Workers ${Number(counts.running || 0)}/${Number(repository.indexWorkerLimit || 0)}`;
+            }
             const exclusionBadge = card.querySelector("[data-repository-exclusion]");
             if (exclusionBadge) {
                 exclusionBadge.hidden = !repository.refreshExcluded;

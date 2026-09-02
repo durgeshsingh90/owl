@@ -156,6 +156,101 @@ def test_background_clone_then_refresh_materializes_only_pdf_and_vsdx(tmp_path, 
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="Git is required")
+def test_clone_keeps_dated_history_when_server_rejects_partial_clone(
+    tmp_path,
+    settings,
+    monkeypatch,
+):
+    remote, _source = _create_remote(tmp_path)
+    settings.BITBUCKET_REPOSITORIES_ROOT = tmp_path / "media" / "bitbucket" / "repositories"
+    settings.BITBUCKET_TEMP_ROOT = tmp_path / "media" / "bitbucket" / "tmp"
+    settings.BITBUCKET_GIT_TIMEOUT_SECONDS = 30
+    repository, job = _queued_repository(remote)
+    original_run_streaming = git_sync._run_streaming
+    clone_commands: list[tuple[str, ...]] = []
+
+    def reject_partial_clone(arguments, **kwargs):
+        if tuple(arguments[:2]) == ("git", "clone"):
+            clone_commands.append(tuple(arguments))
+            if "--filter=blob:none" in arguments:
+                raise git_sync.RepositorySyncError(
+                    "clone_failed",
+                    "Synthetic server does not support partial clone.",
+                )
+        return original_run_streaming(arguments, **kwargs)
+
+    monkeypatch.setattr(git_sync, "_run_streaming", reject_partial_clone)
+
+    claimed = claim_next_job()
+    assert claimed is not None and claimed.pk == job.pk
+    completed = execute_claimed_job(claimed.pk)
+
+    repository.refresh_from_db()
+    document = repository.pdf_documents.select_related("added_commit").get(
+        relative_path="docs/Architecture.PDF"
+    )
+    assert completed.status == RepositorySyncJobStatus.SUCCEEDED
+    assert len(clone_commands) == 2
+    assert "--filter=blob:none" in clone_commands[0]
+    assert any(argument.startswith("--shallow-since=") for argument in clone_commands[1])
+    assert "--depth=1" not in clone_commands[1]
+    assert document.added_evidence == PDFDocumentAddedEvidence.CONFIRMED
+    assert document.added_commit is not None
+    assert document.added_commit.author_name == "Synthetic OWL"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="Git is required")
+def test_refresh_recovers_author_evidence_for_an_existing_depth_one_checkout(
+    tmp_path,
+    settings,
+    monkeypatch,
+):
+    remote, source = _create_remote(tmp_path)
+    (source / "README.md").write_text("new head", encoding="utf-8")
+    _git("add", "README.md", cwd=source)
+    _git("commit", "-m", "Advance the default branch", cwd=source)
+    _git("push", "origin", "main", cwd=source)
+    settings.BITBUCKET_REPOSITORIES_ROOT = tmp_path / "media" / "bitbucket" / "repositories"
+    settings.BITBUCKET_TEMP_ROOT = tmp_path / "media" / "bitbucket" / "tmp"
+    settings.BITBUCKET_GIT_TIMEOUT_SECONDS = 30
+    repository, job = _queued_repository(remote)
+    original_run_streaming = git_sync._run_streaming
+
+    def force_depth_one_clone(arguments, **kwargs):
+        if tuple(arguments[:2]) == ("git", "clone") and any(
+            argument.startswith("--shallow-since=") for argument in arguments
+        ):
+            raise git_sync.RepositorySyncError(
+                "clone_failed",
+                "Synthetic dated-history clone rejection.",
+            )
+        return original_run_streaming(arguments, **kwargs)
+
+    monkeypatch.setattr(git_sync, "_run_streaming", force_depth_one_clone)
+    claimed = claim_next_job()
+    assert claimed is not None and claimed.pk == job.pk
+    assert execute_claimed_job(claimed.pk).status == RepositorySyncJobStatus.SUCCEEDED
+
+    repository.refresh_from_db()
+    document = repository.pdf_documents.get(relative_path="docs/Architecture.PDF")
+    assert repository.history_is_shallow is True
+    assert document.added_commit_id is None
+
+    monkeypatch.setattr(git_sync, "_run_streaming", original_run_streaming)
+    queued = queue_repository_refresh(repository.pk)
+    claimed = claim_next_job()
+    assert claimed is not None and claimed.pk == queued.job.pk
+    assert execute_claimed_job(claimed.pk).status == RepositorySyncJobStatus.SUCCEEDED
+
+    repository.refresh_from_db()
+    document.refresh_from_db()
+    assert repository.history_is_shallow is False
+    assert document.added_evidence == PDFDocumentAddedEvidence.CONFIRMED
+    assert document.added_commit is not None
+    assert document.added_commit.author_name == "Synthetic OWL"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="Git is required")
 @pytest.mark.parametrize("remote_changed", (False, True))
 def test_refresh_restores_sparse_excluded_documents_without_losing_catalogue_usage(
     tmp_path,

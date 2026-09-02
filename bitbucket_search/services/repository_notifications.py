@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from django.conf import settings
 from django.db.models import (
     Avg,
     Case,
     Count,
+    F,
     IntegerField,
     Max,
     Min,
@@ -23,6 +25,7 @@ from bitbucket_search.models import (
     BitbucketRepository,
     PDFDocument,
     PDFDocumentLifecycle,
+    PDFExtractionJob,
     PDFExtractionJobStatus,
     PDFIndexState,
     RepositorySyncJob,
@@ -32,6 +35,7 @@ from bitbucket_search.models import (
     RepositorySyncState,
 )
 from bitbucket_search.services.git_output import bounded_git_output
+from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 from bitbucket_search.services.repository_activity import summarize_operation_activities
 from bitbucket_search.services.repository_worker_timing import (
     current_pdf_extraction_jobs,
@@ -202,17 +206,33 @@ def _document_states():
 
 
 def _extraction_states(*, observed_at):
-    # An old revision's queued job must not keep a newly published catalogue busy.
-    current = current_pdf_extraction_jobs()
+    # Include terminal attempts for visible progress totals, while excluding jobs
+    # for obsolete document revisions from the active worker calculation.
+    current = PDFExtractionJob.objects.filter(
+        document__lifecycle_state=PDFDocumentLifecycle.ACTIVE,
+        document__local_policy__isnull=True,
+        target_git_blob_id=F("document__git_blob_id"),
+        target_relative_path=F("document__relative_path"),
+        target_file_size=F("document__file_size"),
+        target_extractor_version=PDF_EXTRACTOR_VERSION,
+    )
+    active = Q(status=PDFExtractionJobStatus.RUNNING) | Q(
+        status=PDFExtractionJobStatus.QUEUED,
+        document__repository__enabled=True,
+    )
     return {
         row["document__repository_id"]: row
         for row in current.values("document__repository_id")
         .annotate(
-            active_count=Count("pk"),
+            active_count=Count("pk", filter=active),
             running_count=Count("pk", filter=Q(status=PDFExtractionJobStatus.RUNNING)),
             running_started_at=Min("started_at", filter=running_pdf_start_filter(observed_at)),
             running_progress=Avg("progress", filter=running_pdf_start_filter(observed_at)),
             queued_count=Count("pk", filter=Q(status=PDFExtractionJobStatus.QUEUED)),
+            succeeded_count=Count("pk", filter=Q(status=PDFExtractionJobStatus.SUCCEEDED)),
+            failed_count=Count("pk", filter=Q(status=PDFExtractionJobStatus.FAILED)),
+            interrupted_count=Count("pk", filter=Q(status=PDFExtractionJobStatus.INTERRUPTED)),
+            cancelled_count=Count("pk", filter=Q(status=PDFExtractionJobStatus.CANCELLED)),
             updated_at=Max(Coalesce("heartbeat_at", "started_at", "requested_at")),
         )
         .order_by()
@@ -504,6 +524,15 @@ def repository_notification_statuses(*, at=None) -> dict[str, object]:
                 "progress": primary_activity["progress"] if primary_activity else None,
                 "activity": primary_activity,
                 "activities": activities,
+                "indexingSummary": {
+                    "queued": extraction.get("queued_count", 0),
+                    "running": extraction.get("running_count", 0),
+                    "passed": extraction.get("succeeded_count", 0),
+                    "failed": extraction.get("failed_count", 0),
+                    "interrupted": extraction.get("interrupted_count", 0),
+                    "cancelled": extraction.get("cancelled_count", 0),
+                    "workerLimit": settings.PDF_MAX_EXTRACTION_WORKERS,
+                },
                 "updatedAt": _iso(updated_at),
                 "lastSuccessAt": _iso(
                     _latest_time(repository["last_sync_successful_at"], repository["successful_at"])

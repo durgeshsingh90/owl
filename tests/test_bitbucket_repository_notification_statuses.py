@@ -453,6 +453,35 @@ def test_pdf_text_work_remains_busy_after_git_success(job_status):
     assert payload["items"][0]["lastOutcome"] == "succeeded"
 
 
+def test_repository_payload_exposes_pdf_progress_counts_and_worker_capacity(settings):
+    settings.PDF_MAX_EXTRACTION_WORKERS = 4
+    repository = _repository(sync_state=RepositorySyncState.READY)
+    for index, status in enumerate(
+        (
+            PDFExtractionJobStatus.QUEUED,
+            PDFExtractionJobStatus.RUNNING,
+            PDFExtractionJobStatus.SUCCEEDED,
+            PDFExtractionJobStatus.FAILED,
+            PDFExtractionJobStatus.CANCELLED,
+        ),
+        start=1,
+    ):
+        document = _document(repository, relative_path=f"docs/{index}.pdf")
+        _extraction(document, status)
+
+    summary = _item(repository)["indexingSummary"]
+
+    assert summary == {
+        "queued": 1,
+        "running": 1,
+        "passed": 1,
+        "failed": 1,
+        "interrupted": 0,
+        "cancelled": 1,
+        "workerLimit": 4,
+    }
+
+
 @pytest.mark.parametrize(
     ("job_status", "expected_status"),
     [

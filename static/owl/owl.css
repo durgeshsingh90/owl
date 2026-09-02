@@ -3758,6 +3758,26 @@ body[data-theme="dark"] .notification-repository[data-operation="indexing"] .not
     line-height: 1.5;
 }
 
+.notification-repository__progress {
+    display: grid;
+    gap: 0.35rem;
+    margin-top: 0.7rem;
+}
+
+.notification-repository__progress progress {
+    width: 100%;
+    height: 0.65rem;
+    accent-color: var(--accent, #f5b544);
+}
+
+.notification-repository__progress small {
+    color: var(--text-muted, #aeb8ca);
+}
+
+.notification-repository__counts {
+    font-variant-numeric: tabular-nums;
+}
+
 .notification-repository__full-name {
     display: block;
     color: var(--notification-ink);

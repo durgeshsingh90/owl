@@ -801,12 +801,25 @@
             const updated = createNotificationElement("p", "notification-repository__date");
             const lastSuccess = createNotificationElement("p", "notification-repository__date");
             const lastOutcome = createNotificationElement("p", "notification-repository__date");
+            const gitProgress = createNotificationElement("section", "notification-repository__progress");
+            const gitProgressHeading = createNotificationElement("strong", "", "Git progress");
+            const gitProgressBar = createNotificationElement("progress");
+            gitProgressBar.max = 100;
+            const gitProgressLabel = createNotificationElement("small");
+            gitProgress.append(gitProgressHeading, gitProgressBar, gitProgressLabel);
+            const indexProgress = createNotificationElement("section", "notification-repository__progress notification-repository__progress--pdf");
+            const indexProgressHeading = createNotificationElement("strong", "", "PDF indexing progress");
+            const indexProgressBar = createNotificationElement("progress");
+            indexProgressBar.max = 100;
+            const indexProgressLabel = createNotificationElement("small");
+            const indexCounts = createNotificationElement("small", "notification-repository__counts");
+            indexProgress.append(indexProgressHeading, indexProgressBar, indexProgressLabel, indexCounts);
             const link = createNotificationElement("a", "notification-repository__link", "View repository");
             const statusLink = createNotificationElement("a", "notification-repository__link", "Full status");
             const gitLog = createNotificationElement("details", "notification-repository__git-log");
             gitLog.setAttribute("data-repository-git-log", "");
             const gitLogSummary = createNotificationElement("summary", "notification-repository__git-log-toggle");
-            const gitLogLabel = createNotificationElement("span", "", "Git log");
+            const gitLogLabel = createNotificationElement("span", "", "View Git logs");
             const gitLogStatus = createNotificationElement("span", "notification-repository__git-log-status", "Not loaded");
             gitLogSummary.append(gitLogLabel, gitLogStatus);
             const gitLogMessage = createNotificationElement("p", "notification-repository__git-log-message", "Open to load Git output.");
@@ -821,7 +834,7 @@
             const indexLog = createNotificationElement("details", "notification-repository__git-log notification-repository__index-log");
             indexLog.setAttribute("data-repository-index-log", "");
             const indexLogSummary = createNotificationElement("summary", "notification-repository__git-log-toggle");
-            const indexLogLabel = createNotificationElement("span", "", "PDF indexing log");
+            const indexLogLabel = createNotificationElement("span", "", "View PDF indexing logs");
             const indexLogStatus = createNotificationElement("span", "notification-repository__git-log-status", "Not loaded");
             indexLogSummary.append(indexLogLabel, indexLogStatus);
             const indexLogMessage = createNotificationElement("p", "notification-repository__git-log-message", "Open to load PDF indexing activity.");
@@ -837,12 +850,14 @@
             indexStop.hidden = true;
             indexLog.append(indexLogSummary, indexLogMessage, indexLogOutput, indexLogTruncated, indexStop);
             statusLink.textContent = "View full logs";
-            body.append(fullName, detail, updated, lastOutcome, lastSuccess, gitLog, indexLog, link, statusLink);
+            body.append(fullName, detail, gitProgress, indexProgress, updated, lastOutcome, lastSuccess, gitLog, indexLog, link, statusLink);
             details.append(summary, body);
             row.append(details);
             const elements = {
                 row, details, summary, icon, name, status, time, timer, logPreview, previewLines, fullName, detail, updated,
-                lastSuccess, lastOutcome, link, statusLink, gitLog, gitLogSummary, gitLogStatus,
+                lastSuccess, lastOutcome, gitProgress, gitProgressBar, gitProgressLabel,
+                indexProgress, indexProgressBar, indexProgressLabel, indexCounts,
+                link, statusLink, gitLog, gitLogSummary, gitLogStatus,
                 gitLogMessage, gitLogOutput, gitLogTruncated, indexLog, indexLogSummary,
                 indexLogStatus, indexLogMessage, indexLogOutput, indexLogTruncated,
                 indexStop,
@@ -956,6 +971,31 @@
                     ? `${operationNames[operation]} · ${operationProgress}`
                     : compactStatuses[item.status] || status;
                 elements.status.title = item.phaseLabel || status;
+                const syncActivity = Array.isArray(item.activities)
+                    ? item.activities.find((activity) => ["clone", "pull"].includes(activity?.operation))
+                    : null;
+                const gitProgressValue = syncActivity?.progress ?? (["succeeded", "success"].includes(item.lastOutcome) ? 100 : null);
+                elements.gitProgressBar.removeAttribute("value");
+                if (gitProgressValue !== null && gitProgressValue !== undefined) {
+                    elements.gitProgressBar.value = Math.min(100, Math.max(0, Number(gitProgressValue) || 0));
+                    elements.gitProgressBar.setAttribute("value", String(elements.gitProgressBar.value));
+                }
+                elements.gitProgressLabel.textContent = syncActivity
+                    ? `${syncActivity.phaseLabel || "Git running"} · ${syncActivity.runningJobs || 0} worker running`
+                    : item.lastOutcome ? `Last Git operation: ${item.lastOutcome}` : "Git waiting";
+                const counts = item.indexingSummary || {};
+                const queuedCount = Math.max(0, Number(counts.queued) || 0);
+                const runningCount = Math.max(0, Number(counts.running) || 0);
+                const passedCount = Math.max(0, Number(counts.passed) || 0);
+                const failedCount = Math.max(0, Number(counts.failed) || 0);
+                const cancelledCount = Math.max(0, Number(counts.cancelled) || 0);
+                const totalCount = queuedCount + runningCount + passedCount + failedCount + cancelledCount;
+                const finishedCount = passedCount + failedCount + cancelledCount;
+                const indexPercent = totalCount ? Math.round((finishedCount / totalCount) * 100) : 0;
+                elements.indexProgressBar.value = indexPercent;
+                elements.indexProgressBar.setAttribute("value", String(indexPercent));
+                elements.indexProgressLabel.textContent = `${indexPercent}% · ${runningCount} of ${Math.max(0, Number(counts.workerLimit) || 0)} workers running`;
+                elements.indexCounts.textContent = `Queued ${queuedCount} · Passed ${passedCount} · Failed ${failedCount} · Cancelled ${cancelledCount}`;
                 const logState = elements.gitLogState;
                 const logsUrl = localTargetPath(item.logsUrl);
                 const cancelIndexingUrl = localTargetPath(item.cancelIndexingUrl);

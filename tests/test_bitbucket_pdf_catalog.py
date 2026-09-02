@@ -397,7 +397,9 @@ def test_second_publish_at_same_commit_preserves_confirmed_addition_evidence(
     )
 
     document.refresh_from_db()
-    assert reused_catalog.documents[0].added_evidence == PDFDocumentAddedEvidence.NOT_FOUND
+    # A checkout that became complete since the stored repository snapshot must
+    # rebuild attribution even when HEAD itself did not change.
+    assert reused_catalog.documents[0].added_evidence == PDFDocumentAddedEvidence.CONFIRMED
     assert document.added_evidence == PDFDocumentAddedEvidence.CONFIRMED
     assert document.added_commit_id == original_added_commit_id
     assert document.timeline_basis == PDFDocumentTimelineBasis.GIT_ADDED

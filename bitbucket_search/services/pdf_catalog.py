@@ -777,6 +777,7 @@ def _build_repository_pdf_catalog(
 
     can_reuse_history = (
         repository.metadata_indexed_commit == result_commit
+        and repository.history_is_shallow == bool(shallow_boundaries)
         and not any(state == PDFLocalPolicyState.RESUMING for _, state, _ in policy_signature)
         and repository.pdf_documents.filter(lifecycle_state=PDFDocumentLifecycle.ACTIVE).exists()
     )

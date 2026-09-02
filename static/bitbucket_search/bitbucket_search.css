@@ -815,6 +815,13 @@
     white-space: normal;
 }
 
+.bb-repository-card__copy .bb-repository-index-counts {
+    color: var(--bb-muted);
+    font-variant-numeric: tabular-nums;
+    overflow: visible;
+    white-space: normal;
+}
+
 .bb-repository-work-label[hidden] {
     display: none;
 }

@@ -74,8 +74,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=delete-selected-icon-v2" in html
-    assert "bitbucket_search/bitbucket_search.js?v=delete-selected-icon-v2" in html
+    assert "bitbucket_search/bitbucket_search.css?v=repository-progress-v3" in html
+    assert "bitbucket_search/bitbucket_search.js?v=repository-progress-v3" in html
     assert 'name="confirmed"' not in html
 
 
