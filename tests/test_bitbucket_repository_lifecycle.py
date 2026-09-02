@@ -315,7 +315,11 @@ def test_removal_retains_intent_when_checkout_reader_outlives_bounded_wait(
     with pytest.raises(RepositoryLifecycleError) as caught:
         remove_repository(repository.pk)
     assert caught.value.code == "repository_delete_confirmation_required"
-    monkeypatch.setattr(repository_lifecycle, "_REMOVAL_CHECKOUT_WAIT_SECONDS", 0)
+    monkeypatch.setattr(
+        repository_lifecycle.settings,
+        "BITBUCKET_REPOSITORY_REMOVAL_WAIT_SECONDS",
+        0,
+    )
     with (
         repository_checkout_lock(repository.pk, blocking=False, shared=True),
         pytest.raises(RepositoryLifecycleError) as caught,

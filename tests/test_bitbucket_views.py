@@ -80,8 +80,9 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=connection-status-v1" in html
-    assert "bitbucket_search/bitbucket_search.js?v=select-all-repositories-v1" in html
+    assert "bitbucket_search/bitbucket_search.css?v=blocking-repository-actions-v1" in html
+    assert "bitbucket_search/bitbucket_search.js?v=blocking-repository-actions-v1" in html
+    assert "data-repository-operation-overlay" in html
     assert "bitbucket_search/icons/work-in-progress.gif" in html
     assert "bitbucket_search/icons/connection-connected.png" in html
     assert "bitbucket_search/icons/connection-disconnected.png" in html
@@ -1079,7 +1080,7 @@ def test_pdf_timeline_fragment_preserves_boundary_group_key(loopback_client):
     assert first_page.status_code == 200
     assert f'data-document-id="{newer_document.pk}"' in first_html
     assert 'data-timeline-group-key="repo-date-unavailable"' not in first_html
-    assert "First seen by OWL" in first_html
+    assert "Git date unavailable" in first_html
     assert f'href="{next_page_url}" rel="next" data-pdf-next-page' in first_html
 
     second_page = loopback_client.get(
@@ -1093,7 +1094,7 @@ def test_pdf_timeline_fragment_preserves_boundary_group_key(loopback_client):
     assert payload["nextPageUrl"] == ""
     assert f'data-document-id="{older_document.pk}"' in payload["html"]
     assert 'data-timeline-group-key="repo-date-unavailable"' not in payload["html"]
-    assert "First seen by OWL" in payload["html"]
+    assert "Git date unavailable" in payload["html"]
     assert payload["html"].count('name="return_page" value="2"') == 2
     assert 'data-tooltip="Open file"' in payload["html"]
     assert 'data-tooltip="Open folder"' in payload["html"]

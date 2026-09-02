@@ -126,7 +126,7 @@ def test_timeline_row_labels_git_author_without_claiming_push_or_project_evidenc
 
 
 @override_settings(TIME_ZONE="Europe/Dublin")
-def test_unknown_git_addition_uses_explicit_owl_discovery_fallback(tmp_path, settings):
+def test_unknown_git_addition_never_displays_owl_discovery_as_a_git_date(tmp_path, settings):
     settings.BITBUCKET_REPOSITORIES_ROOT = tmp_path / "managed-repositories"
     repository = _repository()
     discovered_at = datetime(2026, 8, 22, 9, 15, tzinfo=UTC)
@@ -143,11 +143,11 @@ def test_unknown_git_addition_uses_explicit_owl_discovery_fallback(tmp_path, set
     row = views._timeline_row(document)
 
     assert row.added_by_label == "Unavailable in available Git history"
-    assert row.added_date_label == "22 Aug 2026"
-    assert row.added_date_source_label == "First seen by OWL"
-    assert "First seen by OWL · 22 Aug 2026, 10:15" in row.added_date_detail
-    assert "Original Git-added date is unavailable" in row.added_date_detail
-    assert row.history_label == "Available history · Git-added date unavailable"
+    assert row.added_date_label == "Unavailable"
+    assert row.added_date_source_label == "Git date unavailable"
+    assert "No Git commit timestamp is available" in row.added_date_detail
+    assert "22 Aug 2026" not in row.added_date_detail
+    assert row.history_label == "Available history · Original Git-added date unavailable"
 
 
 @pytest.mark.parametrize("search", [False, True])
@@ -212,7 +212,7 @@ def test_list_and_search_show_original_repo_addition_not_discovery_or_latest_cha
     ],
 )
 @override_settings(TIME_ZONE="Europe/Dublin")
-def test_unknown_git_dates_show_explicit_owl_discovery_fallback(
+def test_unknown_addition_uses_latest_available_git_commit_and_never_owl_discovery(
     client, search, evidence, with_commit
 ):
     repository = _repository()
@@ -229,7 +229,7 @@ def test_unknown_git_dates_show_explicit_owl_discovery_fallback(
         filename="Legacy Guide.pdf",
         relative_path="Legacy Guide.pdf",
         added_evidence=evidence,
-        added_commit=commit,
+        last_commit=commit,
         discovered_at=datetime(2026, 8, 30, tzinfo=UTC),
         timeline_at=datetime(2026, 8, 30, tzinfo=UTC),
     )
@@ -237,13 +237,17 @@ def test_unknown_git_dates_show_explicit_owl_discovery_fallback(
     html = response.content.decode()
     row_start = html.index(f'data-document-id="{document.pk}"')
     row_html = html[row_start : html.index("</tr>", row_start)]
-    assert "30 Aug 2026" in row_html
-    assert "First seen by OWL" in row_html
-    assert "Original Git-added date is unavailable" in row_html
-    assert "2024" not in row_html
+    assert "30 Aug 2026" not in row_html
+    assert "First seen by OWL" not in row_html
+    if with_commit:
+        assert "2 Jan 2024" in row_html
+        assert "Git commit" in row_html
+    else:
+        assert "Git date unavailable" in row_html
+        assert "Unavailable" in row_html
     if not search:
         expected_key, _label, _detail = views._timeline_bucket(
-            timezone.localtime(document.discovered_at).date(),
+            timezone.localtime(commit.committed_at if commit else document.discovered_at).date(),
             today=timezone.localdate(),
         )
         assert f'data-timeline-group-key="{expected_key}"' in html
@@ -314,7 +318,7 @@ def test_document_page_returns_json_and_html_with_stable_discovery_date_paginati
     assert payload["nextPageUrl"] == ""
     assert payload["html"].count("data-pdf-row") == 1
     assert "Document-00.pdf" in payload["html"]
-    assert "First seen by OWL" in payload["html"]
+    assert "Git date unavailable" in payload["html"]
     assert 'data-timeline-group-key="repo-date-unavailable"' not in payload["html"]
     assert 'name="return_page" value="2"' in payload["html"]
 

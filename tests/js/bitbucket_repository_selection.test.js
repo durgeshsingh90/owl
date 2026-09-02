@@ -115,7 +115,7 @@ const element = (hook, attributes = {}, tag = "div") =>
 
 function boot({
     repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = false,
-    duplicateCopies = false, connectionResponse = null,
+    duplicateCopies = false, connectionResponse = null, pdfCount = 0,
 } = {}) {
     const makeControls = () => ({
         selectAll: element("data-selected-select-all", { type: "button", hidden: "", disabled: "" }, "button"),
@@ -175,6 +175,23 @@ function boot({
     workspace.appendChild(deleteStatus);
     const filter = element("data-repository-filter", { type: "search" }, "input");
     workspace.appendChild(filter);
+    const operationOverlay = element("data-repository-operation-overlay", { hidden: "", tabindex: "-1" });
+    const operationTitle = element("data-repository-operation-title", {}, "strong");
+    const operationDetail = element("data-repository-operation-detail", {}, "span");
+    operationOverlay.appendChild(operationTitle);
+    operationOverlay.appendChild(operationDetail);
+    workspace.appendChild(operationOverlay);
+    const pdfSelectionCount = element("data-pdf-selection-count", { hidden: "" }, "span");
+    const selectAllPdfs = element("data-select-all-pdfs", { type: "checkbox" }, "input");
+    workspace.appendChild(pdfSelectionCount);
+    workspace.appendChild(selectAllPdfs);
+    const pdfs = Array.from({ length: pdfCount }, (_, index) => {
+        const row = element("data-pdf-row", { "data-document-id": String(index + 1) }, "tr");
+        const checkbox = element("data-pdf-select", { type: "checkbox", value: String(index + 1) }, "input");
+        row.appendChild(checkbox);
+        workspace.appendChild(row);
+        return { row, checkbox };
+    });
     let connection = null;
     if (connectionResponse) {
         connection = element("data-repository-connection-result", { "data-state": "checking" }, "button");
@@ -219,6 +236,7 @@ function boot({
         };
     });
     const document = new Element("document", {}, [workspace]);
+    document.documentElement = new Element("html");
     document.getElementById = (id) => document.querySelector(`#${id}`);
     document.createElement = (tag) => new Element(tag);
     const timers = new Map();
@@ -254,7 +272,8 @@ function boot({
     });
     return {
         controls, controlCopies, cards, form, global, globalForm, workspace, timerUpdates, staleTimers, deleteStatus,
-        connection,
+        connection, pdfs, pdfSelectionCount, selectAllPdfs,
+        operationOverlay, operationTitle, operationDetail, document,
         settle() { return new Promise((resolve) => setImmediate(resolve)); },
         queueResponse(response) { responses.push(response); },
         reloads: () => reloads,
@@ -309,6 +328,38 @@ function boot({
         },
     };
 }
+
+test("PDF rows support independent multi-selection and select-all on the visible page", () => {
+    const page = boot({ repositories: [{ id: 1 }], pdfCount: 3 });
+    page.pdfs[0].checkbox.checked = true;
+    page.pdfs[0].checkbox.dispatch("change");
+    page.pdfs[2].checkbox.checked = true;
+    page.pdfs[2].checkbox.dispatch("change");
+    assert.equal(page.pdfSelectionCount.hidden, false);
+    assert.equal(page.pdfSelectionCount.textContent, "2 PDFs selected");
+    assert.equal(page.selectAllPdfs.indeterminate, true);
+
+    page.selectAllPdfs.checked = true;
+    page.selectAllPdfs.dispatch("change");
+    assert.equal(page.pdfs.every(({ checkbox }) => checkbox.checked), true);
+    assert.equal(page.pdfSelectionCount.textContent, "3 PDFs selected");
+    assert.equal(page.selectAllPdfs.indeterminate, false);
+    assert.equal(page.selectAllPdfs.checked, true);
+});
+
+test("stopping repository work blocks the page with a focused loading screen", () => {
+    const page = boot({ repositories: [{ id: 1, pdf: true }] });
+    page.select(0);
+    const submission = page.submit("stop");
+    assert.equal(submission.defaultPrevented, false);
+    assert.equal(page.operationOverlay.hidden, false);
+    assert.equal(page.operationOverlay.focused, true);
+    assert.equal(page.operationTitle.textContent, "Stopping repository work…");
+    assert.match(page.operationDetail.textContent, /Stopping Git and PDF workers/);
+    assert.equal(page.document.documentElement.classList.contains("bb-operation-blocked"), true);
+    assert.equal(page.controls.stop.disabled, true);
+    assert.equal(page.controls.remove.disabled, true);
+});
 
 test("connection test runs on load and runs again when its top-bar icon is clicked", async () => {
     const page = boot({

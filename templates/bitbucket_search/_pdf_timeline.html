@@ -2,7 +2,7 @@
 {% if group.rows %}
 <tbody class="bb-pdf-group" data-pdf-group data-timeline-group-key="{{ group.key }}">
     <tr class="bb-period-row" data-pdf-group-heading>
-        <th colspan="9" scope="rowgroup" id="bb-pdf-period-{{ group.rows.0.document.pk }}">
+        <th colspan="10" scope="rowgroup" id="bb-pdf-period-{{ group.rows.0.document.pk }}">
             <span class="bb-period-heading__dot" aria-hidden="true"></span>
             <span class="bb-period-heading">
                 <strong>{{ group.label }}</strong>
@@ -13,6 +13,9 @@
     {% for row in group.rows %}
     {% with document=row.document %}
     <tr class="bb-document-row" id="pdf-document-{{ document.pk }}" data-pdf-row data-document-id="{{ document.pk }}"{% if search_active %} data-search-result-row{% endif %}>
+        <td class="bb-document-cell bb-document-cell--select" headers="bb-pdf-column-select">
+            <input type="checkbox" value="{{ document.pk }}" data-pdf-select aria-label="Select {{ document.filename }}">
+        </td>
         <td class="bb-document-cell bb-document-cell--name" headers="bb-pdf-column-name">
             <span class="bb-cell-label" aria-hidden="true">PDF</span>
             <span class="bb-document-name">
@@ -117,7 +120,7 @@
     </tr>
     {% if row.search_hit %}
     <tr class="bb-search-context-row">
-        <td colspan="9">
+        <td colspan="10">
             <div class="bb-search-context">
                 <div class="bb-search-explanations" aria-label="Why this PDF matched">
                     {% for explanation in row.search_hit.explanations %}

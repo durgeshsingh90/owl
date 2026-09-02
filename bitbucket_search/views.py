@@ -372,13 +372,15 @@ def _display_full_path(document: PDFDocument) -> str:
 
 
 def _repository_added_at(document: PDFDocument) -> datetime | None:
-    """Use original Git addition evidence, never the OWL discovery timestamp."""
+    """Use the best available real Git timestamp, never OWL discovery time."""
 
     if (
         document.added_evidence == PDFDocumentAddedEvidence.CONFIRMED
         and document.added_commit is not None
     ):
         return document.added_commit.committed_at
+    if document.last_commit is not None:
+        return document.last_commit.committed_at
     return None
 
 
@@ -395,23 +397,31 @@ def _timeline_row(
 ) -> PDFTimelineRow:
     added_at = _repository_added_at(document)
     displayed_at = _timeline_display_at(document)
-    if added_at is not None:
+    original_addition = (
+        document.added_evidence == PDFDocumentAddedEvidence.CONFIRMED
+        and document.added_commit is not None
+    )
+    if original_addition:
         added_by = f"{document.added_commit.author_name} · Git author"
         added_source = "Git addition"
         added_detail = f"Original Git addition · {_display_datetime(added_at)}"
+    elif added_at is not None:
+        added_by = f"{document.last_commit.author_name} · Git author"
+        added_source = "Git commit"
+        added_detail = (
+            f"Latest available Git commit · {_display_datetime(added_at)}. "
+            "The original addition commit is outside the available history."
+        )
     else:
         added_by = "Unavailable in available Git history"
-        added_source = "First seen by OWL"
-        added_detail = (
-            f"First seen by OWL · {_display_datetime(displayed_at)}. "
-            "Original Git-added date is unavailable in the synchronized history."
-        )
+        added_source = "Git date unavailable"
+        added_detail = "No Git commit timestamp is available in the synchronized history."
 
     history_label = (
         "Available history" if document.repository.history_is_shallow else "Full reachable history"
     )
-    if added_at is None:
-        history_label = f"{history_label} · Git-added date unavailable"
+    if not original_addition:
+        history_label = f"{history_label} · Original Git-added date unavailable"
 
     full_path = _display_full_path(document)
     path_copy_available = not full_path.startswith("Unavailable:")
@@ -427,7 +437,11 @@ def _timeline_row(
         path_copy_available=path_copy_available,
         project_label=_project_label(document.repository),
         added_by_label=added_by,
-        added_date_label=_display_date(timezone.localtime(displayed_at).date()),
+        added_date_label=(
+            _display_date(timezone.localtime(added_at).date())
+            if added_at is not None
+            else "Unavailable"
+        ),
         added_date_source_label=added_source,
         added_date_detail=added_detail,
         history_label=history_label,
@@ -450,6 +464,7 @@ def _pdf_timeline_page(page_number: object) -> tuple[Page, tuple[PDFTimelineGrou
                     added_commit__isnull=False,
                     then=F("added_commit__committed_at"),
                 ),
+                When(last_commit__isnull=False, then=F("last_commit__committed_at")),
                 default=F("discovered_at"),
                 output_field=DateTimeField(),
             )

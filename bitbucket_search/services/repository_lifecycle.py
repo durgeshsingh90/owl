@@ -46,7 +46,6 @@ _ACTIVE_SYNC_STATES = (
     RepositorySyncState.FETCHING,
     RepositorySyncState.UPDATING,
 )
-_REMOVAL_CHECKOUT_WAIT_SECONDS = 3.0
 _REMOVAL_CHECKOUT_POLL_SECONDS = 0.05
 
 
@@ -198,9 +197,13 @@ def _ensure_pdf_stopped(repository: BitbucketRepository) -> None:
 
 @contextmanager
 def _bounded_repository_checkout_lock(repository_id: int) -> Iterator[None]:
-    """Wait briefly for revoked PDF readers without hanging a delete request."""
+    """Wait for revoked PDF readers, bounded by the Django deletion setting."""
 
-    deadline = time.monotonic() + max(0.0, _REMOVAL_CHECKOUT_WAIT_SECONDS)
+    wait_seconds = max(
+        0.0,
+        float(getattr(settings, "BITBUCKET_REPOSITORY_REMOVAL_WAIT_SECONDS", 120)),
+    )
+    deadline = time.monotonic() + wait_seconds
     acquired = None
     while acquired is None:
         candidate = repository_checkout_lock(repository_id, blocking=False)

@@ -305,6 +305,20 @@
     }
 
     const selectionForm = workspace.querySelector("[data-repository-selection-form]");
+    const operationOverlay = workspace.querySelector("[data-repository-operation-overlay]");
+    const showOperationOverlay = (operation, count) => {
+        if (!operationOverlay || !["stop_indexing", "remove"].includes(operation)) return;
+        const removing = operation === "remove";
+        const title = operationOverlay.querySelector("[data-repository-operation-title]");
+        const detail = operationOverlay.querySelector("[data-repository-operation-detail]");
+        if (title) title.textContent = removing ? "Deleting repositories…" : "Stopping repository work…";
+        if (detail) detail.textContent = removing
+            ? `Removing ${count} selected ${repositoryNoun(count)}, downloaded files and indexed data. This can take a minute.`
+            : `Stopping Git and PDF workers for ${count} selected ${repositoryNoun(count)}. This can take a minute.`;
+        operationOverlay.hidden = false;
+        document.documentElement.classList.add("bb-operation-blocked");
+        operationOverlay.focus();
+    };
     let deletionUnlocked = false;
     let deleteRelockTimer = null;
     let deleteUnlockExpiresAt = 0;
@@ -506,6 +520,7 @@
             resetDeleteLock();
             updateSelectedRepositoryActions();
             updateRefreshAllButtons();
+            showOperationOverlay(operation, selectedRepositoryCards().length);
             return;
         }
         if (
@@ -1208,6 +1223,33 @@
             }, 2000);
         }
         });
+    });
+
+    const pdfSelectionCount = workspace.querySelector("[data-pdf-selection-count]");
+    const selectAllPdfs = workspace.querySelector("[data-select-all-pdfs]");
+    const visiblePdfCheckboxes = () => Array.from(
+        workspace.querySelectorAll("[data-pdf-select]"),
+    ).filter((checkbox) => !checkbox.disabled && !checkbox.closest("[data-pdf-row]")?.hidden);
+    const updatePdfSelection = () => {
+        const checkboxes = visiblePdfCheckboxes();
+        const selected = checkboxes.filter((checkbox) => checkbox.checked).length;
+        if (pdfSelectionCount) {
+            pdfSelectionCount.hidden = selected === 0;
+            pdfSelectionCount.textContent = `${selected} PDF${selected === 1 ? "" : "s"} selected`;
+        }
+        if (selectAllPdfs) {
+            selectAllPdfs.checked = checkboxes.length > 0 && selected === checkboxes.length;
+            selectAllPdfs.indeterminate = selected > 0 && selected < checkboxes.length;
+        }
+    };
+    workspace.addEventListener("change", (event) => {
+        if (event.target.matches("[data-pdf-select]")) updatePdfSelection();
+        if (event.target.matches("[data-select-all-pdfs]")) {
+            visiblePdfCheckboxes().forEach((checkbox) => {
+                checkbox.checked = event.target.checked;
+            });
+            updatePdfSelection();
+        }
     });
 
     const pathCopyTimers = new WeakMap();

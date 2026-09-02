@@ -291,6 +291,10 @@ BITBUCKET_CONNECTION_TIMEOUT_SECONDS = min(
     _env_int("BITBUCKET_CONNECTION_TIMEOUT_SECONDS", 20, minimum=1), 120
 )
 BITBUCKET_WORKER_IDLE_SECONDS = _env_int("BITBUCKET_WORKER_IDLE_SECONDS", 15, minimum=1)
+# Repository deletion may need to wait for an isolated PDF parser to observe
+# cancellation and release its shared checkout lock. Keep this as a Django
+# setting so local installations can tune it without an environment file.
+BITBUCKET_REPOSITORY_REMOVAL_WAIT_SECONDS = 120
 BITBUCKET_DAILY_REFRESH_ENABLED = _env_bool("BITBUCKET_DAILY_REFRESH_ENABLED", True)
 BITBUCKET_DAILY_REFRESH_LOCAL_HOUR = _env_int(
     "BITBUCKET_DAILY_REFRESH_LOCAL_HOUR",

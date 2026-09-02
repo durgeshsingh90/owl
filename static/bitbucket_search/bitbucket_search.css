@@ -1127,6 +1127,53 @@
     background: rgb(246 249 251 / 88%);
 }
 
+.bb-blocking-operation {
+    position: fixed;
+    z-index: 1000;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 1.5rem;
+    background: rgb(30 103 190 / 22%);
+    backdrop-filter: blur(18px) saturate(125%);
+    -webkit-backdrop-filter: blur(18px) saturate(125%);
+}
+
+.bb-blocking-operation[hidden] { display: none; }
+
+.bb-blocking-operation__card {
+    display: grid;
+    width: min(92vw, 390px);
+    justify-items: center;
+    gap: 0.75rem;
+    padding: 1.65rem 1.5rem;
+    border: 1px solid rgb(255 255 255 / 42%);
+    border-radius: 22px;
+    color: #fff;
+    text-align: center;
+    background: rgb(20 84 168 / 82%);
+    box-shadow: 0 28px 80px rgb(2 24 62 / 38%);
+}
+
+.bb-blocking-operation__card strong { font-size: 1.08rem; }
+
+.bb-blocking-operation__card > span:last-child {
+    color: rgb(255 255 255 / 84%);
+    font-size: 0.78rem;
+    line-height: 1.5;
+}
+
+.bb-blocking-operation__spinner {
+    width: 34px;
+    height: 34px;
+    border: 3px solid rgb(255 255 255 / 30%);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: bb-refresh-all-spin 0.75s linear infinite;
+}
+
+html.bb-operation-blocked { cursor: wait; }
+
 .bb-app-title {
     display: flex;
     min-width: 0;
@@ -3087,7 +3134,29 @@
 }
 
 .bb-results-table .bb-column-name {
-    width: 17%;
+    width: 14%;
+}
+
+.bb-results-table .bb-column-select { width: 3%; }
+
+.bb-document-cell--select,
+#bb-pdf-column-select { text-align: center; }
+
+.bb-document-cell--select input,
+#bb-pdf-column-select input {
+    cursor: pointer;
+    accent-color: var(--bb-cyan);
+}
+
+.bb-document-row:has([data-pdf-select]:checked) td {
+    background: rgb(44 151 255 / 10%);
+}
+
+.bb-pdf-selection-count {
+    color: var(--bb-cyan-soft);
+    font-size: 0.72rem;
+    font-weight: 700;
+    white-space: nowrap;
 }
 
 .bb-results-table .bb-column-path {
@@ -4233,6 +4302,7 @@
         width: auto;
         min-width: 0;
         grid-template-areas:
+            "select name actions"
             "name name actions"
             "path path actions"
             "project repository opens"
@@ -4291,6 +4361,10 @@
 
     .bb-document-cell--name {
         grid-area: name;
+    }
+
+    .bb-document-cell--select {
+        grid-area: select;
     }
 
     .bb-document-cell--path {
@@ -4640,6 +4714,7 @@
 
     .bb-results-table .bb-document-row {
         grid-template-areas:
+            "select actions"
             "name actions"
             "path path"
             "project repository"
@@ -4710,6 +4785,7 @@
 
     .bb-results-table .bb-document-row {
         grid-template-areas:
+            "select actions"
             "name actions"
             "path path"
             "project project"

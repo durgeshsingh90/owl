@@ -5,7 +5,7 @@
 {% block theme_default %}dark{% endblock %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=connection-status-v1">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=blocking-repository-actions-v1">
 {% endblock %}
 
 {% block app_header %}{% endblock %}
@@ -25,6 +25,13 @@
     data-catalog-publication-signature="{{ catalog_publication_signature }}"
     data-daily-refresh-enabled="{{ automation_payload.enabled|yesno:'true,false' }}"
 >
+    <div class="bb-blocking-operation" data-repository-operation-overlay hidden role="alert" aria-live="assertive" aria-busy="true" tabindex="-1">
+        <div class="bb-blocking-operation__card">
+            <span class="bb-blocking-operation__spinner" aria-hidden="true"></span>
+            <strong data-repository-operation-title>Updating repositories…</strong>
+            <span data-repository-operation-detail>Please keep OWL running. This can take a minute.</span>
+        </div>
+    </div>
     <form id="bb-repository-selection-form" method="post" action="{% url 'bitbucket_search:repositories_selected' %}" data-repository-selection-form hidden>
         {% csrf_token %}
         <input type="hidden" name="excluded" value="yes" data-selected-excluded-value>
@@ -369,6 +376,7 @@
                         {% endif %}
                         <span data-extraction-summary>{% if extraction_payload.active %}PDF indexing in progress · {{ extraction_status.queued_jobs|add:extraction_status.running_jobs }} active{% else %}{{ extraction_status.indexed_documents }} indexed · {{ extraction_status.pending_documents }} pending{% endif %}</span>
                     </p>
+                    <span class="bb-pdf-selection-count" data-pdf-selection-count hidden>0 PDFs selected</span>
                     <div class="bb-result-actions" aria-label="Result actions">
                         {% if search_active and search_page.results %}
                         <button type="button" data-tooltip="Copy paths" aria-label="Copy paths for {{ search_page.results|length }} PDFs on this page" data-copy-search-result-paths>
@@ -429,6 +437,7 @@
                     <table class="bb-results-table">
                         <caption class="visually-hidden">{% if search_active %}Bitbucket PDF phrase-search results{% else %}Downloaded Bitbucket PDFs grouped by date added to repo{% endif %}</caption>
                         <colgroup>
+                            <col class="bb-column-select">
                             <col class="bb-column-name">
                             <col class="bb-column-path">
                             <col class="bb-column-project">
@@ -441,6 +450,7 @@
                         </colgroup>
                         <thead>
                             <tr>
+                                <th scope="col" id="bb-pdf-column-select"><input type="checkbox" data-select-all-pdfs aria-label="Select all PDFs on this page"></th>
                                 <th scope="col" id="bb-pdf-column-name">PDF name</th>
                                 <th scope="col" id="bb-pdf-column-path">Path</th>
                                 <th scope="col" id="bb-pdf-column-project">Project</th>
@@ -457,7 +467,7 @@
                         {% else %}
                         <tbody>
                             <tr class="bb-period-row">
-                                <th colspan="9" scope="rowgroup">
+                                <th colspan="10" scope="rowgroup">
                                     <span class="bb-period-heading__dot" aria-hidden="true"></span>
                                     <span class="bb-period-heading">
                                         <strong id="bb-empty-period-heading">{% if search_active %}Search results{% else %}PDF inventory{% endif %}</strong>
@@ -466,7 +476,7 @@
                                 </th>
                             </tr>
                             <tr class="bb-empty-row">
-                                <td colspan="9">
+                                <td colspan="10">
                                     <div class="bb-empty-state" aria-labelledby="bb-empty-period-heading">
                                         <div class="bb-empty-state__lead">
                                             <span class="bb-empty-state__icon" aria-hidden="true">
@@ -575,6 +585,6 @@
 {% block global_status %}{% endblock %}
 
 {% block scripts %}
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=select-all-repositories-v1" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=blocking-repository-actions-v1" defer></script>
 <script src="{% static 'bitbucket_search/people_sort.js' %}?v=people-sort-v1" defer></script>
 {% endblock %}
