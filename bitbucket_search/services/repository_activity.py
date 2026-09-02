@@ -11,8 +11,10 @@ from django.utils import timezone
 
 from bitbucket_search.models import (
     BitbucketRepository,
+    PDFDocument,
     PDFExtractionJob,
     PDFExtractionJobStatus,
+    PDFIndexState,
     RepositorySyncJob,
     RepositorySyncJobStatus,
     RepositorySyncOperation,
@@ -178,6 +180,16 @@ def with_repository_activity(
     if not repository_ids:
         return repositories
     observed_at = at or timezone.now()
+    failed_pdf_counts = dict(
+        PDFDocument.objects.filter(
+            repository_id__in=repository_ids,
+            lifecycle_state="active",
+            index_state__in=(PDFIndexState.FAILED, PDFIndexState.STALE_ERROR),
+        )
+        .values("repository_id")
+        .annotate(total=Count("id"))
+        .values_list("repository_id", "total")
+    )
     sync_counts: dict[int, Counter] = defaultdict(Counter)
     sync_jobs: dict[int, dict[str, dict[str, object]]] = defaultdict(dict)
     for row in (
@@ -229,6 +241,10 @@ def with_repository_activity(
         pdf_metrics[row["document__repository_id"]][row["status"]] = row
 
     for repository in repositories:
+        repository.pdf_index_failed_count = failed_pdf_counts.get(repository.pk, 0)
+        repository.git_sync_failed = bool(
+            repository.last_error_code or repository.sync_state == "failed"
+        )
         sync = sync_counts[repository.pk]
         pdfs = pdf_counts[repository.pk]
         current_pdfs = current_pdf_counts[repository.pk]

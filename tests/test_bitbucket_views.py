@@ -55,11 +55,13 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-selected-unlock" not in html
     assert html.count("data-selected-remove disabled") == 2
     assert html.count('data-delete-locked="true"') == 2
-    assert html.count("data-selected-delete-lock-icon") == 2
-    assert html.count("data-selected-delete-action-icon hidden") == 2
+    assert html.count("data-selected-delete-icon") == 2
+    assert html.count("🗑️") == 0
     assert html.count("data-repository-delete-status") == 1
     assert 'id="bb-repository-selection-form"' in html
     assert 'action="/pdfs/repositories/add/"' in html
+    assert 'name="repository_url"' in html
+    assert "Paste one repository URL per line." in html
     assert "Add &amp; clone in background" in html
     assert "Allowed host:" in html
     assert "bitbucket.org" in html
@@ -72,8 +74,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=repository-activity-v1" in html
-    assert "bitbucket_search/bitbucket_search.js?v=repository-activity-v1" in html
+    assert "bitbucket_search/bitbucket_search.css?v=delete-selected-icon-v2" in html
+    assert "bitbucket_search/bitbucket_search.js?v=delete-selected-icon-v2" in html
     assert 'name="confirmed"' not in html
 
 
@@ -121,8 +123,8 @@ def test_workspace_omits_redundant_search_navigation_and_keeps_repository_contro
     for toolbar in toolbars:
         assert len(re.findall(r"<button\b", toolbar)) == 4
         assert 'data-delete-locked="true"' in toolbar
-        assert "data-selected-delete-lock-icon" in toolbar
-        assert "data-selected-delete-action-icon hidden" in toolbar
+        assert "data-selected-delete-icon" in toolbar
+        assert "🔒" in toolbar
     assert "data-repository-filter" in rail.group("body")
     for total in ("repositories", "pdfs", "vsdx", "bytes"):
         assert f"data-total-{total}" in rail.group("body")
@@ -889,18 +891,21 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_page_navigation(
         canonical_remote_key="bitbucket.org/workspace/networking",
         remote_url="ssh://git@bitbucket.org/workspace/networking.git",
         sync_state=RepositorySyncState.READY,
+        last_sync_successful_at=timezone.now(),
     )
     network_plan = PDFDocument.objects.create(
         repository=repository,
         filename="Network <Plan>.pdf",
         relative_path="docs/network/Network <Plan>.pdf",
         open_count=4,
+        index_state=PDFIndexState.READY,
     )
     archived_plan = PDFDocument.objects.create(
         repository=repository,
         filename="Archive.pdf",
         relative_path="archive/Archive.pdf",
         open_count=0,
+        index_state=PDFIndexState.FAILED,
     )
     context = bitbucket_views._index_context()
     next_page_url = f"{reverse('bitbucket_search:document_page')}?page=2"
@@ -957,7 +962,7 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_page_navigation(
 
     assert response.status_code == 200
     assert "data-pdf-visible-start>1</b>–<b data-pdf-visible-end>2</b> of 2 PDFs" in html
-    assert "0 indexed · 2 pending" in html
+    assert "1 indexed · 0 pending" in html
     assert 'data-timeline-group-key="today-2026-08-29"' in html
     assert 'data-timeline-group-key="year-2025"' in html
     assert html.index("<strong>Today</strong>") < html.index("<strong>2025</strong>")
@@ -967,6 +972,10 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_page_navigation(
     assert "Architecture &amp; Design" in html
     assert "A. Author" in html
     assert "Added by (Git author)" in html
+    assert 'id="bb-pdf-column-status">Status</th>' in html
+    assert html.count('aria-label="Git clone or pull complete"') == 2
+    assert 'aria-label="PDF text indexed"' in html
+    assert 'aria-label="PDF text indexing failed"' in html
     assert "Git addition" in html
     assert "First seen by OWL" in html
     assert "Discovered by OWL" not in html
@@ -1114,6 +1123,58 @@ def test_add_repository_returns_immediately_and_deduplicates_active_job_and_page
     assert repository.sync_state == RepositorySyncState.QUEUED
     assert repository.remote_url == "ssh://git@bitbucket.org/workspace/architecture.git"
     launched.assert_called_once_with()
+
+
+@override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
+def test_add_repository_accepts_one_repository_url_per_line(loopback_client, monkeypatch):
+    monkeypatch.setattr(
+        "bitbucket_search.views.resident_repository_workers_active",
+        Mock(return_value=True),
+    )
+
+    response = loopback_client.post(
+        reverse("bitbucket_search:repository_add"),
+        {
+            "repository_url": (
+                "git@bitbucket.org:workspace/architecture.git\n\n"
+                "https://bitbucket.org/workspace/security.git\n"
+                "https://bitbucket.org/workspace/architecture.git"
+            )
+        },
+        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+    )
+
+    assert response.status_code == 202
+    assert response.json()["state"] == "queued"
+    assert response.json()["submitted"] == 2
+    assert response.json()["added"] == 2
+    assert response.json()["queued"] == 2
+    assert BitbucketRepository.objects.count() == 2
+    assert RepositorySyncJob.objects.count() == 2
+    assert set(BitbucketRepository.objects.values_list("display_name", flat=True)) == {
+        "architecture",
+        "security",
+    }
+
+
+@override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
+def test_add_repository_rejects_invalid_batch_before_queuing_any_repository(loopback_client):
+    response = loopback_client.post(
+        reverse("bitbucket_search:repository_add"),
+        {
+            "repository_url": (
+                "git@bitbucket.org:workspace/architecture.git\n"
+                "https://example.invalid/workspace/not-allowed.git"
+            )
+        },
+        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "host_not_allowed"
+    assert response.json()["detail"].startswith("Line 2:")
+    assert not BitbucketRepository.objects.exists()
+    assert not RepositorySyncJob.objects.exists()
 
 
 @override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org", "scm.example.invalid"))
@@ -1322,7 +1383,7 @@ def test_repository_poller_tracks_daily_idle_and_catalog_publication_contract():
     assert "workspace.dataset.dailyRefreshEnabled" in javascript
     assert "workspace.dataset.catalogPublicationSignature" in javascript
     assert "catalogPublicationChanged" in javascript
-    assert "`${repository.name}: ${working ? workLabel : repository.stateLabel}`" in javascript
+    assert "`${repository.name}: ${visibleLabel}`" in javascript
     assert "`${repository.pdfCount} PDF · ${repository.vsdxCount} VSDX`" in javascript
     assert (
         "Boolean(repository.activity?.active || repository.hasActiveWork || repository.active)"
@@ -1423,8 +1484,8 @@ def test_failed_daily_refresh_uses_compact_failure_card_and_keeps_status_detail(
     assert len(cards) == 2
     for card in cards:
         assert 'data-repository-state="failed"' in card
-        assert "bb-repository-state--failed" in card
-        assert 'role="img" aria-label="retrying: Failed"' in card
+        assert "bb-repository-state--git-failed" in card
+        assert 'role="img" aria-label="retrying: Git connection or pull failed"' in card
         assert '<strong data-repository-name title="retrying">retrying</strong>' in card
         assert "<small data-repository-documents>5 PDF · 0 VSDX</small>" in card
         assert 'name="repository_ids"' in card

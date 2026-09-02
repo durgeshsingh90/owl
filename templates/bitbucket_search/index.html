@@ -5,7 +5,7 @@
 {% block theme_default %}dark{% endblock %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=repository-activity-v1">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=delete-selected-icon-v2">
 {% endblock %}
 
 {% block app_header %}{% endblock %}
@@ -19,6 +19,7 @@
     class="bitbucket-workspace"
     data-bitbucket-workspace
     data-repository-status-url="{% url 'bitbucket_search:repository_status' %}"
+    data-repository-connection-test-url="{% url 'bitbucket_search:repository_connection_test' %}"
     data-extraction-active="{{ extraction_payload.active|yesno:'true,false' }}"
     data-extraction-publication-signature="{{ extraction_payload.publicationSignature }}"
     data-catalog-publication-signature="{{ catalog_publication_signature }}"
@@ -29,6 +30,7 @@
         <input type="hidden" name="excluded" value="yes" data-selected-excluded-value>
     </form>
     <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-repository-delete-status></span>
+    <p class="bb-connection-test" role="status" aria-live="polite" data-repository-connection-result data-state="checking">Testing stored credentials and Git connections…</p>
     <aside class="bb-repository-rail" aria-labelledby="bb-repositories-heading">
         <a class="bb-brand" href="{% url 'core:dashboard' %}" aria-label="OWL Home">
             <span class="bb-brand__mark" aria-hidden="true">
@@ -419,6 +421,7 @@
                             <col class="bb-column-repository">
                             <col class="bb-column-added">
                             <col class="bb-column-author">
+                            <col class="bb-column-status">
                             <col class="bb-column-opens">
                             <col class="bb-column-actions">
                         </colgroup>
@@ -430,6 +433,7 @@
                                 <th scope="col" id="bb-pdf-column-repository">Repository</th>
                                 <th scope="col" id="bb-pdf-column-added">Date added to repo</th>
                                 <th scope="col" id="bb-pdf-column-author">Added by (Git author)</th>
+                                <th scope="col" id="bb-pdf-column-status">Status</th>
                                 <th scope="col" id="bb-pdf-column-opens">Opens</th>
                                 <th scope="col" id="bb-pdf-column-actions">Actions</th>
                             </tr>
@@ -439,7 +443,7 @@
                         {% else %}
                         <tbody>
                             <tr class="bb-period-row">
-                                <th colspan="8" scope="rowgroup">
+                                <th colspan="9" scope="rowgroup">
                                     <span class="bb-period-heading__dot" aria-hidden="true"></span>
                                     <span class="bb-period-heading">
                                         <strong id="bb-empty-period-heading">{% if search_active %}Search results{% else %}PDF inventory{% endif %}</strong>
@@ -448,7 +452,7 @@
                                 </th>
                             </tr>
                             <tr class="bb-empty-row">
-                                <td colspan="8">
+                                <td colspan="9">
                                     <div class="bb-empty-state" aria-labelledby="bb-empty-period-heading">
                                         <div class="bb-empty-state__lead">
                                             <span class="bb-empty-state__icon" aria-hidden="true">
@@ -557,6 +561,6 @@
 {% block global_status %}{% endblock %}
 
 {% block scripts %}
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-activity-v1" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=delete-selected-icon-v2" defer></script>
 <script src="{% static 'bitbucket_search/people_sort.js' %}?v=people-sort-v1" defer></script>
 {% endblock %}

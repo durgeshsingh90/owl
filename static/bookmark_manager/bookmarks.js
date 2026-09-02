@@ -9,6 +9,23 @@
     const csrfToken = () =>
         document.querySelector("input[name='csrfmiddlewaretoken']")?.value || "";
 
+    const autoConnectionForm = document.querySelector("[data-auto-connection-test]");
+    const autoConnectionResult = document.querySelector("[data-auto-connection-result]");
+    if (autoConnectionForm && autoConnectionResult) {
+        fetch(autoConnectionForm.action, {
+            method: "POST",
+            headers: {"X-CSRFToken": csrfToken(), "X-Requested-With": "XMLHttpRequest"},
+            credentials: "same-origin",
+        }).then(async (response) => {
+            const payload = await response.json();
+            autoConnectionResult.dataset.state = payload.state || "unreachable";
+            autoConnectionResult.textContent = `${payload.label}: ${payload.detail}`;
+        }).catch(() => {
+            autoConnectionResult.dataset.state = "unreachable";
+            autoConnectionResult.textContent = "Connection test failed: OWL could not reach Confluence.";
+        });
+    }
+
     const openSettings = (trigger = settingsButtons[0]) => {
         activeSettingsButton = trigger || settingsButtons[0] || null;
         if (!settingsDialog || typeof settingsDialog.showModal !== "function") {

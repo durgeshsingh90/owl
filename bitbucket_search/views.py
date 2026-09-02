@@ -52,7 +52,16 @@ from bitbucket_search.services.document_actions import (
     reveal_registered_pdf,
 )
 from bitbucket_search.services.git_output import bounded_git_output, sanitize_git_output
-from bitbucket_search.services.git_sync import RepositorySyncError, managed_repository_path
+from bitbucket_search.services.git_sync import (
+    GitHTTPSCredential,
+    RepositorySyncError,
+    managed_repository_path,
+    test_repository_connection,
+)
+from bitbucket_search.services.https_credentials import (
+    HTTPSCredentialUnavailable,
+    resolve_https_credential,
+)
 from bitbucket_search.services.logging_events import get_logger, log_event
 from bitbucket_search.services.path_safety import has_disallowed_path_characters
 from bitbucket_search.services.pdf_indexing import (
@@ -104,7 +113,10 @@ from bitbucket_search.services.repository_sync import (
     reserve_queued_repository_worker_wakeups,
     resident_repository_workers_active,
 )
-from bitbucket_search.services.repository_urls import RepositoryURLValidationError
+from bitbucket_search.services.repository_urls import (
+    RepositoryURLValidationError,
+    normalize_repository_url,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1283,6 +1295,8 @@ def _repository_payload(repository: BitbucketRepository) -> dict[str, object]:
         "refreshExcluded": repository.exclude_from_refresh,
         "hasActiveWork": repository.has_active_work,
         "activity": repository.activity,
+        "pdfIndexFailedCount": getattr(repository, "pdf_index_failed_count", 0),
+        "gitSyncFailed": getattr(repository, "git_sync_failed", False),
         "hasRemovalPending": repository.has_removal_pending,
         "lastAttemptAt": last_attempt_at,
         "lastSuccessfulAt": (
@@ -1328,6 +1342,44 @@ def repositories(request: HttpRequest) -> HttpResponse:
         request,
         "bitbucket_search/index.html",
         _index_context(active_section="repositories", open_repository_form=True),
+    )
+
+
+@require_POST
+@csrf_protect
+@never_cache
+@_logged_web_action("repository_connection_test")
+def repository_connection_test(request: HttpRequest) -> JsonResponse:
+    """Run credential-aware, read-only Git remote checks when the app opens."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    results = []
+    for repository in BitbucketRepository.objects.filter(enabled=True).order_by("display_name"):
+        try:
+            saved = resolve_https_credential(repository.remote_url)
+            credential = (
+                GitHTTPSCredential(username=saved.username, token=saved.token) if saved else None
+            )
+            test_repository_connection(repository, https_credential=credential)
+        except (RepositorySyncError, HTTPSCredentialUnavailable):
+            results.append({"id": repository.pk, "name": repository.display_name, "connected": False})
+        else:
+            results.append({"id": repository.pk, "name": repository.display_name, "connected": True})
+    failed = sum(not item["connected"] for item in results)
+    return JsonResponse(
+        {
+            "state": "connected" if not failed else "failed",
+            "label": "Git connection passed" if not failed else "Git connection failed",
+            "detail": (
+                f"Verified {len(results)} repositories with the available stored credentials."
+                if not failed
+                else f"{failed} of {len(results)} repository connection tests failed."
+            ),
+            "repositories": results,
+        },
+        status=200 if not failed else 400,
     )
 
 
@@ -1747,13 +1799,45 @@ def delete_document(request: HttpRequest, document_id: int) -> HttpResponse:
 @never_cache
 @_logged_web_action("repository_add")
 def add_repository(request: HttpRequest) -> HttpResponse:
-    """Validate one URL, enqueue clone/refresh, and return before Git starts."""
+    """Validate newline-separated URLs, enqueue each repository, and return promptly."""
 
     local_error = _require_local_action(request)
     if local_error:
         return local_error
     try:
-        queued = register_and_queue_repository(request.POST.get("repository_url"))
+        submitted_lines = [
+            (line_number, value.strip())
+            for line_number, value in enumerate(
+                str(request.POST.get("repository_url") or "").splitlines(), start=1
+            )
+            if value.strip()
+        ]
+        if not submitted_lines:
+            normalize_repository_url("")
+        if len(submitted_lines) > 100:
+            raise RepositoryURLValidationError(
+                "too_many_repository_urls",
+                "Add no more than 100 repository URLs at once.",
+            )
+
+        normalized_urls = []
+        seen_keys: set[str] = set()
+        for line_number, value in submitted_lines:
+            try:
+                normalized = normalize_repository_url(value)
+            except RepositoryURLValidationError as exc:
+                raise RepositoryURLValidationError(
+                    exc.code,
+                    f"Line {line_number}: {exc}",
+                ) from exc
+            if normalized.canonical_remote_key in seen_keys:
+                continue
+            seen_keys.add(normalized.canonical_remote_key)
+            normalized_urls.append(normalized.remote_url)
+
+        queued_results = [
+            register_and_queue_repository(remote_url) for remote_url in normalized_urls
+        ]
     except RepositorySyncError as error:
         return _repository_lifecycle_failure(request, error)
     except RepositoryURLValidationError as exc:
@@ -1772,37 +1856,76 @@ def add_repository(request: HttpRequest) -> HttpResponse:
         messages.error(request, str(exc))
         return redirect(f"{reverse('bitbucket_search:repositories')}#bb-add-repository")
 
-    # Reserve the queued job before launching so the redirected page's automatic
-    # schedule tick cannot start a second helper for the same work.
-    if queued.job.status == RepositorySyncJobStatus.QUEUED:
-        _workers_started, launch_failed = _wake_queued_repository_workers(
-            job_ids=(queued.job.pk,),
-        )
-        if launch_failed:
-            mark_worker_launch_failed(queued.job.pk)
-            queued.repository.refresh_from_db()
-            detail = "OWL could not start the background repository worker."
+    # Reserve all newly queued jobs together so the redirected page's automatic
+    # schedule tick cannot start duplicate helpers for the same work.
+    queued_job_ids = tuple(
+        result.job.pk
+        for result in queued_results
+        if result.job.status == RepositorySyncJobStatus.QUEUED
+    )
+    if queued_job_ids:
+        failed_job_ids = []
+        for job_id in queued_job_ids:
+            _workers_started, launch_failed = _wake_queued_repository_workers(
+                job_ids=(job_id,),
+            )
+            if launch_failed:
+                mark_worker_launch_failed(job_id)
+                failed_job_ids.append(job_id)
+        if failed_job_ids:
+            detail = "OWL could not start all background repository workers."
             if _is_async_request(request):
                 return JsonResponse(
                     {
                         "state": "worker_unavailable",
                         "detail": detail,
-                        "repository": _repository_payload(queued.repository),
+                        "repositories": [
+                            _repository_payload(result.repository)
+                            for result in queued_results
+                        ],
                     },
                     status=503,
                 )
             messages.error(request, detail)
             return redirect(reverse("bitbucket_search:repositories"))
 
-    queued.repository.refresh_from_db()
-    detail = (
-        "Repository added. The background worker will clone PDF and VSDX files."
-        if queued.repository_created
-        else "Repository already exists. Its background refresh is queued."
-    )
-    if not queued.job_created:
-        detail = "This repository already has a background sync in progress."
+    for result in queued_results:
+        result.repository.refresh_from_db()
+    added_count = sum(result.repository_created for result in queued_results)
+    queued_count = sum(result.job_created for result in queued_results)
+    active_count = len(queued_results) - queued_count
+    if len(queued_results) == 1:
+        queued = queued_results[0]
+        detail = (
+            "Repository added. The background worker will clone PDF and VSDX files."
+            if queued.repository_created
+            else "Repository already exists. Its background refresh is queued."
+        )
+        if not queued.job_created:
+            detail = "This repository already has a background sync in progress."
+    else:
+        detail = (
+            f"Accepted {len(queued_results)} repositories: {added_count} added, "
+            f"{queued_count} queued, and {active_count} already in progress."
+        )
     if _is_async_request(request):
+        if len(queued_results) > 1:
+            return JsonResponse(
+                {
+                    "state": "queued" if queued_count else "already_running",
+                    "detail": detail,
+                    "submitted": len(queued_results),
+                    "added": added_count,
+                    "queued": queued_count,
+                    "alreadyRunning": active_count,
+                    "repositories": [
+                        _repository_payload(result.repository)
+                        for result in queued_results
+                    ],
+                },
+                status=202,
+            )
+        queued = queued_results[0]
         return JsonResponse(
             {
                 "state": "queued" if queued.job_created else "already_running",

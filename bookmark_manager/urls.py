@@ -36,6 +36,7 @@ urlpatterns = [
     path("<int:pk>/delete/", views.delete_bookmark, name="delete"),
     path("settings/", views.settings_page, name="settings"),
     path("settings/test/", views.test_connection, name="settings_test"),
+    path("connection/test/", views.saved_connection_test, name="saved_connection_test"),
     path("settings/save/", views.save_settings, name="settings_save"),
     path("settings/remove/", views.remove_settings, name="settings_remove"),
     path(

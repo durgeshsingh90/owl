@@ -69,6 +69,7 @@ urlpatterns = [
         name="repository_schedule_tick",
     ),
     path("repositories/status/", views.repository_status, name="repository_status"),
+    path("repositories/connection/test/", views.repository_connection_test, name="repository_connection_test"),
     path("repositories/<int:repository_id>/logs/", views.repository_logs, name="repository_logs"),
     path(
         "repositories/<int:repository_id>/indexing/cancel/",

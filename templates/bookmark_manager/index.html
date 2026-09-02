@@ -11,6 +11,8 @@
 {% block main_class %}bookmark-main{% endblock %}
 
 {% block main_wrapper %}
+<form method="post" action="{% url 'bookmark_manager:saved_connection_test' %}" data-auto-connection-test hidden>{% csrf_token %}</form>
+<p class="test-result" role="status" aria-live="polite" data-auto-connection-result data-state="checking">Testing Confluence connection…</p>
 <div class="bookmark-workspace-shell">
     {% include "bookmark_manager/_app_sidebar.html" with compact=False %}
 
@@ -529,4 +531,4 @@
 {% endblock %}
 
 {% block global_status %}{% endblock %}
-{% block scripts %}<script src="{% static 'bookmark_manager/bookmarks.js' %}?v=repository-git-log-v1" defer></script>{% endblock %}
+{% block scripts %}<script src="{% static 'bookmark_manager/bookmarks.js' %}?v=connection-health-v1" defer></script>{% endblock %}

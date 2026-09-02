@@ -1,18 +1,17 @@
 <form class="bb-repository-form" method="post" action="{% url 'bitbucket_search:repository_add' %}" data-repository-add-form>
     {% csrf_token %}
-    <label for="{{ form_id|default:'bb-repository-url' }}">SSH or HTTPS Git URL</label>
-    <input
+    <label for="{{ form_id|default:'bb-repository-url' }}">SSH or HTTPS Git URLs</label>
+    <textarea
         id="{{ form_id|default:'bb-repository-url' }}"
         name="repository_url"
-        type="text"
-        inputmode="url"
-        maxlength="2048"
+        rows="5"
         autocomplete="off"
         autocapitalize="none"
         spellcheck="false"
-        placeholder="git@host:workspace/repository.git"
+        placeholder="git@host:workspace/repository-one.git&#10;git@host:workspace/repository-two.git"
         required
-    >
+    ></textarea>
+    <small>Paste one repository URL per line. Blank lines are ignored; up to 100 repositories can be added at once.</small>
     <p>
         Allowed host{% if allowed_hosts|length != 1 %}s{% endif %}:
         <strong>{{ allowed_hosts_label }}</strong>

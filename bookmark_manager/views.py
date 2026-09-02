@@ -1395,6 +1395,34 @@ def index(request: HttpRequest) -> HttpResponse:
 @csrf_protect
 @never_cache
 @_logged_view
+def saved_connection_test(request: HttpRequest) -> JsonResponse:
+    """Test the active stored Confluence profile without returning any secret."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    try:
+        profile = get_active_profile()
+    except ConfigurationUnavailable as exc:
+        return JsonResponse(
+            {"state": "configuration_required", "label": "Not connected", "detail": str(exc)},
+            status=400,
+        )
+    result = test_candidate_connection(
+        base_url=profile.origin.base_url,
+        personal_access_token=profile.token,
+        auth_mode=profile.auth_mode,
+    )
+    return JsonResponse(
+        {"state": result.state, "label": result.label, "detail": result.detail},
+        status=200 if result.success else 400,
+    )
+
+
+@require_POST
+@csrf_protect
+@never_cache
+@_logged_view
 def start_global_refresh(request: HttpRequest) -> HttpResponse:
     """Queue one global refresh and return before the worker contacts Confluence."""
 

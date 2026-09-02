@@ -472,6 +472,17 @@ def _check_connection(
     progress_callback(phase, 4, "Repository connection verified.")
 
 
+def test_repository_connection(
+    repository: BitbucketRepository,
+    *,
+    https_credential: GitHTTPSCredential | None = None,
+) -> None:
+    """Perform only Git's read-only remote HEAD check for one repository."""
+
+    with _git_https_authorization(repository.remote_url, https_credential):
+        _check_connection(repository, lambda _phase, _progress, _message: None)
+
+
 def _abort_capture(process, *, isolate_process: bool) -> str:
     """Stop owned Git/transport children and bound cleanup after timeout/cancellation."""
 

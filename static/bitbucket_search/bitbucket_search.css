@@ -272,7 +272,17 @@
 }
 
 .bb-repository-tool--danger[data-delete-locked="false"]:not(:disabled) {
+    border-color: var(--bb-danger);
+    color: var(--bb-danger);
+    background: var(--bb-danger-soft);
     box-shadow: 0 0 0 2px var(--bb-danger-soft);
+}
+
+.bb-repository-delete-icon {
+    display: block;
+    font-size: 16px;
+    line-height: 1;
+    filter: saturate(1.2);
 }
 
 .bb-repository-tool:disabled {
@@ -379,13 +389,32 @@
     gap: 0.55rem;
 }
 
+.bb-connection-test {
+    position: fixed;
+    right: 1rem;
+    bottom: 1rem;
+    z-index: 40;
+    max-width: min(32rem, calc(100vw - 2rem));
+    margin: 0;
+    padding: 0.65rem 0.8rem;
+    border: 1px solid var(--bb-amber);
+    border-radius: 7px;
+    color: var(--bb-text);
+    background: var(--bb-surface);
+    box-shadow: 0 12px 32px rgb(0 0 0 / 32%);
+    font-size: 0.7rem;
+}
+
+.bb-connection-test[data-state="connected"] { border-color: var(--bb-success); }
+.bb-connection-test[data-state="failed"] { border-color: var(--bb-danger); }
+
 .bb-repository-form label {
     color: var(--bb-text-soft);
     font-size: 0.7rem;
     font-weight: 680;
 }
 
-.bb-repository-form input {
+.bb-repository-form textarea {
     width: 100%;
     min-height: 40px;
     padding: 0.55rem 0.62rem;
@@ -394,6 +423,8 @@
     color: var(--bb-text);
     background: var(--bb-bg-deep);
     font-size: 0.69rem;
+    line-height: 1.45;
+    resize: vertical;
 }
 
 .bb-repository-form p,
@@ -758,6 +789,23 @@
 }
 
 .bb-repository-state--unknown .bb-state-icon--attention {
+    display: block;
+}
+
+.bb-repository-state--git-failed,
+.bb-repository-state--indexing-failed {
+    color: var(--bb-danger);
+    border-color: var(--bb-danger);
+    background: var(--bb-danger-soft);
+}
+
+.bb-repository-state--git-failed .bb-state-icon,
+.bb-repository-state--indexing-failed .bb-state-icon {
+    display: none;
+}
+
+.bb-repository-state--git-failed .bb-state-icon--git-failed,
+.bb-repository-state--indexing-failed .bb-state-icon--indexing-failed {
     display: block;
 }
 
@@ -2935,15 +2983,15 @@
 }
 
 .bb-results-table .bb-column-name {
-    width: 19%;
+    width: 17%;
 }
 
 .bb-results-table .bb-column-path {
-    width: 22%;
+    width: 19%;
 }
 
 .bb-results-table .bb-column-project {
-    width: 11%;
+    width: 9%;
 }
 
 .bb-results-table .bb-column-repository {
@@ -2951,11 +2999,15 @@
 }
 
 .bb-results-table .bb-column-added {
-    width: 11%;
+    width: 10%;
 }
 
 .bb-results-table .bb-column-author {
-    width: 13%;
+    width: 11%;
+}
+
+.bb-results-table .bb-column-status {
+    width: 9%;
 }
 
 .bb-results-table .bb-column-opens {
@@ -2963,8 +3015,39 @@
 }
 
 .bb-results-table .bb-column-actions {
-    width: 9%;
+    width: 10%;
 }
+
+.bb-document-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.bb-document-status__item {
+    display: inline-grid;
+    grid-template-columns: auto auto;
+    align-items: center;
+    gap: 0.18rem;
+    color: var(--bb-muted);
+}
+
+.bb-document-status__item b {
+    display: grid;
+    width: 18px;
+    height: 18px;
+    place-items: center;
+    border: 1px solid currentColor;
+    border-radius: 50%;
+    font-size: 0.68rem;
+    line-height: 1;
+}
+
+.bb-document-status__item small { font-size: 0.58rem; }
+.bb-document-status__item.is-success { color: var(--bb-success); }
+.bb-document-status__item.is-failed { color: var(--bb-danger); }
+.bb-document-status__item.is-warning,
+.bb-document-status__item.is-pending { color: var(--bb-amber); }
 
 .bb-results-table thead th {
     position: sticky;

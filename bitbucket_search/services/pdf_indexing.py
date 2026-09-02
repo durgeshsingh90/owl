@@ -1407,7 +1407,6 @@ def _hash_pdf(path: Path, heartbeat: Callable[[], None]) -> tuple[str, int]:
 
 def _extractor_environment() -> dict[str, str]:
     environment: dict[str, str] = {
-        "PYTHONNOUSERSITE": "1",
         "PYTHONUTF8": "1",
     }
     for name in ("PATH", "SYSTEMROOT", "WINDIR", "TMPDIR", "TMP", "TEMP"):

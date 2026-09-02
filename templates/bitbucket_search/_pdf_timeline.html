@@ -2,7 +2,7 @@
 {% if group.rows %}
 <tbody class="bb-pdf-group" data-pdf-group data-timeline-group-key="{{ group.key }}">
     <tr class="bb-period-row" data-pdf-group-heading>
-        <th colspan="8" scope="rowgroup" id="bb-pdf-period-{{ group.rows.0.document.pk }}">
+        <th colspan="9" scope="rowgroup" id="bb-pdf-period-{{ group.rows.0.document.pk }}">
             <span class="bb-period-heading__dot" aria-hidden="true"></span>
             <span class="bb-period-heading">
                 <strong>{{ group.label }}</strong>
@@ -59,6 +59,28 @@
             <span class="bb-metadata-unavailable">Unavailable</span>
             {% endif %}
         </td>
+        <td class="bb-document-cell bb-document-cell--status" headers="bb-pdf-column-status">
+            <span class="bb-cell-label" aria-hidden="true">Status</span>
+            <span class="bb-document-status" aria-label="Git and indexing status">
+                {% if document.repository.last_sync_successful_at and row.path_copy_available %}
+                <span class="bb-document-status__item is-success" title="Git clone or pull complete" aria-label="Git clone or pull complete"><b aria-hidden="true">✓</b><small>Git</small></span>
+                {% elif document.repository.sync_state == "failed" %}
+                <span class="bb-document-status__item is-failed" title="Git clone or pull failed" aria-label="Git clone or pull failed"><b aria-hidden="true">×</b><small>Git</small></span>
+                {% else %}
+                <span class="bb-document-status__item is-pending" title="Git clone or pull has not completed" aria-label="Git clone or pull pending"><b aria-hidden="true">…</b><small>Git</small></span>
+                {% endif %}
+
+                {% if document.index_state == "ready" %}
+                <span class="bb-document-status__item is-success" title="PDF text indexed" aria-label="PDF text indexed"><b aria-hidden="true">✓</b><small>Index</small></span>
+                {% elif document.index_state == "failed" or document.index_state == "stale_error" %}
+                <span class="bb-document-status__item is-failed" title="PDF text indexing failed" aria-label="PDF text indexing failed"><b aria-hidden="true">×</b><small>Index</small></span>
+                {% elif document.index_state == "partial" or document.index_state == "no_text" %}
+                <span class="bb-document-status__item is-warning" title="{{ document.get_index_state_display }}" aria-label="Indexing result: {{ document.get_index_state_display }}"><b aria-hidden="true">!</b><small>Index</small></span>
+                {% else %}
+                <span class="bb-document-status__item is-pending" title="PDF text indexing pending" aria-label="PDF text indexing pending"><b aria-hidden="true">…</b><small>Index</small></span>
+                {% endif %}
+            </span>
+        </td>
         <td class="bb-document-cell bb-document-cell--opens" headers="bb-pdf-column-opens">
             <span class="bb-cell-label" aria-hidden="true">Opens</span>
             <span>{{ document.open_count|default:0 }}</span>
@@ -95,7 +117,7 @@
     </tr>
     {% if row.search_hit %}
     <tr class="bb-search-context-row">
-        <td colspan="8">
+        <td colspan="9">
             <div class="bb-search-context">
                 <div class="bb-search-explanations" aria-label="Why this PDF matched">
                     {% for explanation in row.search_hit.explanations %}

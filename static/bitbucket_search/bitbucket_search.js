@@ -19,6 +19,29 @@
     );
     let repositorySubmissionPending = false;
     let repositoryStatusPending = false;
+    const connectionResult = workspace.querySelector("[data-repository-connection-result]");
+    const connectionTestUrl = workspace.dataset.repositoryConnectionTestUrl;
+    if (connectionResult && connectionTestUrl) {
+        const csrf = workspace.querySelector("input[name='csrfmiddlewaretoken']")?.value || "";
+        fetch(connectionTestUrl, {
+            method: "POST",
+            headers: {"X-CSRFToken": csrf, "X-Requested-With": "XMLHttpRequest"},
+            credentials: "same-origin",
+        }).then(async (response) => {
+            const payload = await response.json();
+            connectionResult.dataset.state = payload.state || "failed";
+            connectionResult.textContent = `${payload.label}: ${payload.detail}`;
+            (payload.repositories || []).filter(item => !item.connected).forEach((item) => {
+                document.querySelectorAll(`[data-repository-id="${item.id}"] [data-repository-state-icon]`).forEach((icon) => {
+                    icon.className = "bb-repository-state bb-repository-state--git-failed";
+                    icon.title = "Git connection test failed";
+                });
+            });
+        }).catch(() => {
+            connectionResult.dataset.state = "failed";
+            connectionResult.textContent = "Git connection test failed: check network, VPN, SSH agent, or stored HTTPS credentials.";
+        });
+    }
     let extractionWorkActive = workspace.dataset.extractionActive === "true";
     let workSummary = {
         label: initialRefreshAllState?.workLabel || "",
@@ -207,10 +230,8 @@
         disable("[data-selected-remove]", destructiveUnavailable, deleteTitle);
         workspace.querySelectorAll("[data-selected-remove]").forEach((button) => {
             button.dataset.deleteLocked = String(!deletionUnlocked);
-            const lockIcon = button.querySelector("[data-selected-delete-lock-icon]");
-            const deleteIcon = button.querySelector("[data-selected-delete-action-icon]");
-            if (lockIcon) lockIcon.hidden = deletionUnlocked;
-            if (deleteIcon) deleteIcon.hidden = !deletionUnlocked;
+            const icon = button.querySelector("[data-selected-delete-icon]");
+            if (icon) icon.textContent = deletionUnlocked ? "🗑️" : "🔒";
         });
         workspace.querySelectorAll("[data-selected-exclude]").forEach((button) => {
             button.setAttribute("aria-pressed", String(allExcluded));
@@ -358,13 +379,22 @@
             card.dataset.repositoryRemovalPending = String(Boolean(repository.hasRemovalPending));
             const stateIcon = card.querySelector("[data-repository-state-icon]");
             if (stateIcon) {
-                stateIcon.className = `bb-repository-state bb-repository-state--${working ? "working" : repository.state}`;
+                const visibleState = working ? "working"
+                    : repository.gitSyncFailed ? "git-failed"
+                    : Number(repository.pdfIndexFailedCount || 0) ? "indexing-failed"
+                    : repository.state;
+                const visibleLabel = working ? workLabel
+                    : repository.gitSyncFailed ? "Git connection or pull failed"
+                    : Number(repository.pdfIndexFailedCount || 0)
+                        ? `${repository.pdfIndexFailedCount} PDF indexing failures`
+                        : repository.stateLabel;
+                stateIcon.className = `bb-repository-state bb-repository-state--${visibleState}`;
                 stateIcon.dataset.repositoryOperation = operation;
                 stateIcon.setAttribute(
                     "aria-label",
-                    `${repository.name}: ${working ? workLabel : repository.stateLabel}`,
+                    `${repository.name}: ${visibleLabel}`,
                 );
-                stateIcon.title = working ? workDetail : repository.stateLabel;
+                stateIcon.title = working ? workDetail : visibleLabel;
             }
             const workStatus = card.querySelector("[data-repository-work-label]");
             if (workStatus) {
