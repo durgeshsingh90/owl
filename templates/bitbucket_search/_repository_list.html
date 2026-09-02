@@ -1,3 +1,4 @@
+{% load static %}
 {% if repositories %}
 <ul class="bb-repository-list" data-repository-list>
     {% for repository in repositories %}
@@ -8,7 +9,7 @@
                 <svg class="bb-state-icon bb-state-icon--active" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v11M8 10l4 4 4-4M5 19h14"/></svg>
                 <svg class="bb-state-icon bb-state-icon--clone" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v10M8 9l4 4 4-4M5 17.5h14v3H5z"/></svg>
                 <svg class="bb-state-icon bb-state-icon--pull" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M18.5 7.5A7.5 7.5 0 0 0 6 6l-2 2M5.5 16.5A7.5 7.5 0 0 0 18 18l2-2M4 4v4h4M20 20v-4h-4"/></svg>
-                <svg class="bb-state-icon bb-state-icon--indexing" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 3.5h9l4 4V13M14 3.5v4h4M8 11h5M8 15h3"/><circle cx="16.5" cy="17" r="3"/><path d="m19 19.5 2 2"/></svg>
+                <img class="bb-state-icon bb-state-icon--indexing bb-state-icon--indexing-gif" src="{% static 'bitbucket_search/icons/indexing.gif' %}" alt="" aria-hidden="true">
                 <svg class="bb-state-icon bb-state-icon--attention" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="M12 8v5M12 16.5v.5"/></svg>
                 <svg class="bb-state-icon bb-state-icon--git-failed" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 6h8M10 3l3 3-3 3M19 18h-8M14 15l-3 3 3 3"/><path d="M5 18 19 6"/></svg>
                 <svg class="bb-state-icon bb-state-icon--indexing-failed" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 3.5h9l4 4V13M14 3.5v4h4M8 11h5M8 15h3"/><path d="m14.5 15 5 5m0-5-5 5"/></svg>

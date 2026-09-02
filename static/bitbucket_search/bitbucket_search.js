@@ -231,7 +231,14 @@
         workspace.querySelectorAll("[data-selected-remove]").forEach((button) => {
             button.dataset.deleteLocked = String(!deletionUnlocked);
             const icon = button.querySelector("[data-selected-delete-icon]");
-            if (icon) icon.textContent = deletionUnlocked ? "🗑️" : "🔒";
+            const lock = button.querySelector("[data-selected-delete-lock]");
+            const image = button.querySelector("[data-selected-delete-image]");
+            if (lock && image) {
+                lock.hidden = deletionUnlocked;
+                image.hidden = !deletionUnlocked;
+            } else if (icon) {
+                icon.textContent = deletionUnlocked ? "🗑️" : "🔒";
+            }
         });
         workspace.querySelectorAll("[data-selected-exclude]").forEach((button) => {
             button.setAttribute("aria-pressed", String(allExcluded));
@@ -1067,6 +1074,29 @@
         }
         copyWithTextarea(text);
     };
+
+    const repositoryUrlCopyButton = document.querySelector("[data-copy-repository-urls]");
+    repositoryUrlCopyButton?.addEventListener("click", async () => {
+        const status = repositoryUrlCopyButton.querySelector("[data-copy-repository-urls-status]");
+        let urls = [];
+        try {
+            urls = JSON.parse(document.getElementById("bb-repository-copy-urls")?.textContent || "[]");
+            if (!Array.isArray(urls) || urls.length === 0) throw new Error("No repository URLs");
+            repositoryUrlCopyButton.disabled = true;
+            await copyText(urls.join("\n"));
+            repositoryUrlCopyButton.title = `Copied ${urls.length} repository URL${urls.length === 1 ? "" : "s"}`;
+            if (status) status.textContent = repositoryUrlCopyButton.title;
+        } catch (_error) {
+            repositoryUrlCopyButton.title = "Could not copy repository URLs. Check clipboard permission.";
+            if (status) status.textContent = "Copy failed";
+        } finally {
+            window.setTimeout(() => {
+                repositoryUrlCopyButton.disabled = false;
+                repositoryUrlCopyButton.title = "Copy all repository URLs";
+                if (status) status.textContent = "";
+            }, 2000);
+        }
+    });
 
     const pathCopyTimers = new WeakMap();
     const pendingPathCopies = new WeakSet();

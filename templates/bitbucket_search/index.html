@@ -5,7 +5,7 @@
 {% block theme_default %}dark{% endblock %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=repository-progress-v3">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=repository-icons-v1">
 {% endblock %}
 
 {% block app_header %}{% endblock %}
@@ -109,6 +109,18 @@
             </a>
 
             <div class="bb-topbar__actions">
+                {{ repository_copy_urls|json_script:"bb-repository-copy-urls" }}
+                <button
+                    class="bb-icon-button"
+                    type="button"
+                    data-copy-repository-urls
+                    aria-label="Copy all repository URLs"
+                    title="Copy all repository URLs"
+                    {% if not repository_copy_urls %}disabled{% endif %}
+                >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="8" y="7" width="11" height="13" rx="1.5"/><path d="M16 7V4H5v12h3"/></svg>
+                    <span class="visually-hidden" data-copy-repository-urls-status></span>
+                </button>
                 <form
                     class="bb-refresh-all bb-refresh-all--desktop{% if refresh_all_active_count %} bb-refresh-all--active{% elif not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %} bb-refresh-all--disabled{% endif %}"
                     method="post"
@@ -561,6 +573,6 @@
 {% block global_status %}{% endblock %}
 
 {% block scripts %}
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-progress-v4" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-icons-v1" defer></script>
 <script src="{% static 'bitbucket_search/people_sort.js' %}?v=people-sort-v1" defer></script>
 {% endblock %}

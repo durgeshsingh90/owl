@@ -57,6 +57,12 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert html.count('data-delete-locked="true"') == 2
     assert html.count("data-selected-delete-icon") == 2
     assert html.count("🗑️") == 0
+    assert html.count('/static/bitbucket_search/icons/stop.png') == 2
+    assert html.count('/static/bitbucket_search/icons/delete.png') == 2
+    repository_template = (
+        Path(__file__).parents[1] / "templates" / "bitbucket_search" / "_repository_list.html"
+    ).read_text(encoding="utf-8")
+    assert "bitbucket_search/icons/indexing.gif" in repository_template
     assert html.count("data-repository-delete-status") == 1
     assert 'id="bb-repository-selection-form"' in html
     assert 'action="/pdfs/repositories/add/"' in html
@@ -74,8 +80,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=repository-progress-v3" in html
-    assert "bitbucket_search/bitbucket_search.js?v=repository-progress-v4" in html
+    assert "bitbucket_search/bitbucket_search.css?v=repository-icons-v1" in html
+    assert "bitbucket_search/bitbucket_search.js?v=repository-icons-v1" in html
     assert 'name="confirmed"' not in html
 
 
@@ -180,6 +186,7 @@ def test_bitbucket_topbar_omits_settings_icon_and_preserves_other_controls(
     assert "data-settings-open" not in topbar_html
     assert "data-repository-status-toggle" not in topbar_html
     assert 'aria-label="Open repository logs"' not in topbar_html
+    assert 'aria-label="Copy all repository URLs"' in topbar_html
     assert "data-notification-toggle" in topbar_html
     assert 'aria-label="Open notifications"' in topbar_html
     assert '<summary class="bb-icon-button" aria-label="Applications">' in topbar_html
@@ -191,6 +198,30 @@ def test_bitbucket_topbar_omits_settings_icon_and_preserves_other_controls(
     assert 'aria-label="Refresh all repositories"' in topbar_html
     assert "data-refresh-all-icon" in topbar_html
     assert "data-refresh-all-spinner hidden" in topbar_html
+
+
+def test_copy_all_repository_urls_uses_sanitized_one_per_line_source(loopback_client):
+    BitbucketRepository.objects.create(
+        display_name="Architecture",
+        canonical_remote_key="bitbucket.org/workspace/architecture",
+        remote_url="https://bitbucket.org/workspace/architecture.git",
+    )
+    BitbucketRepository.objects.create(
+        display_name="Security",
+        canonical_remote_key="bitbucket.org/workspace/security",
+        remote_url="ssh://git@bitbucket.org/workspace/security.git",
+    )
+
+    response = loopback_client.get(reverse("bitbucket_search:index"))
+    html = response.content.decode()
+
+    assert response.status_code == 200
+    assert 'id="bb-repository-copy-urls"' in html
+    assert response.context["repository_copy_urls"] == (
+        "https://bitbucket.org/workspace/architecture.git",
+        "ssh://git@bitbucket.org/workspace/security.git",
+    )
+    assert "data-copy-repository-urls" in html
 
 
 def test_desktop_topbar_spans_results_and_people_starts_below_it(loopback_client):

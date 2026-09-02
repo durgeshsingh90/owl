@@ -1165,6 +1165,24 @@ def _index_context(
     people_search_hidden_fields = tuple(
         ("committer", name) for name in requested_search_query.committer_names
     ) + tuple(("people_group", str(group_id)) for group_id in selected_people_group_ids)
+    repository_copy_urls = []
+    for repository in repositories:
+        try:
+            parsed_remote = urlsplit(repository.remote_url)
+            if (
+                parsed_remote.scheme not in {"https", "ssh"}
+                or parsed_remote.password is not None
+                or parsed_remote.query
+                or parsed_remote.fragment
+                or not parsed_remote.hostname
+                or (parsed_remote.scheme == "https" and parsed_remote.username is not None)
+                or (parsed_remote.scheme == "ssh" and parsed_remote.username != "git")
+            ):
+                continue
+            repository_copy_urls.append(repository.remote_url)
+        except ValueError:
+            # Legacy invalid values must never be copied back into the browser.
+            continue
     context = {
         "active_app": "bitbucket",
         "active_section": active_section,
@@ -1180,6 +1198,7 @@ def _index_context(
             repository_id__in=(repository.pk for repository in repositories)
         ).order_by("display_name", "id"),
         "repository_count": len(repositories),
+        "repository_copy_urls": tuple(repository_copy_urls),
         "enabled_repository_count": sum(
             item.enabled and not item.exclude_from_refresh and not item.has_removal_pending
             for item in repositories
