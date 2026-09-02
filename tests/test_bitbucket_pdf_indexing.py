@@ -52,11 +52,21 @@ pytestmark = pytest.mark.django_db
 
 def test_extractor_keeps_python_user_site_visible_for_windows_user_installs(monkeypatch):
     monkeypatch.setenv("PYTHONNOUSERSITE", "1")
+    monkeypatch.setenv("APPDATA", r"C:\Users\worker\AppData\Roaming")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\worker\AppData\Local")
+    monkeypatch.setenv("USERPROFILE", r"C:\Users\worker")
+    monkeypatch.setenv("HOMEDRIVE", "C:")
+    monkeypatch.setenv("HOMEPATH", r"\Users\worker")
 
     environment = _extractor_environment()
 
     assert "PYTHONNOUSERSITE" not in environment
     assert environment["PYTHONUTF8"] == "1"
+    assert environment["APPDATA"] == r"C:\Users\worker\AppData\Roaming"
+    assert environment["LOCALAPPDATA"] == r"C:\Users\worker\AppData\Local"
+    assert environment["USERPROFILE"] == r"C:\Users\worker"
+    assert environment["HOMEDRIVE"] == "C:"
+    assert environment["HOMEPATH"] == r"\Users\worker"
 
 
 @pytest.fixture

@@ -1409,7 +1409,23 @@ def _extractor_environment() -> dict[str, str]:
     environment: dict[str, str] = {
         "PYTHONUTF8": "1",
     }
-    for name in ("PATH", "SYSTEMROOT", "WINDIR", "TMPDIR", "TMP", "TEMP"):
+    # Python's Windows user-site location is derived from APPDATA/USERPROFILE.
+    # Keep those non-secret path variables so an isolated child launched from a
+    # system-wide interpreter can still import requirements installed with
+    # ``pip --user`` under AppData\Roaming.
+    for name in (
+        "PATH",
+        "SYSTEMROOT",
+        "WINDIR",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+    ):
         value = os.environ.get(name)
         if value:
             environment[name] = value
