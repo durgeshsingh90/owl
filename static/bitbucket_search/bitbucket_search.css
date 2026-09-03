@@ -708,6 +708,10 @@
     stroke-width: 1.7;
 }
 
+.bb-state-icon[hidden] {
+    display: none !important;
+}
+
 .bb-repository-state .bb-state-icon--idle {
     display: block;
 }
@@ -875,6 +879,51 @@
 .bb-repository-state--git-failed .bb-state-icon--git-failed,
 .bb-repository-state--indexing-failed .bb-state-icon--indexing-failed {
     display: block;
+}
+
+.bb-repository-state--pipeline-queued,
+.bb-repository-state--pipeline-working {
+    color: var(--bb-amber);
+    border-color: var(--bb-amber);
+    background: var(--bb-amber-soft);
+}
+
+.bb-repository-state--pipeline-complete {
+    color: var(--bb-success);
+    border-color: var(--bb-success);
+    background: var(--bb-success-soft);
+}
+
+.bb-repository-state--pipeline-attention {
+    color: var(--bb-danger);
+    border-color: var(--bb-danger);
+    background: var(--bb-danger-soft);
+}
+
+.bb-repository-state--pipeline-unknown {
+    color: var(--bb-muted);
+    border-color: var(--bb-line-strong);
+    background: var(--bb-bg-deep);
+}
+
+.bb-repository-state--pipeline-queued .bb-state-icon,
+.bb-repository-state--pipeline-working .bb-state-icon,
+.bb-repository-state--pipeline-complete .bb-state-icon,
+.bb-repository-state--pipeline-attention .bb-state-icon,
+.bb-repository-state--pipeline-unknown .bb-state-icon {
+    display: none;
+}
+
+.bb-repository-state--pipeline-queued [data-repository-queued-icon]:not([hidden]),
+.bb-repository-state--pipeline-working [data-repository-working-icon]:not([hidden]),
+.bb-repository-state--pipeline-complete [data-repository-complete-icon]:not([hidden]),
+.bb-repository-state--pipeline-attention [data-repository-attention-icon]:not([hidden]),
+.bb-repository-state--pipeline-unknown [data-repository-unknown-icon]:not([hidden]) {
+    display: block;
+}
+
+.bb-repository-state--pipeline-working [data-repository-working-icon]:not([hidden]) {
+    animation: bb-operation-spin 1.4s linear infinite;
 }
 
 .bb-repository-card__copy .bb-repository-work-label {
@@ -1269,10 +1318,22 @@ html.bb-operation-blocked { cursor: wait; }
 
 .bb-refresh-all {
     display: flex;
-    min-width: min(390px, 36vw);
+    width: 38px;
+    min-width: 38px;
     align-items: center;
     gap: 0.42rem;
     margin: 0;
+}
+
+.bb-refresh-all--desktop .bb-refresh-all__meta {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }
 
 .bb-refresh-all__button {
@@ -1292,6 +1353,10 @@ html.bb-operation-blocked { cursor: wait; }
 }
 
 .bb-refresh-all__visual--running {
+    display: none;
+}
+
+.bb-refresh-all__visual[hidden] {
     display: none;
 }
 
@@ -1377,6 +1442,32 @@ html.bb-operation-blocked { cursor: wait; }
     font-weight: 700;
 }
 
+.bb-repository-queue-label {
+    color: var(--bb-amber);
+    font-weight: 760;
+}
+
+.bb-repository-eta {
+    color: var(--bb-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.bb-repository-card[data-pipeline-repository-state="complete"] .bb-repository-work-label {
+    color: var(--bb-success);
+}
+
+.bb-repository-card[data-pipeline-repository-state="completed_with_errors"] .bb-repository-work-label,
+.bb-repository-card[data-pipeline-repository-state="cancelled"] .bb-repository-work-label,
+.bb-repository-card[data-pipeline-repository-state="paused"] .bb-repository-work-label {
+    color: var(--bb-danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .bb-repository-state--pipeline-working [data-repository-working-icon]:not([hidden]) {
+        animation: none;
+    }
+}
+
 .bb-refresh-all__meta strong {
     color: var(--bb-text-soft);
     font-size: 0.66rem;
@@ -1386,6 +1477,55 @@ html.bb-operation-blocked { cursor: wait; }
 .bb-refresh-all__meta small {
     color: var(--bb-muted-low);
     font-size: 0.57rem;
+}
+
+.bb-pipeline-topbar-status {
+    display: grid;
+    min-width: min(430px, 38vw);
+    grid-template-columns: repeat(4, minmax(72px, 1fr));
+    margin: 0 0.35rem;
+    overflow: hidden;
+    border: 1px solid var(--bb-line);
+    border-radius: 9px;
+    background: rgb(255 255 255 / 2%);
+}
+
+.bb-pipeline-topbar-status > div {
+    min-width: 0;
+    padding: 0.38rem 0.52rem;
+}
+
+.bb-pipeline-topbar-status > div + div {
+    border-left: 1px solid var(--bb-line);
+}
+
+.bb-pipeline-topbar-status dt,
+.bb-pipeline-topbar-status dd,
+.bb-pipeline-topbar-status small {
+    display: block;
+    margin: 0;
+    overflow: hidden;
+    line-height: 1.25;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.bb-pipeline-topbar-status dt,
+.bb-pipeline-topbar-status small {
+    color: var(--bb-muted-low);
+    font-size: 0.5rem;
+}
+
+.bb-pipeline-topbar-status dd {
+    margin-top: 0.1rem;
+    color: var(--bb-text-soft);
+    font-size: 0.63rem;
+    font-weight: 740;
+    font-variant-numeric: tabular-nums;
+}
+
+.bb-pipeline-topbar-status small {
+    margin-top: 0.08rem;
 }
 
 .bb-refresh-all__meta strong,
@@ -2562,6 +2702,13 @@ html.bb-operation-blocked { cursor: wait; }
     min-width: 0;
 }
 
+.bb-people-list > .bb-people-person-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 32px;
+    align-items: center;
+    gap: 0.18rem;
+}
+
 .bb-people-option {
     display: grid;
     min-width: 0;
@@ -2683,6 +2830,43 @@ html.bb-operation-blocked { cursor: wait; }
 .bb-people-repository-count:focus-visible {
     outline: 2px solid var(--bb-amber);
     outline-offset: 2px;
+}
+
+.bb-people-star {
+    display: grid;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    color: var(--bb-muted);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+}
+
+.bb-people-star:hover:not(:disabled),
+.bb-people-star[aria-pressed="true"] {
+    border-color: var(--bb-amber);
+    color: var(--bb-amber);
+    background: var(--bb-amber-soft);
+}
+
+.bb-people-star:focus-visible {
+    border-color: var(--bb-amber);
+    outline: 2px solid var(--bb-amber);
+    outline-offset: 2px;
+}
+
+.bb-people-star:disabled {
+    opacity: 0.62;
+    cursor: wait;
+}
+
+.bb-people-star > span {
+    font-size: 1.08rem;
+    line-height: 1;
 }
 
 .bb-people-inline-empty,
@@ -3226,7 +3410,7 @@ html.bb-operation-blocked { cursor: wait; }
 }
 
 .bb-results-table .bb-column-name {
-    width: 14%;
+    width: 12%;
 }
 
 .bb-results-table .bb-column-select { width: 3%; }
@@ -3252,7 +3436,7 @@ html.bb-operation-blocked { cursor: wait; }
 }
 
 .bb-results-table .bb-column-path {
-    width: 16%;
+    width: 14%;
 }
 
 .bb-results-table .bb-column-project {
@@ -3284,7 +3468,7 @@ html.bb-operation-blocked { cursor: wait; }
 }
 
 .bb-results-table .bb-column-actions {
-    width: 10%;
+    width: 14%;
 }
 
 .bb-document-status {
@@ -3738,7 +3922,7 @@ html.bb-operation-blocked { cursor: wait; }
 
 .bb-document-actions {
     display: grid;
-    grid-template-columns: repeat(2, max-content);
+    grid-template-columns: repeat(3, max-content);
     align-items: center;
     justify-content: center;
     gap: 0.3rem;
@@ -3766,6 +3950,24 @@ html.bb-operation-blocked { cursor: wait; }
     color: var(--bb-amber);
     border-color: var(--bb-amber);
     background: var(--bb-amber-soft);
+}
+
+.bb-document-actions button:focus-visible {
+    color: var(--bb-amber);
+    border-color: var(--bb-amber);
+    outline: 2px solid var(--bb-amber);
+    outline-offset: 2px;
+}
+
+.bb-document-actions .bb-document-star[aria-pressed="true"] {
+    color: var(--bb-amber);
+    border-color: var(--bb-amber);
+    background: var(--bb-amber-soft);
+}
+
+.bb-document-star__icon {
+    font-size: 1rem;
+    line-height: 1;
 }
 
 .bb-delete-confirmation {
@@ -4125,7 +4327,7 @@ html.bb-operation-blocked { cursor: wait; }
 @media (min-width: 1800px) {
     .bb-results-table .bb-column-select { width: 3%; }
     .bb-results-table .bb-column-name { width: 23%; }
-    .bb-results-table .bb-column-path { width: 13%; }
+    .bb-results-table .bb-column-path { width: 11%; }
     .bb-results-table .bb-column-project { width: 7%; }
     .bb-results-table .bb-column-repository { width: 8%; }
     .bb-results-table .bb-column-added { width: 8%; }
@@ -4133,7 +4335,7 @@ html.bb-operation-blocked { cursor: wait; }
     .bb-results-table .bb-column-commit { width: 10%; }
     .bb-results-table .bb-column-status { width: 8%; }
     .bb-results-table .bb-column-opens { width: 4%; }
-    .bb-results-table .bb-column-actions { width: 8%; }
+    .bb-results-table .bb-column-actions { width: 10%; }
 
     .bb-document-name__icon {
         display: none;
@@ -4278,11 +4480,20 @@ html.bb-operation-blocked { cursor: wait; }
         padding-inline: 0.55rem;
     }
 
-    .bb-results-table .bb-column-name { width: 13%; }
-    .bb-results-table .bb-column-path { width: 15%; }
+    .bb-app-title p,
+    .bb-pipeline-topbar-status small {
+        display: none;
+    }
+
+    .bb-pipeline-topbar-status {
+        min-width: min(360px, 43vw);
+    }
+
+    .bb-results-table .bb-column-name { width: 12%; }
+    .bb-results-table .bb-column-path { width: 13%; }
     .bb-results-table .bb-column-added { width: 10%; }
     .bb-results-table .bb-column-commit { width: 10%; }
-    .bb-results-table .bb-column-actions { width: 11%; }
+    .bb-results-table .bb-column-actions { width: 14%; }
 
 }
 
@@ -4741,6 +4952,22 @@ html.bb-operation-blocked { cursor: wait; }
         width: 100%;
     }
 
+    .bb-pipeline-topbar-status {
+        order: 10;
+        min-width: 100%;
+        flex-basis: 100%;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .bb-pipeline-topbar-status > div:nth-child(3) {
+        border-top: 1px solid var(--bb-line);
+        border-left: 0;
+    }
+
+    .bb-pipeline-topbar-status > div:nth-child(4) {
+        border-top: 1px solid var(--bb-line);
+    }
+
     .bb-status-repositories__heading {
         padding: 1rem;
     }
@@ -4864,6 +5091,12 @@ html.bb-operation-blocked { cursor: wait; }
         gap: 0.15rem;
     }
 
+    .bb-pipeline-topbar-status {
+        min-width: 0;
+        flex: 1 1 360px;
+        margin-inline: 0.2rem;
+    }
+
     .bb-icon-button {
         width: 44px;
         height: 44px;
@@ -4888,6 +5121,15 @@ html.bb-operation-blocked { cursor: wait; }
     .bb-people-group-create input[type="text"],
     .bb-people-group-create input[type="search"] {
         min-height: 44px;
+    }
+
+    .bb-people-list > .bb-people-person-row {
+        grid-template-columns: minmax(0, 1fr) 44px;
+    }
+
+    .bb-people-star {
+        width: 44px;
+        height: 44px;
     }
 
     .bb-content {

@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 from django.core.management import call_command
+from django.db import OperationalError
 
 from bitbucket_search.management.commands import (
     bitbucket_index_worker,
@@ -19,6 +20,8 @@ from bitbucket_search.models import (
     PDFDocument,
     PDFExtractionJob,
     PDFExtractionJobStatus,
+    PDFPipelineRecovery,
+    PDFPipelineRecoveryState,
     RepositorySyncJob,
     RepositorySyncJobStatus,
     RepositorySyncOperation,
@@ -514,7 +517,7 @@ def test_supervisor_releases_display_assertion_even_when_worker_shutdown_fails(
     )
     monkeypatch.setattr(run_owl, "sweep_semantic_index_queue", Mock())
 
-    def launch(_command):
+    def launch(_command, *, role=None):
         stop_event.set()
         return worker
 
@@ -624,7 +627,7 @@ def test_resident_supervisor_recovers_leases_before_launch_and_stops_owned_worke
         lambda *, interrupt_running=False: events.append(("semantic-sweep", interrupt_running)),
     )
 
-    def launch(command):
+    def launch(command, *, role=None):
         process = _ResidentProcess(command)
         launched.append(process)
         events.append(("launch", command))
@@ -746,7 +749,7 @@ def test_semantic_reconciliation_failure_does_not_block_other_recovery_or_worker
         lambda logger, level, event, **fields: semantic_logs.append((logger, level, event, fields)),
     )
 
-    def launch(command):
+    def launch(command, *, role=None):
         process = _ResidentProcess(command)
         launched.append(process)
         events.append(("launch", command))
@@ -808,7 +811,7 @@ def test_resident_supervisor_clears_marker_when_live_worker_dies_during_exceptio
             stop_event.set()
             raise RuntimeError("synthetic supervisor failure")
 
-    def launch(command):
+    def launch(command, *, role=None):
         if command == "bitbucket_sync_worker":
             return repository_worker
         return _ResidentProcess(command)
@@ -831,7 +834,10 @@ def test_resident_launcher_disables_detached_helpers_only_for_sync_worker(
 
     run_owl._launch_resident_bitbucket_worker("bitbucket_sync_worker")
     sync_arguments = popen.call_args.args[0]
-    run_owl._launch_resident_bitbucket_worker("bitbucket_index_worker")
+    run_owl._launch_resident_bitbucket_worker(
+        "bitbucket_index_worker",
+        role="pdf-index-3",
+    )
     index_arguments = popen.call_args.args[0]
     run_owl._launch_resident_bitbucket_worker("semantic_index_worker")
     semantic_arguments = popen.call_args.args[0]
@@ -842,7 +848,12 @@ def test_resident_launcher_disables_detached_helpers_only_for_sync_worker(
         "--no-spawn-index-workers",
         "--no-startup-index-sweep",
     ]
-    assert index_arguments[-2:] == ["bitbucket_index_worker", "--no-startup-sweep"]
+    assert index_arguments[-4:] == [
+        "bitbucket_index_worker",
+        "--no-startup-sweep",
+        "--slot-number",
+        "3",
+    ]
     assert semantic_arguments[-2:] == ["semantic_index_worker", "--no-startup-sweep"]
     assert "--no-spawn-index-workers" not in index_arguments
     assert popen.call_args.kwargs["cwd"] == settings.BASE_DIR
@@ -899,7 +910,8 @@ def test_supervisor_stops_only_tracked_stale_children(monkeypatch):
     stopped.assert_called_once_with(stale)
 
 
-def test_supervisor_watchdog_restarts_an_escaped_controller(monkeypatch):
+def test_supervisor_watchdog_restarts_an_escaped_controller(monkeypatch, settings):
+    settings.PDF_PIPELINE_RECOVERY_ENABLED = False
     stop_event = threading.Event()
     calls = 0
 
@@ -925,6 +937,36 @@ def test_supervisor_watchdog_restarts_an_escaped_controller(monkeypatch):
     assert waits == [5.0]
 
 
+def test_supervisor_watchdog_does_not_enter_controller_when_circuit_is_paused(
+    monkeypatch,
+    settings,
+    tmp_path,
+):
+    settings.PDF_PIPELINE_STATE_ROOT = tmp_path / "pipeline-state"
+    settings.PDF_PIPELINE_RECOVERY_ENABLED = True
+    settings.PDF_PIPELINE_RECOVERY_PAUSE_AFTER_ATTEMPTS = 0
+    run_owl._record_recovery_scope_failure(
+        "supervisor",
+        reason_code=run_owl.RecoveryReasonCode.SUPERVISOR_LOOP_FAILED,
+        probe=None,
+    )
+    stop_event = threading.Event()
+    controller = Mock()
+
+    def stop_after_wait(_delay):
+        stop_event.set()
+        return True
+
+    monkeypatch.setattr(run_owl, "_bitbucket_queue_loop", controller)
+    monkeypatch.setattr(stop_event, "wait", stop_after_wait)
+
+    run_owl._bitbucket_supervisor_watchdog_loop(stop_event, poll_seconds=5)
+
+    controller.assert_not_called()
+    recovery = PDFPipelineRecovery.objects.get(scope="supervisor")
+    assert recovery.state == PDFPipelineRecoveryState.PAUSED
+
+
 def test_exited_pdf_controller_lease_is_recovered_before_replacement(
     monkeypatch,
     settings,
@@ -932,6 +974,9 @@ def test_exited_pdf_controller_lease_is_recovered_before_replacement(
     settings.BITBUCKET_MAX_REPO_WORKERS = 1
     settings.PDF_MAX_EXTRACTION_WORKERS = 1
     settings.SEMANTIC_SEARCH_ENABLED = False
+    # This legacy test isolates lease ordering. Component-circuit timing has
+    # dedicated deterministic coverage below.
+    settings.PDF_PIPELINE_RECOVERY_ENABLED = False
     stop_event = threading.Event()
     launched: list[_ResidentProcess] = []
     sweep_options: list[dict[str, object]] = []
@@ -947,7 +992,7 @@ def test_exited_pdf_controller_lease_is_recovered_before_replacement(
             )
             pdf_worker.returncode = 9
 
-    def launch(command):
+    def launch(command, *, role=None):
         process = _ResidentProcess(command, 1000 + len(launched))
         launched.append(process)
         if (
@@ -1000,6 +1045,122 @@ def test_standalone_index_worker_reconciles_once_before_cheap_claims(monkeypatch
     work_one.assert_called_once_with()
 
 
+def test_index_worker_controller_pauses_only_new_job_claims(monkeypatch):
+    work_one = Mock(return_value=None)
+    monkeypatch.setattr(bitbucket_index_worker, "worker_slot_admitted", Mock(return_value=False))
+    monkeypatch.setattr(bitbucket_index_worker, "work_one_extraction_job", work_one)
+
+    call_command(
+        "bitbucket_index_worker",
+        "--once",
+        "--no-startup-sweep",
+        "--slot-number",
+        "3",
+    )
+
+    bitbucket_index_worker.worker_slot_admitted.assert_called_once_with(3)
+    work_one.assert_not_called()
+
+
+def test_supervisor_records_controller_evaluation_failure_in_controller_scope(
+    monkeypatch,
+    settings,
+):
+    settings.PDF_PIPELINE_RECOVERY_ENABLED = True
+    settings.SEMANTIC_SEARCH_ENABLED = False
+    stop_event = threading.Event()
+    record_failure = Mock()
+    monkeypatch.setattr(run_owl, "resident_repository_workers_active", Mock(return_value=False))
+    monkeypatch.setattr(run_owl, "set_resident_repository_workers_active", Mock())
+    monkeypatch.setattr(run_owl, "_resident_worker_specs", Mock(return_value=()))
+    monkeypatch.setattr(run_owl, "_resident_bitbucket_worker_specs", Mock(return_value=()))
+    monkeypatch.setattr(run_owl, "ensure_recovery_scope", Mock())
+    monkeypatch.setattr(run_owl, "queue_due_daily_repository_refreshes", Mock())
+    monkeypatch.setattr(run_owl, "repository_status_snapshot", Mock())
+    monkeypatch.setattr(run_owl, "stale_repository_worker_pids", Mock(return_value=()))
+    monkeypatch.setattr(run_owl, "stale_extraction_worker_pids", Mock(return_value=()))
+    monkeypatch.setattr(run_owl, "stale_semantic_worker_pids", Mock(return_value=()))
+    monkeypatch.setattr(
+        run_owl,
+        "sweep_pdf_extraction_queue",
+        Mock(return_value=type("Recovery", (), {"interrupted_worker_pids": ()})()),
+    )
+    monkeypatch.setattr(run_owl, "reconcile_open_pipeline_runs", Mock())
+    monkeypatch.setattr(
+        run_owl,
+        "_prepare_recovery_scope_launch",
+        Mock(return_value=run_owl._WorkerLaunchPermission(allowed=True)),
+    )
+    monkeypatch.setattr(run_owl, "_record_recovery_scope_failure", record_failure)
+    monkeypatch.setattr(
+        run_owl,
+        "_reconcile_display_awake_for_current_queues",
+        Mock(return_value=None),
+    )
+    monkeypatch.setattr(run_owl, "_stop_display_awake_assertion", Mock())
+
+    def fail_controller_sample(**kwargs):
+        stop_event.set()
+        raise run_owl.ControllerEvaluationError("synthetic evaluation failure")
+
+    monkeypatch.setattr(run_owl, "sample_pipeline_metrics", fail_controller_sample)
+
+    run_owl._run_bitbucket_queue_loop(stop_event, poll_seconds=0)
+
+    record_failure.assert_called_once_with(
+        run_owl.RecoveryScope.CONTROLLER.value,
+        reason_code=run_owl.RecoveryReasonCode.ERROR_LOOP,
+        probe=None,
+    )
+
+
+def test_paused_controller_scope_samples_fixed_fallback_without_evaluating(
+    monkeypatch,
+    settings,
+):
+    settings.PDF_PIPELINE_RECOVERY_ENABLED = True
+    settings.SEMANTIC_SEARCH_ENABLED = False
+    stop_event = threading.Event()
+    sampled_controllers = []
+    monkeypatch.setattr(run_owl, "resident_repository_workers_active", Mock(return_value=False))
+    monkeypatch.setattr(run_owl, "set_resident_repository_workers_active", Mock())
+    monkeypatch.setattr(run_owl, "_resident_worker_specs", Mock(return_value=()))
+    monkeypatch.setattr(run_owl, "_resident_bitbucket_worker_specs", Mock(return_value=()))
+    monkeypatch.setattr(run_owl, "ensure_recovery_scope", Mock())
+    monkeypatch.setattr(run_owl, "queue_due_daily_repository_refreshes", Mock())
+    monkeypatch.setattr(run_owl, "repository_status_snapshot", Mock())
+    monkeypatch.setattr(run_owl, "stale_repository_worker_pids", Mock(return_value=()))
+    monkeypatch.setattr(run_owl, "stale_extraction_worker_pids", Mock(return_value=()))
+    monkeypatch.setattr(run_owl, "stale_semantic_worker_pids", Mock(return_value=()))
+    monkeypatch.setattr(
+        run_owl,
+        "sweep_pdf_extraction_queue",
+        Mock(return_value=type("Recovery", (), {"interrupted_worker_pids": ()})()),
+    )
+    monkeypatch.setattr(run_owl, "reconcile_open_pipeline_runs", Mock())
+    monkeypatch.setattr(
+        run_owl,
+        "_prepare_recovery_scope_launch",
+        Mock(return_value=run_owl._WorkerLaunchPermission(allowed=False)),
+    )
+    monkeypatch.setattr(
+        run_owl,
+        "_reconcile_display_awake_for_current_queues",
+        Mock(return_value=None),
+    )
+    monkeypatch.setattr(run_owl, "_stop_display_awake_assertion", Mock())
+
+    def sample_fixed_fallback(**kwargs):
+        sampled_controllers.append(kwargs["controller"])
+        stop_event.set()
+
+    monkeypatch.setattr(run_owl, "sample_pipeline_metrics", sample_fixed_fallback)
+
+    run_owl._run_bitbucket_queue_loop(stop_event, poll_seconds=0)
+
+    assert sampled_controllers == [None]
+
+
 def test_repository_only_sync_worker_never_claims_pdf_extraction(monkeypatch):
     repository_work = Mock(return_value=None)
     extraction_work = Mock()
@@ -1017,3 +1178,120 @@ def test_repository_only_sync_worker_never_claims_pdf_extraction(monkeypatch):
     repository_work.assert_called_once_with()
     extraction_sweep.assert_not_called()
     extraction_work.assert_not_called()
+
+
+def test_paused_pdf_slot_is_not_relaunched(tmp_path, settings):
+    settings.PDF_PIPELINE_STATE_ROOT = tmp_path / "pipeline-state"
+    settings.PDF_PIPELINE_RECOVERY_ENABLED = True
+    settings.PDF_PIPELINE_RECOVERY_PAUSE_AFTER_ATTEMPTS = 0
+
+    run_owl._record_pdf_worker_failure(
+        "pdf-index-1",
+        reason_code=run_owl.RecoveryReasonCode.PROCESS_EXIT,
+        probe=None,
+    )
+
+    recovery = PDFPipelineRecovery.objects.get(scope="extraction_slot:1")
+    assert recovery.state == PDFPipelineRecoveryState.PAUSED
+    assert run_owl._prepare_pdf_worker_launch("pdf-index-1").allowed is False
+
+
+def test_due_pdf_recovery_launch_closes_only_after_stability(tmp_path, settings):
+    settings.PDF_PIPELINE_STATE_ROOT = tmp_path / "pipeline-state"
+    settings.PDF_PIPELINE_RECOVERY_ENABLED = True
+    settings.PDF_PIPELINE_RECOVERY_PAUSE_AFTER_ATTEMPTS = 2
+    settings.PDF_PIPELINE_RECOVERY_BACKOFF_BASE_SECONDS = 1
+    settings.PDF_PIPELINE_RECOVERY_BACKOFF_MAX_SECONDS = 1
+    settings.PDF_PIPELINE_RECOVERY_JITTER_FRACTION = 0
+    settings.PDF_PIPELINE_RECOVERY_STABILITY_SECONDS = 5
+    run_owl._record_pdf_worker_failure(
+        "pdf-writer-1",
+        reason_code=run_owl.RecoveryReasonCode.PROCESS_EXIT,
+        probe=None,
+    )
+    PDFPipelineRecovery.objects.filter(scope="publisher").update(
+        next_retry_at=run_owl.timezone.now(),
+    )
+
+    permission = run_owl._prepare_pdf_worker_launch(
+        "pdf-writer-1",
+        monotonic_now=10,
+    )
+    assert permission.allowed is True
+    assert permission.probe is not None
+    recovery = PDFPipelineRecovery.objects.get(scope="publisher")
+    assert recovery.state == PDFPipelineRecoveryState.RECOVERING
+    assert recovery.lifetime_attempts == 1
+
+    process = _ResidentProcess("bitbucket_pdf_writer", 808)
+    probes = {"pdf-writer-1": permission.probe}
+    run_owl._complete_stable_pdf_worker_probes(
+        {"pdf-writer-1": process},
+        probes,
+        monotonic_now=14.9,
+    )
+    recovery.refresh_from_db()
+    assert recovery.state == PDFPipelineRecoveryState.RECOVERING
+    assert "pdf-writer-1" in probes
+
+    run_owl._complete_stable_pdf_worker_probes(
+        {"pdf-writer-1": process},
+        probes,
+        monotonic_now=15,
+    )
+    recovery.refresh_from_db()
+    assert recovery.state == PDFPipelineRecoveryState.HEALTHY
+    assert recovery.lifetime_attempts == 1
+    assert recovery.consecutive_failed_attempts == 0
+    assert probes == {}
+
+
+def test_failed_replacement_probe_opens_circuit_at_threshold(tmp_path, settings):
+    settings.PDF_PIPELINE_STATE_ROOT = tmp_path / "pipeline-state"
+    settings.PDF_PIPELINE_RECOVERY_ENABLED = True
+    settings.PDF_PIPELINE_RECOVERY_PAUSE_AFTER_ATTEMPTS = 1
+    settings.PDF_PIPELINE_RECOVERY_BACKOFF_BASE_SECONDS = 1
+    settings.PDF_PIPELINE_RECOVERY_BACKOFF_MAX_SECONDS = 1
+    settings.PDF_PIPELINE_RECOVERY_JITTER_FRACTION = 0
+    run_owl._record_pdf_worker_failure(
+        "pdf-index-2",
+        reason_code=run_owl.RecoveryReasonCode.PROCESS_EXIT,
+        probe=None,
+    )
+    PDFPipelineRecovery.objects.filter(scope="extraction_slot:2").update(
+        next_retry_at=run_owl.timezone.now(),
+    )
+    permission = run_owl._prepare_pdf_worker_launch("pdf-index-2")
+    assert permission.probe is not None
+
+    run_owl._record_pdf_worker_failure(
+        "pdf-index-2",
+        reason_code=run_owl.RecoveryReasonCode.LAUNCH_FAILED,
+        probe=permission.probe,
+    )
+
+    recovery = PDFPipelineRecovery.objects.get(scope="extraction_slot:2")
+    assert recovery.state == PDFPipelineRecoveryState.PAUSED
+    assert recovery.consecutive_failed_attempts == 1
+    assert recovery.lifetime_attempts == 1
+    assert run_owl._prepare_pdf_worker_launch("pdf-index-2").allowed is False
+
+
+def test_index_worker_exits_a_caught_database_error_loop_for_supervisor_recovery(
+    monkeypatch,
+    settings,
+):
+    settings.PDF_PIPELINE_COMPONENT_ERROR_LOOP_THRESHOLD = 2
+    monkeypatch.setattr(
+        bitbucket_index_worker,
+        "resident_supervisor_is_alive",
+        Mock(return_value=True),
+    )
+    work = Mock(side_effect=OperationalError("synthetic locked loop"))
+    monkeypatch.setattr(bitbucket_index_worker, "work_one_extraction_job", work)
+    monkeypatch.setattr(bitbucket_index_worker.time, "sleep", Mock())
+
+    with pytest.raises(OperationalError):
+        call_command("bitbucket_index_worker", "--no-startup-sweep")
+
+    assert work.call_count == 2

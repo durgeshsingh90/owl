@@ -381,6 +381,10 @@ test("connection test stays idle on load and runs only when its top-bar icon is 
     page.connection.dispatch("click");
     page.connection.dispatch("click");
     assert.equal(page.connection.dataset.state, "checking", "click immediately shows checking state");
+    assert.equal(
+        page.connection.title,
+        "Testing every saved repository URL with Git: Please wait.",
+    );
     assert.equal(page.connection.disabled, true, "parallel clicks are blocked while testing");
     await page.settle();
     assert.equal(page.fetchCount(), 1, "one explicit click starts one connection test");

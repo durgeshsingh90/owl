@@ -103,8 +103,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=connection-idle-v1" in html
-    assert "bitbucket_search/bitbucket_search.js?v=connection-diagnostic-v1" in html
+    assert "bitbucket_search/bitbucket_search.css?v=local-stars-v1" in html
+    assert "bitbucket_search/bitbucket_search.js?v=repository-url-connection-v1" in html
     assert "data-repository-operation-overlay" in html
     assert "bitbucket_search/icons/work-in-progress.gif" in html
     assert "bitbucket_search/icons/connection-connected.png" in html
@@ -115,7 +115,7 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     )
     assert 'class="bb-connection-test" type="button"' in html
     assert 'data-repository-connection-result data-state="idle"' in html
-    assert 'aria-label="Test repository connections"' in html
+    assert 'aria-label="Test every saved repository URL with Git"' in html
     assert "data-repository-connection-message" in html
     assert 'name="confirmed"' not in html
 
@@ -301,15 +301,24 @@ def _repository_cards(html: str, repository_id: int) -> tuple[str, ...]:
     )
 
 
-def _assert_refresh_work_summary(form: str, summary: dict) -> None:
-    assert summary["active"] is True
-    for hook, key in (("label", "label"), ("detail", "detail")):
-        content = re.search(rf"data-refresh-all-{hook}>\s*(.*?)\s*</", form, re.DOTALL)
-        assert content is not None
-        assert content.group(1) == escape(summary[key])
-    assert 'tabindex="0"' in form
+def _assert_refresh_waits_for_authoritative_pipeline_snapshot(form: str) -> None:
+    """Durable work rows alone must not masquerade as live execution."""
+
+    assert "bb-refresh-all--unknown" in form
+    assert "Checking current activity" in form
+    assert "Waiting for a fresh pipeline snapshot" in form
+    assert "disabled" in form
+    assert 'aria-busy="true"' not in form
     assert 'aria-describedby="bb-refresh-all-description"' in form
     assert 'id="bb-refresh-all-description"' in form
+    assert "data-refresh-all-icon hidden" in form
+    assert "data-refresh-all-attention" in form
+    running = re.search(r"<img[^>]+data-refresh-all-running-visual[^>]*>", form)
+    assert running is not None
+    assert " hidden" in running.group()
+    assert " src=" not in running.group()
+    assert "data-active-src" in running.group()
+    assert "data-overall-progress" not in form
 
 
 def test_refresh_all_controls_are_accessible_and_truthful_when_unavailable(loopback_client):
@@ -320,7 +329,8 @@ def test_refresh_all_controls_are_accessible_and_truthful_when_unavailable(loopb
     assert empty_response.status_code == 200
     assert empty_html.count('action="/pdfs/repositories/refresh/"') == 1
     assert "bb-refresh-all--disabled" in desktop_empty
-    assert "Refresh all repositories unavailable: no repositories are connected" in desktop_empty
+    assert "data-pipeline-indicator-state=\"hidden\"" in desktop_empty
+    assert " hidden" in desktop_empty
     assert "disabled" in desktop_empty
     assert "No repositories connected" in empty_html
 
@@ -357,8 +367,9 @@ def test_refresh_all_controls_are_accessible_and_truthful_when_unavailable(loopb
     assert mixed_response.context["active_repository_count"] == 1
     assert mixed_response.context["active_enabled_repository_count"] == 0
     assert 'data-active-repository-count="1"' in mixed_html
-    assert "bb-refresh-all--active" in _workspace_refresh_form(mixed_html)
-    assert 'disabled aria-busy="true"' in _workspace_refresh_form(mixed_html)
+    _assert_refresh_waits_for_authoritative_pipeline_snapshot(
+        _workspace_refresh_form(mixed_html)
+    )
 
 
 def test_refresh_all_controls_enable_only_when_all_repositories_are_idle(loopback_client):
@@ -393,14 +404,8 @@ def test_refresh_all_controls_enable_only_when_all_repositories_are_idle(loopbac
 
     assert partial_response.context["enabled_repository_count"] == 2
     assert partial_response.context["active_repository_count"] == 1
-    assert "bb-refresh-all--active" in partial_desktop
-    _assert_refresh_work_summary(
-        partial_desktop, partial_response.context["repository_work_summary"]
-    )
-    assert "Git sync queued" in partial_desktop
-    assert "networking" in partial_desktop
+    _assert_refresh_waits_for_authoritative_pipeline_snapshot(partial_desktop)
     assert "Refresh remaining repositories" not in partial_html
-    assert 'disabled aria-busy="true"' in partial_desktop
 
     idle.sync_state = RepositorySyncState.QUEUED
     idle.save(update_fields={"sync_state"})
@@ -413,11 +418,7 @@ def test_refresh_all_controls_enable_only_when_all_repositories_are_idle(loopbac
     active_desktop = _workspace_refresh_form(active_html)
 
     assert active_response.context["active_repository_count"] == 2
-    assert "bb-refresh-all--active" in active_desktop
-    _assert_refresh_work_summary(active_desktop, active_response.context["repository_work_summary"])
-    assert "architecture" in active_desktop
-    assert "networking" in active_desktop
-    assert 'disabled aria-busy="true"' in active_desktop
+    _assert_refresh_waits_for_authoritative_pipeline_snapshot(active_desktop)
 
 
 @pytest.mark.parametrize(
@@ -458,14 +459,8 @@ def test_refresh_all_controls_stay_disabled_through_add_and_refresh_phases(
     assert response.context["active_repository_count"] == 1
     assert status.json()["repositories"][0]["active"] is True
     form = _workspace_refresh_form(html)
-    assert 'disabled aria-busy="true"' in form
     assert 'data-active-repository-count="1"' in form
-    _assert_refresh_work_summary(form, response.context["repository_work_summary"])
-    assert "data-refresh-all-icon hidden" not in form
-    assert "data-refresh-all-spinner hidden" in form
-    assert "data-refresh-all-visual" in form
-    assert "data-refresh-all-running-visual" in form
-    assert "data-overall-progress" in form
+    _assert_refresh_waits_for_authoritative_pipeline_snapshot(form)
 
 
 @pytest.mark.parametrize(
@@ -491,7 +486,9 @@ def test_refresh_all_controls_reenable_after_jobs_finish(loopback_client, sync_s
         heartbeat_at=timezone.now(),
     )
     busy_response = loopback_client.get(reverse("bitbucket_search:index"))
-    assert 'disabled aria-busy="true"' in _workspace_refresh_form(busy_response.content.decode())
+    _assert_refresh_waits_for_authoritative_pipeline_snapshot(
+        _workspace_refresh_form(busy_response.content.decode())
+    )
 
     repository.sync_state = sync_state
     repository.save(update_fields={"sync_state"})
@@ -810,7 +807,7 @@ def test_git_ready_repository_shows_pdf_worker_phase_in_sidebar_and_refresh_tool
         assert "bb-repository-state--working" not in card
         assert re.search(r"data-repository-work-label[^>]*\bhidden", card)
     form = _workspace_refresh_form(html)
-    _assert_refresh_work_summary(form, payload["work"])
+    _assert_refresh_waits_for_authoritative_pipeline_snapshot(form)
 
     # These are separate truthful snapshots, so their observation clocks may differ.
     # Compare the durable activity contract without pretending they were sampled together.
@@ -830,12 +827,8 @@ def test_git_ready_repository_shows_pdf_worker_phase_in_sidebar_and_refresh_tool
     assert stable_work(response.context["repository_work_summary"]) == stable_work(payload["work"])
     assert repository.display_name in payload["work"]["detail"]
     assert idle.display_name not in payload["work"]["detail"]
-    assert 'disabled aria-busy="true"' in form
-    assert "data-refresh-all-icon hidden" not in form
-    assert "data-refresh-all-spinner hidden" in form
-    assert "data-refresh-all-visual" in form
-    assert "data-refresh-all-running-visual" in form
-    assert "data-overall-progress" in form
+    assert "Workers " not in form
+    assert "PDF indexing in progress" not in form
 
 
 @pytest.mark.parametrize(
@@ -856,7 +849,9 @@ def test_terminal_pdf_jobs_do_not_leave_global_refresh_or_sidebar_busy(loopback_
     )
     job = _pdf_worker(repository, 1, PDFExtractionJobStatus.RUNNING)
     active_response = loopback_client.get(reverse("bitbucket_search:index"))
-    assert 'disabled aria-busy="true"' in _workspace_refresh_form(active_response.content.decode())
+    _assert_refresh_waits_for_authoritative_pipeline_snapshot(
+        _workspace_refresh_form(active_response.content.decode())
+    )
     job.status = job_status
     job.completed_at = timezone.now()
     job.save(update_fields={"status", "completed_at"})
@@ -1157,7 +1152,7 @@ def test_pdf_timeline_fragment_preserves_boundary_group_key(loopback_client):
     assert "Page <strong data-pdf-current-page>2</strong> of 2" in fallback_html
     assert f'href="{previous_page_url}" rel="prev"' in fallback_html
     assert f'id="pdf-document-{older_document.pk}"' in fallback_html
-    assert fallback_html.count('name="return_page" value="2"') == 2
+    assert fallback_html.count('name="return_page" value="2"') == 3
 
 
 @override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
@@ -1470,14 +1465,15 @@ def test_repository_status_is_compact_and_never_returns_the_remote_url(loopback_
     assert "/private/synthetic/path" not in serialized
 
 
-def test_topbar_connection_test_checks_each_enabled_repository_with_its_actual_credential(
+@override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org", "github.com", "scm.example.invalid"))
+def test_topbar_connection_test_checks_every_saved_repository_url_with_its_actual_credential(
     loopback_client,
     monkeypatch,
 ):
     https_repository = BitbucketRepository.objects.create(
         display_name="architecture-https",
-        canonical_remote_key="scm.mastercard.int/workspace/architecture",
-        remote_url="https://scm.mastercard.int/workspace/architecture.git",
+        canonical_remote_key="scm.example.invalid/workspace/architecture",
+        remote_url="https://scm.example.invalid/workspace/architecture.git",
         sync_state=RepositorySyncState.READY,
     )
     ssh_repository = BitbucketRepository.objects.create(
@@ -1485,6 +1481,14 @@ def test_topbar_connection_test_checks_each_enabled_repository_with_its_actual_c
         canonical_remote_key="github.com/workspace/platform",
         remote_url="ssh://git@github.com/workspace/platform.git",
         sync_state=RepositorySyncState.READY,
+    )
+    disabled_repository = BitbucketRepository.objects.create(
+        display_name="disabled-still-saved",
+        canonical_remote_key="bitbucket.org/workspace/disabled",
+        remote_url="ssh://git@bitbucket.org/workspace/disabled.git",
+        enabled=False,
+        exclude_from_refresh=True,
+        sync_state=RepositorySyncState.DISABLED,
     )
     saved_credential = Mock(username="stored-user", token="private-token")
     resolved_urls = []
@@ -1507,40 +1511,41 @@ def test_topbar_connection_test_checks_each_enabled_repository_with_its_actual_c
     response = loopback_client.post(reverse("bitbucket_search:repository_connection_test"))
 
     assert response.status_code == 200
-    assert resolved_urls == [https_repository.remote_url, ssh_repository.remote_url]
+    assert resolved_urls == [
+        https_repository.remote_url,
+        disabled_repository.remote_url,
+        ssh_repository.remote_url,
+    ]
     assert [repository for repository, _credential in calls] == [
         https_repository,
+        disabled_repository,
         ssh_repository,
     ]
     assert calls[0][1].username == "stored-user"
     assert calls[0][1].token == "private-token"
     assert calls[1][1] is None
+    assert calls[2][1] is None
     payload = response.json()
     assert payload["state"] == "connected"
-    assert payload["detail"] == "2 repository connections passed."
+    assert payload["detail"] == "3 repository URL checks passed."
     assert "ssh" not in payload
     assert "private-token" not in response.content.decode()
 
 
+@override_settings(BITBUCKET_ALLOWED_HOSTS=("scm.example.invalid",))
 def test_topbar_connection_test_returns_safe_failed_result_as_completed_request(
     loopback_client,
     monkeypatch,
 ):
     timed_out = BitbucketRepository.objects.create(
         display_name="architecture",
-        canonical_remote_key="scm.mastercard.int/workspace/architecture",
-        remote_url="ssh://git@scm.mastercard.int/workspace/architecture.git",
+        canonical_remote_key="scm.example.invalid/workspace/architecture",
+        remote_url="ssh://git@scm.example.invalid/workspace/architecture.git",
     )
     missing_credential = BitbucketRepository.objects.create(
         display_name="payments",
-        canonical_remote_key="scm.mastercard.int/workspace/payments",
-        remote_url="https://scm.mastercard.int/workspace/payments.git",
-    )
-    BitbucketRepository.objects.create(
-        display_name="disabled",
-        canonical_remote_key="bitbucket.org/workspace/disabled",
-        remote_url="ssh://git@bitbucket.org/workspace/disabled.git",
-        enabled=False,
+        canonical_remote_key="scm.example.invalid/workspace/payments",
+        remote_url="https://scm.example.invalid/workspace/payments.git",
     )
 
     def resolve_credential(remote_url):
@@ -1568,7 +1573,7 @@ def test_topbar_connection_test_returns_safe_failed_result_as_completed_request(
     assert response.status_code == 200
     payload = response.json()
     assert payload["state"] == "failed"
-    assert payload["detail"] == "2 of 2 repository connections failed."
+    assert payload["detail"] == "2 of 2 repository URL checks failed."
     assert payload["repositories"] == [
         {
             "id": timed_out.pk,
@@ -1593,14 +1598,62 @@ def test_topbar_connection_test_returns_safe_failed_result_as_completed_request(
     assert "private credential detail" not in response.content.decode()
 
 
-def test_topbar_connection_test_is_neutral_when_no_repositories_are_enabled(loopback_client):
+@override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
+def test_topbar_connection_test_rejects_an_unsafe_saved_url_without_running_git(
+    loopback_client,
+    monkeypatch,
+):
+    unsafe = BitbucketRepository.objects.create(
+        display_name="unsafe",
+        canonical_remote_key="bitbucket.org/workspace/unsafe",
+        remote_url="ext::sh -c unsafe-command",
+    )
+    valid = BitbucketRepository.objects.create(
+        display_name="valid",
+        canonical_remote_key="bitbucket.org/workspace/valid",
+        remote_url="https://bitbucket.org/workspace/valid.git",
+    )
+    resolved_urls = []
+    tested = []
+    monkeypatch.setattr(
+        bitbucket_views,
+        "resolve_https_credential",
+        lambda remote_url: resolved_urls.append(remote_url),
+    )
+    monkeypatch.setattr(
+        bitbucket_views,
+        "test_repository_connection",
+        lambda repository, *, https_credential: tested.append(repository),
+    )
+
+    response = loopback_client.post(reverse("bitbucket_search:repository_connection_test"))
+
+    assert response.status_code == 200
+    assert resolved_urls == [valid.remote_url]
+    assert tested == [valid]
+    payload = response.json()
+    assert payload["state"] == "failed"
+    assert payload["detail"] == "1 of 2 repository URL checks failed."
+    assert payload["repositories"][0] == {
+        "id": unsafe.pk,
+        "name": "unsafe",
+        "connected": False,
+        "errorCode": "invalid_repository_url",
+        "detail": (
+            "This saved repository URL is invalid or no longer allowed. "
+            "Remove it and add a valid SSH or HTTPS URL."
+        ),
+    }
+
+
+def test_topbar_connection_test_is_neutral_when_no_repositories_are_saved(loopback_client):
     response = loopback_client.post(reverse("bitbucket_search:repository_connection_test"))
 
     assert response.status_code == 200
     assert response.json() == {
         "state": "idle",
         "label": "No repository connections to test",
-        "detail": "Add or enable a repository, then test again.",
+        "detail": "Add a repository URL, then test again.",
         "repositories": [],
     }
 
@@ -1610,6 +1663,12 @@ def test_topbar_connection_test_reserves_4xx_for_request_errors(client):
 
     assert client.get(path, REMOTE_ADDR="127.0.0.1").status_code == 405
     assert client.post(path, REMOTE_ADDR="192.0.2.10").status_code == 403
+    csrf_client = Client(
+        enforce_csrf_checks=True,
+        HTTP_HOST="127.0.0.1",
+        REMOTE_ADDR="127.0.0.1",
+    )
+    assert csrf_client.post(path).status_code == 403
 
 
 def test_repository_poller_tracks_daily_idle_and_catalog_publication_contract():

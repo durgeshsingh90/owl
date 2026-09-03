@@ -7,7 +7,7 @@ from datetime import datetime
 from django.db import transaction
 from django.utils import timezone
 
-from bookmark_manager.models import Notification, NotificationState
+from bookmark_manager.models import Notification, NotificationKind, NotificationState
 
 DEFAULT_NOTIFICATION_LIMIT = 20
 MAX_NOTIFICATION_LIMIT = 100
@@ -102,7 +102,7 @@ def publish_notification(
 
 
 def _notification_payload(notification: Notification) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "id": notification.pk,
         "kind": notification.kind,
         "kindLabel": notification.get_kind_display(),
@@ -114,6 +114,15 @@ def _notification_payload(notification: Notification) -> dict[str, object]:
         "occurredAt": notification.occurred_at.isoformat(),
         "read": notification.read_at is not None,
     }
+    if notification.kind == NotificationKind.PDF_PIPELINE_RECOVERY:
+        # Resolve the action from canonical recovery state.  A path, log line, or
+        # stored notification message can therefore never supply an executable URL.
+        from bitbucket_search.services.pdf_recovery import recovery_notification_payload
+
+        recovery = recovery_notification_payload(notification.event_key)
+        if recovery is not None:
+            payload.update(recovery)
+    return payload
 
 
 def list_notification_payloads(
@@ -130,6 +139,7 @@ def list_notification_payloads(
         queryset = queryset.filter(read_at__isnull=True)
     notifications = queryset.only(
         "id",
+        "event_key",
         "kind",
         "state",
         "title",

@@ -147,14 +147,15 @@ def test_first_use_page_has_accessible_settings_gear_dialog_and_blank_pat(loopba
     assert 'aria-labelledby="confluence-settings-heading"' in html
     assert 'data-open-on-load="false"' in html
     dialog = html.split('<dialog class="settings-dialog"', 1)[1]
-    assert "Confluence connection" in dialog
-    assert "Bitbucket HTTPS credentials" in dialog
+    assert "Confluence" in dialog
+    assert "Repository access" in dialog
+    assert "Open full Settings" in dialog
     assert "Bookmark data" not in dialog
+    assert "<form" not in dialog
+    assert "personal_access_token" not in dialog
     assert "Confluence text search is optional" not in html
     assert 'aria-describedby="bookmark-connection-help"' not in html
     assert "No bookmarks saved yet" in html
-    assert 'autocomplete="new-password"' in password_input_tag(html)
-    assert "value=" not in password_input_tag(html)
     assert SYNTHETIC_PAT not in html
 
 
@@ -187,7 +188,7 @@ def test_environment_managed_settings_are_disabled_blank_and_secret_free(
     settings.CONFLUENCE_BASE_URL = environment_origin
     settings.CONFLUENCE_PAT = environment_pat
 
-    response = loopback_client.get(reverse("bookmark_manager:settings"))
+    response = loopback_client.get(reverse("bookmark_manager:settings"), {"section": "confluence"})
     html = response_html(response)
     form = response.context["settings_form"]
 
@@ -199,10 +200,10 @@ def test_environment_managed_settings_are_disabled_blank_and_secret_free(
         form.fields[field_name].disabled
         for field_name in ("base_url", "personal_access_token", "auth_mode")
     )
-    assert "Managed outside OWL" in html
+    assert "Managed externally" in html
     assert environment_origin not in html
     assert environment_pat not in html
-    assert "value=" not in password_input_tag(html)
+    assert 'type="password"' not in html
 
 
 def test_get_and_post_methods_are_restricted_to_their_declared_purpose(loopback_client):
@@ -264,7 +265,10 @@ def test_rendered_settings_form_supplies_a_working_csrf_token(monkeypatch):
         HTTP_HOST="127.0.0.1",
         REMOTE_ADDR="127.0.0.1",
     )
-    page = csrf_client.get(reverse("bookmark_manager:index"))
+    page = csrf_client.get(
+        reverse("bookmark_manager:settings"),
+        {"section": "confluence", "task": "confluence"},
+    )
     match = re.search(
         r'name="csrfmiddlewaretoken" value="(?P<token>[^"]+)"',
         response_html(page),
@@ -395,14 +399,19 @@ def test_save_reopen_and_remove_keep_pat_hidden_and_bookmarks_retained(
     )
 
     assert save_response.status_code == 302
-    assert save_response.headers["Location"] == reverse("bookmark_manager:settings")
+    saved_url = urlparse(save_response.headers["Location"])
+    assert saved_url.path == reverse("bookmark_manager:settings")
+    assert parse_qs(saved_url.query)["section"] == ["confluence"]
     assert SYNTHETIC_PAT in (secure_store.get() or "")
     configuration = ConfluenceConfiguration.objects.get(pk=1)
     assert configuration.base_url == SYNTHETIC_ORIGIN
     assert SYNTHETIC_PAT not in repr(configuration.__dict__)
     assert_no_secret_in_local_surfaces(loopback_client, save_response, SYNTHETIC_PAT)
 
-    reopen_response = loopback_client.get(reverse("bookmark_manager:settings"))
+    reopen_response = loopback_client.get(
+        reverse("bookmark_manager:settings"),
+        {"section": "confluence", "task": "confluence"},
+    )
     reopen_html = response_html(reopen_response)
     assert reopen_response.status_code == 200
     assert "Replace PAT" in reopen_html
@@ -415,7 +424,9 @@ def test_save_reopen_and_remove_keep_pat_hidden_and_bookmarks_retained(
         {"confirm": "remove", "return_to": "settings"},
     )
     assert remove_response.status_code == 302
-    assert remove_response.headers["Location"] == reverse("bookmark_manager:settings")
+    removed_url = urlparse(remove_response.headers["Location"])
+    assert removed_url.path == reverse("bookmark_manager:settings")
+    assert parse_qs(removed_url.query)["section"] == ["confluence"]
     assert secure_store.get() is None
     configuration.refresh_from_db()
     assert configuration.base_url == ""

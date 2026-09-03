@@ -16,6 +16,7 @@ from urllib.parse import urlencode, urlsplit
 
 from django.conf import settings
 from django.contrib import messages
+from django.core.exceptions import DisallowedHost
 from django.core.paginator import EmptyPage, Page, PageNotAnInteger, Paginator
 from django.db import OperationalError
 from django.db.models import Case, Count, DateTimeField, F, When
@@ -27,6 +28,7 @@ from django.http import (
     HttpResponseForbidden,
     JsonResponse,
 )
+from django.http.request import split_domain_port
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
@@ -80,6 +82,7 @@ from bitbucket_search.services.pdf_indexing import (
     extraction_status_snapshot,
 )
 from bitbucket_search.services.pdf_local_policy import frozen_pdf_path
+from bitbucket_search.services.pdf_pipeline_metrics import metrics_payload_for_request
 from bitbucket_search.services.pdf_search import (
     PDFSearchHit,
     PDFSearchPage,
@@ -96,10 +99,20 @@ from bitbucket_search.services.pdf_search_query import (
     PDFSearchSort,
     parse_pdf_search_query,
 )
+from bitbucket_search.services.pdf_stars import (
+    PDFStarConflictError,
+    PDFStarNotFoundError,
+    PDFStarValidationError,
+    set_document_star,
+)
 from bitbucket_search.services.people import (
     PeopleGroupValidationError,
+    StarredPersonConflictError,
+    StarredPersonValidationError,
     create_people_group,
     git_people_summaries,
+    set_starred_person,
+    starred_people_identities,
 )
 from bitbucket_search.services.repository_activity import (
     repository_work_summary,
@@ -118,7 +131,7 @@ from bitbucket_search.services.repository_sync import (
     queue_all_repository_refreshes,
     queue_due_daily_repository_refreshes,
     queue_repository_refresh,
-    register_and_queue_repository,
+    register_and_queue_repositories,
     release_repository_worker_wakeups,
     repository_status_snapshot,
     reserve_queued_repository_worker_wakeups,
@@ -244,6 +257,37 @@ def _require_strict_loopback_action(request: HttpRequest) -> HttpResponse | None
         return None
     log_event(logger, logging.WARNING, "filesystem_action_rejected", reason="non_loopback")
     return HttpResponseForbidden("This filesystem action is available only on this computer.")
+
+
+def _require_recovery_loopback_action(request: HttpRequest) -> HttpResponse | None:
+    """Require both a loopback peer and an exact loopback Host for recovery control."""
+
+    candidate = request.META.get("REMOTE_ADDR", "")
+    try:
+        peer_address = ipaddress.ip_address(candidate.split("%", maxsplit=1)[0])
+        if isinstance(peer_address, ipaddress.IPv6Address) and peer_address.ipv4_mapped:
+            peer_address = peer_address.ipv4_mapped
+        peer_is_loopback = peer_address.is_loopback
+    except ValueError:
+        peer_is_loopback = False
+    try:
+        host = request.get_host()
+    except DisallowedHost:
+        host = ""
+    host_domain, host_port = split_domain_port(host)
+    valid_port = not host_port or (
+        host_port.isdecimal() and len(host_port) <= 5 and 1 <= int(host_port) <= 65_535
+    )
+    if (
+        peer_is_loopback
+        and host_domain in {"localhost", "127.0.0.1", "[::1]"}
+        and valid_port
+    ):
+        return None
+    log_event(logger, logging.WARNING, "recovery_action_rejected", reason="non_loopback")
+    return HttpResponseForbidden(
+        "PDF pipeline recovery controls are available only from the local OWL application."
+    )
 
 
 def _is_async_request(request: HttpRequest) -> bool:
@@ -672,6 +716,7 @@ def _search_filter_options(
     }
     sort_labels = {
         PDFSearchSort.RELEVANCE: "Best match",
+        PDFSearchSort.STARRED_FIRST: "Starred first",
         PDFSearchSort.MOST_OPENED: "Most opened",
         PDFSearchSort.LEAST_OPENED: "Least opened",
         PDFSearchSort.RECENTLY_OPENED: "Recently opened",
@@ -1083,6 +1128,7 @@ def _index_context(
     pdf_page, timeline_groups = _pdf_timeline_page(pdf_page_number)
     inventory_document_count = pdf_page.paginator.count
     people = git_people_summaries()
+    starred_people = starred_people_identities()
     stored_people_groups = tuple(
         BitbucketPeopleGroup.objects.prefetch_related("members").order_by("normalized_name", "id")
     )
@@ -1212,6 +1258,8 @@ def _index_context(
             "repository_count": person.repository_count,
             "repository_names": person.repository_names,
             "last_committed_at": person.last_committed_at,
+            "identity_key": person.name.casefold(),
+            "starred": person.name.casefold() in starred_people,
             "selected": person.name.casefold() in selected_people_keys,
             "group_form_selected": person.name.casefold() in group_form_member_keys,
         }
@@ -1448,19 +1496,41 @@ def repositories(request: HttpRequest) -> HttpResponse:
 @never_cache
 @_logged_web_action("repository_connection_test")
 def repository_connection_test(request: HttpRequest) -> JsonResponse:
-    """Run one explicit, read-only check against each enabled repository."""
+    """Run one explicit, read-only Git check against every saved repository URL."""
 
     local_error = _require_local_action(request)
     if local_error:
         return local_error
     results = []
-    for repository in BitbucketRepository.objects.filter(enabled=True).order_by("display_name"):
+    for repository in BitbucketRepository.objects.order_by("display_name", "id"):
         try:
+            normalized = normalize_repository_url(repository.remote_url)
+            if (
+                normalized.remote_url != repository.remote_url
+                or normalized.canonical_remote_key != repository.canonical_remote_key
+            ):
+                raise RepositoryURLValidationError(
+                    "invalid_saved_repository_url",
+                    "The saved repository URL is not canonical.",
+                )
             saved = resolve_https_credential(repository.remote_url)
             credential = (
                 GitHTTPSCredential(username=saved.username, token=saved.token) if saved else None
             )
             test_repository_connection(repository, https_credential=credential)
+        except RepositoryURLValidationError:
+            results.append(
+                {
+                    "id": repository.pk,
+                    "name": repository.display_name,
+                    "connected": False,
+                    "errorCode": "invalid_repository_url",
+                    "detail": (
+                        "This saved repository URL is invalid or no longer allowed. "
+                        "Remove it and add a valid SSH or HTTPS URL."
+                    ),
+                }
+            )
         except RepositorySyncError as error:
             results.append(
                 {
@@ -1491,7 +1561,7 @@ def repository_connection_test(request: HttpRequest) -> JsonResponse:
                     "name": repository.display_name,
                     "connected": True,
                     "errorCode": "",
-                    "detail": "Repository connection passed.",
+                    "detail": "Git access to this repository URL passed.",
                 }
             )
     failed = sum(not item["connected"] for item in results)
@@ -1500,20 +1570,19 @@ def repository_connection_test(request: HttpRequest) -> JsonResponse:
     if not repository_count:
         state = "idle"
         label = "No repository connections to test"
-        detail = "Add or enable a repository, then test again."
+        detail = "Add a repository URL, then test again."
     elif connection_failed:
         state = "failed"
         label = "Git connection failed"
         detail = (
-            f"{failed} of {repository_count} repository "
-            f"connection{'s' if repository_count != 1 else ''} failed."
+            f"{failed} of {repository_count} repository URL "
+            f"check{'s' if repository_count != 1 else ''} failed."
         )
     else:
         state = "connected"
         label = "Git connection passed"
         detail = (
-            f"{repository_count} repository "
-            f"connection{'s' if repository_count != 1 else ''} passed."
+            f"{repository_count} repository URL check{'s' if repository_count != 1 else ''} passed."
         )
     return JsonResponse(
         {
@@ -1560,6 +1629,148 @@ def add_people_group(request: HttpRequest) -> HttpResponse:
         f"Git committer{'s' if member_count != 1 else ''}.",
     )
     return redirect(_document_action_return_url(request))
+
+
+@require_POST
+@csrf_protect
+@never_cache
+@_logged_web_action("people_star_toggle", quiet=True)
+def toggle_people_star(request: HttpRequest) -> HttpResponse:
+    """Set one local Git-committer star without changing any repository."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+
+    try:
+        raw_starred = request.POST.get("starred")
+        if raw_starred is None:
+            raw_starred = request.GET.get("starred")
+        if not isinstance(raw_starred, str) or raw_starred.strip().casefold() not in {
+            "true",
+            "false",
+        }:
+            raise StarredPersonValidationError("Starred state must be true or false.")
+        desired_starred = raw_starred.strip().casefold() == "true"
+        result = set_starred_person(
+            request.POST.get("person", ""),
+            starred=desired_starred,
+        )
+    except StarredPersonValidationError as error:
+        detail = str(error)
+        if _is_async_request(request):
+            return JsonResponse(
+                {
+                    "state": "invalid",
+                    "label": "Star not changed",
+                    "detail": detail,
+                },
+                status=400,
+            )
+        messages.error(request, detail)
+        return redirect(_document_action_return_url(request))
+    except StarredPersonConflictError as error:
+        detail = str(error)
+        if _is_async_request(request):
+            return JsonResponse(
+                {
+                    "state": "conflict",
+                    "label": "Star not changed",
+                    "detail": detail,
+                },
+                status=409,
+            )
+        messages.error(request, detail)
+        return redirect(_document_action_return_url(request))
+
+    detail = (
+        f"Starred {result.person_name}"
+        if result.starred
+        else f"Removed star from {result.person_name}"
+    )
+    payload = {
+        "state": "success",
+        "label": "Person updated",
+        "detail": detail,
+        "person": result.person_name,
+        "identity_key": result.identity_key,
+        "starred": result.starred,
+    }
+    if _is_async_request(request):
+        return JsonResponse(payload)
+
+    messages.success(request, detail)
+    return redirect(_document_action_return_url(request))
+
+
+@require_POST
+@csrf_protect
+@never_cache
+@_logged_web_action("pdf_star_set", quiet=True)
+def set_document_star_view(request: HttpRequest, document_id: int) -> HttpResponse:
+    """Set one registered PDF's persistent local star without touching its repository."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+
+    try:
+        raw_starred = request.POST.get("starred")
+        if raw_starred is None:
+            raw_starred = request.GET.get("starred")
+        if not isinstance(raw_starred, str) or raw_starred.strip().casefold() not in {
+            "true",
+            "false",
+        }:
+            raise PDFStarValidationError("Starred state must be true or false.")
+        result = set_document_star(
+            document_id,
+            starred=raw_starred.strip().casefold() == "true",
+        )
+    except PDFStarValidationError as error:
+        detail = str(error)
+        if _is_async_request(request):
+            return JsonResponse(
+                {"state": "invalid", "label": "Star not changed", "detail": detail},
+                status=400,
+            )
+        messages.error(request, detail)
+        return redirect(_document_action_return_url(request, document_id=document_id))
+    except PDFStarNotFoundError as error:
+        detail = str(error)
+        if _is_async_request(request):
+            return JsonResponse(
+                {"state": "not_found", "label": "Star not changed", "detail": detail},
+                status=404,
+            )
+        messages.error(request, detail)
+        return redirect(_document_action_return_url(request, document_id=document_id))
+    except PDFStarConflictError as error:
+        detail = str(error)
+        if _is_async_request(request):
+            return JsonResponse(
+                {"state": "conflict", "label": "Star not changed", "detail": detail},
+                status=409,
+            )
+        messages.error(request, detail)
+        return redirect(_document_action_return_url(request, document_id=document_id))
+
+    detail = (
+        f"Starred {result.filename}" if result.starred else f"Removed star from {result.filename}"
+    )
+    payload = {
+        "state": "success",
+        "label": "PDF updated",
+        "detail": detail,
+        "documentId": result.document_id,
+        "filename": result.filename,
+        "starred": result.starred,
+    }
+    if _is_async_request(request):
+        return JsonResponse(payload)
+
+    messages.success(request, detail)
+    return redirect(_document_action_return_url(request, document_id=result.document_id))
 
 
 @require_GET
@@ -2009,9 +2220,8 @@ def add_repository(request: HttpRequest) -> HttpResponse:
             seen_keys.add(normalized.canonical_remote_key)
             normalized_urls.append(normalized.remote_url)
 
-        queued_results = [
-            register_and_queue_repository(remote_url) for remote_url in normalized_urls
-        ]
+        queued_batch = register_and_queue_repositories(normalized_urls)
+        queued_results = list(queued_batch.results)
     except RepositorySyncError as error:
         return _repository_lifecycle_failure(request, error)
     except RepositoryURLValidationError as exc:
@@ -2091,9 +2301,17 @@ def add_repository(request: HttpRequest) -> HttpResponse:
                     "added": added_count,
                     "queued": queued_count,
                     "alreadyRunning": active_count,
+                    "runId": str(queued_batch.run.pk) if queued_batch.run is not None else None,
                     "repositories": [
                         _repository_payload(result.repository) for result in queued_results
                     ],
+                    "runIds": sorted(
+                        {
+                            str(result.run_repository.run_id)
+                            for result in queued_results
+                            if result.run_repository is not None
+                        }
+                    ),
                 },
                 status=202,
             )
@@ -2103,6 +2321,9 @@ def add_repository(request: HttpRequest) -> HttpResponse:
                 "state": "queued" if queued.job_created else "already_running",
                 "detail": detail,
                 "repository": _repository_payload(queued.repository),
+                "runId": (
+                    str(queued.run_repository.run_id) if queued.run_repository is not None else None
+                ),
             },
             status=202,
         )
@@ -2582,6 +2803,9 @@ def refresh_repository(request: HttpRequest, repository_id: int) -> HttpResponse
                     else "This repository already has a background sync in progress."
                 ),
                 "repository": _repository_payload(queued.repository),
+                "runId": (
+                    str(queued.run_repository.run_id) if queued.run_repository is not None else None
+                ),
             },
             status=202,
         )
@@ -2692,6 +2916,13 @@ def refresh_all_repositories(request: HttpRequest) -> HttpResponse:
                 "alreadyQueued": already_queued_count,
                 "alreadyRunning": already_running_count,
                 "workersStarted": workers_started,
+                "runId": str(queued.run.pk) if queued.run is not None else None,
+                "acceptedRepositoryIds": [
+                    result.repository.pk
+                    for result in queued.results
+                    if result.run_repository is not None
+                ],
+                "rejectedRepositoryIds": list(queued.rejected_repository_ids),
             },
             status=202,
         )
@@ -2850,6 +3081,210 @@ def repository_status(request: HttpRequest) -> JsonResponse:
                 ),
             },
         }
+    )
+
+
+@require_GET
+@never_cache
+@_logged_web_action("pdf_pipeline_metrics", quiet=True)
+def pipeline_metrics(request: HttpRequest) -> JsonResponse:
+    """Expose the bounded, redacted local PDF-pipeline metrics contract."""
+
+    local_error = _require_local_action(request)
+    if local_error:
+        return local_error
+    response = JsonResponse(metrics_payload_for_request())
+    response["Cache-Control"] = "no-store, max-age=0"
+    response["Pragma"] = "no-cache"
+    return response
+
+
+def _recovery_action_values(request: HttpRequest) -> dict[str, object] | None:
+    scope = request.POST.get("scope", "")
+    episode_id = request.POST.get("episodeId", "")
+    raw_generation = request.POST.get("expectedGeneration", "")
+    raw_pause_generation = request.POST.get("pauseGeneration", "")
+    if (
+        not isinstance(scope, str)
+        or len(scope) > 128
+        or not isinstance(episode_id, str)
+        or len(episode_id) > 36
+        or len(raw_generation) > 19
+        or len(raw_pause_generation) > 19
+        or not raw_generation.isascii()
+        or not raw_generation.isdigit()
+        or not raw_pause_generation.isascii()
+        or not raw_pause_generation.isdigit()
+    ):
+        return None
+    generation = int(raw_generation)
+    pause_generation = int(raw_pause_generation)
+    if generation > 9_223_372_036_854_775_807 or pause_generation > 9_223_372_036_854_775_807:
+        return None
+    return {
+        "scope": scope,
+        "episode_id": episode_id,
+        "expected_generation": generation,
+        "pause_generation": pause_generation,
+    }
+
+
+def _recovery_action_error(error: Exception) -> JsonResponse:
+    from bitbucket_search.services.pdf_recovery import (
+        RecoveryConflict,
+        RecoveryNotFound,
+        RecoveryResumeBlocked,
+        RecoveryTransitionRejected,
+    )
+
+    if isinstance(error, RecoveryNotFound):
+        return JsonResponse(
+            {"state": "not_found", "detail": "That recovery episode no longer exists."},
+            status=404,
+        )
+    if isinstance(error, RecoveryResumeBlocked):
+        return JsonResponse(
+            {
+                "state": "blocked",
+                "reasonCode": error.reason_code,
+                "detail": (
+                    "Resume remains blocked by a current safety check. Review pipeline details, "
+                    "resolve the condition, and try again."
+                ),
+            },
+            status=409,
+        )
+    if isinstance(error, (RecoveryConflict, RecoveryTransitionRejected)):
+        return JsonResponse(
+            {
+                "state": "conflict",
+                "detail": "This recovery action is stale. Refresh OWL and use the current action.",
+            },
+            status=409,
+        )
+    return JsonResponse(
+        {"state": "invalid", "detail": "Choose a valid PDF pipeline recovery action."},
+        status=400,
+    )
+
+
+@require_POST
+@csrf_protect
+@never_cache
+@_logged_web_action("pdf_pipeline_recovery_popup_claim", quiet=True)
+def claim_pdf_pipeline_recovery_popup(request: HttpRequest) -> JsonResponse:
+    """Grant one visible local tab the popup for the current pause generation."""
+
+    local_error = _require_recovery_loopback_action(request)
+    if local_error:
+        return local_error
+    values = _recovery_action_values(request)
+    if values is None:
+        return _recovery_action_error(ValueError())
+    from bitbucket_search.services.pdf_recovery import (
+        RecoveryError,
+        claim_recovery_popup,
+        recovery_popup_payload,
+    )
+
+    try:
+        result = claim_recovery_popup(**values)
+    except (RecoveryError, ValueError) as error:
+        return _recovery_action_error(error)
+    return JsonResponse(
+        {
+            "state": "claimed" if result.changed else "already_claimed",
+            "claimed": result.changed,
+            "popup": recovery_popup_payload(result.recovery, claimed=True)
+            if result.changed
+            else None,
+        }
+    )
+
+
+@require_POST
+@csrf_protect
+@never_cache
+@_logged_web_action("pdf_pipeline_recovery_popup_acknowledge", quiet=True)
+def acknowledge_pdf_pipeline_recovery_popup(request: HttpRequest) -> JsonResponse:
+    """Durably dismiss one claimed popup without changing notification read state."""
+
+    local_error = _require_recovery_loopback_action(request)
+    if local_error:
+        return local_error
+    values = _recovery_action_values(request)
+    if values is None:
+        return _recovery_action_error(ValueError())
+    from bitbucket_search.services.pdf_recovery import (
+        RecoveryError,
+        acknowledge_recovery_popup,
+    )
+
+    try:
+        result = acknowledge_recovery_popup(**values)
+    except (RecoveryError, ValueError) as error:
+        return _recovery_action_error(error)
+    return JsonResponse(
+        {
+            "state": "acknowledged",
+            "acknowledged": True,
+            "duplicate": result.duplicate,
+            "generation": result.recovery.generation,
+            "pauseGeneration": result.recovery.pause_generation,
+        }
+    )
+
+
+@require_POST
+@csrf_protect
+@never_cache
+@_logged_web_action("pdf_pipeline_recovery_resume", quiet=True)
+def resume_pdf_pipeline_recovery(request: HttpRequest) -> JsonResponse:
+    """Request one generation-safe half-open probe after a fresh local preflight."""
+
+    local_error = _require_recovery_loopback_action(request)
+    if local_error:
+        return local_error
+    values = _recovery_action_values(request)
+    idempotency_key = request.POST.get("idempotencyKey", "")
+    if values is None or not isinstance(idempotency_key, str):
+        return _recovery_action_error(ValueError())
+    from bitbucket_search.services.pdf_recovery import (
+        RecoveryError,
+        recovery_resume_key_is_valid,
+        recovery_resume_preflight,
+        request_recovery_resume,
+    )
+
+    if not recovery_resume_key_is_valid(
+        scope=values["scope"],
+        episode_id=values["episode_id"],
+        pause_generation=values["pause_generation"],
+        idempotency_key=idempotency_key,
+    ):
+        return JsonResponse(
+            {
+                "state": "conflict",
+                "detail": "This recovery action is stale. Refresh OWL and use the current action.",
+            },
+            status=409,
+        )
+    try:
+        result = request_recovery_resume(
+            **values,
+            idempotency_key=idempotency_key,
+            safety_check=recovery_resume_preflight,
+        )
+    except (RecoveryError, ValueError) as error:
+        return _recovery_action_error(error)
+    return JsonResponse(
+        {
+            "state": result.recovery.state,
+            "accepted": True,
+            "duplicate": result.duplicate,
+            "recovery": result.payload,
+        },
+        status=200 if result.duplicate else 202,
     )
 
 

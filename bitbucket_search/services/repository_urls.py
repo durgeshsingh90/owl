@@ -6,7 +6,11 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
-from django.conf import settings
+from bitbucket_search.services.repository_hosts import (
+    RepositoryHostNotAllowed,
+    require_repository_hostname_allowed,
+    require_repository_https_origin_allowed,
+)
 
 _SCP_STYLE_URL = re.compile(
     r"^(?P<user>[A-Za-z0-9._-]+)@(?P<host>[A-Za-z0-9.-]+):(?P<path>[^\s?#]+)$"
@@ -30,28 +34,14 @@ class NormalizedRepositoryURL:
     hostname: str
 
 
-def _allowed_hosts() -> frozenset[str]:
-    return frozenset(
-        str(host).strip().casefold().rstrip(".")
-        for host in settings.BITBUCKET_ALLOWED_HOSTS
-        if str(host).strip()
-    )
-
-
 def _validate_host(hostname: str) -> str:
-    normalized = hostname.casefold().rstrip(".")
-    allowed_hosts = _allowed_hosts()
-    if not allowed_hosts:
-        raise RepositoryURLValidationError(
-            "allowed_hosts_not_configured",
-            "Configure BITBUCKET_ALLOWED_HOSTS before adding a repository.",
-        )
-    if normalized not in allowed_hosts:
+    try:
+        return require_repository_hostname_allowed(hostname)
+    except RepositoryHostNotAllowed as error:
         raise RepositoryURLValidationError(
             "host_not_allowed",
-            "This repository host is not in BITBUCKET_ALLOWED_HOSTS.",
-        )
-    return normalized
+            "This repository host is not approved in OWL Settings.",
+        ) from error
 
 
 def _normalize_path(raw_path: str) -> tuple[str, str]:
@@ -130,10 +120,24 @@ def normalize_repository_url(value: object) -> NormalizedRepositoryURL:
         port_suffix = f":{port}" if port is not None else ""
         netloc = f"git@{hostname}{port_suffix}" if scheme == "ssh" else f"{hostname}{port_suffix}"
         remote_url = urlunsplit((scheme, netloc, f"/{path}.git", "", ""))
+        if scheme == "https":
+            try:
+                require_repository_https_origin_allowed(
+                    f"https://{hostname}:{port or 443}"
+                )
+            except RepositoryHostNotAllowed as error:
+                raise RepositoryURLValidationError(
+                    "host_not_allowed",
+                    "This repository host and HTTPS port are not approved in OWL Settings.",
+                ) from error
 
     return NormalizedRepositoryURL(
         remote_url=remote_url,
-        canonical_remote_key=f"{hostname}/{path.casefold()}",
+        canonical_remote_key=(
+            f"{hostname}:{port}/{path.casefold()}"
+            if not scp_match and port is not None
+            else f"{hostname}/{path.casefold()}"
+        ),
         display_name=display_name,
         hostname=hostname,
     )

@@ -1,11 +1,11 @@
 # OWL master product and implementation requirements
 
 - Work-prompt order: 001
-- Version: 1.2
+- Version: 1.3
 - Status: Approved requirements baseline
 - Repository: git@github.com:durgeshsingh90/owl.git
 - Local project path: /Users/durgesh/Projects/owl
-- Last consolidated: 26 August 2026
+- Last consolidated: 3 September 2026
 
 ## 1. Product outcome
 
@@ -1061,6 +1061,40 @@ Pages indexed · 8,417
 ~~~
 
 Show current phase, per-repository state, counts, throughput, last successful refresh, errors, and an approximate ETA only when enough measurements exist.
+
+### 21.1 Adaptive PDF pipeline truth and control contract
+
+The following stable requirement IDs define the observability-first adaptive PDF pipeline
+scope. They supplement, and do not weaken, the indexing, durability, search, security, or
+accessibility requirements elsewhere in this document.
+
+| Requirement ID | Required acceptance contract |
+|---|---|
+| PIPE-001 | Preserve the architecture of isolated PDF parsers, atomic durable disk staging, one controlled SQLite/FTS publisher, and search against the last published index. |
+| PIPE-002 | Create one durable run identity at acceptance time, record every accepted/rejected repository, and preserve truthful queued, active, inventory-final, terminal, error, and cancellation outcomes across restart. |
+| PIPE-003 | Count normal extraction only after the atomic stage handoff, normal writing only after publication commit, and cache reuse separately; every boundary is once-only and reconstructable. |
+| PIPE-004 | Classify extractor, publisher, queue, locality/source, backpressure, SQLite, recovery, and resource states from fresh authoritative evidence; unavailable data is never reported as zero, idle, or running. |
+| PIPE-005 | Use an initial common 60-second rate window: under 30 seconds is warming, 30–59 seconds requires at least three events to extrapolate, and a complete window reports even zero, one, or two events with confidence. ETA uses inventory coverage, recent weighted work, pipeline overlap, constraints, and the end-to-end critical path rather than worker-count division or repository summation. |
+| PIPE-006 | The Bitbucket top bar, repository cards, Home, and Repository Logs use the same run/snapshot truth for ETA, extracted/written rates, lifecycle, activity, and errors; animation is attached only for confirmed active work and respects reduced motion. |
+| PIPE-007 | Settings keeps General, Confluence, Repository hosts, Import/Export, PDF pipeline, and Diagnostics separable. A trusted credential-free host origin, a credential origin, and a full repository clone URL remain distinct, with external policy precedence and dependency-safe removal. |
+| PIPE-008 | Recovery uses durable smallest-safe-scope episodes, classified retryability, bounded backoff, unique attempts, and a default component pause threshold of 25 consecutive failed recovery probes. Per-document parser retries remain a separate small budget; pause/resume never deletes staged work or grants a fresh component budget. |
+| PIPE-009 | Controller modes are `off`, `observe`, `shadow`, and explicitly enabled `adaptive`, with one supervisor-owned authority. Requested, configured, tested, resource-aware, safety, and effective targets remain distinct; the initial tested PDF ceiling is eight. |
+| PIPE-010 | The CPU-derived background budget is `max(0, floor(schedulable CPUs * 0.80))`, reduced for active/reserved CPU-heavy OWL work and all memory, disk, database, thermal, failure, and foreground guardrails. It is a ceiling, never a utilization promise or permission to start idle workers. |
+| PIPE-011 | Adaptive admission is benchmark-gated. Use a deterministic synthetic corpus and a fresh isolated OWL data root/database per trial, repeat fixed 1/2/4/6/8 targets with the same workload, measure variance and foreground/resource effects, change one independent variable at a time, and keep raw reports under ignored runtime data. |
+| PIPE-012 | Accepted work is server-owned and continues when browser tabs close, but does not run while OWL or the laptop is stopped; restart reconstructs durable state. Metrics/control endpoints remain loopback-authorized, no secret/private labels enter telemetry, Git synchronization concurrency/order is unchanged by this scope, and observe/shadow remain the safe fallback when any adaptive gate fails. |
+
+Persist wall-clock timestamps in UTC for correlation and display, but use a monotonic clock
+for intervals, rolling windows, rates, cooldowns, and ETA duration math. Sample active work
+at a low cadence (initially five seconds), retain a bounded configurable 15–30 minutes of
+high-frequency history outside the main SQLite database, and publish any cross-process
+snapshot by restrictive atomic replacement beneath the configured data root. Poll the
+lightweight local metrics endpoint approximately every five seconds while active and every
+30 seconds while idle; hidden pages stop polling and never own background execution.
+
+Automatic admission must remain disabled until fixed-target variance, deterministic state
+classification, ETA error, recovery, restart/cancellation, foreground latency, data
+integrity, resource guardrails, and shadow-decision quality pass their mapped tests. A
+failed gate is reported as `BLOCKED`; it is not converted into an adaptive success claim.
 
 ## 22. PDF identity, lifecycle, and Git metadata
 

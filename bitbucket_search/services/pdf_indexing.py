@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,7 @@ from django.db.models import (
     Count,
     Exists,
     F,
+    Min,
     OuterRef,
     Q,
     Subquery,
@@ -44,6 +46,8 @@ from bitbucket_search.models import (
     PDFExtractionJobStatus,
     PDFIndexState,
     PDFPageExtractionState,
+    PDFPipelineCompletionKind,
+    PDFPipelineRunRepository,
     PDFTextPage,
     PDFTextRevision,
     PDFTextRevisionState,
@@ -68,6 +72,11 @@ from bitbucket_search.services.pdf_extractor import (
     PDF_EXTRACTOR_VERSION,
     PDFExtractionDiagnostic,
 )
+from bitbucket_search.services.pdf_pipeline_control import (
+    extraction_admission_allowed,
+    publication_admission_allowed,
+)
+from bitbucket_search.services.pdf_pipeline_runs import reconcile_run_repository
 from bitbucket_search.services.repository_lock import (
     RepositoryCheckoutBusy,
     pdf_extraction_claim_lock,
@@ -87,6 +96,13 @@ _HASH_CHUNK_BYTES = 1024 * 1024
 _HEARTBEAT_SECONDS = 1.0
 _QUEUE_WRITE_BATCH_SIZE = 400
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_STAGED_MANIFEST_SCHEMA_VERSION = 1
+_STAGED_MANIFEST_SCAN_LIMIT = 250
+_STAGED_MANIFEST_FILENAME = re.compile(r"^job-([1-9][0-9]{0,18})\.json$")
+_STAGED_TEMP_FILENAME = re.compile(
+    r"^\.job-([1-9][0-9]{0,18})\.json\.[1-9][0-9]*\.[0-9a-f]{32}\.tmp$"
+)
+_STAGED_MANIFEST_FIXED_OVERHEAD_BYTES = 262_144
 _ACTIVE_JOB_STATUSES = (
     PDFExtractionJobStatus.QUEUED,
     PDFExtractionJobStatus.RUNNING,
@@ -243,6 +259,25 @@ class ExtractionStatusSnapshot:
     pending_documents: int
     indexed_documents: int
     stale_documents: int
+
+
+@dataclass(frozen=True, slots=True)
+class StagedPublicationReconciliation:
+    """Bounded, redacted result of one durable-stage recovery pass."""
+
+    examined_files: int = 0
+    promoted_job_ids: tuple[int, ...] = ()
+    ready_job_ids: tuple[int, ...] = ()
+    cleaned_job_ids: tuple[int, ...] = ()
+    reextract_job_ids: tuple[int, ...] = ()
+    deferred_job_ids: tuple[int, ...] = ()
+    interrupted_worker_pids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedStagedManifest:
+    content_sha256: str
+    extraction: StagedPDFExtraction
 
 
 ExtractionRunner = Callable[[Path, Callable[[], None]], StagedPDFExtraction]
@@ -546,12 +581,30 @@ def queue_repository_pdf_extractions(
     if locked_repository is None:
         return ExtractionQueueResult((), (), ())
     observed_at = timezone.now()
-    run_id = uuid.uuid4()
     sync_job_id = (
         repository_sync_job.pk
         if isinstance(repository_sync_job, RepositorySyncJob)
         else repository_sync_job
     )
+    run_repository_id = (
+        repository_sync_job.run_repository_id
+        if isinstance(repository_sync_job, RepositorySyncJob)
+        else None
+    )
+    if run_repository_id is None and sync_job_id is not None:
+        run_repository_id = (
+            RepositorySyncJob.objects.filter(pk=sync_job_id)
+            .values_list("run_repository_id", flat=True)
+            .first()
+        )
+    pipeline_run_id = (
+        PDFPipelineRunRepository.objects.filter(pk=run_repository_id)
+        .values_list("run_id", flat=True)
+        .first()
+        if run_repository_id is not None
+        else None
+    )
+    run_id = pipeline_run_id or uuid.uuid4()
 
     unavailable_ids = tuple(
         PDFExtractionJob.objects.filter(
@@ -702,6 +755,7 @@ def queue_repository_pdf_extractions(
         if sync_job_id is not None:
             update_values["repository_sync_job_id"] = sync_job_id
         update_values["run_id"] = run_id
+        update_values["run_repository_id"] = run_repository_id
         PDFExtractionJob.objects.filter(
             pk__in=update_ids,
             status__in=_ACTIVE_JOB_STATUSES,
@@ -743,6 +797,7 @@ def queue_repository_pdf_extractions(
             PDFExtractionJob(
                 document=document,
                 repository_sync_job_id=sync_job_id,
+                run_repository_id=run_repository_id,
                 run_id=run_id,
                 target_git_blob_id=document.git_blob_id,
                 target_source_commit=document.last_seen_commit,
@@ -784,6 +839,7 @@ def queue_repository_pdf_extractions(
                             PDFExtractionJob.objects.create(
                                 document_id=proposed.document_id,
                                 repository_sync_job_id=proposed.repository_sync_job_id,
+                                run_repository_id=proposed.run_repository_id,
                                 run_id=proposed.run_id,
                                 target_git_blob_id=proposed.target_git_blob_id,
                                 target_source_commit=proposed.target_source_commit,
@@ -834,6 +890,10 @@ def queue_repository_pdf_extractions(
             lambda context=context: log_event(
                 logger, logging.INFO, "pdf_extraction_queue_reconciled", **context
             )
+        )
+    if run_repository_id is not None:
+        transaction.on_commit(
+            lambda run_repository_id=run_repository_id: reconcile_run_repository(run_repository_id)
         )
     return ExtractionQueueResult(
         tuple(job.pk for job in created_jobs if job.pk is not None),
@@ -1010,6 +1070,500 @@ def _normalized_worker_pids(worker_pids: Sequence[int]) -> tuple[int, ...]:
     )
 
 
+def _staged_recovery_eligible(
+    job: PDFExtractionJob,
+    *,
+    observed_at: datetime,
+    force: bool,
+    worker_pids: frozenset[int],
+) -> bool:
+    if job.status != PDFExtractionJobStatus.RUNNING:
+        return False
+    if force or job.worker_pid is None or job.worker_pid in worker_pids:
+        return True
+    cutoff = observed_at - STALE_EXTRACTION_AFTER
+    return bool(
+        (job.heartbeat_at is not None and job.heartbeat_at < cutoff)
+        or (job.heartbeat_at is None and job.started_at is not None and job.started_at < cutoff)
+    )
+
+
+def _verified_published_manifest(
+    job: PDFExtractionJob,
+    manifest: _ValidatedStagedManifest,
+) -> bool:
+    if job.status != PDFExtractionJobStatus.SUCCEEDED:
+        return False
+    revision = PDFTextRevision.objects.filter(
+        content_sha256=manifest.content_sha256,
+        extractor_version=job.target_extractor_version,
+    ).first()
+    if revision is None or not _existing_revision_is_valid(revision):
+        return False
+    staged = manifest.extraction
+    if (
+        revision.source_byte_size != staged.source_size_bytes
+        or revision.state != staged.state
+        or revision.page_count != staged.page_count
+        or revision.extracted_character_count != staged.extracted_character_count
+    ):
+        return False
+    published_pages = tuple(
+        revision.pages.order_by("page_number").values_list(
+            "page_number",
+            "extracted_text",
+            "character_count",
+            "extraction_state",
+            "error_code",
+        )
+    )
+    staged_pages = tuple(
+        (
+            page.page_number,
+            page.text,
+            page.character_count,
+            page.state,
+            page.error_code,
+        )
+        for page in staged.pages
+    )
+    return published_pages == staged_pages
+
+
+def _clean_reconciled_stage(target: Path, *, job_id: int, reason: str) -> bool:
+    try:
+        removed = _remove_publication_staging_file(target)
+    except OSError as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_staged_cleanup_failed",
+            error=exc,
+            job_id=job_id,
+            reason=reason,
+        )
+        return not target.exists()
+    if removed:
+        log_event(
+            logger,
+            logging.INFO,
+            "pdf_staged_result_cleaned",
+            job_id=job_id,
+            reason=reason,
+        )
+    return removed
+
+
+def _mark_unverified_stage_for_reextraction(
+    job_id: int,
+    *,
+    observed_at: datetime,
+    force: bool,
+    worker_pids: frozenset[int],
+) -> tuple[bool, int | None]:
+    with pdf_extraction_claim_lock(), transaction.atomic():
+        _reserve_sqlite_write()
+        job = (
+            PDFExtractionJob.objects.select_for_update()
+            .select_related("document__repository")
+            .filter(pk=job_id)
+            .first()
+        )
+        if job is None or not _staged_recovery_eligible(
+            job,
+            observed_at=observed_at,
+            force=force,
+            worker_pids=worker_pids,
+        ):
+            return False, None
+        worker_pid = job.worker_pid
+        job.status = PDFExtractionJobStatus.INTERRUPTED
+        job.completed_at = observed_at
+        job.heartbeat_at = observed_at
+        job.error_code = "extraction_worker_interrupted"
+        job.error_summary = (
+            "The durable staged PDF result could not be verified and will be extracted again."
+        )
+        job.save(
+            update_fields=(
+                "status",
+                "completed_at",
+                "heartbeat_at",
+                "error_code",
+                "error_summary",
+            )
+        )
+        document = job.document
+        if document.repository.enabled and _job_matches_document(job, document):
+            document.index_state = (
+                PDFIndexState.STALE_ERROR
+                if document.indexed_revision_id is not None
+                else PDFIndexState.FAILED
+            )
+            document.last_index_attempt_at = observed_at
+            document.extraction_error_code = job.error_code
+            document.extraction_error_summary = job.error_summary
+            document.save(
+                update_fields=(
+                    "index_state",
+                    "last_index_attempt_at",
+                    "extraction_error_code",
+                    "extraction_error_summary",
+                )
+            )
+        _append_index_log(
+            job.pk,
+            event="indexing_interrupted",
+            message=(
+                "A durable staged PDF result could not be verified; OWL will extract it again."
+            ),
+            phase=job.phase,
+            progress=job.progress,
+            severity=RepositoryOperationLogSeverity.ERROR,
+            job=job,
+        )
+        if job.run_repository_id is not None:
+            transaction.on_commit(
+                lambda run_repository_id=job.run_repository_id: reconcile_run_repository(
+                    run_repository_id
+                )
+            )
+    log_event(
+        logger,
+        logging.WARNING,
+        "pdf_staged_result_reextract_requested",
+        job_id=job_id,
+        error_code="invalid_staged_extraction",
+    )
+    return True, worker_pid
+
+
+def _release_reconciled_publication_lease(
+    job_id: int,
+    *,
+    observed_at: datetime,
+    force: bool,
+    worker_pids: frozenset[int],
+) -> int | None:
+    with pdf_extraction_claim_lock(), transaction.atomic():
+        _reserve_sqlite_write()
+        job = PDFExtractionJob.objects.select_for_update().filter(pk=job_id).first()
+        if (
+            job is None
+            or job.phase != PDFExtractionJobPhase.PUBLISHING
+            or not _staged_recovery_eligible(
+                job,
+                observed_at=observed_at,
+                force=force,
+                worker_pids=worker_pids,
+            )
+        ):
+            return None
+        worker_pid = job.worker_pid
+        if worker_pid is not None:
+            job.worker_pid = None
+            job.heartbeat_at = observed_at
+            job.save(update_fields=("worker_pid", "heartbeat_at"))
+        return worker_pid
+
+
+def _promote_orphan_staged_result(
+    target: Path,
+    job_id: int,
+    *,
+    observed_at: datetime,
+    force: bool,
+    worker_pids: frozenset[int],
+) -> tuple[str, int | None]:
+    try:
+        job = PDFExtractionJob.objects.select_related(
+            "document__repository",
+            "document__local_policy",
+        ).get(pk=job_id)
+        if not _staged_recovery_eligible(
+            job,
+            observed_at=observed_at,
+            force=force,
+            worker_pids=worker_pids,
+        ):
+            return "deferred", None
+        with repository_checkout_lock(
+            job.document.repository_id,
+            blocking=False,
+            shared=True,
+        ):
+            _raise_if_repository_sync_active(job_id=job_id)
+            job = PDFExtractionJob.objects.select_related(
+                "document__repository",
+                "document__local_policy",
+            ).get(pk=job_id)
+            manifest = _read_staged_manifest(
+                target,
+                job,
+                require_current_target=True,
+            )
+            source_path = _validated_job_path(job)
+            source_sha256, source_size = _hash_pdf(source_path, lambda: None)
+            if (
+                source_sha256 != manifest.content_sha256
+                or source_size != manifest.extraction.source_size_bytes
+            ):
+                raise PDFExtractionTargetChanged(
+                    "extraction_target_changed",
+                    "The PDF changed after its staged extraction was written.",
+                )
+            staged_job_identity = _staged_manifest_job_payload(job)
+            with pdf_extraction_claim_lock(), transaction.atomic():
+                _reserve_sqlite_write()
+                locked_job = (
+                    PDFExtractionJob.objects.select_for_update()
+                    .select_related(
+                        "document__repository",
+                        "document__local_policy",
+                    )
+                    .get(pk=job_id)
+                )
+                if not _staged_recovery_eligible(
+                    locked_job,
+                    observed_at=observed_at,
+                    force=force,
+                    worker_pids=worker_pids,
+                ):
+                    return "deferred", None
+                if _staged_manifest_job_payload(
+                    locked_job
+                ) != staged_job_identity or not _job_matches_current_manifest_target(locked_job):
+                    raise PDFExtractionTargetChanged(
+                        "extraction_target_changed",
+                        "A newer PDF revision replaced this staged extraction request.",
+                    )
+                if locked_job.phase == PDFExtractionJobPhase.PUBLISHING:
+                    return "ready", None
+                worker_pid = locked_job.worker_pid
+                locked_job.phase = PDFExtractionJobPhase.PUBLISHING
+                locked_job.progress = 95
+                locked_job.staged_at = locked_job.staged_at or observed_at
+                locked_job.heartbeat_at = observed_at
+                locked_job.worker_pid = None
+                locked_job.save(
+                    update_fields=(
+                        "phase",
+                        "progress",
+                        "staged_at",
+                        "heartbeat_at",
+                        "worker_pid",
+                    )
+                )
+                _append_index_log(
+                    locked_job.pk,
+                    event="indexing_stage_recovered",
+                    message="Recovered a durable staged PDF result for publication.",
+                    phase=PDFExtractionJobPhase.PUBLISHING,
+                    progress=95,
+                    job=locked_job,
+                )
+                if locked_job.run_repository_id is not None:
+                    transaction.on_commit(
+                        lambda run_repository_id=locked_job.run_repository_id: (
+                            reconcile_run_repository(run_repository_id)
+                        )
+                    )
+        log_event(
+            logger,
+            logging.INFO,
+            "pdf_staged_result_promoted",
+            job_id=job_id,
+        )
+        return "promoted", worker_pid
+    except (PDFExtractionDeferred, RepositoryCheckoutBusy):
+        return "deferred", None
+    except (PDFExtractionExcluded, PDFExtractionTargetChanged, PDFIndexingError):
+        return "invalid", None
+
+
+def reconcile_staged_publications(
+    *,
+    observed_at: datetime | None = None,
+    force: bool = False,
+    worker_pids: Sequence[int] = (),
+    limit: int = _STAGED_MANIFEST_SCAN_LIMIT,
+) -> StagedPublicationReconciliation:
+    """Reconcile bounded crash gaps around durable PDF stage publication."""
+
+    now = observed_at or timezone.now()
+    exact_worker_pids = frozenset(_normalized_worker_pids(worker_pids))
+    bounded_limit = max(1, min(int(limit), 1_000))
+    root = _publication_staging_path(1).parent
+    paths: list[Path] = []
+    examined_entries = 0
+    for entry_number, path in enumerate(root.iterdir(), start=1):
+        if entry_number > bounded_limit:
+            break
+        examined_entries += 1
+        if _STAGED_MANIFEST_FILENAME.fullmatch(path.name):
+            paths.append(path)
+            continue
+        temporary_match = _STAGED_TEMP_FILENAME.fullmatch(path.name)
+        if temporary_match is None:
+            continue
+        try:
+            temporary_is_stale = (
+                datetime.fromtimestamp(
+                    path.lstat().st_mtime,
+                    tz=now.tzinfo,
+                )
+                < now - STALE_EXTRACTION_AFTER
+            )
+        except OSError:
+            continue
+        if force or temporary_is_stale:
+            _clean_reconciled_stage(
+                path,
+                job_id=int(temporary_match.group(1)),
+                reason="incomplete_temporary_stage",
+            )
+    promoted: list[int] = []
+    ready: list[int] = []
+    cleaned: list[int] = []
+    reextract: list[int] = []
+    deferred: list[int] = []
+    interrupted_worker_pids: list[int] = []
+
+    for target in paths:
+        match = _STAGED_MANIFEST_FILENAME.fullmatch(target.name)
+        if match is None:
+            continue
+        job_id = int(match.group(1))
+        job = (
+            PDFExtractionJob.objects.select_related(
+                "document__repository",
+                "document__local_policy",
+            )
+            .filter(pk=job_id)
+            .first()
+        )
+        if job is None:
+            if _clean_reconciled_stage(target, job_id=job_id, reason="job_missing"):
+                cleaned.append(job_id)
+            continue
+
+        if job.status == PDFExtractionJobStatus.SUCCEEDED:
+            verified = False
+            try:
+                manifest = _read_staged_manifest(
+                    target,
+                    job,
+                    require_current_target=False,
+                )
+                verified = _verified_published_manifest(job, manifest)
+            except PDFIndexingError:
+                pass
+            reason = "published_commit_confirmed" if verified else "terminal_stage_unverified"
+            if _clean_reconciled_stage(target, job_id=job_id, reason=reason):
+                cleaned.append(job_id)
+            continue
+
+        if job.status != PDFExtractionJobStatus.RUNNING:
+            if _clean_reconciled_stage(target, job_id=job_id, reason="job_terminal"):
+                cleaned.append(job_id)
+            continue
+
+        eligible = _staged_recovery_eligible(
+            job,
+            observed_at=now,
+            force=force,
+            worker_pids=exact_worker_pids,
+        )
+        if not eligible:
+            deferred.append(job_id)
+            continue
+        try:
+            _read_staged_manifest(
+                target,
+                job,
+                require_current_target=True,
+            )
+        except (PDFExtractionTargetChanged, PDFIndexingError):
+            transitioned, worker_pid = _mark_unverified_stage_for_reextraction(
+                job_id,
+                observed_at=now,
+                force=force,
+                worker_pids=exact_worker_pids,
+            )
+            if transitioned:
+                if worker_pid:
+                    interrupted_worker_pids.append(worker_pid)
+                if _clean_reconciled_stage(
+                    target,
+                    job_id=job_id,
+                    reason="manifest_unverified",
+                ):
+                    cleaned.append(job_id)
+                reextract.append(job_id)
+            else:
+                deferred.append(job_id)
+            continue
+
+        if job.phase == PDFExtractionJobPhase.PUBLISHING:
+            worker_pid = None
+            if job.worker_pid is not None:
+                worker_pid = _release_reconciled_publication_lease(
+                    job_id,
+                    observed_at=now,
+                    force=force,
+                    worker_pids=exact_worker_pids,
+                )
+            if worker_pid:
+                interrupted_worker_pids.append(worker_pid)
+            ready.append(job_id)
+            continue
+
+        outcome, worker_pid = _promote_orphan_staged_result(
+            target,
+            job_id,
+            observed_at=now,
+            force=force,
+            worker_pids=exact_worker_pids,
+        )
+        if outcome == "promoted":
+            if worker_pid:
+                interrupted_worker_pids.append(worker_pid)
+            promoted.append(job_id)
+        elif outcome == "ready":
+            ready.append(job_id)
+        elif outcome == "deferred":
+            deferred.append(job_id)
+        else:
+            transitioned, worker_pid = _mark_unverified_stage_for_reextraction(
+                job_id,
+                observed_at=now,
+                force=force,
+                worker_pids=exact_worker_pids,
+            )
+            if transitioned:
+                if worker_pid:
+                    interrupted_worker_pids.append(worker_pid)
+                if _clean_reconciled_stage(
+                    target,
+                    job_id=job_id,
+                    reason="source_unverified",
+                ):
+                    cleaned.append(job_id)
+                reextract.append(job_id)
+            else:
+                deferred.append(job_id)
+
+    return StagedPublicationReconciliation(
+        examined_files=examined_entries,
+        promoted_job_ids=tuple(promoted),
+        ready_job_ids=tuple(ready),
+        cleaned_job_ids=tuple(cleaned),
+        reextract_job_ids=tuple(reextract),
+        deferred_job_ids=tuple(deferred),
+        interrupted_worker_pids=tuple(dict.fromkeys(interrupted_worker_pids)),
+    )
+
+
 @_logged_indexing_errors("extraction_lease_recovery")
 def _interrupt_stale_extraction_jobs(
     *,
@@ -1119,9 +1673,18 @@ def sweep_pdf_extraction_queue(
     """Recover stale leases and queue every stranded current PDF revision."""
 
     started = time.monotonic()
-    interrupted_worker_pids = _interrupt_stale_extraction_jobs(
+    staged_recovery = reconcile_staged_publications(
         force=interrupt_running,
         worker_pids=interrupt_worker_pids,
+    )
+    interrupted_worker_pids = tuple(
+        dict.fromkeys(
+            staged_recovery.interrupted_worker_pids
+            + _interrupt_stale_extraction_jobs(
+                force=interrupt_running,
+                worker_pids=interrupt_worker_pids,
+            )
+        )
     )
 
     observed_at = timezone.now()
@@ -1238,6 +1801,8 @@ def sweep_pdf_extraction_queue(
 def claim_next_extraction_job() -> PDFExtractionJob | None:
     """Claim one PDF after its own checkout is published, within a global cap."""
 
+    if not extraction_admission_allowed():
+        return None
     with pdf_extraction_claim_lock(), transaction.atomic():
         # Resident workers poll continuously. Avoid reserving SQLite's single
         # writer when the queue is empty. The cross-process claim gate also
@@ -1248,9 +1813,9 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
         active_by_repository = tuple(
             PDFExtractionJob.objects.exclude(document__repository_id__in=_removal_repository_ids())
             .filter(status=PDFExtractionJobStatus.RUNNING)
-            .order_by()
             .values("document__repository_id")
-            .annotate(total=Count("id"))
+            .annotate(total=Count("id"), oldest_started_at=Min("started_at"))
+            .order_by("oldest_started_at", "document__repository_id")
         )
         running_by_repository = tuple(
             PDFExtractionJob.objects.exclude(document__repository_id__in=_removal_repository_ids())
@@ -1309,20 +1874,58 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
                 repository_running__lt=settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY,
             )
         )
+        candidate_id = None
+        admission_reason = "oldest_eligible"
         if active_repository_ids:
-            # Once a repository owns the parser pool, preserve locality and
-            # avoid concurrent SQLite/FTS publication from other repositories.
-            candidates = candidates.filter(
-                document__repository_id__in=active_repository_ids[
-                    : settings.PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES
-                ]
+            # Prefer the oldest active locality set, but treat the configured
+            # repository count as a locality preference rather than a reason
+            # to leave a healthy parser idle. A repository beyond the set can
+            # spill over when the preferred set cannot fill another slot.
+            preferred_repository_ids = active_repository_ids[
+                : settings.PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES
+            ]
+            fairness_seconds = int(
+                getattr(settings, "PDF_PIPELINE_REPOSITORY_FAIRNESS_MAX_WAIT_SECONDS", 120)
             )
-        candidate_id = (
-            candidates.order_by("requested_at", "id").values_list("id", flat=True).first()
-        )
+            fairness_cutoff = timezone.now() - timedelta(seconds=max(1, fairness_seconds))
+            starved_candidate_id = (
+                candidates.exclude(document__repository_id__in=preferred_repository_ids)
+                .filter(requested_at__lte=fairness_cutoff)
+                .order_by("requested_at", "id")
+                .values_list("id", flat=True)
+                .first()
+            )
+            if starved_candidate_id is not None:
+                candidate_id = starved_candidate_id
+                admission_reason = "fairness_wait_bound"
+            else:
+                candidate_id = (
+                    candidates.filter(document__repository_id__in=preferred_repository_ids)
+                    .order_by("requested_at", "id")
+                    .values_list("id", flat=True)
+                    .first()
+                )
+                admission_reason = "locality_preferred"
+            if candidate_id is None:
+                candidate_id = (
+                    candidates.order_by("requested_at", "id")
+                    .values_list("id", flat=True)
+                    .first()
+                )
+                admission_reason = "work_conserving_spillover"
+        else:
+            candidate_id = (
+                candidates.order_by("requested_at", "id").values_list("id", flat=True).first()
+            )
         if candidate_id is None:
             return None
-        log_event(logger, logging.DEBUG, "pdf_extraction_candidate_selected", job_id=candidate_id)
+        log_event(
+            logger,
+            logging.DEBUG,
+            "pdf_extraction_candidate_selected",
+            job_id=candidate_id,
+            reason=admission_reason,
+        )
         now = timezone.now()
         claimed = PDFExtractionJob.objects.filter(
             pk=candidate_id,
@@ -1348,6 +1951,12 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
             progress=1,
             job=job,
         )
+        if job.run_repository_id is not None:
+            transaction.on_commit(
+                lambda run_repository_id=job.run_repository_id: reconcile_run_repository(
+                    run_repository_id
+                )
+            )
     log_event(
         logger,
         logging.INFO,
@@ -1389,6 +1998,45 @@ def _publication_staging_path(job_id: int) -> Path:
     return root / f"job-{int(job_id)}.json"
 
 
+def _maximum_staged_manifest_bytes() -> int:
+    """Bound one staged result using the same configured extraction limits."""
+
+    # JSON can expand a control character to a six-byte ``\uXXXX`` escape.
+    # Per-page metadata and the fixed manifest envelope receive separate,
+    # deterministic allowances; no untrusted length controls this limit.
+    return (
+        settings.PDF_MAX_TOTAL_TEXT_CHARS * 6
+        + settings.PDF_MAX_PAGES * 1_024
+        + _STAGED_MANIFEST_FIXED_OVERHEAD_BYTES
+    )
+
+
+def _canonical_payload_sha256(payload: object) -> str:
+    """Hash canonical JSON incrementally without copying large page text."""
+
+    digest = hashlib.sha256()
+    encoder = json.JSONEncoder(
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    for chunk in encoder.iterencode(payload):
+        digest.update(chunk.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _staged_manifest_job_payload(job: PDFExtractionJob) -> dict[str, object]:
+    return {
+        "id": job.pk,
+        "document_id": job.document_id,
+        "target_git_blob_id": job.target_git_blob_id,
+        "target_source_commit": job.target_source_commit,
+        "target_relative_path": job.target_relative_path,
+        "target_file_size": job.target_file_size,
+        "target_extractor_version": job.target_extractor_version,
+    }
+
+
 def _staged_extraction_payload(staged: StagedPDFExtraction) -> dict[str, object]:
     return {
         "state": staged.state,
@@ -1415,6 +2063,186 @@ def _staged_extraction_payload(staged: StagedPDFExtraction) -> dict[str, object]
     }
 
 
+def _build_staged_manifest(
+    job: PDFExtractionJob,
+    *,
+    content_sha256: str,
+    staged: StagedPDFExtraction,
+) -> dict[str, object]:
+    if not _job_matches_current_manifest_target(job):
+        raise PDFExtractionTargetChanged(
+            "extraction_target_changed",
+            "A newer PDF revision replaced this extraction request.",
+        )
+    extraction = _staged_extraction_payload(staged)
+    # Test runners can hand the controller a dataclass directly, bypassing the
+    # isolated-process JSON parser. Apply the same fixed schema and bounds at
+    # the durable boundary before any bytes become publishable.
+    validated = _parse_extractor_payload(extraction)
+    if (
+        not _SHA256.fullmatch(content_sha256)
+        or validated.content_sha256_before != content_sha256
+        or validated.content_sha256_after != content_sha256
+        or validated.source_size_bytes != job.target_file_size
+        or job.target_extractor_version != PDF_EXTRACTOR_VERSION
+    ):
+        raise PDFExtractionTargetChanged(
+            "extraction_target_changed",
+            "The PDF changed before its extracted result became durable.",
+        )
+    return {
+        "schema_version": _STAGED_MANIFEST_SCHEMA_VERSION,
+        "job": _staged_manifest_job_payload(job),
+        "content_sha256": content_sha256,
+        "extraction_sha256": _canonical_payload_sha256(extraction),
+        "extraction": extraction,
+    }
+
+
+def _job_matches_current_manifest_target(job: PDFExtractionJob) -> bool:
+    document = job.document
+    return (
+        job.status == PDFExtractionJobStatus.RUNNING
+        and document.lifecycle_state == PDFDocumentLifecycle.ACTIVE
+        and document.repository.enabled
+        and getattr(document, "local_policy", None) is None
+        and _job_matches_document(job, document)
+        and job.target_source_commit == document.last_seen_commit
+        and not RepositoryRemovalRecovery.objects.filter(
+            repository_id=document.repository_id
+        ).exists()
+    )
+
+
+def _validate_staged_manifest(
+    payload: object,
+    job: PDFExtractionJob,
+    *,
+    require_current_target: bool,
+) -> _ValidatedStagedManifest:
+    expected_keys = {
+        "schema_version",
+        "job",
+        "content_sha256",
+        "extraction_sha256",
+        "extraction",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
+        raise PDFIndexingError(
+            "invalid_staged_extraction",
+            "The durable staged PDF result has an invalid manifest.",
+        )
+    schema_version = payload["schema_version"]
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != _STAGED_MANIFEST_SCHEMA_VERSION
+        or payload["job"] != _staged_manifest_job_payload(job)
+    ):
+        raise PDFIndexingError(
+            "invalid_staged_extraction",
+            "The durable staged PDF result does not match its indexing request.",
+        )
+    content_sha256 = payload["content_sha256"]
+    extraction_sha256 = payload["extraction_sha256"]
+    if (
+        not isinstance(content_sha256, str)
+        or not _SHA256.fullmatch(content_sha256)
+        or not isinstance(extraction_sha256, str)
+        or not _SHA256.fullmatch(extraction_sha256)
+        or _canonical_payload_sha256(payload["extraction"]) != extraction_sha256
+    ):
+        raise PDFIndexingError(
+            "invalid_staged_extraction",
+            "The durable staged PDF result failed its integrity check.",
+        )
+    staged = _parse_extractor_payload(payload["extraction"])
+    if (
+        not staged.publishable
+        or staged.content_sha256_before != content_sha256
+        or staged.content_sha256_after != content_sha256
+        or staged.source_size_bytes != job.target_file_size
+        or staged.extractor_version != job.target_extractor_version
+        or job.target_extractor_version != PDF_EXTRACTOR_VERSION
+    ):
+        raise PDFIndexingError(
+            "invalid_staged_extraction",
+            "The durable staged PDF result has inconsistent content metadata.",
+        )
+    if require_current_target and not _job_matches_current_manifest_target(job):
+        raise PDFExtractionTargetChanged(
+            "extraction_target_changed",
+            "A newer PDF revision replaced this staged extraction request.",
+        )
+    return _ValidatedStagedManifest(content_sha256, staged)
+
+
+def _read_staged_manifest(
+    target: Path,
+    job: PDFExtractionJob,
+    *,
+    require_current_target: bool,
+) -> _ValidatedStagedManifest:
+    try:
+        before = target.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > _maximum_staged_manifest_bytes()
+        ):
+            raise PDFIndexingError(
+                "invalid_staged_extraction",
+                "The durable staged PDF result has an invalid size or file type.",
+            )
+        with target.open("r", encoding="utf-8") as stream:
+            opened = os.fstat(stream.fileno())
+            if (opened.st_dev, opened.st_ino) != (
+                before.st_dev,
+                before.st_ino,
+            ) or opened.st_size != before.st_size:
+                raise PDFIndexingError(
+                    "invalid_staged_extraction",
+                    "The durable staged PDF result changed while it was opened.",
+                )
+            payload = json.load(stream)
+    except PDFIndexingError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise PDFIndexingError(
+            "invalid_staged_extraction",
+            "The durable staged PDF result could not be verified.",
+        ) from exc
+    return _validate_staged_manifest(
+        payload,
+        job,
+        require_current_target=require_current_target,
+    )
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Persist a rename/unlink in the private staging directory on POSIX."""
+
+    if os.name == "nt":
+        # Windows does not expose a portable directory fsync through os.open;
+        # the file itself is still flushed before ReplaceFile semantics.
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _remove_publication_staging_file(target: Path) -> bool:
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        return False
+    _fsync_directory(target.parent)
+    return True
+
+
 @_serialized_index_write
 def _stage_extraction_for_publication(
     job_id: int,
@@ -1424,19 +2252,26 @@ def _stage_extraction_for_publication(
 ) -> None:
     """Atomically hand validated parser output to the sole SQLite publisher."""
 
+    job = PDFExtractionJob.objects.select_related(
+        "document__repository",
+        "document__local_policy",
+    ).get(pk=job_id)
     target = _publication_staging_path(job_id)
     temporary = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    payload = {
-        "job_id": int(job_id),
-        "content_sha256": content_sha256,
-        "extraction": _staged_extraction_payload(staged),
-    }
+    payload = _build_staged_manifest(job, content_sha256=content_sha256, staged=staged)
     try:
         with temporary.open("x", encoding="utf-8", newline="\n") as stream:
             json.dump(payload, stream, ensure_ascii=False, separators=(",", ":"))
             stream.flush()
             os.fsync(stream.fileno())
+            if os.fstat(stream.fileno()).st_size > _maximum_staged_manifest_bytes():
+                raise PDFIndexingError(
+                    "invalid_staged_extraction",
+                    "The durable staged PDF result exceeded its configured size limit.",
+                )
         os.replace(temporary, target)
+        _fsync_directory(target.parent)
+        staged_at = timezone.now()
         with transaction.atomic():
             _reserve_sqlite_write()
             updated = PDFExtractionJob.objects.filter(
@@ -1445,13 +2280,28 @@ def _stage_extraction_for_publication(
             ).update(
                 phase=PDFExtractionJobPhase.PUBLISHING,
                 progress=95,
-                heartbeat_at=timezone.now(),
+                staged_at=Case(
+                    When(staged_at__isnull=True, then=Value(staged_at)),
+                    default=F("staged_at"),
+                ),
+                heartbeat_at=staged_at,
                 worker_pid=None,
             )
             if updated != 1:
                 raise PDFIndexingError(
                     "extraction_worker_lease_lost",
                     "This PDF extraction was interrupted before publication.",
+                )
+            run_repository_id = (
+                PDFExtractionJob.objects.filter(pk=job_id)
+                .values_list("run_repository_id", flat=True)
+                .first()
+            )
+            if run_repository_id is not None:
+                transaction.on_commit(
+                    lambda run_repository_id=run_repository_id: reconcile_run_repository(
+                        run_repository_id
+                    )
                 )
     except Exception:
         temporary.unlink(missing_ok=True)
@@ -1460,7 +2310,7 @@ def _stage_extraction_for_publication(
             status=PDFExtractionJobStatus.RUNNING,
             phase=PDFExtractionJobPhase.PUBLISHING,
         ).exists():
-            target.unlink(missing_ok=True)
+            _remove_publication_staging_file(target)
         raise
 
 
@@ -1478,17 +2328,25 @@ def _release_publication_lease(job_id: int) -> None:
 def work_one_publication_job() -> PDFExtractionJob | None:
     """Publish one durably staged extraction through the single SQLite writer."""
 
+    if not publication_admission_allowed():
+        return None
+    publication_candidates = PDFExtractionJob.objects.filter(
+        status=PDFExtractionJobStatus.RUNNING,
+        phase=PDFExtractionJobPhase.PUBLISHING,
+        worker_pid__isnull=True,
+    )
+    # The resident writer spends most of its lifetime polling an empty queue.
+    # Keep that path to a plain read: do not acquire the cross-process claim
+    # gate or reserve SQLite's single writer unless publication work was
+    # visible. A candidate can still disappear before the gate is acquired,
+    # so the transaction below deliberately repeats the predicate.
+    if not publication_candidates.exists():
+        return None
+
     with pdf_extraction_claim_lock(), transaction.atomic():
         _reserve_sqlite_write()
         job_id = (
-            PDFExtractionJob.objects.filter(
-                status=PDFExtractionJobStatus.RUNNING,
-                phase=PDFExtractionJobPhase.PUBLISHING,
-                worker_pid__isnull=True,
-            )
-            .order_by("started_at", "id")
-            .values_list("id", flat=True)
-            .first()
+            publication_candidates.order_by("started_at", "id").values_list("id", flat=True).first()
         )
         if job_id is None:
             return None
@@ -1497,21 +2355,32 @@ def work_one_publication_job() -> PDFExtractionJob | None:
             status=PDFExtractionJobStatus.RUNNING,
             phase=PDFExtractionJobPhase.PUBLISHING,
             worker_pid__isnull=True,
-        ).update(worker_pid=os.getpid(), heartbeat_at=timezone.now())
+        ).update(
+            worker_pid=os.getpid(),
+            publication_started_at=Case(
+                When(publication_started_at__isnull=True, then=Value(timezone.now())),
+                default=F("publication_started_at"),
+            ),
+            heartbeat_at=timezone.now(),
+        )
         if claimed != 1:
             return None
-    job = PDFExtractionJob.objects.select_related("document__repository").get(pk=job_id)
+    job = PDFExtractionJob.objects.select_related(
+        "document__repository",
+        "document__local_policy",
+    ).get(pk=job_id)
     target = _publication_staging_path(job.pk)
     try:
-        with target.open("r", encoding="utf-8") as stream:
-            payload = json.load(stream)
-        if payload.get("job_id") != job.pk:
-            raise PDFIndexingError("invalid_staged_extraction", "Staged PDF result is invalid.")
-        staged = _parse_extractor_payload(payload.get("extraction"))
-        content_sha256 = str(payload.get("content_sha256") or "")
-        if not _SHA256.fullmatch(content_sha256):
-            raise PDFIndexingError("invalid_staged_extraction", "Staged PDF hash is invalid.")
-        _attach_revision(job.pk, content_sha256=content_sha256, staged=staged)
+        manifest = _read_staged_manifest(
+            target,
+            job,
+            require_current_target=True,
+        )
+        _attach_revision(
+            job.pk,
+            content_sha256=manifest.content_sha256,
+            staged=manifest.extraction,
+        )
     except PDFExtractionDeferred:
         _release_publication_lease(job.pk)
         log_event(
@@ -1535,11 +2404,25 @@ def work_one_publication_job() -> PDFExtractionJob | None:
             exc
             if isinstance(exc, PDFIndexingError)
             else PDFIndexingError(
-                "staged_extraction_unavailable",
-                "The extracted PDF result could not be loaded for publication.",
+                "invalid_staged_extraction",
+                "The durable staged PDF result could not be verified.",
             )
         )
-        _fail_job(job.pk, error)
+        if error.code == "invalid_staged_extraction":
+            transitioned, _worker_pid = _mark_unverified_stage_for_reextraction(
+                job.pk,
+                observed_at=timezone.now(),
+                force=True,
+                worker_pids=frozenset((os.getpid(),)),
+            )
+            if transitioned:
+                queue_repository_pdf_extractions(
+                    job.document.repository_id,
+                    repository_sync_job=job.repository_sync_job_id,
+                    recover_interrupted=True,
+                )
+        else:
+            _fail_job(job.pk, error)
     except Exception:
         # Preserve valid staged data across an unexpected writer failure. The
         # worker command may exit, but the replacement can claim immediately
@@ -1552,7 +2435,7 @@ def work_one_publication_job() -> PDFExtractionJob | None:
             .exclude(status=PDFExtractionJobStatus.RUNNING)
             .exists()
         ):
-            target.unlink(missing_ok=True)
+            _remove_publication_staging_file(target)
     return PDFExtractionJob.objects.select_related("document__repository").get(pk=job.pk)
 
 
@@ -2233,6 +3116,12 @@ def _attach_revision(
         job.characters_extracted = revision.extracted_character_count
         job.heartbeat_at = now
         job.completed_at = now
+        job.published_at = job.published_at or now
+        job.completion_kind = (
+            PDFPipelineCompletionKind.CACHE_REUSE
+            if existing_revision is not None
+            else PDFPipelineCompletionKind.NORMAL_PUBLICATION
+        )
         job.error_code = document.extraction_error_code
         job.error_summary = document.extraction_error_summary
         job.save(
@@ -2244,6 +3133,8 @@ def _attach_revision(
                 "characters_extracted",
                 "heartbeat_at",
                 "completed_at",
+                "published_at",
+                "completion_kind",
                 "error_code",
                 "error_summary",
             )
@@ -2263,6 +3154,12 @@ def _attach_revision(
             ),
             job=job,
         )
+        if job.run_repository_id is not None:
+            transaction.on_commit(
+                lambda run_repository_id=job.run_repository_id: reconcile_run_repository(
+                    run_repository_id
+                )
+            )
     log_event(
         logger,
         logging.INFO,
@@ -2365,6 +3262,12 @@ def _fail_job(
             ),
             job=job,
         )
+        if job.run_repository_id is not None:
+            transaction.on_commit(
+                lambda run_repository_id=job.run_repository_id: reconcile_run_repository(
+                    run_repository_id
+                )
+            )
 
 
 def _queue_current_target_after_obsolete_job(job_id: int) -> None:
@@ -2373,7 +3276,11 @@ def _queue_current_target_after_obsolete_job(job_id: int) -> None:
         job.document.lifecycle_state == PDFDocumentLifecycle.ACTIVE
         and job.document.repository.enabled
     ):
-        queue_repository_pdf_extractions(job.document.repository_id)
+        queue_repository_pdf_extractions(
+            job.document.repository_id,
+            repository_sync_job=job.repository_sync_job_id,
+            retry_failed=True,
+        )
 
 
 def _execute_claimed_extraction_job(

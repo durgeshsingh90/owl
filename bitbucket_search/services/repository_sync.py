@@ -26,6 +26,9 @@ from bitbucket_search.models import (
     PDFDocument,
     PDFDocumentLifecycle,
     PDFLocalPolicyState,
+    PDFPipelineRun,
+    PDFPipelineRunRepository,
+    PDFPipelineRunTrigger,
     RepositoryRemovalRecovery,
     RepositorySyncJob,
     RepositorySyncJobStatus,
@@ -51,8 +54,20 @@ from bitbucket_search.services.pdf_catalog import (
     publish_repository_pdf_catalog,
 )
 from bitbucket_search.services.pdf_indexing import queue_repository_pdf_extractions
+from bitbucket_search.services.pdf_pipeline_runs import (
+    accept_pipeline_run,
+    attach_sync_job_to_membership,
+    finalize_repository_inventory,
+    mark_sync_progress,
+    mark_sync_terminal,
+    run_memberships_by_repository,
+)
 from bitbucket_search.services.repository_lock import repository_worker_wakeup_lock
-from bitbucket_search.services.repository_urls import normalize_repository_url
+from bitbucket_search.services.repository_urls import (
+    NormalizedRepositoryURL,
+    RepositoryURLValidationError,
+    normalize_repository_url,
+)
 from bitbucket_search.services.repository_worker_timing import (
     running_pdf_worker_activity,
     worker_timing,
@@ -84,6 +99,7 @@ class QueueResult:
     job: RepositorySyncJob
     repository_created: bool
     job_created: bool
+    run_repository: PDFPipelineRunRepository | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +109,8 @@ class QueueAllRepositoriesResult:
     eligible_total: int
     results: tuple[QueueResult, ...]
     fallback_worker_jobs: tuple[RepositorySyncJob, ...]
+    run: PDFPipelineRun | None = None
+    rejected_repository_ids: tuple[int, ...] = ()
 
     @property
     def newly_queued(self) -> tuple[QueueResult, ...]:
@@ -133,6 +151,14 @@ class QueueAllRepositoriesResult:
     @property
     def already_running_count(self) -> int:
         return len(self.already_running)
+
+
+@dataclass(frozen=True, slots=True)
+class QueueRepositoryBatchResult:
+    """One atomic registration/queue pass for validated clone URLs."""
+
+    results: tuple[QueueResult, ...]
+    run: PDFPipelineRun | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -824,6 +850,7 @@ def _interrupt_stale_jobs(*, at=None, worker_pids: Sequence[int] = ()) -> tuple[
                     if retry_allowed:
                         retry_job, _created = _queue_job(
                             repository,
+                            run_repository=interrupted_job.run_repository,
                             operation=interrupted_job.operation,
                             trigger=interrupted_job.trigger,
                             scheduled_day=interrupted_job.scheduled_day,
@@ -908,6 +935,7 @@ def _operation_for(repository: BitbucketRepository) -> str:
 def _queue_job(
     repository: BitbucketRepository,
     *,
+    run_repository: PDFPipelineRunRepository | None = None,
     trigger: str = RepositorySyncTrigger.MANUAL,
     scheduled_day: date | None = None,
     automatic_retry_number: int = 0,
@@ -919,8 +947,16 @@ def _queue_job(
             "repository_removal_pending",
             "Repository removal is incomplete. Use Retry removal before adding or refreshing it.",
         )
+    try:
+        normalize_repository_url(repository.remote_url)
+    except RepositoryURLValidationError as exc:
+        raise RepositorySyncError(
+            "repository_host_not_allowed",
+            "This repository host is no longer approved in OWL Settings.",
+        ) from exc
     active = repository.sync_jobs.filter(status__in=ACTIVE_JOB_STATUSES).first()
     if active is not None:
+        attach_sync_job_to_membership(active, run_repository)
         log_event(
             logger,
             logging.DEBUG,
@@ -953,6 +989,7 @@ def _queue_job(
         with transaction.atomic():
             job = RepositorySyncJob.objects.create(
                 repository=repository,
+                run_repository=run_repository,
                 operation=operation,
                 trigger=trigger,
                 scheduled_day=scheduled_day,
@@ -1021,33 +1058,126 @@ def reserve_repository_write() -> None:
         BitbucketRepository.objects.filter(pk=-1).update(enabled=F("enabled"))
 
 
-def register_and_queue_repository(remote_url: object) -> QueueResult:
-    """Register a canonical repository once and queue clone/refresh idempotently."""
+def _find_compatible_repository(
+    normalized: NormalizedRepositoryURL,
+) -> BitbucketRepository | None:
+    """Find the current key or a pre-port-key row without broadening identity."""
 
-    normalized = normalize_repository_url(remote_url)
-    _interrupt_stale_jobs()
-    with transaction.atomic():
-        reserve_repository_write()
-        repository, repository_created = BitbucketRepository.objects.get_or_create(
-            canonical_remote_key=normalized.canonical_remote_key,
-            defaults={
-                "display_name": normalized.display_name,
-                "remote_url": normalized.remote_url,
-            },
+    repository = BitbucketRepository.objects.filter(
+        canonical_remote_key=normalized.canonical_remote_key
+    ).first()
+    if repository is not None:
+        return repository
+    path_key = normalized.canonical_remote_key.split("/", 1)[-1]
+    legacy_key = f"{normalized.hostname}/{path_key}"
+    if legacy_key == normalized.canonical_remote_key:
+        return None
+    candidate = BitbucketRepository.objects.filter(canonical_remote_key=legacy_key).first()
+    if candidate is None:
+        return None
+    try:
+        candidate_identity = normalize_repository_url(candidate.remote_url)
+    except RepositoryURLValidationError:
+        return None
+    return (
+        candidate
+        if candidate_identity.canonical_remote_key == normalized.canonical_remote_key
+        else None
+    )
+
+
+@transaction.atomic
+def register_and_queue_repositories(remote_urls: Sequence[object]) -> QueueRepositoryBatchResult:
+    """Register and queue one whole validated batch with a shared durable run."""
+
+    normalized_urls = tuple(normalize_repository_url(value) for value in remote_urls)
+    if not normalized_urls:
+        raise RepositoryURLValidationError(
+            "repository_url_required",
+            "Enter at least one repository URL.",
         )
+    _interrupt_stale_jobs()
+    reserve_repository_write()
+    provisional: list[QueueResult] = []
+    seen_repository_ids: set[int] = set()
+    for normalized in normalized_urls:
+        repository = _find_compatible_repository(normalized)
+        repository_created = repository is None
+        if repository is None:
+            repository = BitbucketRepository.objects.create(
+                canonical_remote_key=normalized.canonical_remote_key,
+                display_name=normalized.display_name,
+                remote_url=normalized.remote_url,
+            )
         if repository_created:
             repository.local_path = str(managed_repository_path(repository))
             repository.save(update_fields=("local_path", "updated_at"))
         else:
             repository = BitbucketRepository.objects.select_for_update().get(pk=repository.pk)
+        if repository.pk in seen_repository_ids:
+            continue
+        seen_repository_ids.add(repository.pk)
         job, job_created = _queue_job(repository)
-    return QueueResult(repository, job, repository_created, job_created)
+        existing_membership = (
+            PDFPipelineRunRepository.objects.filter(pk=job.run_repository_id).first()
+            if job.run_repository_id
+            else None
+        )
+        provisional.append(
+            QueueResult(
+                repository,
+                job,
+                repository_created,
+                job_created,
+                existing_membership,
+            )
+        )
+
+    accepted = tuple(
+        result
+        for result in provisional
+        if result.job_created or result.run_repository is None
+    )
+    run = None
+    memberships: dict[int, PDFPipelineRunRepository] = {}
+    if accepted:
+        run = accept_pipeline_run(
+            (result.repository.pk for result in accepted),
+            trigger=(
+                PDFPipelineRunTrigger.REPOSITORY_ADD
+                if any(result.repository_created for result in accepted)
+                else PDFPipelineRunTrigger.REPOSITORY_REFRESH
+            ),
+        )
+        memberships = run_memberships_by_repository(run)
+
+    results: list[QueueResult] = []
+    for result in provisional:
+        membership = memberships.get(result.repository.pk) or result.run_repository
+        attach_sync_job_to_membership(result.job, membership)
+        results.append(
+            QueueResult(
+                result.repository,
+                result.job,
+                result.repository_created,
+                result.job_created,
+                membership,
+            )
+        )
+    return QueueRepositoryBatchResult(tuple(results), run)
+
+
+def register_and_queue_repository(remote_url: object) -> QueueResult:
+    """Register a canonical repository once and queue clone/refresh idempotently."""
+
+    return register_and_queue_repositories((remote_url,)).results[0]
 
 
 def _queue_repository_refresh(
     repository_id: int,
     *,
     enabled_only: bool,
+    run_repository: PDFPipelineRunRepository | None = None,
 ) -> QueueResult:
     _interrupt_stale_jobs()
     with transaction.atomic():
@@ -1058,14 +1188,33 @@ def _queue_repository_refresh(
                 pk__in=RepositoryRemovalRecovery.objects.values("repository_id")
             )
         repository = repositories.get(pk=repository_id)
-        job, job_created = _queue_job(repository)
-    return QueueResult(repository, job, False, job_created)
+        job, job_created = _queue_job(repository, run_repository=run_repository)
+    return QueueResult(repository, job, False, job_created, run_repository)
 
 
 def queue_repository_refresh(repository_id: int) -> QueueResult:
     """Queue the next safe clone/refresh for an existing repository."""
 
-    return _queue_repository_refresh(repository_id, enabled_only=False)
+    with transaction.atomic():
+        queued = _queue_repository_refresh(repository_id, enabled_only=False)
+        if queued.job.run_repository_id:
+            run_repository = PDFPipelineRunRepository.objects.get(
+                pk=queued.job.run_repository_id
+            )
+        else:
+            run = accept_pipeline_run(
+                (repository_id,),
+                trigger=PDFPipelineRunTrigger.REPOSITORY_REFRESH,
+            )
+            run_repository = run.repository_memberships.get(repository_id=repository_id)
+            attach_sync_job_to_membership(queued.job, run_repository)
+        return QueueResult(
+            queued.repository,
+            queued.job,
+            queued.repository_created,
+            queued.job_created,
+            run_repository,
+        )
 
 
 @transaction.atomic
@@ -1110,18 +1259,52 @@ def queue_all_repository_refreshes(*, require_idle: bool = False) -> QueueAllRep
         .order_by("id")
         .values_list("id", flat=True)
     )
-    results: list[QueueResult] = []
+    provisional: list[QueueResult] = []
     fallback_worker_jobs: dict[int, RepositorySyncJob] = {}
+    rejected_repository_ids: list[int] = []
     for repository_id in repository_ids:
         try:
             queued = _queue_repository_refresh(repository_id, enabled_only=True)
         except BitbucketRepository.DoesNotExist:
             # Deletion or disabling between the eligible snapshot and this
             # repository's row lock is harmless; no job should be queued.
+            rejected_repository_ids.append(repository_id)
             continue
-        results.append(queued)
+        provisional.append(queued)
         if queued.job.status == RepositorySyncJobStatus.QUEUED:
             fallback_worker_jobs[queued.job.pk] = queued.job
+
+    accepted = tuple(
+        result
+        for result in provisional
+        if result.job_created or not result.job.run_repository_id
+    )
+    run = (
+        accept_pipeline_run(
+            (result.repository.pk for result in accepted),
+            trigger=PDFPipelineRunTrigger.REFRESH_ALL,
+        )
+        if accepted
+        else None
+    )
+    run_memberships = run_memberships_by_repository(run) if run is not None else {}
+    results: list[QueueResult] = []
+    for queued in provisional:
+        run_repository = run_memberships.get(queued.repository.pk)
+        if run_repository is None and queued.job.run_repository_id:
+            run_repository = PDFPipelineRunRepository.objects.filter(
+                pk=queued.job.run_repository_id
+            ).first()
+        attach_sync_job_to_membership(queued.job, run_repository)
+        results.append(
+            QueueResult(
+                queued.repository,
+                queued.job,
+                queued.repository_created,
+                queued.job_created,
+                run_repository,
+            )
+        )
 
     log_event(
         logger,
@@ -1138,6 +1321,8 @@ def queue_all_repository_refreshes(*, require_idle: bool = False) -> QueueAllRep
         eligible_total=len(results),
         results=tuple(results),
         fallback_worker_jobs=tuple(fallback_worker_jobs.values()),
+        run=run,
+        rejected_repository_ids=tuple(rejected_repository_ids),
     )
 
 
@@ -1233,14 +1418,25 @@ def queue_due_daily_repository_refreshes(*, at=None) -> tuple[QueueResult, ...]:
                     continue
                 trigger = RepositorySyncTrigger.RETRY
 
+            pipeline_run = accept_pipeline_run(
+                (repository.pk,),
+                trigger=(
+                    PDFPipelineRunTrigger.RECOVERY
+                    if trigger == RepositorySyncTrigger.RETRY
+                    else PDFPipelineRunTrigger.DAILY
+                ),
+                accepted_at=observed_at,
+            )
+            run_repository = pipeline_run.repository_memberships.get(repository=repository)
             job, job_created = _queue_job(
                 repository,
+                run_repository=run_repository,
                 trigger=trigger,
                 scheduled_day=scheduled_day,
                 automatic_retry_number=retry_number,
             )
             if job_created:
-                queued.append(QueueResult(repository, job, False, True))
+                queued.append(QueueResult(repository, job, False, True, run_repository))
 
     if queued:
         transaction.on_commit(
@@ -1495,6 +1691,7 @@ def cancel_repository_sync(repository_id: int) -> CancelRepositorySyncResult:
             )
             if updated != 1:
                 continue
+            mark_sync_terminal(job, cancelled=True, at=observed_at)
             if was_running:
                 running_count += 1
                 if job.worker_pid:
@@ -1573,7 +1770,9 @@ def claim_next_job() -> RepositorySyncJob | None:
         )
         if claimed != 1:
             return None
-    job = RepositorySyncJob.objects.select_related("repository").get(pk=candidate_id)
+    job = RepositorySyncJob.objects.select_related("repository", "run_repository__run").get(
+        pk=candidate_id
+    )
     initial_state = (
         RepositorySyncState.CLONING
         if job.operation == RepositorySyncOperation.CLONE
@@ -1585,6 +1784,7 @@ def claim_next_job() -> RepositorySyncJob | None:
         status_message=job.status_message,
         last_sync_started_at=job.started_at,
     )
+    mark_sync_progress(job, phase=job.phase, at=job.started_at)
     transaction.on_commit(
         lambda: log_event(
             logger,
@@ -1670,7 +1870,9 @@ def _unexpected_worker_diagnostic(error: Exception, *, stage: str) -> tuple[str,
 def execute_claimed_job(job_id: int) -> RepositorySyncJob:
     """Execute one already-claimed job and publish only sanitized durable state."""
 
-    job = RepositorySyncJob.objects.select_related("repository").get(pk=job_id)
+    job = RepositorySyncJob.objects.select_related("repository", "run_repository__run").get(
+        pk=job_id
+    )
     if job.status != RepositorySyncJobStatus.RUNNING:
         return job
 
@@ -1737,6 +1939,7 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
                 sync_progress=progress,
                 status_message=safe_message,
             )
+            mark_sync_progress(job, phase=phase, at=heartbeat)
         last_saved_at = now_monotonic
         last_message = safe_message
         last_phase = phase
@@ -1897,6 +2100,12 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
                     last_sync_completed_at=now,
                     last_sync_successful_at=now,
                 )
+                finalize_repository_inventory(
+                    job,
+                    total_pdfs=inventory_totals["pdf_count"],
+                    repository_revision=result.result_commit,
+                    at=now,
+                )
         if updated == 1:
             elapsed_ms = round((time.monotonic() - started_at) * 1000)
             transaction.on_commit(
@@ -1958,6 +2167,7 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
                     last_sync_completed_at=now,
                 )
         if updated == 1:
+            mark_sync_terminal(job, at=now)
             if exc.code.startswith("connection_"):
                 _publish_manual_connection_status(job, occurred_at=now, failure_summary=exc.summary)
             _publish_automatic_refresh_failure(
@@ -2002,6 +2212,7 @@ def _execute_claimed_job(job: RepositorySyncJob) -> RepositorySyncJob:
                     last_error_summary=summary,
                     last_sync_completed_at=now,
                 )
+                mark_sync_terminal(job, at=now)
         if updated == 1:
             _publish_automatic_refresh_failure(
                 job,

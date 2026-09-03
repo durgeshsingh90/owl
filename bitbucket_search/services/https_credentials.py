@@ -26,6 +26,14 @@ from bitbucket_search.models import (
     BitbucketRepository,
 )
 from bitbucket_search.services.logging_events import get_logger, log_event
+from bitbucket_search.services.repository_hosts import (
+    RepositoryHostNotAllowed,
+    RepositoryHostValidationError,
+    effective_repository_host_policy,
+    https_origin_from_repository_url,
+    normalize_repository_host_origin,
+    require_repository_https_origin_allowed,
+)
 from bookmark_manager.services.secret_store import (
     SecretStore,
     SecretStoreError,
@@ -137,17 +145,11 @@ def _normalized_hostname(value: object) -> str:
 
 
 def _allowed_hosts() -> frozenset[str]:
-    allowed = set()
-    for value in settings.BITBUCKET_ALLOWED_HOSTS:
-        try:
-            allowed.add(_normalized_hostname(value))
-        except HTTPSCredentialValidationError:
-            continue
-    return frozenset(allowed)
+    return effective_repository_host_policy().hostnames
 
 
 def normalize_https_origin(value: object) -> str:
-    """Return ``https://host:effective-port`` for a safe allowed origin or remote."""
+    """Return ``https://host:effective-port`` for a safe approved origin."""
 
     raw = unicodedata.normalize("NFKC", str(value or "")).strip()
     if not raw or len(raw) > 2048 or any(ord(character) < 32 for character in raw):
@@ -156,46 +158,31 @@ def normalize_https_origin(value: object) -> str:
         )
     candidate = raw if "://" in raw else f"https://{raw}"
     try:
-        parsed = urlsplit(candidate)
-        port = parsed.port or 443
-    except ValueError as exc:
+        normalized = normalize_repository_host_origin(candidate)
+        require_repository_https_origin_allowed(normalized.canonical_origin)
+    except (RepositoryHostValidationError, RepositoryHostNotAllowed) as exc:
         raise HTTPSCredentialValidationError(
             "invalid_https_origin", "Enter a valid Bitbucket HTTPS origin."
         ) from exc
-    if (
-        parsed.scheme.casefold() != "https"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or not 1 <= port <= 65_535
-    ):
-        raise HTTPSCredentialValidationError(
-            "invalid_https_origin",
-            "Use a credential-free HTTPS origin on an allowed Bitbucket host.",
-        )
-    hostname = _normalized_hostname(parsed.hostname)
-    if hostname not in _allowed_hosts():
-        raise HTTPSCredentialValidationError(
-            "https_host_not_allowed",
-            "This HTTPS credential host is not in BITBUCKET_ALLOWED_HOSTS.",
-        )
-    return f"https://{hostname}:{port}"
+    return normalized.canonical_origin
 
 
 def available_https_origins() -> tuple[str, ...]:
     """List safe default origins plus exact origins used by registered HTTPS remotes."""
 
-    origins = {f"https://{hostname}:443" for hostname in _allowed_hosts()}
+    origins = {
+        entry.canonical_origin for entry in effective_repository_host_policy().entries
+    }
     try:
         remote_urls = BitbucketRepository.objects.filter(
             remote_url__istartswith="https://"
         ).values_list("remote_url", flat=True)
         for remote_url in remote_urls:
             try:
-                origins.add(normalize_https_origin(remote_url))
-            except HTTPSCredentialValidationError:
+                remote_origin = https_origin_from_repository_url(remote_url)
+                require_repository_https_origin_allowed(remote_origin.canonical_origin)
+                origins.add(remote_origin.canonical_origin)
+            except (RepositoryHostValidationError, RepositoryHostNotAllowed):
                 continue
     except (OperationalError, ProgrammingError):
         pass
@@ -865,8 +852,18 @@ def resolve_https_credential(
     if supplied_scheme and supplied_scheme != "https":
         return None
     try:
-        normalized_origin = normalize_https_origin(raw)
-    except HTTPSCredentialValidationError:
+        if supplied_scheme == "https" and urlsplit(raw).path not in {"", "/"}:
+            remote_origin = https_origin_from_repository_url(raw)
+            require_repository_https_origin_allowed(remote_origin.canonical_origin)
+            normalized_origin = remote_origin.canonical_origin
+        else:
+            normalized_origin = normalize_https_origin(raw)
+    except (
+        HTTPSCredentialValidationError,
+        RepositoryHostValidationError,
+        RepositoryHostNotAllowed,
+        ValueError,
+    ):
         # Credential resolution is optional. Existing SSH, local fixtures, and
         # HTTPS origins removed from the allowlist must continue through Git's
         # normal credential path; an exact configured origin is still required

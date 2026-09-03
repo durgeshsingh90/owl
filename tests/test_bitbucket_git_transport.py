@@ -105,34 +105,56 @@ def test_preflight_uses_real_remote_and_local_git_config_without_showing_metadat
     assert all(call.kwargs["timeout"] <= 1 for call in process.communicate.call_args_list)
 
 
-def test_bitbucket_ssh_probe_uses_batch_mode_and_accepts_authenticated_exit_one(monkeypatch):
-    process = Mock(returncode=1)
-    process.communicate.return_value = (
-        "",
-        "authenticated via ssh key. You can use git to connect to Bitbucket.",
-    )
+@pytest.mark.parametrize(
+    "remote_url",
+    (
+        "git@bitbucket.org:workspace/repository.git",
+        "ssh://git@scm.example.invalid/workspace/repository.git",
+        "https://scm.example.invalid/workspace/repository.git",
+    ),
+)
+def test_repository_connection_uses_git_against_the_exact_saved_url(monkeypatch, remote_url):
+    repository = _repository()
+    repository.remote_url = remote_url
+    monkeypatch.setattr(git_sync, "_validate_outbound_repository_url", lambda _repository: None)
+    process = Mock(returncode=0)
+    process.communicate.return_value = ("", "")
     spawn = Mock(return_value=process)
     monkeypatch.setattr(git_sync.subprocess, "Popen", spawn)
 
-    git_sync.probe_bitbucket_ssh_connection()
+    git_sync.test_repository_connection(repository)
 
     arguments, options = spawn.call_args
-    assert arguments[0][0:2] == ["ssh", "-T"]
-    assert "BatchMode=yes" in arguments[0]
-    assert arguments[0][-1] == "git@bitbucket.org"
+    assert arguments[0] == [
+        "git",
+        "ls-remote",
+        "--symref",
+        "--",
+        remote_url,
+        "HEAD",
+    ]
+    assert arguments[0][0] != "ssh"
     assert options["stdin"] == subprocess.DEVNULL
-    assert options["env"]["SSH_ASKPASS_REQUIRE"] == "never"
 
 
-def test_bitbucket_ssh_probe_rejects_missing_key(monkeypatch):
-    process = Mock(returncode=255)
-    process.communicate.return_value = ("", "Permission denied (publickey).")
-    monkeypatch.setattr(git_sync.subprocess, "Popen", Mock(return_value=process))
+def test_repository_connection_rechecks_effective_host_policy_before_git(
+    monkeypatch,
+    settings,
+):
+    settings.BITBUCKET_ALLOWED_HOSTS = ("approved.example.invalid",)
+    settings.BITBUCKET_ALLOWED_HOSTS_EXPLICIT = True
+    settings.BITBUCKET_ALLOWED_HOSTS_SOURCE = "explicit"
+    repository = _repository()
+    repository.remote_url = "ssh://git@blocked.example.invalid/team/synthetic.git"
+    repository.canonical_remote_key = "blocked.example.invalid/team/synthetic"
+    spawn = Mock(side_effect=AssertionError("Git must not run for an unapproved host"))
+    monkeypatch.setattr(git_sync.subprocess, "Popen", spawn)
 
     with pytest.raises(git_sync.RepositorySyncError) as captured:
-        git_sync.probe_bitbucket_ssh_connection()
+        git_sync.test_repository_connection(repository)
 
-    assert captured.value.code == "connection_auth_failed"
+    assert captured.value.code == "repository_host_not_allowed"
+    spawn.assert_not_called()
 
 
 def test_preflight_timeout_has_separate_limit_heartbeats_and_reaps_process(monkeypatch, settings):

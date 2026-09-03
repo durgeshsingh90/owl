@@ -14,6 +14,7 @@ This folder is the version-controlled source of truth for planning and implement
 - [008_TROPICAL_HOME_THEME_VALIDATION_REPORT.md](008_TROPICAL_HOME_THEME_VALIDATION_REPORT.md) records the Home navigation update, original tropical visual direction, hierarchy visibility, and validation evidence.
 - [009_OWL_THEME_VALIDATION_REPORT.md](009_OWL_THEME_VALIDATION_REPORT.md) records the final knowledge-owl identity, moonlit palette, hierarchy continuity, and validation evidence.
 - [010_TIMELINE_AND_CONTRIBUTOR_ATTRIBUTION_RECORD.md](010_TIMELINE_AND_CONTRIBUTOR_ATTRIBUTION_RECORD.md) records the implemented bookmark timeline, truthful source-control identity model, planned contributor rail, and phase boundary.
+- [011_ADAPTIVE_PDF_PIPELINE_IMPLEMENTATION_PROMPT.md](011_ADAPTIVE_PDF_PIPELINE_IMPLEMENTATION_PROMPT.md) defines the ETA-first dashboard and repository queue lifecycle, durable retry/pause/notification/resume recovery, background execution contract, and benchmark-gated 80%-budget adaptive concurrency for OWL's PDF extraction and SQLite publication pipeline.
 
 ## Recommended use
 

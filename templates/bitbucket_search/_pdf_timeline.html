@@ -12,7 +12,7 @@
     </tr>
     {% for row in group.rows %}
     {% with document=row.document %}
-    <tr class="bb-document-row" id="pdf-document-{{ document.pk }}" data-pdf-row data-document-id="{{ document.pk }}"{% if search_active %} data-search-result-row{% endif %}>
+    <tr class="bb-document-row" id="pdf-document-{{ document.pk }}" data-pdf-row data-document-id="{{ document.pk }}" data-pdf-starred="{{ document.starred|yesno:'true,false' }}"{% if search_active %} data-search-result-row{% endif %}>
         <td class="bb-document-cell bb-document-cell--select" headers="bb-pdf-column-select">
             <input type="checkbox" value="{{ document.pk }}" data-pdf-select aria-label="Select {{ document.filename }}">
         </td>
@@ -108,6 +108,20 @@
         <td class="bb-document-cell bb-document-cell--actions" headers="bb-pdf-column-actions">
             <span class="bb-cell-label" aria-hidden="true">Actions</span>
             <div class="bb-document-actions">
+                {% url 'bitbucket_search:document_star' document.pk as document_star_url %}
+                <button
+                    class="bb-document-star"
+                    type="submit"
+                    form="bb-pdf-star-form"
+                    formaction="{{ document_star_url }}?starred={% if document.starred %}false{% else %}true{% endif %}"
+                    aria-label="Star PDF: {{ document.filename }}"
+                    aria-pressed="{{ document.starred|yesno:'true,false' }}"
+                    title="{% if document.starred %}Remove star from {{ document.filename }} in OWL{% else %}Star {{ document.filename }} in OWL{% endif %}"
+                    data-tooltip="{% if document.starred %}Remove star{% else %}Star PDF{% endif %}"
+                    data-pdf-star-toggle
+                    data-document-id="{{ document.pk }}"
+                    data-pdf-star-name="{{ document.filename }}"
+                ><span class="bb-document-star__icon" aria-hidden="true" data-pdf-star-icon>{% if document.starred %}★{% else %}☆{% endif %}</span></button>
                 {% url 'bitbucket_search:document_open' document.pk as document_open_url %}
                 <form method="post" action="{{ document_open_url }}">
                     {% csrf_token %}

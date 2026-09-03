@@ -4,6 +4,10 @@ from django import forms
 from django.conf import settings
 from django.db import OperationalError, ProgrammingError
 
+from bitbucket_search.services.repository_hosts import (
+    RepositoryHostValidationError,
+    normalize_repository_host_origin,
+)
 from bookmark_manager.models import BookmarkAvailability, Tag
 from bookmark_manager.services.confluence_validation import (
     OriginValidationError,
@@ -109,6 +113,32 @@ class ConfluenceSettingsForm(forms.Form):
                 "Enter a new PAT when changing the Confluence origin.",
             )
         return cleaned_data
+
+
+class TrustedRepositoryHostForm(forms.Form):
+    repository_host_url = forms.CharField(
+        label="Repository host URL",
+        max_length=2048,
+        strip=False,
+        widget=forms.URLInput(
+            attrs={
+                "autocomplete": "url",
+                "inputmode": "url",
+                "placeholder": "https://scm.company.example:8443",
+            }
+        ),
+        help_text=(
+            "Approves this Git server for later repository connections. "
+            "It does not add or clone a repository."
+        ),
+    )
+
+    def clean_repository_host_url(self) -> str:
+        try:
+            normalized = normalize_repository_host_origin(self.cleaned_data["repository_host_url"])
+        except RepositoryHostValidationError as exc:
+            raise forms.ValidationError(str(exc), code=exc.code) from exc
+        return normalized.canonical_origin
 
 
 class BookmarkInputForm(forms.Form):

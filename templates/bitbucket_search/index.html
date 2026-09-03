@@ -5,7 +5,8 @@
 {% block theme_default %}dark{% endblock %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=connection-idle-v1">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=local-stars-v1">
+<link rel="stylesheet" href="{% static 'bitbucket_search/pdf_pipeline_dashboard.css' %}?v=pipeline-dashboard-v1">
 {% endblock %}
 
 {% block app_header %}{% endblock %}
@@ -18,6 +19,10 @@
 <div
     class="bitbucket-workspace"
     data-bitbucket-workspace
+    data-pipeline-dashboard
+    data-pipeline-metrics-url="{% url 'bitbucket_search:pipeline_metrics' %}"
+    data-pipeline-active-interval="5000"
+    data-pipeline-idle-interval="30000"
     data-repository-status-url="{% url 'bitbucket_search:repository_status' %}"
     data-repository-connection-test-url="{% url 'bitbucket_search:repository_connection_test' %}"
     data-extraction-active="{{ extraction_payload.active|yesno:'true,false' }}"
@@ -36,6 +41,20 @@
         {% csrf_token %}
         <input type="hidden" name="excluded" value="yes" data-selected-excluded-value>
     </form>
+    <form id="bb-people-star-form" method="post" action="{% url 'bitbucket_search:people_star_toggle' %}" data-people-star-form hidden>
+        {% csrf_token %}
+        <input type="hidden" name="return_to" value="{{ people_group_return_to }}">
+    </form>
+    <form id="bb-pdf-star-form" method="post" data-pdf-star-form hidden>
+        {% csrf_token %}
+        {% if search_return_to %}
+        <input type="hidden" name="return_to" value="{{ search_return_to }}">
+        {% else %}
+        <input type="hidden" name="return_page" value="{{ timeline_page_number }}">
+        {% endif %}
+    </form>
+    <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-people-star-status></span>
+    <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-pdf-star-status></span>
     <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-repository-delete-status></span>
     {{ repository_copy_urls|json_script:"bb-repository-copy-urls" }}
     <aside class="bb-repository-rail" aria-labelledby="bb-repositories-heading">
@@ -116,37 +135,35 @@
             </a>
 
             <div class="bb-topbar__actions">
-                <button class="bb-connection-test" type="button" aria-live="polite" data-repository-connection-result data-state="idle" aria-label="Test repository connections" title="Test repository connections">
+                <button class="bb-connection-test" type="button" aria-live="polite" data-repository-connection-result data-state="idle" aria-label="Test every saved repository URL with Git" title="Test every saved repository URL with Git">
                     <img class="bb-connection-test__icon bb-connection-test__icon--checking" src="{% static 'bitbucket_search/icons/no-connection.gif' %}" alt="" aria-hidden="true">
                     <img class="bb-connection-test__icon bb-connection-test__icon--connected" src="{% static 'bitbucket_search/icons/connection-connected.png' %}" alt="" aria-hidden="true">
                     <img class="bb-connection-test__icon bb-connection-test__icon--disconnected" src="{% static 'bitbucket_search/icons/connection-disconnected.png' %}" alt="" aria-hidden="true">
-                    <span class="visually-hidden" data-repository-connection-message>Test repository connections.</span>
+                    <span class="visually-hidden" data-repository-connection-message>Test every saved repository URL with Git.</span>
                 </button>
                 <form
-                    class="bb-refresh-all bb-refresh-all--desktop{% if refresh_all_active_count %} bb-refresh-all--active{% elif not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %} bb-refresh-all--disabled{% endif %}"
+                    class="bb-refresh-all bb-refresh-all--desktop{% if refresh_all_active_count %} bb-refresh-all--unknown{% elif not refresh_all_enabled_count or not repositories_refresh_all_url %} bb-refresh-all--idle_unavailable bb-refresh-all--disabled{% else %} bb-refresh-all--idle_actionable{% endif %}"
                     method="post"
                     action="{{ repositories_refresh_all_url }}"
                     data-repositories-refresh-all
+                    data-pipeline-activity-control
+                    data-pipeline-indicator-state="{% if not repository_count %}hidden{% elif refresh_all_active_count %}unknown{% elif not refresh_all_enabled_count or not repositories_refresh_all_url %}idle_unavailable{% else %}idle_actionable{% endif %}"
                     data-repository-count="{{ repository_count|default:0 }}"
                     data-enabled-repository-count="{{ refresh_all_enabled_count }}"
                     data-active-repository-count="{{ refresh_all_active_count }}"
                     data-work-label="{{ repository_work_summary.label }}"
                     data-work-detail="{{ repository_work_summary.detail }}"
-                    tabindex="0"
                     aria-label="Repository refresh and background activity"
                     aria-describedby="bb-refresh-all-description"
+                    {% if not repository_count %}hidden{% endif %}
                 >
                     {% csrf_token %}
                     <button
                         class="bb-icon-button bb-refresh-all__button"
                         type="submit"
                         {% if refresh_all_active_count %}
-                        aria-label="Refresh all repositories unavailable: {{ repository_work_summary.detail }}"
-                        title="{{ repository_work_summary.label }} — {{ repository_work_summary.detail }}"
-                        disabled aria-busy="true"
-                        {% elif not repository_count %}
-                        aria-label="Refresh all repositories unavailable: no repositories are connected"
-                        title="Add a repository before queuing a workspace refresh"
+                        aria-label="Refresh all repositories unavailable until current activity is confirmed"
+                        title="Checking current background activity"
                         disabled
                         {% elif not refresh_all_enabled_count %}
                         aria-label="Refresh all repositories unavailable: no repositories are included"
@@ -162,20 +179,21 @@
                         {% endif %}
                         data-refresh-all-button
                     >
-                        <img class="bb-refresh-all__visual bb-refresh-all__visual--idle" src="{% static 'bitbucket_search/icons/indexing.gif' %}" alt="" aria-hidden="true" data-refresh-all-visual>
-                        <img class="bb-refresh-all__visual bb-refresh-all__visual--running" src="{% static 'bitbucket_search/icons/work-in-progress.gif' %}" alt="" aria-hidden="true" data-refresh-all-running-visual>
-                        <svg class="bb-refresh-all__reload-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-icon><path d="M19 8a7.5 7.5 0 1 0 1 7"/><path d="M19 3v5h-5"/></svg>
+                        <svg class="bb-refresh-all__reload-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-icon{% if refresh_all_active_count or not refresh_all_enabled_count or not repositories_refresh_all_url %} hidden{% endif %}><path d="M19 8a7.5 7.5 0 1 0 1 7"/><path d="M19 3v5h-5"/></svg>
+                        <svg class="bb-refresh-all__waiting-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-waiting hidden><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>
+                        <img class="bb-refresh-all__visual bb-refresh-all__visual--running" alt="" aria-hidden="true" data-refresh-all-running-visual data-active-src="{% static 'bitbucket_search/icons/work-in-progress.gif' %}" hidden>
+                        <svg class="bb-refresh-all__running-static" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-running-static hidden><path d="M4 12a8 8 0 0 1 14-5"/><path d="M18 3v4h-4M20 12a8 8 0 0 1-14 5"/><path d="M6 21v-4h4"/></svg>
+                        <svg class="bb-refresh-all__attention-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-attention{% if not refresh_all_active_count and refresh_all_enabled_count and repositories_refresh_all_url %} hidden{% endif %}><circle cx="12" cy="12" r="8"/><path d="M12 8v5M12 16.5v.5"/></svg>
+                        <svg class="bb-refresh-all__complete-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-complete hidden><path d="m6 12 4 4 8-9"/></svg>
                         <span class="bb-refresh-all__spinner" aria-hidden="true" data-refresh-all-spinner hidden></span>
                     </button>
                     <span class="bb-refresh-all__meta" id="bb-refresh-all-description" role="status" aria-live="polite" aria-atomic="true">
-                        <strong class="visually-hidden" data-refresh-all-label>
-                            {% if refresh_all_active_count %}{{ repository_work_summary.label }}{% elif not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %}Refresh all unavailable{% else %}Refresh all repositories{% endif %}
+                        <strong data-refresh-all-label>
+                            {% if refresh_all_active_count %}Checking current activity{% elif not refresh_all_enabled_count or not repositories_refresh_all_url %}Refresh all unavailable{% else %}Refresh all repositories{% endif %}
                         </strong>
-                        <small class="visually-hidden" data-refresh-all-detail>
+                        <small data-refresh-all-detail>
                             {% if refresh_all_active_count %}
-                            {{ repository_work_summary.detail }}
-                            {% elif not repository_count %}
-                            Add a repository to enable workspace refresh
+                            Waiting for a fresh pipeline snapshot
                             {% elif not refresh_all_enabled_count %}
                             No repositories included in refresh
                             {% elif not repositories_refresh_all_url %}
@@ -184,22 +202,15 @@
                             Queue {{ refresh_all_enabled_count }} included repositor{{ refresh_all_enabled_count|pluralize:'y,ies' }} in the background
                             {% endif %}
                         </small>
-                        <span class="bb-overall-progress" data-overall-progress{% if not refresh_all_active_count %} hidden{% endif %}>
-                            <progress max="100" data-overall-progress-bar></progress>
-                            <small data-overall-progress-label>Preparing current run…</small>
-                        </span>
-                        <span class="bb-overall-summary-row">
-                            <small class="bb-overall-counts" data-overall-counts>{% if refresh_all_active_count %}Calculating workers…{% else %}Workers 0 running{% endif %}</small>
-                            <details class="bb-overall-details">
-                                <summary>Details</summary>
-                                <span class="bb-overall-details__panel">
-                                    <small data-overall-pdf-counts>PDF current-run counts unavailable</small>
-                                    <small data-overall-git-counts>Git current-run counts unavailable</small>
-                                </span>
-                            </details>
-                        </span>
                     </span>
                 </form>
+                <dl class="bb-pipeline-topbar-status" aria-label="Current PDF pipeline" role="status" aria-live="polite" aria-atomic="true">
+                    <div><dt>Total ETA</dt><dd data-pipeline-total-eta>Waiting for a current run</dd></div>
+                    <div><dt>Extracted</dt><dd data-pipeline-extracted-rate>Warming</dd><small data-pipeline-rate-window>60-second window</small></div>
+                    <div><dt>Written</dt><dd data-pipeline-written-rate>Warming</dd><small data-pipeline-written-window>60-second window</small></div>
+                    <div><dt>Status</dt><dd data-pipeline-activity>Loading pipeline status</dd><small data-pipeline-activity-secondary>No confirmed activity yet</small></div>
+                </dl>
+                <span class="visually-hidden" data-pipeline-live aria-live="polite" aria-atomic="true"></span>
                 {% include "owl/_notification_center.html" %}
                 <details class="bb-app-switcher">
                     <summary class="bb-icon-button" aria-label="Applications">
@@ -382,7 +393,7 @@
                         {% else %}
                         Showing <strong>{{ pdf_document_count|default:0 }} PDF{{ pdf_document_count|default:0|pluralize }}</strong>
                         {% endif %}
-                        <span data-extraction-summary>{% if extraction_payload.active %}PDF indexing in progress · {{ extraction_status.queued_jobs|add:extraction_status.running_jobs }} active{% else %}{{ extraction_status.indexed_documents }} indexed · {{ extraction_status.pending_documents }} pending{% endif %}</span>
+                        <a class="bb-results-pipeline-link" href="{% url 'bitbucket_search:index_status' %}">Pipeline: <span data-pipeline-activity>Loading status</span></a>
                     </p>
                     <span class="bb-pdf-selection-count" data-pdf-selection-count hidden>0 PDFs selected</span>
                     <div class="bb-result-actions" aria-label="Result actions">
@@ -595,6 +606,9 @@
 {% block global_status %}{% endblock %}
 
 {% block scripts %}
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=connection-diagnostic-v1" defer></script>
+<script src="{% static 'bitbucket_search/pdf_pipeline_dashboard.js' %}?v=pipeline-dashboard-v1" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-url-connection-v1" defer></script>
 <script src="{% static 'bitbucket_search/people_sort.js' %}?v=people-sort-v1" defer></script>
+<script src="{% static 'bitbucket_search/people_stars.js' %}?v=people-stars-v1" defer></script>
+<script src="{% static 'bitbucket_search/pdf_stars.js' %}?v=pdf-stars-v1" defer></script>
 {% endblock %}

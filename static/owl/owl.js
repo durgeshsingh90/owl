@@ -372,6 +372,19 @@
         const live = center.querySelector("[data-notification-live]");
         const readAll = center.querySelector("[data-notification-read-all]");
         const unreadLabel = center.querySelector("[data-notification-unread-label]");
+        const recoveryBackdrop = center.querySelector("[data-notification-recovery-backdrop]");
+        const recoveryDialog = center.querySelector("[data-notification-recovery-dialog]");
+        const recoveryHeading = center.querySelector("[data-notification-recovery-heading]");
+        const recoveryScope = center.querySelector("[data-notification-recovery-scope]");
+        const recoveryTime = center.querySelector("[data-notification-recovery-time]");
+        const recoveryAttempts = center.querySelector("[data-notification-recovery-attempts]");
+        const recoveryReason = center.querySelector("[data-notification-recovery-reason]");
+        const recoveryDurable = center.querySelector("[data-notification-recovery-durable]");
+        const recoveryRecommendation = center.querySelector("[data-notification-recovery-recommendation]");
+        const recoveryStatus = center.querySelector("[data-notification-recovery-status]");
+        const recoveryDetails = center.querySelector("[data-notification-recovery-details]");
+        const recoveryDismiss = center.querySelector("[data-notification-recovery-dismiss]");
+        const recoveryResume = center.querySelector("[data-notification-recovery-resume]");
         const statusCenter = document.querySelector("[data-repository-status-center]");
         const statusToggle = statusCenter?.querySelector("[data-repository-status-toggle]");
         const statusPanel = statusCenter?.querySelector("[data-repository-status-panel]");
@@ -417,6 +430,10 @@
         let requestInFlight = false;
         let repositoriesActive = false;
         let notificationSignature = null;
+        let recoveryClaimInFlight = false;
+        let lastRecoveryClaimSignature = "";
+        let currentRecoveryPopup = null;
+        let recoveryPreviousFocus = null;
         const repositoryRows = new Map();
         let gitLogPollTimer = null;
         let gitLogsSuspended = false;
@@ -681,10 +698,287 @@
                 body,
             });
             if (!response.ok) {
-                throw new Error("The notification action could not be completed.");
+                const error = new Error("The notification action could not be completed.");
+                error.status = response.status;
+                throw error;
             }
             return response;
         };
+
+        const recoveryScopePattern = /^(?:pipeline|supervisor|controller|extraction_pool|publisher|extraction_slot:[1-9][0-9]{0,3}|repository:[1-9][0-9]{0,18})$/;
+        const recoveryEpisodePattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+        const recoveryKeyPattern = /^[0-9a-f]{64}$/;
+        const recoveryActionValues = (action, type, expectedUrl, { requiresKey = false } = {}) => {
+            const safeUrl = localTargetPath(expectedUrl);
+            if (!action || typeof action !== "object" || action.type !== type
+                || action.method !== "POST" || action.url !== safeUrl || !safeUrl
+                || typeof action.scope !== "string" || !recoveryScopePattern.test(action.scope)
+                || typeof action.episodeId !== "string"
+                || !recoveryEpisodePattern.test(action.episodeId)
+                || !Number.isSafeInteger(action.expectedGeneration) || action.expectedGeneration < 0
+                || !Number.isSafeInteger(action.pauseGeneration) || action.pauseGeneration < 1
+                || (requiresKey && (typeof action.idempotencyKey !== "string"
+                    || !recoveryKeyPattern.test(action.idempotencyKey)))) {
+                return null;
+            }
+            return {
+                scope: action.scope,
+                episodeId: action.episodeId,
+                expectedGeneration: action.expectedGeneration,
+                pauseGeneration: action.pauseGeneration,
+                ...(requiresKey ? { idempotencyKey: action.idempotencyKey } : {}),
+            };
+        };
+        const safeRecoveryText = (value, fallback = "") => (
+            typeof value === "string" && value.length <= 800 ? value : fallback
+        );
+        const validClaimedRecoveryPopup = (popup) => {
+            if (!popup || typeof popup !== "object"
+                || popup.type !== "pdf_pipeline_recovery_paused"
+                || popup.schemaVersion !== 1
+                || typeof popup.scope !== "string" || !recoveryScopePattern.test(popup.scope)
+                || typeof popup.episodeId !== "string"
+                || !recoveryEpisodePattern.test(popup.episodeId)
+                || !Number.isSafeInteger(popup.generation) || popup.generation < 0
+                || !Number.isSafeInteger(popup.pauseGeneration) || popup.pauseGeneration < 1
+                || popup.detailsPath !== "/pdfs/status/") {
+                return false;
+            }
+            const resumeValues = recoveryActionValues(
+                popup.resumeAction,
+                "pdf_pipeline_resume",
+                center.dataset.recoveryResumeUrl,
+                { requiresKey: true },
+            );
+            const acknowledgeValues = recoveryActionValues(
+                popup.acknowledgeAction,
+                "pdf_pipeline_recovery_popup_acknowledge",
+                center.dataset.recoveryPopupAcknowledgeUrl,
+            );
+            return Boolean(resumeValues && acknowledgeValues
+                && resumeValues.scope === popup.scope
+                && acknowledgeValues.scope === popup.scope
+                && resumeValues.episodeId === popup.episodeId
+                && acknowledgeValues.episodeId === popup.episodeId
+                && resumeValues.expectedGeneration === popup.generation
+                && acknowledgeValues.expectedGeneration === popup.generation
+                && resumeValues.pauseGeneration === popup.pauseGeneration
+                && acknowledgeValues.pauseGeneration === popup.pauseGeneration);
+        };
+        const closeRecoveryPopup = ({ restoreFocus = true } = {}) => {
+            if (!currentRecoveryPopup) {
+                return;
+            }
+            currentRecoveryPopup = null;
+            if (recoveryDialog) {
+                recoveryDialog.hidden = true;
+            }
+            if (recoveryBackdrop) {
+                recoveryBackdrop.hidden = true;
+            }
+            document.body?.classList.remove("has-recovery-popup");
+            if (recoveryStatus) {
+                recoveryStatus.textContent = "";
+            }
+            if (restoreFocus && recoveryPreviousFocus?.focus
+                && recoveryPreviousFocus.isConnected !== false) {
+                recoveryPreviousFocus.focus();
+            }
+            recoveryPreviousFocus = null;
+        };
+        const openRecoveryPopup = (popup) => {
+            if (!validClaimedRecoveryPopup(popup) || !recoveryBackdrop || !recoveryDialog) {
+                return false;
+            }
+            recoveryPreviousFocus = document.activeElement;
+            currentRecoveryPopup = popup;
+            headerPanels.forEach((controller) => controller.close({ restoreFocus: false }));
+            recoveryScope.textContent = safeRecoveryText(popup.scopeLabel, "PDF pipeline");
+            recoveryTime.textContent = formatNotificationDate(popup.pausedAt, "Time unavailable");
+            recoveryAttempts.textContent = safeRecoveryText(
+                popup.attemptSummary,
+                "PDF recovery is paused.",
+            );
+            recoveryReason.textContent = safeRecoveryText(
+                popup.reason,
+                "OWL paused PDF recovery for safety.",
+            );
+            recoveryDurable.textContent = safeRecoveryText(popup.durableWorkSummary);
+            recoveryRecommendation.textContent = safeRecoveryText(popup.recommendedNextStep);
+            recoveryStatus.textContent = "";
+            recoveryDetails.href = "/pdfs/status/";
+            recoveryResume.disabled = false;
+            recoveryDismiss.disabled = false;
+            recoveryBackdrop.hidden = false;
+            recoveryDialog.hidden = false;
+            document.body?.classList.add("has-recovery-popup");
+            (recoveryResume || recoveryHeading)?.focus();
+            announce("PDF pipeline recovery paused. A recovery dialog is open.");
+            return true;
+        };
+        const recoveryActionFailure = (error) => (
+            error?.status === 409
+                ? "Resume is still blocked or this action is stale. Review pipeline details and try again."
+                : "The recovery action could not be completed. OWL will keep the pipeline paused."
+        );
+        const performRecoveryResume = async (action, trigger, statusElement = null) => {
+            const values = recoveryActionValues(
+                action,
+                "pdf_pipeline_resume",
+                center.dataset.recoveryResumeUrl,
+                { requiresKey: true },
+            );
+            if (!values) {
+                announce("The recovery action is unavailable. Refresh OWL for the current action.");
+                return false;
+            }
+            trigger.disabled = true;
+            if (statusElement) {
+                statusElement.textContent = "Running current safety checks…";
+            }
+            try {
+                await post(center.dataset.recoveryResumeUrl, values);
+                if (statusElement) {
+                    statusElement.textContent = "Resume requested. OWL will run one controlled stability probe.";
+                }
+                announce("PDF pipeline resume requested.");
+                if (currentRecoveryPopup) {
+                    closeRecoveryPopup();
+                }
+                window.setTimeout(() => void load(), 0);
+                return true;
+            } catch (error) {
+                trigger.disabled = false;
+                const message = recoveryActionFailure(error);
+                if (statusElement) {
+                    statusElement.textContent = message;
+                }
+                announce(message);
+                return false;
+            }
+        };
+        const acknowledgeCurrentRecoveryPopup = async ({ navigate = false } = {}) => {
+            if (!currentRecoveryPopup) {
+                return false;
+            }
+            const values = recoveryActionValues(
+                currentRecoveryPopup.acknowledgeAction,
+                "pdf_pipeline_recovery_popup_acknowledge",
+                center.dataset.recoveryPopupAcknowledgeUrl,
+            );
+            if (!values) {
+                recoveryStatus.textContent = "This popup is stale. Refresh OWL before dismissing it.";
+                return false;
+            }
+            recoveryDismiss.disabled = true;
+            recoveryResume.disabled = true;
+            recoveryStatus.textContent = "Saving dismissal…";
+            try {
+                await post(center.dataset.recoveryPopupAcknowledgeUrl, values);
+                closeRecoveryPopup();
+                announce("Recovery alert dismissed. The paused state remains in notification history.");
+                if (navigate) {
+                    if (typeof window.location?.assign === "function") {
+                        window.location.assign("/pdfs/status/");
+                    } else if (window.location) {
+                        window.location.href = "/pdfs/status/";
+                    }
+                } else {
+                    window.setTimeout(() => void load(), 0);
+                }
+                return true;
+            } catch (_error) {
+                recoveryDismiss.disabled = false;
+                recoveryResume.disabled = false;
+                recoveryStatus.textContent = (
+                    "Dismissal could not be saved. The dialog remains open so another tab cannot lose it."
+                );
+                return false;
+            }
+        };
+        const claimRecoveryPopup = async (candidate) => {
+            if (document.hidden || recoveryClaimInFlight || currentRecoveryPopup
+                || !candidate || typeof candidate !== "object") {
+                return;
+            }
+            const values = recoveryActionValues(
+                candidate.claimAction,
+                "pdf_pipeline_recovery_popup_claim",
+                center.dataset.recoveryPopupClaimUrl,
+            );
+            if (!values || candidate.type !== "pdf_pipeline_recovery_paused"
+                || candidate.episodeId !== values.episodeId
+                || candidate.scope !== values.scope
+                || candidate.pauseGeneration !== values.pauseGeneration) {
+                return;
+            }
+            const signature = `${values.episodeId}:${values.pauseGeneration}`;
+            if (signature === lastRecoveryClaimSignature) {
+                return;
+            }
+            lastRecoveryClaimSignature = signature;
+            recoveryClaimInFlight = true;
+            try {
+                const response = await post(center.dataset.recoveryPopupClaimUrl, values);
+                const result = await response.json();
+                if (result?.claimed === true && openRecoveryPopup(result.popup)) {
+                    window.setTimeout(() => void load(), 0);
+                }
+            } catch (_error) {
+                lastRecoveryClaimSignature = "";
+            } finally {
+                recoveryClaimInFlight = false;
+            }
+        };
+
+        recoveryResume?.addEventListener("click", () => {
+            if (currentRecoveryPopup) {
+                void performRecoveryResume(
+                    currentRecoveryPopup.resumeAction,
+                    recoveryResume,
+                    recoveryStatus,
+                );
+            }
+        });
+        recoveryDismiss?.addEventListener("click", () => {
+            void acknowledgeCurrentRecoveryPopup();
+        });
+        recoveryDetails?.addEventListener("click", (event) => {
+            if (!currentRecoveryPopup) {
+                return;
+            }
+            event.preventDefault();
+            void acknowledgeCurrentRecoveryPopup({ navigate: true });
+        });
+        document.addEventListener("keydown", (event) => {
+            if (!currentRecoveryPopup) {
+                return;
+            }
+            if (event.key === "Escape") {
+                event.preventDefault();
+                void acknowledgeCurrentRecoveryPopup();
+                return;
+            }
+            if (event.key !== "Tab") {
+                return;
+            }
+            const focusable = [recoveryResume, recoveryDetails, recoveryDismiss]
+                .filter((element) => element && !element.hidden && !element.disabled);
+            if (!focusable.length) {
+                event.preventDefault();
+                recoveryHeading?.focus();
+                return;
+            }
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+            }
+        });
 
         const refreshBadge = (nextUnreadCount) => {
             const nextCount = Math.max(0, Number.parseInt(nextUnreadCount, 10) || 0);
@@ -748,6 +1042,24 @@
             }
             footer.append(time);
             footer.append(createNotificationElement("span", "", item.kindLabel || item.kind || "OWL"));
+
+            if (recoveryActionValues(
+                item.action,
+                "pdf_pipeline_resume",
+                center.dataset.recoveryResumeUrl,
+                { requiresKey: true },
+            )) {
+                const resumeButton = createNotificationElement(
+                    "button",
+                    "notification-card__action",
+                    "Resume",
+                );
+                resumeButton.type = "button";
+                resumeButton.addEventListener("click", () => {
+                    void performRecoveryResume(item.action, resumeButton);
+                });
+                footer.append(resumeButton);
+            }
 
             if (!item.read) {
                 const readButton = createNotificationElement("button", "notification-card__read", "Mark read");
@@ -1290,21 +1602,31 @@
 
             renderRefresh(payload.refresh || {}, payload.schedule || {});
             renderRepositories(payload.repositoryStatuses);
-            isActive = isActive || repositoriesActive;
+            isActive = isActive || repositoriesActive || Boolean(payload.recoveryActive)
+                || Boolean(currentRecoveryPopup) || recoveryClaimInFlight;
             renderBackgroundIndicator(payload.repositoryStatuses, payload.refresh || {}, payload.schedule || {});
             refreshBadge(payload.unread_count ?? payload.unreadCount ?? 0);
             window.dispatchEvent(new CustomEvent("owl:refresh-status", {
                 detail: payload.refresh || {},
             }));
             hasLoaded = true;
+            void claimRecoveryPopup(payload.recoveryPopup);
         };
 
         const schedulePoll = () => {
             window.clearTimeout(pollTimer);
+            pollTimer = null;
+            if (document.hidden) {
+                return;
+            }
             pollTimer = window.setTimeout(load, isActive ? 2000 : 30000);
         };
 
         const load = async () => {
+            if (document.hidden) {
+                schedulePoll();
+                return;
+            }
             if (requestInFlight || !center.dataset.notificationsUrl) {
                 schedulePoll();
                 return;
@@ -1346,6 +1668,14 @@
                 schedulePoll();
             }
         };
+
+        document.addEventListener("visibilitychange", () => {
+            window.clearTimeout(pollTimer);
+            pollTimer = null;
+            if (!document.hidden) {
+                void load();
+            }
+        });
 
         readAll?.addEventListener("click", async () => {
             readAll.disabled = true;
@@ -1389,7 +1719,9 @@
             }
         };
 
-        load();
+        if (!document.hidden) {
+            load();
+        }
         tickSchedule();
         tickBitbucketSchedule();
         window.setInterval(() => {

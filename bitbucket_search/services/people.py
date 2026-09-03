@@ -9,12 +9,13 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Count, Max, Q
 
 from bitbucket_search.models import (
     BitbucketPeopleGroup,
     BitbucketPeopleGroupMember,
+    BitbucketStarredPerson,
     GitCommit,
     InvalidPeopleName,
     PDFDocument,
@@ -29,6 +30,14 @@ logger = get_logger("actions")
 
 class PeopleGroupValidationError(ValueError):
     """Raised when a requested People group is invalid or no longer resolvable."""
+
+
+class StarredPersonValidationError(ValueError):
+    """Raised when a requested Git committer star cannot be changed safely."""
+
+
+class StarredPersonConflictError(RuntimeError):
+    """Raised when concurrent database work prevents a safe star update."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +56,15 @@ class GitPersonSummary:
         """Count repository identities, even when display names are shared."""
 
         return len(self.repository_names)
+
+
+@dataclass(frozen=True, slots=True)
+class StarredPersonSetResult:
+    """Canonical state returned after setting one Git committer star."""
+
+    person_name: str
+    identity_key: str
+    starred: bool
 
 
 def git_people_summaries() -> tuple[GitPersonSummary, ...]:
@@ -150,6 +168,120 @@ def git_people_summaries() -> tuple[GitPersonSummary, ...]:
         )
     )
     return tuple(summaries)
+
+
+def starred_people_identities() -> frozenset[str]:
+    """Return the durable normalized identities currently starred in OWL."""
+
+    return frozenset(
+        BitbucketStarredPerson.objects.order_by().values_list(
+            "normalized_person_name",
+            flat=True,
+        )
+    )
+
+
+def set_starred_person(person_name: object, *, starred: bool) -> StarredPersonSetResult:
+    """Atomically set one Git committer's OWL-owned star to the desired state."""
+
+    log_event(logger, logging.INFO, "people_star_set_requested", starred=starred)
+    try:
+        result = _set_starred_person(person_name, starred=starred)
+    except StarredPersonValidationError as error:
+        log_event(
+            logger,
+            logging.WARNING,
+            "people_star_set_rejected",
+            error=error,
+            reason="invalid_person",
+        )
+        raise
+    except (IntegrityError, OperationalError) as error:
+        log_event(
+            logger,
+            logging.WARNING,
+            "people_star_set_conflicted",
+            error=error,
+            reason="database_conflict",
+        )
+        raise StarredPersonConflictError(
+            "The person star is busy. Refresh and try again."
+        ) from error
+    except Exception as error:
+        log_event(logger, logging.ERROR, "people_star_set_failed", error=error)
+        raise
+    log_event(
+        logger,
+        logging.INFO,
+        "people_star_set_completed",
+        starred=result.starred,
+    )
+    return result
+
+
+@transaction.atomic
+def _set_starred_person(person_name: object, *, starred: bool) -> StarredPersonSetResult:
+    if not isinstance(starred, bool):
+        raise StarredPersonValidationError("Starred state must be true or false.")
+    try:
+        requested_name = canonical_people_name(person_name)
+    except InvalidPeopleName as error:
+        raise StarredPersonValidationError(str(error)) from error
+    requested_identity = requested_name.casefold()
+
+    known_people = {
+        normalize_people_name(alias): person
+        for person in git_people_summaries()
+        for alias in person.aliases
+    }
+    person = known_people.get(requested_identity)
+
+    starred_person = (
+        BitbucketStarredPerson.objects.select_for_update()
+        .filter(normalized_person_name=requested_identity)
+        .first()
+    )
+    if person is not None:
+        display_name = person.name
+    elif starred_person is not None:
+        display_name = starred_person.person_name
+    else:
+        display_name = requested_name
+
+    if not starred:
+        if starred_person is not None:
+            starred_person.delete()
+        return StarredPersonSetResult(
+            person_name=display_name,
+            identity_key=requested_identity,
+            starred=False,
+        )
+
+    if starred_person is not None:
+        return StarredPersonSetResult(
+            person_name=display_name,
+            identity_key=requested_identity,
+            starred=True,
+        )
+
+    if person is None:
+        raise StarredPersonValidationError(
+            "Unknown Git committer selection. Refresh and try again."
+        )
+
+    identity_key = normalize_people_name(person.name)
+    try:
+        BitbucketStarredPerson.objects.create(person_name=person.name)
+    except ValidationError as error:
+        raise StarredPersonValidationError(
+            "The person star could not be changed. Refresh and try again."
+        ) from error
+
+    return StarredPersonSetResult(
+        person_name=person.name,
+        identity_key=identity_key,
+        starred=True,
+    )
 
 
 def create_people_group(

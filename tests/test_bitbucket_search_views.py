@@ -328,7 +328,8 @@ def test_wide_workspace_uses_available_space_for_long_names():
     desktop_rule_end = stylesheet.index("@media (min-width: 2200px)", desktop_rule_start)
     desktop_rule = stylesheet[desktop_rule_start:desktop_rule_end]
     assert ".bb-results-table .bb-column-name { width: 23%; }" in desktop_rule
-    assert ".bb-results-table .bb-column-path { width: 13%; }" in desktop_rule
+    assert ".bb-results-table .bb-column-path { width: 11%; }" in desktop_rule
+    assert ".bb-results-table .bb-column-actions { width: 10%; }" in desktop_rule
     assert ".bb-document-name__icon {\n        display: none;" in desktop_rule
 
     ultra_wide_rule_start = desktop_rule_end

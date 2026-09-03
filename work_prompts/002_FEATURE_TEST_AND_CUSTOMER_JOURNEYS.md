@@ -1,11 +1,11 @@
 # OWL feature test and customer journey plan
 
 - Work-prompt order: 002
-- Version: 1.0
+- Version: 1.1
 - Status: Required validation contract
 - Product source of truth: `work_prompts/001_OWL_MASTER_REQUIREMENTS.md`
 - Applies to: local OWL development, phase acceptance, release testing, and defect retesting
-- Last consolidated: 25 August 2026
+- Last consolidated: 3 September 2026
 
 ## 1. Purpose and authority
 
@@ -665,6 +665,69 @@ Steps and checkpoints:
 8. Confirm loopback OWL exposes no public webhook receiver and Cloud push actors remain unavailable unless the test uses an explicitly approved authenticated relay/import adapter.
 9. Verify the contributor rail as a right-side sticky panel on desktop and a named accessible drawer/strip on a narrow screen.
 
+### CJ-019 — Observe, benchmark, and safely control the PDF pipeline
+
+- **Persona:** local OWL user indexing a large multi-repository PDF corpus
+- **Goal:** understand current progress and completion time while OWL selects only proven-safe PDF extraction capacity
+- **Priority:** P0
+- **Covers:** PIPE-001–PIPE-012
+- **Prerequisites:** temporary OWL data root/database, deterministic synthetic Git/PDF corpus, fixed controller mode, fake clocks/resource samples, and no live external targets
+
+Steps and checkpoints:
+
+1. Submit a synthetic multi-repository refresh and inspect its acknowledgement.
+   - One stable run ID is returned before Git/PDF work starts.
+   - Every accepted and rejected repository is named with a reason; **Added to queue** is
+     never presented as an active worker.
+2. Follow the top bar, repository cards, Home, and Repository Logs through queued, Git,
+   inventory, extraction, cache reuse, staged waiting, publication, retry, and terminal
+   phases.
+   - All surfaces use the same authoritative run/snapshot identity and counters.
+   - Only inventory-final, fully terminal success receives the unqualified green tick.
+3. Replay deterministic samples for healthy idle, source blocked, publisher starved,
+   publication limited, backpressure, SQLite contention, missing/stale process evidence,
+   CPU/memory/disk pressure, and simultaneous extraction/publication.
+   - Each worker and publisher occupies exactly one applicable state per sample.
+   - The activity artwork is absent while idle/unavailable and is not attached when
+     reduced motion applies.
+4. Verify the common-window rates and ETA states with fake time and boundary events.
+   - Normal extraction counts only a durable stage transition, normal writing counts only
+     a committed publication, and cache reuse is separate.
+   - Warming, low-sample, available, blocked, paused, stale, cancelled, completed-with-
+     errors, and clean-complete output never fabricates a zero or false precision.
+5. Close every OWL browser tab while work remains, verify server-side progress
+   independently, reopen, and confirm state reconstruction. Separately stop OWL and
+   restart it; no progress is claimed while stopped and durable work resumes safely.
+6. Complete Settings keyboard/narrow-screen journeys for the section routes, Confluence,
+   import/export, PDF pipeline controls, and exact trusted-host origin. Add a repository
+   with a separate full clone URL and verify credential-origin scoping, external-policy
+   precedence, conflict handling, and dependency-safe host removal.
+7. Inject retryable component failures, a permanent corrupt PDF, an immediate disk-safety
+   failure, and repeated failures at the configured component threshold.
+   - Recovery pauses only the smallest safe scope, preserves staged work and history,
+     deduplicates notification/popup delivery, and one authorized resume performs one
+     half-open probe without resetting the attempt budget.
+8. Run the isolated benchmark harness repeatedly at fixed 1/2/4/6/8 targets against the
+   same synthetic workload, restoring a clean data root/database for every trial.
+   - Reports contain workload, settings, machine/resource context, variance, correctness,
+     foreground latency, and unsupported/unavailable measurements, and exist only below
+     ignored runtime data.
+9. Replay shadow recommendations before explicitly opting into adaptive mode.
+   - One supervisor owner respects configured/tested/resource/safety bounds, the shared
+     80-percent CPU-derived budget, warm-up/hysteresis/cooldown, and gradual job-boundary
+     changes.
+   - If any correctness, recovery, resource, ETA, foreground, variance, or decision gate
+     fails, the result is `BLOCKED` and admission remains fixed/observe/shadow.
+
+Required evidence: sanitized acceptance response, deterministic trace assertions,
+desktop/narrow/reduced-motion screenshots, restart/recovery records, focused automated
+results, and the ignored benchmark report location. Record the active controller mode and
+every failed or unrun gate.
+
+Cleanup: stop benchmark/controller workers, delete disposable trial databases/PDFs and
+fake stores, retain only explicitly requested synthetic reports beneath ignored runtime
+data, and confirm Git tracks no generated artifact.
+
 ## 8. Feature test matrix and traceability
 
 The matrix is the minimum stable coverage map. Implementations may add narrower tests while retaining these IDs. **Automated target** indicates the expected repeatable layer; it does not remove the mapped browser journey.
@@ -796,7 +859,26 @@ The matrix is the minimum stable coverage map. Implementations may add narrower 
 | PERF-001 | Representative corpus targets or approved evidence-based exception | P1 | Performance | 87 |
 | OPS-004 | Clean documented setup and first-use smoke | P0 | Clean environment | 88 |
 
-This matrix covers every numbered master acceptance scenario from 1 through 108. A release report must list any test ID that was not run rather than silently omitting it.
+### 8.7 Adaptive PDF pipeline observability and control
+
+| Test ID | Scenario | Priority | Layer/automated target | Master acceptance |
+|---|---|---|---|---|
+| PIPE-T01 | Isolated parser, durable stage, single publisher, and last-published search architecture remains intact | P0 | Integration + resilience | PIPE-001 |
+| PIPE-T02 | Durable run acceptance, exact membership, lifecycle, inventory, and terminal precedence survive restart | P0 | Integration + browser | PIPE-002 |
+| PIPE-T03 | Once-only stage/commit/cache-reuse boundaries reconstruct exact counters | P0 | Unit + integration + crash recovery | PIPE-003 |
+| PIPE-T04 | Deterministic worker/publisher/pipeline classification handles all demand, constraint, stale, and unavailable states | P0 | Unit + concurrency | PIPE-004 |
+| PIPE-T05 | Rate windows, weighted critical-path ETA, confidence, terminal states, and completed-run forecast error are exact | P0 | Unit + replay + performance | PIPE-005 |
+| PIPE-T06 | Top bar/cards/Home/Logs share truth; activity asset, accessibility, narrow layout, and reduced motion are correct | P0 | Browser + accessibility | PIPE-006 |
+| PIPE-T07 | Settings sections and trusted-host/credential-origin/clone-URL contracts preserve precedence and safe removal | P0 | Unit + integration + browser + security | PIPE-007 |
+| PIPE-T08 | Durable recovery scopes, backoff, 25-attempt circuit, resume, history, and notification deduplication are exact | P0 | Unit + integration + resilience | PIPE-008 |
+| PIPE-T09 | Off/observe/shadow/adaptive modes have one owner and preserve every target/bound distinction | P0 | Unit + concurrency + restart | PIPE-009 |
+| PIPE-T10 | 80-percent CPU-derived budget, competing OWL work, missing signals, and all safety/foreground guardrails limit admission | P0 | Unit + performance | PIPE-010 |
+| PIPE-T11 | Fresh isolated database/root per trial, fixed repeated matrix, variance, one-variable comparisons, and ignored reports | P0 | Performance + security gate | PIPE-011 |
+| PIPE-T12 | Browser-close/reopen and OWL-stop/restart truth, loopback authorization/redaction, fixed Git policy, and safe fallback | P0 | Integration + browser + security | PIPE-012 |
+
+This matrix covers every numbered master acceptance scenario from 1 through 108 and
+PIPE-001–PIPE-012. A release report must list any test ID that was not run rather than
+silently omitting it.
 
 ## 9. Automated-test organization
 
@@ -887,6 +969,7 @@ Run the mapped suite before declaring each master-requirements phase complete.
 | 6 — PDF extraction/search | CJ-009, CJ-011 relevant index path | IDX, SEA |
 | 7 — PDF productivity | CJ-010 | PDF |
 | 8 — Global/hardening | CJ-012–CJ-016 | GLB, OPS, SEC, PERF and all prior regression suites |
+| Requirement 011 — Adaptive PDF pipeline | CJ-019 | PIPE-T01–PIPE-T12 plus affected REP, IDX, OPS, SEC, and PERF regressions |
 
 If a later phase changes an earlier feature, rerun its mapped earlier journey. Phase acceptance is cumulative for security, migrations, tracked-file safety, and canonical data preservation.
 
@@ -919,6 +1002,7 @@ Minimum smoke:
 - CJ-014 backup/restore;
 - CJ-015 keyboard/accessibility core;
 - CJ-016 clean-machine setup.
+- CJ-019 observe/benchmark/recovery path in fixed or observe mode; adaptive-only checkpoints may remain explicitly BLOCKED until their gates pass.
 
 ### 13.3 Release exit criteria
 
@@ -926,7 +1010,7 @@ A release is ready only when:
 
 - every P0 journey passes;
 - every P1 journey passes or has an explicitly accepted evidence-based exception;
-- all master acceptance scenarios 1–108 have a recorded mapped result;
+- all master acceptance scenarios 1–108 and PIPE-001–PIPE-012 have a recorded mapped result;
 - no open Critical or High security/data-integrity defect remains;
 - the complete automated, migration, accessibility, security, secret-scan, and tracked-file checks pass;
 - backup/restore and credential re-entry pass;

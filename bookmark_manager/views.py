@@ -9,9 +9,10 @@ from dataclasses import dataclass, field, replace
 from functools import wraps
 from urllib.parse import urlencode, urlsplit
 
+from django import forms
 from django.conf import settings
 from django.core.cache import cache
-from django.core.exceptions import ValidationError
+from django.core.exceptions import DisallowedHost, ValidationError
 from django.db import IntegrityError, OperationalError, ProgrammingError
 from django.db.models import Count, Q
 from django.http import (
@@ -24,6 +25,7 @@ from django.http import (
     JsonResponse,
     QueryDict,
 )
+from django.http.request import split_domain_port
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -33,11 +35,20 @@ from django.views.decorators.debug import sensitive_post_parameters
 from django.views.decorators.http import require_GET, require_POST
 
 from bitbucket_search.forms import BitbucketHTTPSCredentialForm
+from bitbucket_search.models import BitbucketHTTPSCredentialKind
 from bitbucket_search.services.https_credentials import (
     available_https_origins,
     list_https_credential_summaries,
     remove_https_credential,
     save_https_credential,
+)
+from bitbucket_search.services.repository_hosts import (
+    RepositoryHostConflict,
+    RepositoryHostError,
+    add_trusted_repository_host,
+    effective_repository_host_policy,
+    list_repository_host_summaries,
+    remove_trusted_repository_host,
 )
 from bookmark_manager.forms import (
     BookmarkCategoryRenameForm,
@@ -48,6 +59,7 @@ from bookmark_manager.forms import (
     BookmarkOrganisationForm,
     ConfluenceSettingsForm,
     SavedBookmarkViewForm,
+    TrustedRepositoryHostForm,
 )
 from bookmark_manager.models import (
     Bookmark,
@@ -411,6 +423,25 @@ def _require_local_action(request: HttpRequest) -> HttpResponse | None:
     return HttpResponseForbidden("This action is available only from the local OWL application.")
 
 
+def _require_strict_loopback_action(request: HttpRequest) -> HttpResponse | None:
+    """Keep trust-policy mutations local even when read access is broadened."""
+
+    try:
+        host = request.get_host()
+    except DisallowedHost:
+        host = ""
+    host_domain, host_port = split_domain_port(host)
+    valid_port = not host_port or (host_port.isdecimal() and 1 <= int(host_port) <= 65_535)
+    if (
+        _is_loopback_request(request)
+        and host_domain in {"localhost", "127.0.0.1", "[::1]"}
+        and valid_port
+    ):
+        return None
+    log_event(logger, logging.WARNING, "bookmark_web_rejected", reason="non_loopback")
+    return HttpResponseForbidden("This action is available only from the local OWL application.")
+
+
 def _action_is_rate_limited(request: HttpRequest, action: str) -> bool:
     cooldown = settings.CONFLUENCE_ACTION_COOLDOWN_SECONDS
     if cooldown <= 0:
@@ -474,17 +505,36 @@ def _new_settings_form(
     )
 
 
-def _new_bitbucket_https_credential_form(*, data=None) -> BitbucketHTTPSCredentialForm:
+def _new_bitbucket_https_credential_form(
+    *,
+    data=None,
+    requested_origin: str = "",
+) -> BitbucketHTTPSCredentialForm:
     origins = available_https_origins()
-    initial_origin = "https://bitbucket.org:443" if "https://bitbucket.org:443" in origins else ""
+    initial_origin = requested_origin if requested_origin in origins else ""
+    if not initial_origin:
+        initial_origin = (
+            "https://bitbucket.org:443" if "https://bitbucket.org:443" in origins else ""
+        )
     if not initial_origin and origins:
         initial_origin = origins[0]
-    return BitbucketHTTPSCredentialForm(
+    form = BitbucketHTTPSCredentialForm(
         data=data,
         origin_choices=origins,
         initial={"origin": initial_origin, "credential_kind": "cloud_api_token"},
         auto_id="id_bitbucket_https_%s",
     )
+    selected_origin = str(data.get("origin", "") if data is not None else initial_origin)
+    if selected_origin != "https://bitbucket.org:443":
+        form.fields["credential_kind"].choices = (
+            (
+                BitbucketHTTPSCredentialKind.USERNAME_TOKEN,
+                "Account name + HTTPS access token",
+            ),
+        )
+        form.fields["credential_kind"].initial = BitbucketHTTPSCredentialKind.USERNAME_TOKEN
+        form.fields["account_name"].label = "Account name"
+    return form
 
 
 def _tree_items(
@@ -1502,6 +1552,10 @@ def global_refresh_status(request: HttpRequest) -> JsonResponse:
 def notifications_status(request: HttpRequest) -> JsonResponse:
     """Return read-only notification, refresh, and scheduler status for every app shell."""
 
+    from bitbucket_search.services.pdf_recovery import (
+        pending_recovery_popup_payload,
+        recovery_notification_poll_active,
+    )
     from bitbucket_search.services.repository_notifications import repository_notification_statuses
 
     local_error = _require_local_action(request)
@@ -1523,6 +1577,8 @@ def notifications_status(request: HttpRequest) -> JsonResponse:
             "refresh": _refresh_run_payload(latest, completed),
             "schedule": refresh_schedule_snapshot(initialize=False),
             "repositoryStatuses": repository_notification_statuses(),
+            "recoveryPopup": pending_recovery_popup_payload(),
+            "recoveryActive": recovery_notification_poll_active(),
         }
     )
 
@@ -1584,9 +1640,64 @@ def tick_refresh_schedule(request: HttpRequest) -> JsonResponse:
 @never_cache
 @_logged_view
 def settings_page(request: HttpRequest) -> HttpResponse:
-    """Render a non-JavaScript fallback for the secure settings panel."""
+    """Render the canonical, server-addressable OWL Settings surface."""
 
     return render(request, "bookmark_manager/settings.html", _settings_page_context(request))
+
+
+_SETTINGS_SECTIONS = (
+    ("overview", "Overview"),
+    ("confluence", "Confluence"),
+    ("repository-sources", "Repository sources"),
+    ("bookmark-data", "Bookmark data"),
+)
+_SETTINGS_SECTION_KEYS = frozenset(key for key, _label in _SETTINGS_SECTIONS)
+_SETTINGS_ACTION_MESSAGES = {
+    "confluence-saved": "Confluence settings saved.",
+    "confluence-removed": "Confluence connection removed. Saved bookmarks remain available.",
+    "credential-saved": "HTTPS credential saved for this exact repository origin.",
+    "credential-removed": "HTTPS credential removed. Repository host approval is unchanged.",
+    "host-added": "Repository host approved. No repository was added or contacted.",
+    "host-unchanged": "Repository host was already approved. No repository was contacted.",
+    "host-removed": "Repository host approval removed. No repository data was deleted.",
+}
+
+
+def _selected_settings_section(request: HttpRequest, explicit: str = "") -> str:
+    candidate = explicit or request.GET.get("section", "")
+    return candidate if candidate in _SETTINGS_SECTION_KEYS else "overview"
+
+
+def _selected_settings_task(section: str, request: HttpRequest, explicit: str = "") -> str:
+    candidate = explicit or request.GET.get("task", "")
+    allowed = {
+        "confluence": {"confluence"},
+        "repository-sources": {"host", "credential"},
+    }.get(section, set())
+    return candidate if candidate in allowed else ""
+
+
+def _settings_url(*, section: str, action: str = "", task: str = "", origin: str = "") -> str:
+    parameters = {"section": section}
+    if action:
+        parameters["action"] = action
+    if task:
+        parameters["task"] = task
+    if origin:
+        parameters["origin"] = origin
+    return f"{reverse('bookmark_manager:settings')}?{urlencode(parameters)}"
+
+
+def _set_form_focus(form: forms.Form, preferred_field: str = "") -> None:
+    field_name = preferred_field
+    if not field_name:
+        field_name = next(
+            (name for name in form.fields if name in form.errors),
+            next(iter(form.fields), ""),
+        )
+    if field_name in form.fields:
+        form.fields[field_name].widget.attrs["autofocus"] = True
+        form.fields[field_name].widget.attrs["data-settings-autofocus"] = ""
 
 
 def _settings_page_context(
@@ -1594,13 +1705,22 @@ def _settings_page_context(
     *,
     settings_form: ConfluenceSettingsForm | None = None,
     bitbucket_credential_form: BitbucketHTTPSCredentialForm | None = None,
+    repository_host_form: TrustedRepositoryHostForm | None = None,
     import_form: BookmarkImportForm | None = None,
     inline_error: str = "",
     status_message: str = "",
+    selected_section: str = "",
+    selected_task: str = "",
+    repository_host_conflict=None,
 ) -> dict[str, object]:
-    """Build the full settings page, including the shared bookmark navigation."""
+    """Build one focused Settings section without exposing stored secrets."""
 
     summary = get_configuration_summary()
+    section = _selected_settings_section(request, selected_section)
+    task = _selected_settings_task(section, request, selected_task)
+    host_policy = effective_repository_host_policy()
+    host_summaries = list_repository_host_summaries()
+    requested_credential_origin = request.GET.get("origin", "")
     bookmark_counts = _global_bookmark_counts()
     import_run = None
     import_run_pk = _positive_query_integer(request, "import_run")
@@ -1608,29 +1728,55 @@ def _settings_page_context(
         import_run = (
             BookmarkImportRun.objects.prefetch_related("failures").filter(pk=import_run_pk).first()
         )
-    refresh_run, completed_refresh = refresh_status_snapshot()
+    action_message = _SETTINGS_ACTION_MESSAGES.get(request.GET.get("action", ""), "")
+    effective_status = (
+        status_message or action_message or f"Settings · {dict(_SETTINGS_SECTIONS)[section]}"
+    )
+    settings_path = reverse("bookmark_manager:settings")
+    resolved_settings_form = settings_form or _new_settings_form(summary)
+    resolved_credential_form = bitbucket_credential_form or _new_bitbucket_https_credential_form(
+        requested_origin=requested_credential_origin
+    )
+    resolved_host_form = repository_host_form or TrustedRepositoryHostForm()
+    if task == "confluence":
+        _set_form_focus(resolved_settings_form, "base_url")
+    elif task == "credential":
+        _set_form_focus(resolved_credential_form, "origin")
+    elif task == "host":
+        _set_form_focus(resolved_host_form, "repository_host_url")
     return {
         "active_nav": "bookmarks",
-        "active_app": "bookmarks",
+        "active_app": "",
         "active_section": "settings",
-        "page_title": "Confluence Settings",
+        "page_title": "Settings",
+        "settings_sections": tuple(
+            {
+                "key": key,
+                "label": label,
+                "href": f"{settings_path}?{urlencode({'section': key})}",
+                "active": key == section,
+            }
+            for key, label in _SETTINGS_SECTIONS
+        ),
+        "selected_settings_section": section,
+        "settings_task": task,
+        "settings_notice": action_message or (inline_error if inline_error else ""),
         "configuration": summary,
-        "settings_form": (
-            settings_form if settings_form is not None else _new_settings_form(summary)
-        ),
-        "bitbucket_credential_form": (
-            bitbucket_credential_form or _new_bitbucket_https_credential_form()
-        ),
+        "settings_form": resolved_settings_form,
+        "bitbucket_credential_form": resolved_credential_form,
         "bitbucket_credential_summaries": list_https_credential_summaries(),
+        "repository_host_form": resolved_host_form,
+        "repository_host_policy": host_policy,
+        "repository_host_summaries": host_summaries,
+        "repository_host_conflict": repository_host_conflict,
         "import_form": import_form if import_form is not None else BookmarkImportForm(),
         "last_import_run": import_run,
         "inline_error": inline_error,
         "bookmark_counts": bookmark_counts,
-        "refresh_status": _refresh_run_payload(refresh_run, completed_refresh),
         "total_bookmarks": bookmark_counts["all_bookmarks"],
         "bookmark_categories": _bookmark_categories_with_totals(),
         "selected_category": None,
-        "status_message": status_message or f"Confluence settings · {summary.label}",
+        "status_message": effective_status,
     }
 
 
@@ -1721,25 +1867,16 @@ def _render_settings_failure(
             status=400,
         )
     form.add_error(None, detail)
-    if request.POST.get("return_to") == "settings":
-        return render(
-            request,
-            "bookmark_manager/settings.html",
-            _settings_page_context(
-                request,
-                settings_form=form,
-                status_message=detail,
-            ),
-            status=400,
-        )
+    _set_form_focus(form)
     return render(
         request,
-        "bookmark_manager/index.html",
-        _index_context(
+        "bookmark_manager/settings.html",
+        _settings_page_context(
             request,
             settings_form=form,
-            open_settings=True,
-            inline_error=detail,
+            status_message=detail,
+            selected_section="confluence",
+            selected_task="confluence",
         ),
         status=400,
     )
@@ -1779,8 +1916,7 @@ def save_settings(request: HttpRequest) -> HttpResponse:
     if not result.success:
         return _render_settings_failure(request, form, result.detail)
 
-    target = _settings_destination(request)
-    return redirect(target)
+    return redirect(_settings_url(section="confluence", action="confluence-saved"))
 
 
 @require_POST
@@ -1816,8 +1952,7 @@ def remove_settings(request: HttpRequest) -> HttpResponse:
                 status=400,
             )
         return HttpResponse(result.detail, status=400)
-    target = _settings_destination(request)
-    return redirect(target)
+    return redirect(_settings_url(section="confluence", action="confluence-removed"))
 
 
 def _render_bitbucket_credential_failure(
@@ -1826,25 +1961,22 @@ def _render_bitbucket_credential_failure(
     detail: str,
 ) -> HttpResponse:
     form.add_error(None, detail)
-    if request.POST.get("return_to") == "settings":
-        return render(
-            request,
-            "bookmark_manager/settings.html",
-            _settings_page_context(
-                request,
-                bitbucket_credential_form=form,
-                status_message=detail,
-            ),
-            status=400,
-        )
+    # The token widget is already non-rendering. Clear the account value too so
+    # an invalid submission never reflects credential material into HTML.
+    sanitized_data = form.data.copy()
+    sanitized_data["account_name"] = ""
+    sanitized_data["token"] = ""
+    form.data = sanitized_data
+    _set_form_focus(form)
     return render(
         request,
-        "bookmark_manager/index.html",
-        _index_context(
+        "bookmark_manager/settings.html",
+        _settings_page_context(
             request,
             bitbucket_credential_form=form,
-            open_settings=True,
-            inline_error=detail,
+            status_message=detail,
+            selected_section="repository-sources",
+            selected_task="credential",
         ),
         status=400,
     )
@@ -1874,7 +2006,7 @@ def save_bitbucket_https_credential(request: HttpRequest) -> HttpResponse:
     )
     if not result.success:
         return _render_bitbucket_credential_failure(request, form, result.detail)
-    return redirect(_settings_destination(request))
+    return redirect(_settings_url(section="repository-sources", action="credential-saved"))
 
 
 @require_POST
@@ -1895,7 +2027,141 @@ def remove_bitbucket_https_credential(request: HttpRequest) -> HttpResponse:
     if not result.success:
         form = _new_bitbucket_https_credential_form()
         return _render_bitbucket_credential_failure(request, form, result.detail)
-    return redirect(_settings_destination(request))
+    return redirect(_settings_url(section="repository-sources", action="credential-removed"))
+
+
+def _render_repository_host_failure(
+    request: HttpRequest,
+    detail: str,
+    *,
+    status: int,
+    conflict=None,
+) -> HttpResponse:
+    # Intentionally construct a fresh unbound form. The rejected POST value may
+    # contain pasted credentials and must not be reflected by a BoundField.
+    form = TrustedRepositoryHostForm()
+    form.cleaned_data = {}
+    form.add_error("repository_host_url", detail)
+    _set_form_focus(form, "repository_host_url")
+    return render(
+        request,
+        "bookmark_manager/settings.html",
+        _settings_page_context(
+            request,
+            repository_host_form=form,
+            inline_error=detail,
+            status_message=detail,
+            selected_section="repository-sources",
+            selected_task="host",
+            repository_host_conflict=conflict,
+        ),
+        status=status,
+    )
+
+
+@require_POST
+@csrf_protect
+@sensitive_post_parameters("repository_host_url")
+@never_cache
+@_logged_view
+def add_repository_host(request: HttpRequest) -> HttpResponse:
+    """Approve one non-secret HTTPS origin without contacting or cloning it."""
+
+    local_error = _require_strict_loopback_action(request)
+    if local_error:
+        return local_error
+    if _action_is_rate_limited(request, "add-repository-host"):
+        return _render_repository_host_failure(
+            request,
+            "Wait briefly before approving another repository host.",
+            status=429,
+        )
+    form = TrustedRepositoryHostForm(request.POST)
+    if not form.is_valid():
+        return _render_repository_host_failure(
+            request,
+            _first_form_error(form),
+            status=400,
+        )
+    try:
+        result = add_trusted_repository_host(form.cleaned_data["repository_host_url"])
+    except RepositoryHostError as exc:
+        log_event(
+            logger,
+            logging.WARNING,
+            "repository_host_change_rejected",
+            reason=exc.code,
+        )
+        return _render_repository_host_failure(request, str(exc), status=409)
+    log_event(
+        logger,
+        logging.INFO,
+        "repository_host_approved",
+        source_id=f"{result.hostname}:{result.port}",
+    )
+    action = "host-added" if result.created or result.changed else "host-unchanged"
+    return redirect(_settings_url(section="repository-sources", action=action))
+
+
+@require_POST
+@csrf_protect
+@sensitive_post_parameters("canonical_origin")
+@never_cache
+@_logged_view
+def remove_repository_host(request: HttpRequest) -> HttpResponse:
+    """Remove one unused UI approval without cascading into dependent data."""
+
+    local_error = _require_strict_loopback_action(request)
+    if local_error:
+        return local_error
+    if request.POST.get("confirm") != "remove-repository-host":
+        return HttpResponseBadRequest(
+            "Confirmation is required before removing the repository host."
+        )
+    if _action_is_rate_limited(request, "remove-repository-host"):
+        return _render_repository_host_failure(
+            request,
+            "Wait briefly before removing another repository host.",
+            status=429,
+        )
+    try:
+        result = remove_trusted_repository_host(request.POST.get("canonical_origin", ""))
+    except RepositoryHostConflict as exc:
+        dependencies = exc.dependencies
+        detail = (
+            "This host remains approved because it has "
+            f"{dependencies.repository_count} dependent repositories, "
+            f"{dependencies.active_job_count} active jobs, and "
+            f"{dependencies.credential_count} saved HTTPS credentials. "
+            "Remove those dependencies first."
+        )
+        log_event(
+            logger,
+            logging.WARNING,
+            "repository_host_change_rejected",
+            reason=exc.code,
+        )
+        return _render_repository_host_failure(
+            request,
+            detail,
+            status=409,
+            conflict=dependencies,
+        )
+    except RepositoryHostError as exc:
+        log_event(
+            logger,
+            logging.WARNING,
+            "repository_host_change_rejected",
+            reason=exc.code,
+        )
+        return _render_repository_host_failure(request, str(exc), status=409)
+    log_event(
+        logger,
+        logging.INFO,
+        "repository_host_removed",
+        source_id=f"{result.hostname}:{result.port}",
+    )
+    return redirect(_settings_url(section="repository-sources", action="host-removed"))
 
 
 @require_POST
@@ -2442,7 +2708,7 @@ def export_bookmarks(request: HttpRequest) -> HttpResponse:
             state=NotificationState.ERROR,
             title="Bookmark export failed",
             message="OWL could not prepare the credential-free JSON backup.",
-            target_path=reverse("bookmark_manager:settings"),
+            target_path=_settings_url(section="bookmark-data"),
             occurred_at=exported_at,
         )
         return HttpResponse("OWL could not prepare the bookmark export.", status=500)
@@ -2452,7 +2718,7 @@ def export_bookmarks(request: HttpRequest) -> HttpResponse:
         state=NotificationState.SUCCESS,
         title="Bookmark export ready",
         message="Your credential-free JSON bookmark backup was prepared for download.",
-        target_path=reverse("bookmark_manager:settings"),
+        target_path=_settings_url(section="bookmark-data"),
         occurred_at=exported_at,
     )
     filename = f"owl-bookmarks-{timezone.localdate(exported_at).isoformat()}.json"
@@ -2483,7 +2749,7 @@ def import_bookmarks(request: HttpRequest) -> HttpResponse:
             state=NotificationState.ERROR,
             title="Bookmark import not started",
             message=detail,
-            target_path=reverse("bookmark_manager:settings"),
+            target_path=_settings_url(section="bookmark-data"),
             occurred_at=failed_at,
         )
         if _is_async_form(request):
@@ -2494,10 +2760,16 @@ def import_bookmarks(request: HttpRequest) -> HttpResponse:
                 status=400,
             )
         if request.POST.get("return_to") == "settings":
+            _set_form_focus(form, "import_file")
             return render(
                 request,
                 "bookmark_manager/settings.html",
-                _settings_page_context(request, import_form=form, inline_error=detail),
+                _settings_page_context(
+                    request,
+                    import_form=form,
+                    inline_error=detail,
+                    selected_section="bookmark-data",
+                ),
                 status=400,
             )
         return render(
@@ -2525,7 +2797,7 @@ def import_bookmarks(request: HttpRequest) -> HttpResponse:
             state=NotificationState.ERROR,
             title="Bookmark import failed",
             message=str(exc),
-            target_path=reverse("bookmark_manager:settings"),
+            target_path=_settings_url(section="bookmark-data"),
             occurred_at=failed_at,
         )
         if _is_async_form(request):
@@ -2536,10 +2808,16 @@ def import_bookmarks(request: HttpRequest) -> HttpResponse:
                 status=400,
             )
         if request.POST.get("return_to") == "settings":
+            _set_form_focus(form, "import_file")
             return render(
                 request,
                 "bookmark_manager/settings.html",
-                _settings_page_context(request, import_form=form, inline_error=str(exc)),
+                _settings_page_context(
+                    request,
+                    import_form=form,
+                    inline_error=str(exc),
+                    selected_section="bookmark-data",
+                ),
                 status=400,
             )
         return render(
@@ -2567,10 +2845,16 @@ def import_bookmarks(request: HttpRequest) -> HttpResponse:
             )
         form.add_error("import_file", detail)
         if request.POST.get("return_to") == "settings":
+            _set_form_focus(form, "import_file")
             return render(
                 request,
                 "bookmark_manager/settings.html",
-                _settings_page_context(request, import_form=form, inline_error=detail),
+                _settings_page_context(
+                    request,
+                    import_form=form,
+                    inline_error=detail,
+                    selected_section="bookmark-data",
+                ),
                 status=503,
             )
         return render(
@@ -2580,6 +2864,10 @@ def import_bookmarks(request: HttpRequest) -> HttpResponse:
             status=503,
         )
     _publish_import_completion(result.run)
+    if request.POST.get("return_to") == "settings":
+        return redirect(
+            _settings_url(section="bookmark-data") + "&" + urlencode({"import_run": result.run.pk})
+        )
     destination = reverse(_settings_destination(request))
     return redirect(f"{destination}?{urlencode({'import_run': result.run.pk})}")
 

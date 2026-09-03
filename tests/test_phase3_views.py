@@ -4,8 +4,8 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from urllib.parse import parse_qs, urlencode, urlparse
 from unittest.mock import Mock
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -1844,7 +1844,12 @@ def test_import_http_journey_returns_to_settings_and_renders_partial_result(
 
     assert response.status_code == 302
     run = BookmarkImportRun.objects.get()
-    assert response["Location"] == (f"{reverse('bookmark_manager:settings')}?import_run={run.pk}")
+    destination = urlparse(response["Location"])
+    assert destination.path == reverse("bookmark_manager:settings")
+    assert parse_qs(destination.query) == {
+        "section": ["bookmark-data"],
+        "import_run": [str(run.pk)],
+    }
     assert run.imported_records == 2
     assert run.failed_records == 1
     assert Bookmark.objects.filter(page_id__in=("810001", "810002")).count() == 2
@@ -1865,17 +1870,13 @@ def test_import_http_journey_returns_to_settings_and_renders_partial_result(
     assert 'class="operation-failure-list"' in html
 
 
-def test_import_database_contention_returns_controlled_retry_response(
-    loopback_client, monkeypatch
-):
+def test_import_database_contention_returns_controlled_retry_response(loopback_client, monkeypatch):
     monkeypatch.setattr(
         views,
         "import_bookmarks_document",
         Mock(side_effect=OperationalError("database is locked")),
     )
-    upload = SimpleUploadedFile(
-        "bookmarks.json", b"[]", content_type="application/json"
-    )
+    upload = SimpleUploadedFile("bookmarks.json", b"[]", content_type="application/json")
 
     response = loopback_client.post(
         reverse("bookmark_manager:import"),
@@ -1933,7 +1934,7 @@ def test_browser_style_async_json_import_passes_csrf_and_redirects_to_result():
         HTTP_HOST="127.0.0.1",
         REMOTE_ADDR="127.0.0.1",
     )
-    page = csrf_client.get(reverse("bookmark_manager:settings"))
+    page = csrf_client.get(reverse("bookmark_manager:settings"), {"section": "bookmark-data"})
     token = re.search(
         r'name="csrfmiddlewaretoken" value="(?P<token>[^"]+)"',
         _html(page),
@@ -1960,7 +1961,10 @@ def test_browser_style_async_json_import_passes_csrf_and_redirects_to_result():
     )
 
     assert response.status_code == 302
-    assert response["Location"].startswith(f"{reverse('bookmark_manager:settings')}?import_run=")
+    destination = urlparse(response["Location"])
+    assert destination.path == reverse("bookmark_manager:settings")
+    assert parse_qs(destination.query)["section"] == ["bookmark-data"]
+    assert parse_qs(destination.query)["import_run"]
     assert Bookmark.objects.filter(page_id="810003", title="Browser imported page").exists()
 
 
@@ -1986,7 +1990,7 @@ def test_null_origin_import_remains_rejected_even_with_a_valid_csrf_token():
         HTTP_HOST="127.0.0.1",
         REMOTE_ADDR="127.0.0.1",
     )
-    page = csrf_client.get(reverse("bookmark_manager:settings"))
+    page = csrf_client.get(reverse("bookmark_manager:settings"), {"section": "bookmark-data"})
     token = re.search(
         r'name="csrfmiddlewaretoken" value="(?P<token>[^"]+)"',
         _html(page),
@@ -2048,11 +2052,13 @@ def test_invalid_import_returning_to_settings_renders_field_and_error_feedback(
 
     assert response.status_code == 400
     assert response.context["import_form"].errors["import_file"]
+    assert response.context["selected_settings_section"] == "bookmark-data"
     assert "Bookmark data" in html
     assert "Import bookmarks" in html
     assert "Choose a valid UTF-8 .json or .txt file" in html
     assert "This field is required." in html
     assert 'name="return_to" value="settings"' in html
+    assert "data-settings-autofocus" in html
     assert "Advanced settings" not in html
 
 

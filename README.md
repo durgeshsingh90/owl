@@ -179,7 +179,7 @@ Repository URLs are canonicalized and deduplicated. Credentials embedded in URLs
 SSH repositories use the existing SSH agent; HTTPS repositories can use an exact-host credential
 saved in OWL Settings, with an external credential manager still available when OWL has no saved
 credential for that origin. Django's `owl/settings.py`
-approves `bitbucket.org`, `github.com`, and `scm.mastercard.int` by default. Leave
+approves `bitbucket.org` and `github.com` by default. Leave
 `BITBUCKET_ALLOWED_HOSTS` unset to use those defaults, or set it in your local `.env` to replace
 them with a comma-separated list of exact hostnames. An explicitly blank value disables
 repository additions. When overriding, keep all hosts you want to use in the list, for example:

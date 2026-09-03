@@ -37,6 +37,10 @@ from bitbucket_search.services.git_output import emit_git_output
 from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
 from bitbucket_search.services.path_safety import has_disallowed_path_characters
 from bitbucket_search.services.repository_lock import repository_checkout_lock
+from bitbucket_search.services.repository_urls import (
+    RepositoryURLValidationError,
+    normalize_repository_url,
+)
 
 ProgressCallback = Callable[[str, int, str], None]
 HeartbeatCallback = Callable[[], None]
@@ -472,6 +476,27 @@ def _check_connection(
     progress_callback(phase, 4, "Repository connection verified.")
 
 
+def _validate_outbound_repository_url(repository: BitbucketRepository) -> None:
+    """Recheck the current effective host policy immediately before Git."""
+
+    try:
+        normalized = normalize_repository_url(repository.remote_url)
+    except RepositoryURLValidationError as exc:
+        raise RepositorySyncError(
+            "repository_host_not_allowed",
+            "This repository host is no longer approved in OWL Settings.",
+        ) from exc
+    legacy_key = f"{normalized.hostname}/{normalized.canonical_remote_key.split('/', 1)[-1]}"
+    if repository.canonical_remote_key not in {
+        normalized.canonical_remote_key,
+        legacy_key,
+    }:
+        raise RepositorySyncError(
+            "repository_identity_changed",
+            "The saved repository address no longer matches its approved identity.",
+        )
+
+
 def test_repository_connection(
     repository: BitbucketRepository,
     *,
@@ -479,38 +504,9 @@ def test_repository_connection(
 ) -> None:
     """Perform only Git's read-only remote HEAD check for one repository."""
 
+    _validate_outbound_repository_url(repository)
     with _git_https_authorization(repository.remote_url, https_credential):
         _check_connection(repository, lambda _phase, _progress, _message: None)
-
-
-def probe_bitbucket_ssh_connection() -> None:
-    """Verify Bitbucket Cloud SSH authentication with the user's configured keys."""
-
-    timeout = settings.BITBUCKET_CONNECTION_TIMEOUT_SECONDS
-    emit_git_output("Checking Bitbucket SSH key authentication…", operation="connection")
-    _run_capture(
-        (
-            "ssh",
-            "-T",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectionAttempts=1",
-            "-o",
-            f"ConnectTimeout={max(1, int(timeout))}",
-            "git@bitbucket.org",
-        ),
-        failure_code="connection_check_failed",
-        failure_summary=(
-            "SSH could not test Bitbucket authentication. Check that SSH is installed and retry."
-        ),
-        timeout_seconds=timeout,
-        failure_classifier=_connection_failure,
-        timeout_error=_connection_timeout_error(),
-        isolate_process=True,
-        accepted_return_codes=(0, 1),
-    )
-    emit_git_output("Bitbucket SSH key authentication verified.", operation="connection")
 
 
 def _abort_capture(process, *, isolate_process: bool) -> str:
@@ -2026,6 +2022,7 @@ def synchronize_repository(
     """Clone once or safely fast-forward an existing OWL-managed checkout."""
 
     started_at = time.monotonic()
+    _validate_outbound_repository_url(repository)
     log_event(
         logger,
         logging.INFO,

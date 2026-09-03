@@ -1,6 +1,7 @@
 """Durable repository and background synchronization state."""
 
 import unicodedata
+import uuid
 
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -168,6 +169,92 @@ class PDFExtractionJobPhase(models.TextChoices):
     COMPLETED = "completed", "Completed"
 
 
+class PDFPipelineRunState(models.TextChoices):
+    """End-to-end lifecycle for one accepted repository refresh/index run."""
+
+    QUEUED = "queued", "Added to queue"
+    ACTIVE = "active", "Active"
+    PAUSED = "paused", "Paused"
+    COMPLETE = "complete", "Complete"
+    COMPLETED_WITH_ERRORS = "completed_with_errors", "Completed with errors"
+    CANCELLED = "cancelled", "Cancelled"
+
+
+class PDFPipelineRunTrigger(models.TextChoices):
+    """Stable reasons why a durable PDF pipeline run was accepted."""
+
+    REPOSITORY_ADD = "repository_add", "Repository added"
+    REPOSITORY_REFRESH = "repository_refresh", "Repository refresh"
+    REFRESH_ALL = "refresh_all", "Refresh all"
+    DAILY = "daily", "Daily refresh"
+    RECOVERY = "recovery", "Recovery"
+    REINDEX = "reindex", "Reindex"
+
+
+class PDFPipelineRepositoryPhase(models.TextChoices):
+    """Truthful current phase for one repository accepted into a pipeline run."""
+
+    QUEUED = "queued", "Added to queue"
+    CHECKING_CONNECTION = "checking_connection", "Checking connection"
+    CLONING = "cloning", "Cloning"
+    PULLING = "pulling", "Pulling"
+    DISCOVERING = "discovering", "Discovering PDFs"
+    VALIDATING = "validating", "Validating"
+    HASHING = "hashing", "Hashing"
+    EXTRACTING = "extracting", "Extracting"
+    WRITING = "writing", "Writing"
+    EXTRACTING_AND_WRITING = "extracting_and_writing", "Extracting + writing"
+    REUSING_CACHED = "reusing_cached", "Reusing cached text"
+    RETRY_WAIT = "retry_wait", "Waiting to retry"
+    RECOVERING = "recovering", "Recovering"
+    COMPLETING = "completing", "Completing"
+    PAUSED = "paused", "Paused"
+    COMPLETE = "complete", "Complete"
+    COMPLETED_WITH_ERRORS = "completed_with_errors", "Completed with errors"
+    CANCELLED = "cancelled", "Cancelled"
+
+
+class PDFPipelineCompletionKind(models.TextChoices):
+    """Once-only boundary that made one PDF exact-searchable for its run."""
+
+    NORMAL_PUBLICATION = "normal_publication", "Normal publication"
+    CACHE_REUSE = "cache_reuse", "Cache reuse"
+
+
+class PDFPipelineRecoveryState(models.TextChoices):
+    """Durable component-recovery circuit state."""
+
+    HEALTHY = "healthy", "Healthy"
+    RETRY_WAIT = "retry_wait", "Retry wait"
+    RECOVERING = "recovering", "Recovering"
+    PAUSED = "paused", "Paused"
+    RESUME_REQUESTED = "resume_requested", "Resume requested"
+    RECOVERING_HALF_OPEN = "recovering_half_open", "Recovering half-open"
+
+
+class PDFPipelineRecoveryEventKind(models.TextChoices):
+    """Sparse audit events for recovery transitions and attempts."""
+
+    EPISODE_OPENED = "episode_opened", "Episode opened"
+    ATTEMPT_STARTED = "attempt_started", "Attempt started"
+    ATTEMPT_FAILED = "attempt_failed", "Attempt failed"
+    ATTEMPT_SUCCEEDED = "attempt_succeeded", "Attempt succeeded"
+    RETRY_SCHEDULED = "retry_scheduled", "Retry scheduled"
+    PAUSED = "paused", "Paused"
+    RESUME_REQUESTED = "resume_requested", "Resume requested"
+    RECOVERED = "recovered", "Recovered"
+    SUPERSEDED = "superseded", "Superseded"
+
+
+class PDFPipelineTuningAction(models.TextChoices):
+    """Sparse controller recommendation/application history."""
+
+    RECOMMEND = "recommend", "Recommend"
+    APPLY = "apply", "Apply"
+    ROLLBACK = "rollback", "Rollback"
+    SAFETY_OVERRIDE = "safety_override", "Safety override"
+
+
 class RepositoryOperationLogChannel(models.TextChoices):
     """Stable source categories for one repository's user-facing operation log."""
 
@@ -235,6 +322,33 @@ class BitbucketHTTPSCredential(models.Model):
         return self.origin
 
 
+class TrustedRepositoryHost(models.Model):
+    """One non-secret, exact HTTPS origin approved through local Settings."""
+
+    canonical_origin = models.URLField(max_length=2048, unique=True)
+    hostname = models.CharField(max_length=253, db_index=True)
+    port = models.PositiveIntegerField(default=443)
+    enabled = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["hostname", "port", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("hostname", "port"),
+                name="bitbucket_unique_trusted_host_port",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(port__gte=1, port__lte=65_535),
+                name="bitbucket_trusted_host_port_range",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return self.canonical_origin
+
+
 class BitbucketRepository(models.Model):
     """One approved Git repository managed in OWL's private media area."""
 
@@ -293,6 +407,211 @@ class BitbucketRepository(models.Model):
             RepositorySyncState.FETCHING,
             RepositorySyncState.UPDATING,
         }
+
+
+class PDFPipelineRun(models.Model):
+    """One durable accepted refresh/index generation across repositories."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    trigger = models.CharField(
+        max_length=32,
+        choices=PDFPipelineRunTrigger,
+        default=PDFPipelineRunTrigger.REPOSITORY_REFRESH,
+        db_index=True,
+    )
+    state = models.CharField(
+        max_length=32,
+        choices=PDFPipelineRunState,
+        default=PDFPipelineRunState.QUEUED,
+        db_index=True,
+    )
+    accepted_at = models.DateTimeField(default=timezone.now, db_index=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    last_progress_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    completed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    accepted_repository_count = models.PositiveIntegerField(default=0)
+    schema_version = models.PositiveSmallIntegerField(default=1)
+
+    class Meta:
+        ordering = ["-accepted_at", "-id"]
+        indexes = [
+            models.Index(fields=("state", "-accepted_at"), name="bb_pipeline_run_state_idx")
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.id} — {self.get_state_display()}"
+
+
+class PDFPipelineRunRepository(models.Model):
+    """Durable membership and end-to-end PDF inventory for one run repository."""
+
+    run = models.ForeignKey(
+        PDFPipelineRun,
+        on_delete=models.CASCADE,
+        related_name="repository_memberships",
+    )
+    repository = models.ForeignKey(
+        BitbucketRepository,
+        on_delete=models.CASCADE,
+        related_name="pipeline_run_memberships",
+    )
+    lifecycle_state = models.CharField(
+        max_length=32,
+        choices=PDFPipelineRunState,
+        default=PDFPipelineRunState.QUEUED,
+        db_index=True,
+    )
+    phase = models.CharField(
+        max_length=32,
+        choices=PDFPipelineRepositoryPhase,
+        default=PDFPipelineRepositoryPhase.QUEUED,
+        db_index=True,
+    )
+    repository_revision = models.CharField(max_length=64, blank=True)
+    accepted_at = models.DateTimeField(default=timezone.now, db_index=True)
+    activated_at = models.DateTimeField(null=True, blank=True)
+    last_progress_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    inventory_final = models.BooleanField(default=False, db_index=True)
+    inventory_final_at = models.DateTimeField(null=True, blank=True)
+    total_pdfs = models.PositiveIntegerField(default=0)
+    successful_pdfs = models.PositiveIntegerField(default=0)
+    permanent_failed_pdfs = models.PositiveIntegerField(default=0)
+    cancelled_pdfs = models.PositiveIntegerField(default=0)
+    remaining_pdfs = models.PositiveIntegerField(default=0)
+    unresolved_failures = models.PositiveIntegerField(default=0)
+    terminal_outcome = models.CharField(
+        max_length=32,
+        choices=PDFPipelineRunState,
+        blank=True,
+    )
+    completed_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
+    class Meta:
+        ordering = ["accepted_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=("run", "repository"),
+                name="bitbucket_unique_pipeline_run_repository",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=("run", "lifecycle_state"),
+                name="bb_pipeline_member_state_idx",
+            ),
+            models.Index(
+                fields=("repository", "-accepted_at"),
+                name="bb_pipeline_repo_latest_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.run_id} — repository {self.repository_id}"
+
+
+class PDFPipelineRecovery(models.Model):
+    """Sparse canonical circuit state for one supervised PDF component scope."""
+
+    scope = models.CharField(max_length=128, unique=True)
+    state = models.CharField(
+        max_length=32,
+        choices=PDFPipelineRecoveryState,
+        default=PDFPipelineRecoveryState.HEALTHY,
+        db_index=True,
+    )
+    episode_id = models.UUIDField(default=uuid.uuid4, editable=False, db_index=True)
+    generation = models.PositiveBigIntegerField(default=0)
+    pause_generation = models.PositiveBigIntegerField(default=0)
+    reason_family = models.CharField(max_length=64, blank=True)
+    reason_code = models.CharField(max_length=64, blank=True)
+    consecutive_failed_attempts = models.PositiveIntegerField(default=0)
+    lifetime_attempts = models.PositiveBigIntegerField(default=0)
+    pause_after_attempts = models.PositiveIntegerField(default=25)
+    first_failure_at = models.DateTimeField(null=True, blank=True)
+    last_failure_at = models.DateTimeField(null=True, blank=True)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    next_retry_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    current_backoff_seconds = models.PositiveIntegerField(default=0)
+    paused_reason = models.CharField(max_length=500, blank=True)
+    paused_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    popup_acknowledged_generation = models.PositiveBigIntegerField(default=0)
+    popup_claimed_generation = models.PositiveBigIntegerField(default=0)
+    resume_requested_at = models.DateTimeField(null=True, blank=True)
+    resume_idempotency_key_hash = models.CharField(max_length=64, blank=True)
+    resume_predecessor_generation = models.PositiveBigIntegerField(null=True, blank=True)
+    recovered_at = models.DateTimeField(null=True, blank=True)
+    last_outcome = models.CharField(max_length=500, blank=True)
+    active_attempt_id = models.UUIDField(null=True, blank=True, editable=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["scope"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(popup_acknowledged_generation__lte=models.F("pause_generation")),
+                name="bb_recovery_ack_lte_pause_gen",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(popup_claimed_generation__lte=models.F("pause_generation")),
+                name="bb_recovery_claim_lte_pause_gen",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.scope} — {self.get_state_display()}"
+
+
+class PDFPipelineRecoveryEvent(models.Model):
+    """Append-only redacted history for recovery attempts and transitions."""
+
+    recovery = models.ForeignKey(
+        PDFPipelineRecovery,
+        on_delete=models.CASCADE,
+        related_name="events",
+    )
+    event_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    attempt_id = models.UUIDField(null=True, blank=True, db_index=True)
+    generation = models.PositiveBigIntegerField()
+    pause_generation = models.PositiveBigIntegerField(default=0)
+    kind = models.CharField(max_length=32, choices=PDFPipelineRecoveryEventKind)
+    reason_code = models.CharField(max_length=64, blank=True)
+    outcome = models.CharField(max_length=500, blank=True)
+    occurred_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-occurred_at", "-id"]
+        indexes = [
+            models.Index(
+                fields=("recovery", "-occurred_at"),
+                name="bb_recovery_event_time_idx",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.recovery.scope} — {self.get_kind_display()}"
+
+
+class PDFPipelineTuningEvent(models.Model):
+    """Sparse, redacted controller recommendation and outcome history."""
+
+    occurred_at = models.DateTimeField(default=timezone.now, db_index=True)
+    mode = models.CharField(max_length=16)
+    action = models.CharField(max_length=24, choices=PDFPipelineTuningAction)
+    previous_target = models.PositiveSmallIntegerField()
+    proposed_target = models.PositiveSmallIntegerField()
+    reason_code = models.CharField(max_length=64)
+    reason = models.CharField(max_length=500)
+    confidence = models.CharField(max_length=16)
+    observation_window_seconds = models.PositiveIntegerField()
+    evidence = models.JSONField(default=dict)
+    cooldown_until = models.DateTimeField(null=True, blank=True)
+    outcome = models.CharField(max_length=500, blank=True)
+
+    class Meta:
+        ordering = ["-occurred_at", "-id"]
+
+    def __str__(self) -> str:
+        return f"{self.get_action_display()} — {self.previous_target} to {self.proposed_target}"
 
 
 class RepositoryRemovalRecovery(models.Model):
@@ -452,6 +771,44 @@ class BitbucketPeopleGroupMember(models.Model):
         self.normalized_person_name = self.person_name.casefold()
 
 
+class BitbucketStarredPerson(models.Model):
+    """One OWL-owned star attached to a normalized Git committer identity."""
+
+    person_name = models.CharField(max_length=255)
+    normalized_person_name = models.CharField(max_length=255, unique=True, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["normalized_person_name", "id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(normalized_person_name=""),
+                name="bitbucket_starred_person_name_not_blank",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return self.person_name
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            kwargs["update_fields"] = set(update_fields) | {
+                "person_name",
+                "normalized_person_name",
+            }
+        return super().save(*args, **kwargs)
+
+    def clean(self) -> None:
+        super().clean()
+        try:
+            self.person_name = canonical_people_name(self.person_name)
+        except InvalidPeopleName as error:
+            raise ValidationError({"person_name": str(error)}) from error
+        self.normalized_person_name = self.person_name.casefold()
+
+
 class PDFDocument(models.Model):
     """One durable PDF identity within a managed repository."""
 
@@ -524,6 +881,7 @@ class PDFDocument(models.Model):
     extractor_version = models.CharField(max_length=64, blank=True)
     extraction_error_code = models.CharField(max_length=64, blank=True)
     extraction_error_summary = models.CharField(max_length=500, blank=True)
+    starred = models.BooleanField(default=False, db_index=True)
     open_count = models.PositiveBigIntegerField(default=0)
     first_opened_at = models.DateTimeField(null=True, blank=True)
     last_opened_at = models.DateTimeField(null=True, blank=True)
@@ -667,6 +1025,13 @@ class PDFExtractionJob(models.Model):
         blank=True,
         related_name="extraction_jobs",
     )
+    run_repository = models.ForeignKey(
+        PDFPipelineRunRepository,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="extraction_jobs",
+    )
     run_id = models.UUIDField(null=True, blank=True, db_index=True)
     target_git_blob_id = models.CharField(max_length=64)
     target_source_commit = models.CharField(max_length=64)
@@ -692,6 +1057,15 @@ class PDFExtractionJob(models.Model):
     characters_extracted = models.PositiveBigIntegerField(default=0)
     requested_at = models.DateTimeField(auto_now_add=True, db_index=True)
     started_at = models.DateTimeField(null=True, blank=True)
+    staged_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    publication_started_at = models.DateTimeField(null=True, blank=True)
+    published_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    completion_kind = models.CharField(
+        max_length=24,
+        choices=PDFPipelineCompletionKind,
+        blank=True,
+        db_index=True,
+    )
     heartbeat_at = models.DateTimeField(null=True, blank=True, db_index=True)
     completed_at = models.DateTimeField(null=True, blank=True, db_index=True)
     worker_pid = models.PositiveIntegerField(null=True, blank=True)
@@ -733,6 +1107,13 @@ class RepositorySyncJob(models.Model):
     repository = models.ForeignKey(
         BitbucketRepository,
         on_delete=models.CASCADE,
+        related_name="sync_jobs",
+    )
+    run_repository = models.ForeignKey(
+        PDFPipelineRunRepository,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="sync_jobs",
     )
     operation = models.CharField(max_length=16, choices=RepositorySyncOperation)

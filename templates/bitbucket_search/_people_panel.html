@@ -3,7 +3,7 @@
     <div class="bb-people-panel__intro">
         <div>
             <strong>Latest Git commit by</strong>
-            <span>Committers from available history</span>
+            <span>Committers from available history · stars stay local to OWL and use Git committer names, not Bitbucket accounts</span>
         </div>
     </div>
     {% else %}
@@ -18,7 +18,7 @@
                 >{{ git_people_total }}</span>
             </div>
         </div>
-        <p>Committers from available history</p>
+        <p>Committers from available history · stars stay local to OWL and use Git committer names, not Bitbucket accounts</p>
     </header>
     {% endif %}
 
@@ -92,7 +92,7 @@
             </div>
             <ul class="bb-people-list" data-git-people-list>
                 {% for person in git_people %}
-                <li data-people-filter-entry data-people-entry-kind="committer" data-people-search-value="{{ person.name }}" data-people-name="{{ person.name }}" data-people-last-commit="{{ person.last_committed_at|date:'U' }}" data-people-commit-count="{{ person.commit_count }}" data-people-pdf-count="{{ person.pdf_count }}">
+                <li class="bb-people-person-row" data-people-filter-entry data-people-entry-kind="committer" data-people-search-value="{{ person.name }}" data-people-name="{{ person.name }}" data-people-last-commit="{{ person.last_committed_at|date:'U' }}" data-people-commit-count="{{ person.commit_count }}" data-people-pdf-count="{{ person.pdf_count }}" data-people-starred="{{ person.starred|yesno:'true,false' }}">
                     <label class="bb-people-option{% if person.selected %} is-active{% endif %}" title="Include PDFs whose latest Git committer is {{ person.name }}">
                         <input type="checkbox" name="committer" value="{{ person.name }}" data-committer-select{% if person.selected %} checked{% endif %}>
                         <span class="bb-people-avatar" aria-hidden="true">{{ person.name|slice:":1"|upper }}</span>
@@ -102,6 +102,20 @@
                         </span>
                         <b class="bb-people-repository-count" tabindex="0" role="note" aria-label="{{ person.repository_count }} repositor{{ person.repository_count|pluralize:'y,ies' }}: {{ person.repository_names|join:', ' }}" title="Repositories: {{ person.repository_names|join:', ' }}">{{ person.repository_count }} repo{{ person.repository_count|pluralize }}</b>
                     </label>
+                    <button
+                        class="bb-people-star"
+                        type="submit"
+                        name="person"
+                        value="{{ person.identity_key }}"
+                        form="bb-people-star-form"
+                        formaction="{% url 'bitbucket_search:people_star_toggle' %}?starred={% if person.starred %}false{% else %}true{% endif %}"
+                        aria-label="Star {{ person.name }}"
+                        aria-pressed="{{ person.starred|yesno:'true,false' }}"
+                        title="{% if person.starred %}Remove star from {{ person.name }} locally in OWL{% else %}Star {{ person.name }} locally in OWL{% endif %}"
+                        data-people-star-toggle
+                        data-people-identity-key="{{ person.identity_key }}"
+                        data-people-star-name="{{ person.name }}"
+                    ><span aria-hidden="true" data-people-star-icon>{% if person.starred %}★{% else %}☆{% endif %}</span></button>
                 </li>
                 {% endfor %}
             </ul>

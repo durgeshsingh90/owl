@@ -59,7 +59,11 @@ class Element {
     contains(element) {
         return element === this || this.children.some((child) => child.contains(element));
     }
-    focus() { this.focused = true; this.focusCount = (this.focusCount || 0) + 1; }
+    focus() {
+        this.focused = true;
+        this.focusCount = (this.focusCount || 0) + 1;
+        if (this.ownerDocument) { this.ownerDocument.activeElement = this; }
+    }
 }
 
 const payload = (items, overrides = {}) => ({
@@ -245,12 +249,21 @@ async function bootWithTimers(initialTimers, ...responses) {
 const bootWithLogs = (logResponses, ...responses) => bootPage([], logResponses, ...responses);
 
 async function bootPage(initialTimers, logResponses, ...responses) {
+    const postFixture = responses.at(-1)?.__owlPostResponses;
+    const postResponses = postFixture ? responses.pop().__owlPostResponses : [];
     const center = new Element();
     center.dataset.notificationsUrl = "/bookmarks/notifications/";
+    center.dataset.recoveryPopupClaimUrl = "/pdfs/pipeline/recovery/popup/claim/";
+    center.dataset.recoveryPopupAcknowledgeUrl = "/pdfs/pipeline/recovery/popup/acknowledge/";
+    center.dataset.recoveryResumeUrl = "/pdfs/pipeline/recovery/resume/";
     const statusCenter = new Element();
     const hooks = new Map();
     const notificationHooks = [
         "toggle", "panel", "badge", "list", "empty", "live", "read-all", "unread-label",
+        "recovery-backdrop", "recovery-dialog", "recovery-heading", "recovery-scope",
+        "recovery-time", "recovery-attempts", "recovery-reason", "recovery-durable",
+        "recovery-recommendation", "recovery-status", "recovery-details",
+        "recovery-dismiss", "recovery-resume",
     ];
     const statusHooks = [
         "background-state", "progress-card", "progress-label",
@@ -282,6 +295,8 @@ async function bootPage(initialTimers, logResponses, ...responses) {
         .forEach((name) => statusCenter.append(hooks.get(name)));
     hooks.get("panel").hidden = true;
     hooks.get("status-panel").hidden = true;
+    hooks.get("recovery-backdrop").hidden = true;
+    hooks.get("recovery-dialog").hidden = true;
     center.querySelector = (selector) => {
         const name = selector.replace("[data-notification-", "").replace("]", "");
         return notificationHooks.includes(name) ? hooks.get(name) : null;
@@ -307,14 +322,21 @@ async function bootPage(initialTimers, logResponses, ...responses) {
     const document = {
         body: new Element("body"),
         documentElement: new Element("html"),
+        activeElement: null,
         querySelector: (selector) => selector === "[data-repository-status-center]" ? statusCenter : null,
         querySelectorAll: (selector) => selector === "[data-notification-center]" ? [center]
             : selector === "[data-repository-worker-timer]" ? initialTimers : [],
         addEventListener(name, fn) {
             documentListeners.set(name, [...(documentListeners.get(name) || []), fn]);
         },
-        createElement: (tag) => new Element(tag),
+        createElement(tag) {
+            const element = new Element(tag);
+            element.ownerDocument = this;
+            return element;
+        },
     };
+    [center, statusCenter, document.body, document.documentElement, ...hooks.values(),
+        ...initialTimers].forEach((element) => { element.ownerDocument = document; });
     let lastResponse;
     let lastLogResponse;
     const confirmations = [];
@@ -349,7 +371,15 @@ async function bootPage(initialTimers, logResponses, ...responses) {
         async fetch(url, options) {
             requests.push({ url, options });
             if (options.method === "POST") {
-                return { ok: true, async json() { return {}; } };
+                const fixture = postResponses.length ? postResponses.shift() : {};
+                if (fixture instanceof Error) { throw fixture; }
+                const status = fixture.status || 200;
+                const body = Object.hasOwn(fixture, "body") ? fixture.body : fixture;
+                return {
+                    ok: status >= 200 && status < 300,
+                    status,
+                    async json() { return body; },
+                };
             }
             if (url.endsWith("/logs/")) {
                 let response = logResponses.length ? logResponses.shift() : lastLogResponse;
@@ -381,6 +411,8 @@ async function bootPage(initialTimers, logResponses, ...responses) {
         activeLogPolls: () => [...activeTimeouts].filter((id) => timers[id - 1].name === "synchronizeGitLogs").length,
         workerTimers: window.OWLRepositoryTimers,
         activeClocks: () => [...activeIntervals].filter((id) => intervalDelays.get(id) === 1000).length,
+        activeNotificationPolls: () => [...activeTimeouts]
+            .filter((id) => timers[id - 1].name === "load").length,
         advance(milliseconds) {
             clock += milliseconds;
             [...activeIntervals].forEach((id) => {
@@ -389,7 +421,7 @@ async function bootPage(initialTimers, logResponses, ...responses) {
         },
         async click(name) {
             const target = hooks.get(name);
-            await target.listeners.get("click")?.({ target });
+            await target.listeners.get("click")?.({ target, preventDefault() {} });
             documentListeners.get("click")?.forEach((fn) => fn({ target }));
             await flush();
         },
@@ -438,6 +470,196 @@ async function bootPage(initialTimers, logResponses, ...responses) {
         },
     };
 }
+
+const recoveryEpisode = "8a20cf98-93a3-4bc9-8509-c9ee9dc15caf";
+const recoveryControlAction = (type, url, generation = 1) => ({
+    type,
+    method: "POST",
+    url,
+    scope: "publisher",
+    episodeId: recoveryEpisode,
+    expectedGeneration: generation,
+    pauseGeneration: 1,
+});
+const recoveryCandidate = (overrides = {}) => ({
+    schemaVersion: 1,
+    type: "pdf_pipeline_recovery_paused",
+    scope: "publisher",
+    scopeLabel: "PDF publisher",
+    episodeId: recoveryEpisode,
+    generation: 1,
+    pauseGeneration: 1,
+    reasonCode: "process_exit",
+    reason: "<strong>Worker exited; queued work is safe.</strong>",
+    pausedAt: "2026-09-03T18:00:00Z",
+    attemptSummary: "Paused after 25 failed recovery attempts.",
+    durableWorkSummary: "Queued jobs and valid staged PDF output remain preserved.",
+    recommendedNextStep: "Review pipeline details, then run one controlled probe.",
+    detailsPath: "/pdfs/status/",
+    claimAction: recoveryControlAction(
+        "pdf_pipeline_recovery_popup_claim",
+        "/pdfs/pipeline/recovery/popup/claim/",
+    ),
+    ...overrides,
+});
+const claimedRecoveryPopup = (overrides = {}) => ({
+    ...recoveryCandidate(),
+    generation: 2,
+    claimAction: undefined,
+    resumeAction: {
+        ...recoveryControlAction(
+            "pdf_pipeline_resume",
+            "/pdfs/pipeline/recovery/resume/",
+            2,
+        ),
+        label: "Resume",
+        idempotencyKey: "a".repeat(64),
+    },
+    acknowledgeAction: recoveryControlAction(
+        "pdf_pipeline_recovery_popup_acknowledge",
+        "/pdfs/pipeline/recovery/popup/acknowledge/",
+        2,
+    ),
+    ...overrides,
+});
+const bootRecovery = (getResponses, postResponses) => bootPage(
+    [],
+    [],
+    ...getResponses,
+    { __owlPostResponses: postResponses },
+);
+
+test("one server-claimed recovery popup renders inert text and dismissal is durable", async () => {
+    const candidate = recoveryCandidate();
+    const popup = claimedRecoveryPopup();
+    const page = await bootRecovery(
+        [payload([], { recoveryPopup: candidate, recoveryActive: true })],
+        [
+            { claimed: true, state: "claimed", popup },
+            { acknowledged: true, state: "acknowledged", generation: 3, pauseGeneration: 1 },
+        ],
+    );
+
+    assert.equal(page.hooks.get("recovery-backdrop").hidden, false);
+    assert.equal(page.hooks.get("recovery-dialog").hidden, false);
+    assert.equal(page.hooks.get("recovery-resume").focused, true);
+    assert.equal(page.hooks.get("recovery-reason").textContent, popup.reason);
+    assert.equal(page.hooks.get("recovery-reason").children.length, 0, "Reason stays text, not HTML");
+    assert.equal(page.requests.filter(({ options }) => options.method === "POST").length, 1);
+
+    await page.poll();
+    assert.equal(
+        page.requests.filter(({ url }) => url.endsWith("/popup/claim/")).length,
+        1,
+        "Repeated polling cannot claim the same pause twice in this tab",
+    );
+    await page.click("recovery-dismiss");
+    assert.equal(page.hooks.get("recovery-dialog").hidden, true);
+    const posts = page.requests.filter(({ options }) => options.method === "POST");
+    assert.equal(posts.length, 2);
+    assert.equal(posts[1].url, "/pdfs/pipeline/recovery/popup/acknowledge/");
+    assert.match(String(posts[1].options.body), /pauseGeneration=1/);
+});
+
+test("recovery Resume executes only the fixed typed local POST action", async () => {
+    const page = await bootRecovery(
+        [payload([], { recoveryPopup: recoveryCandidate(), recoveryActive: true })],
+        [
+            { claimed: true, state: "claimed", popup: claimedRecoveryPopup() },
+            { accepted: true, state: "resume_requested" },
+        ],
+    );
+
+    await page.click("recovery-resume");
+
+    const posts = page.requests.filter(({ options }) => options.method === "POST");
+    assert.equal(posts.length, 2);
+    assert.equal(posts[1].url, "/pdfs/pipeline/recovery/resume/");
+    assert.match(String(posts[1].options.body), /idempotencyKey=a{64}/);
+    assert.equal(page.hooks.get("recovery-dialog").hidden, true);
+});
+
+test("durable recovery cards expose the same typed Resume POST", async () => {
+    const action = claimedRecoveryPopup().resumeAction;
+    const page = await bootRecovery(
+        [payload([], {
+            notifications: [{
+                id: 9,
+                kind: "pdf_pipeline_recovery",
+                kindLabel: "PDF pipeline recovery",
+                state: "error",
+                stateLabel: "Error",
+                title: "PDF pipeline recovery paused",
+                message: "PDF recovery is paused.",
+                targetPath: "/pdfs/status/",
+                occurredAt: "2026-09-03T18:00:00Z",
+                read: false,
+                action,
+            }],
+        })],
+        [{ accepted: true, state: "resume_requested" }],
+    );
+    const article = page.hooks.get("list").children[0];
+    const footer = article.children[1].children.at(-1);
+    const resume = footer.children.find((child) => child.className === "notification-card__action");
+
+    assert.ok(resume);
+    resume.listeners.get("click")();
+    await page.flush();
+
+    const posts = page.requests.filter(({ options }) => options.method === "POST");
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].url, "/pdfs/pipeline/recovery/resume/");
+});
+
+test("arbitrary recovery URLs are never claimed or executed", async () => {
+    const candidate = recoveryCandidate({
+        claimAction: recoveryControlAction(
+            "pdf_pipeline_recovery_popup_claim",
+            "https://evil.example/claim",
+        ),
+    });
+    const page = await bootRecovery(
+        [payload([], { recoveryPopup: candidate, recoveryActive: true })],
+        [],
+    );
+
+    assert.equal(page.hooks.get("recovery-dialog").hidden, true);
+    assert.equal(page.requests.filter(({ options }) => options.method === "POST").length, 0);
+});
+
+test("notification polling stops while hidden and refreshes immediately when visible", async () => {
+    const page = await boot(payload([], { recoveryActive: true }));
+    assert.equal(page.activeNotificationPolls(), 1);
+    const initialRequests = page.requests.length;
+
+    await page.visibility(true);
+    assert.equal(page.activeNotificationPolls(), 0);
+    assert.equal(page.requests.length, initialRequests);
+
+    await page.visibility(false);
+    assert.equal(page.requests.length, initialRequests + 1);
+    assert.equal(page.activeNotificationPolls(), 1);
+});
+
+test("Escape acknowledges the claimed recovery popup before restoring focus", async () => {
+    const page = await bootRecovery(
+        [payload([], { recoveryPopup: recoveryCandidate(), recoveryActive: true })],
+        [
+            { claimed: true, state: "claimed", popup: claimedRecoveryPopup() },
+            { acknowledged: true, state: "acknowledged", generation: 3, pauseGeneration: 1 },
+        ],
+    );
+
+    page.escape();
+    await page.flush();
+
+    assert.equal(page.hooks.get("recovery-dialog").hidden, true);
+    assert.equal(
+        page.requests.filter(({ url }) => url.endsWith("/popup/acknowledge/")).length,
+        1,
+    );
+});
 
 test("all repositories render compact disclosure rows without hiding past alerts", async () => {
     const items = Array.from({ length: 24 }, (_, index) => repository(index + 1));

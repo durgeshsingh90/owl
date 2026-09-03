@@ -9,7 +9,13 @@ app_name = "bitbucket_search"
 urlpatterns = [
     path("", views.index, name="index"),
     path("people/groups/add/", views.add_people_group, name="people_group_create"),
+    path("people/star/", views.toggle_people_star, name="people_star_toggle"),
     path("documents/page/", views.document_page, name="document_page"),
+    path(
+        "documents/<int:document_id>/star/",
+        views.set_document_star_view,
+        name="document_star",
+    ),
     path(
         "documents/<int:document_id>/preview/",
         views.preview_document,
@@ -74,6 +80,22 @@ urlpatterns = [
         name="repository_schedule_tick",
     ),
     path("repositories/status/", views.repository_status, name="repository_status"),
+    path("pipeline/metrics/", views.pipeline_metrics, name="pipeline_metrics"),
+    path(
+        "pipeline/recovery/popup/claim/",
+        views.claim_pdf_pipeline_recovery_popup,
+        name="pdf_pipeline_recovery_popup_claim",
+    ),
+    path(
+        "pipeline/recovery/popup/acknowledge/",
+        views.acknowledge_pdf_pipeline_recovery_popup,
+        name="pdf_pipeline_recovery_popup_acknowledge",
+    ),
+    path(
+        "pipeline/recovery/resume/",
+        views.resume_pdf_pipeline_recovery,
+        name="pdf_pipeline_recovery_resume",
+    ),
     path(
         "repositories/connection/test/",
         views.repository_connection_test,

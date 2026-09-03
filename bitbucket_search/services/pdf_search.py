@@ -395,7 +395,7 @@ def _semantic_fallback_page(query: PDFSearchQuery) -> PDFSearchPage:
 
     match_by_revision = {match.source_id: match for match in matches}
     documents = eligible.filter(indexed_revision_id__in=tuple(match_by_revision))
-    if query.sort == PDFSearchSort.RELEVANCE:
+    if query.sort in {PDFSearchSort.RELEVANCE, PDFSearchSort.STARRED_FIRST}:
         rank = Case(
             *(
                 When(indexed_revision_id=match.source_id, then=position)
@@ -404,9 +404,11 @@ def _semantic_fallback_page(query: PDFSearchQuery) -> PDFSearchPage:
             default=len(matches),
             output_field=IntegerField(),
         )
-        documents = documents.annotate(semantic_rank=rank).order_by(
-            "semantic_rank", Lower("filename"), "pk"
-        )
+        documents = documents.annotate(semantic_rank=rank)
+        if query.sort == PDFSearchSort.STARRED_FIRST:
+            documents = documents.order_by("-starred", "semantic_rank", Lower("filename"), "pk")
+        else:
+            documents = documents.order_by("semantic_rank", Lower("filename"), "pk")
     else:
         documents = documents.order_by(*_filtered_order_by(query.sort))
 
@@ -542,6 +544,8 @@ def _filter_documents_without_text_query(query: PDFSearchQuery) -> PDFSearchPage
 
 def _filtered_order_by(sort: PDFSearchSort):
     identity = (Lower("filename").asc(), "pk")
+    if sort == PDFSearchSort.STARRED_FIRST:
+        return ("-starred", *identity)
     if sort == PDFSearchSort.MOST_OPENED:
         return ("-open_count", *identity)
     if sort == PDFSearchSort.LEAST_OPENED:
@@ -610,6 +614,7 @@ def _eligible_documents_cte(query: PDFSearchQuery) -> tuple[str, list[object]]:
         eligible_documents AS MATERIALIZED (
             SELECT document.id AS document_id,
                    document.filename,
+                   document.starred,
                    document.open_count,
                    document.last_opened_at,
                    document.last_indexed_at,
@@ -809,6 +814,8 @@ def _candidate_ctes(query: PDFSearchQuery) -> tuple[str, list[object]]:
 
 def _search_order_sql(sort: PDFSearchSort) -> str:
     identity = "filename_normalized ASC, document_id ASC"
+    if sort == PDFSearchSort.STARRED_FIRST:
+        return f"starred DESC, score DESC, {identity}"
     if sort == PDFSearchSort.MOST_OPENED:
         return f"open_count DESC, score DESC, {identity}"
     if sort == PDFSearchSort.LEAST_OPENED:

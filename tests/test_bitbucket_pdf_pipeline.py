@@ -162,6 +162,11 @@ def local_git_pdf_pipeline(tmp_path, settings, monkeypatch):
     forbidden_launch = Mock(side_effect=AssertionError("Detached workers are forbidden in tests"))
     monkeypatch.setattr(repository_sync, "launch_sync_worker", forbidden_launch)
     monkeypatch.setattr(pdf_indexing, "launch_index_worker", forbidden_launch)
+    # This integration fixture deliberately uses a private file:// remote so it
+    # can exercise real Git without network access. Production admission and
+    # outbound boundaries remain SSH/HTTPS-only and have separate policy tests.
+    monkeypatch.setattr(repository_sync, "normalize_repository_url", lambda value: value)
+    monkeypatch.setattr(git_sync, "_validate_outbound_repository_url", lambda _repository: None)
 
     source = tmp_path / "source"
     _pipeline_git("init", "-b", "main", source)

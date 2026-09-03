@@ -19,7 +19,7 @@ def loopback_client(client):
         ("/", "Your apps"),
         ("/search/", "Search both knowledge sources in one place"),
         ("/bookmarks/", "Bookmark Manager"),
-        ("/bookmarks/settings/", "Confluence Settings"),
+        ("/bookmarks/settings/", "Settings"),
         ("/pdfs/", "Bitbucket Search"),
         ("/pdfs/repositories/", "Bitbucket Search"),
         ("/pdfs/status/", "Repository logs"),
@@ -251,12 +251,6 @@ def test_bookmark_search_feedback_precedes_active_filters_without_revealing_hidd
     ("path", "active_app", "sidebar_label", "current_function"),
     [
         ("/bookmarks/", "bookmarks", "Bookmark Manager functions", "All bookmarks"),
-        (
-            "/bookmarks/settings/",
-            "bookmarks",
-            "Bookmark Manager functions",
-            None,
-        ),
         ("/pdfs/", "bitbucket", "Bitbucket Search functions", None),
         (
             "/pdfs/repositories/",
@@ -325,6 +319,18 @@ def test_each_app_route_uses_its_own_left_sidebar(
     assert app_nav is not None
     active_apps = re.findall(r'<a[^>]*aria-current="true"[^>]*>([^<]+)</a>', app_nav.group(1))
     assert active_apps == [app_name]
+
+
+def test_settings_uses_dedicated_navigation_without_the_bookmark_sidebar(loopback_client):
+    response = loopback_client.get("/bookmarks/settings/")
+    html = response.content.decode()
+
+    assert response.status_code == 200
+    assert response.context["active_app"] == ""
+    assert 'aria-label="Settings sections"' in html
+    assert 'aria-current="page">Overview</a>' in html
+    assert "bookmark-app-sidebar" not in html
+    assert "Bookmark Manager functions" not in html
 
 
 def test_bitbucket_search_uses_the_repository_workspace_shell(loopback_client):
@@ -403,11 +409,13 @@ def test_security_headers_are_present_on_visible_pages(loopback_client):
 
 
 def test_phase_two_settings_page_uses_a_blank_secure_pat_field(loopback_client):
-    response = loopback_client.get("/bookmarks/settings/")
+    response = loopback_client.get(
+        "/bookmarks/settings/", {"section": "confluence", "task": "confluence"}
+    )
     html = response.content.decode()
 
     assert response.status_code == 200
-    assert "Confluence Settings" in html
+    assert "<h1>Settings</h1>" in html
     assert 'type="password"' in html
     assert 'autocomplete="new-password"' in html
     assert "Stored securely" not in html
@@ -415,14 +423,17 @@ def test_phase_two_settings_page_uses_a_blank_secure_pat_field(loopback_client):
     assert 'type="hidden" name="auth_mode" value="bearer"' in html
     assert "Authentication mode" not in html
     assert ">Advanced<" not in html
-    assert "Bookmark data" in html
-    assert 'action="/bookmarks/export/"' in html
-    assert ">Export JSON</button>" in html
-    assert 'action="/bookmarks/import/"' in html
-    assert "Import bookmarks" in html
-    assert 'accept=".json,.txt,application/json,text/plain"' in html
-    assert "data-bookmark-import-form" in html
-    assert "data-import-progress" in html
+    assert "data-bookmark-import-form" not in html
+
+    data_response = loopback_client.get("/bookmarks/settings/", {"section": "bookmark-data"})
+    data_html = data_response.content.decode()
+    assert 'action="/bookmarks/export/"' in data_html
+    assert ">Export JSON</button>" in data_html
+    assert 'action="/bookmarks/import/"' in data_html
+    assert "Import bookmarks" in data_html
+    assert 'accept=".json,.txt,application/json,text/plain"' in data_html
+    assert "data-bookmark-import-form" in data_html
+    assert "data-import-progress" in data_html
 
 
 def test_bookmark_manager_settings_gear_has_the_required_accessible_name(loopback_client):
@@ -433,8 +444,11 @@ def test_bookmark_manager_settings_gear_has_the_required_accessible_name(loopbac
     assert 'data-settings-fallback="/bookmarks/settings/"' in html
     assert 'aria-label="Import bookmarks"' in html
     dialog = html.split('<dialog class="settings-dialog"', 1)[1]
-    assert "Confluence connection" in dialog
-    assert "Bitbucket HTTPS credentials" in dialog
+    assert "Confluence" in dialog
+    assert "Repository access" in dialog
+    assert "Open full Settings" in dialog
+    assert "<form" not in dialog
+    assert 'type="password"' not in dialog
     assert "Bookmark data" not in dialog
     sidebar = re.search(
         r'<nav class="app-side-nav" aria-label="Bookmark Manager functions">(.*?)</nav>',
@@ -527,4 +541,6 @@ def test_state_changes_use_dedicated_post_only_routes(loopback_client):
     assert loopback_client.get("/bookmarks/save/").status_code == 405
     assert loopback_client.get("/bookmarks/settings/save/").status_code == 405
     assert loopback_client.get("/bookmarks/settings/remove/").status_code == 405
+    assert loopback_client.get("/bookmarks/settings/repository-hosts/add/").status_code == 405
+    assert loopback_client.get("/bookmarks/settings/repository-hosts/remove/").status_code == 405
     assert loopback_client.get("/pdfs/repositories/add/").status_code == 405

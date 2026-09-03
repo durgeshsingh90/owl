@@ -54,6 +54,19 @@ def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
     return parsed
 
 
+def _env_optional_int(name: str, *, minimum: int = 0) -> int | None:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ImproperlyConfigured(f"{name} must be an integer or blank.") from exc
+    if parsed < minimum:
+        raise ImproperlyConfigured(f"{name} must be at least {minimum}.")
+    return parsed
+
+
 def _env_float(
     name: str,
     default: float,
@@ -80,6 +93,13 @@ def _env_csv(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
     if value is None:
         return default
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _env_choice(name: str, default: str, choices: tuple[str, ...]) -> str:
+    value = os.getenv(name, default).strip().casefold() or default
+    if value not in choices:
+        raise ImproperlyConfigured(f"{name} must be one of: {', '.join(choices)}.")
+    return value
 
 
 def _env_log_level(name: str, default: str) -> str:
@@ -156,6 +176,7 @@ INDEXES_ROOT = OWL_DATA_ROOT / "indexes"
 TEMP_ROOT = OWL_DATA_ROOT / "tmp"
 MODEL_ROOT = OWL_DATA_ROOT / "models"
 SEMANTIC_MODEL_CACHE_ROOT = MODEL_ROOT / "semantic"
+PDF_PIPELINE_STATE_ROOT = OWL_DATA_ROOT / "pdf-pipeline"
 
 for runtime_directory in (
     DATABASE_ROOT,
@@ -172,6 +193,7 @@ for runtime_directory in (
     TEMP_ROOT,
     MODEL_ROOT,
     SEMANTIC_MODEL_CACHE_ROOT,
+    PDF_PIPELINE_STATE_ROOT,
 ):
     _create_private_directory(runtime_directory)
 
@@ -277,9 +299,18 @@ OWL_ALLOW_IN_MEMORY_SECRET_STORE = _env_bool("OWL_ALLOW_IN_MEMORY_SECRET_STORE",
 OWL_ALLOW_LIVE_EXTERNAL_TESTS = _env_bool("OWL_ALLOW_LIVE_EXTERNAL_TESTS", False)
 OWL_ALLOW_SYNTHETIC_CONFLUENCE_TARGETS = _env_bool("OWL_ALLOW_SYNTHETIC_CONFLUENCE_TARGETS", False)
 
+_BITBUCKET_ALLOWED_HOSTS_RAW = os.getenv("BITBUCKET_ALLOWED_HOSTS")
+BITBUCKET_ALLOWED_HOSTS_EXPLICIT = _BITBUCKET_ALLOWED_HOSTS_RAW is not None
+BITBUCKET_ALLOWED_HOSTS_SOURCE = (
+    "explicit_blank"
+    if BITBUCKET_ALLOWED_HOSTS_EXPLICIT and not _BITBUCKET_ALLOWED_HOSTS_RAW.strip()
+    else "explicit"
+    if BITBUCKET_ALLOWED_HOSTS_EXPLICIT
+    else "unset"
+)
 BITBUCKET_ALLOWED_HOSTS = _env_csv(
     "BITBUCKET_ALLOWED_HOSTS",
-    ("bitbucket.org", "github.com", "scm.mastercard.int"),
+    ("bitbucket.org", "github.com"),
 )
 BITBUCKET_SECRET_BACKEND = (
     os.getenv("BITBUCKET_SECRET_BACKEND", CONFLUENCE_SECRET_BACKEND).strip().casefold() or "auto"
@@ -352,6 +383,11 @@ PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES = _env_int(
     1,
     minimum=1,
 )
+PDF_PIPELINE_REPOSITORY_FAIRNESS_MAX_WAIT_SECONDS = _env_int(
+    "PDF_PIPELINE_REPOSITORY_FAIRNESS_MAX_WAIT_SECONDS",
+    120,
+    minimum=1,
+)
 PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY = _env_int(
     "PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY",
     PDF_MAX_EXTRACTION_WORKERS,
@@ -385,6 +421,216 @@ PDF_EXTRACTION_MAX_AUTOMATIC_RETRIES = _env_int(
     2,
     minimum=0,
 )
+# The controller defaults to observe-only and maps its target to the legacy
+# worker setting.  Upgrading OWL therefore never changes extraction admission.
+PDF_PIPELINE_CONTROLLER_MODE = _env_choice(
+    "PDF_PIPELINE_CONTROLLER_MODE",
+    "observe",
+    ("fixed", "observe", "shadow", "adaptive"),
+)
+PDF_PIPELINE_ADAPTIVE_ENABLED = _env_bool("PDF_PIPELINE_ADAPTIVE_ENABLED", False)
+PDF_PIPELINE_CONTROLLER_KILL_SWITCH = _env_bool(
+    "PDF_PIPELINE_CONTROLLER_KILL_SWITCH",
+    False,
+)
+PDF_PIPELINE_MANUAL_FIXED_TARGET = _env_optional_int(
+    "PDF_PIPELINE_MANUAL_FIXED_TARGET",
+    minimum=0,
+)
+PDF_PIPELINE_CONFIGURED_MIN_TARGET = _env_int(
+    "PDF_PIPELINE_CONFIGURED_MIN_TARGET",
+    1,
+    minimum=0,
+)
+PDF_PIPELINE_INITIAL_TARGET = _env_int(
+    "PDF_PIPELINE_INITIAL_TARGET",
+    PDF_MAX_EXTRACTION_WORKERS,
+    minimum=0,
+)
+PDF_PIPELINE_TESTED_HARD_MAX = min(
+    _env_int("PDF_PIPELINE_TESTED_HARD_MAX", 8, minimum=1),
+    8,
+)
+if PDF_PIPELINE_CONFIGURED_MIN_TARGET > PDF_MAX_EXTRACTION_WORKERS:
+    raise ImproperlyConfigured(
+        "PDF_PIPELINE_CONFIGURED_MIN_TARGET cannot exceed PDF_MAX_EXTRACTION_WORKERS."
+    )
+if PDF_PIPELINE_INITIAL_TARGET > PDF_MAX_EXTRACTION_WORKERS:
+    raise ImproperlyConfigured(
+        "PDF_PIPELINE_INITIAL_TARGET cannot exceed PDF_MAX_EXTRACTION_WORKERS."
+    )
+if (
+    PDF_PIPELINE_MANUAL_FIXED_TARGET is not None
+    and PDF_PIPELINE_MANUAL_FIXED_TARGET > PDF_MAX_EXTRACTION_WORKERS
+):
+    raise ImproperlyConfigured(
+        "PDF_PIPELINE_MANUAL_FIXED_TARGET cannot exceed PDF_MAX_EXTRACTION_WORKERS."
+    )
+PDF_PIPELINE_BACKGROUND_CPU_BUDGET_FRACTION = _env_float(
+    "PDF_PIPELINE_BACKGROUND_CPU_BUDGET_FRACTION",
+    0.80,
+    minimum=0.0,
+    maximum=1.0,
+)
+if PDF_PIPELINE_BACKGROUND_CPU_BUDGET_FRACTION <= 0:
+    raise ImproperlyConfigured(
+        "PDF_PIPELINE_BACKGROUND_CPU_BUDGET_FRACTION must be greater than zero."
+    )
+PDF_PIPELINE_METRICS_ENABLED = _env_bool("PDF_PIPELINE_METRICS_ENABLED", True)
+PDF_PIPELINE_METRICS_SAMPLE_SECONDS = _env_int(
+    "PDF_PIPELINE_METRICS_SAMPLE_SECONDS",
+    5,
+    minimum=1,
+)
+PDF_PIPELINE_METRICS_RETENTION_SECONDS = _env_int(
+    "PDF_PIPELINE_METRICS_RETENTION_SECONDS",
+    1_800,
+    minimum=60,
+)
+PDF_PIPELINE_METRICS_SNAPSHOT_ENABLED = _env_bool(
+    "PDF_PIPELINE_METRICS_SNAPSHOT_ENABLED",
+    True,
+)
+PDF_PIPELINE_METRICS_STALE_SECONDS = _env_int(
+    "PDF_PIPELINE_METRICS_STALE_SECONDS",
+    15,
+    minimum=5,
+)
+PDF_PIPELINE_RATE_WINDOW_SECONDS = _env_int(
+    "PDF_PIPELINE_RATE_WINDOW_SECONDS",
+    60,
+    minimum=10,
+)
+PDF_PIPELINE_RATE_MIN_ELAPSED_SECONDS = _env_int(
+    "PDF_PIPELINE_RATE_MIN_ELAPSED_SECONDS",
+    30,
+    minimum=1,
+)
+PDF_PIPELINE_RATE_MIN_EVENTS = _env_int(
+    "PDF_PIPELINE_RATE_MIN_EVENTS",
+    3,
+    minimum=1,
+)
+if PDF_PIPELINE_RATE_MIN_ELAPSED_SECONDS > PDF_PIPELINE_RATE_WINDOW_SECONDS:
+    raise ImproperlyConfigured(
+        "PDF_PIPELINE_RATE_MIN_ELAPSED_SECONDS cannot exceed PDF_PIPELINE_RATE_WINDOW_SECONDS."
+    )
+PDF_PIPELINE_ETA_MIN_COMPLETIONS = _env_int(
+    "PDF_PIPELINE_ETA_MIN_COMPLETIONS",
+    3,
+    minimum=1,
+)
+PDF_PIPELINE_ETA_STALE_SECONDS = _env_int(
+    "PDF_PIPELINE_ETA_STALE_SECONDS",
+    30,
+    minimum=5,
+)
+PDF_PIPELINE_CONTROLLER_OBSERVATION_SECONDS = _env_int(
+    "PDF_PIPELINE_CONTROLLER_OBSERVATION_SECONDS",
+    60,
+    minimum=30,
+)
+PDF_PIPELINE_CONTROLLER_COOLDOWN_SECONDS = _env_int(
+    "PDF_PIPELINE_CONTROLLER_COOLDOWN_SECONDS",
+    120,
+    minimum=30,
+)
+PDF_PIPELINE_CONTROLLER_HYSTERESIS_SAMPLES = _env_int(
+    "PDF_PIPELINE_CONTROLLER_HYSTERESIS_SAMPLES",
+    3,
+    minimum=1,
+)
+PDF_PIPELINE_CONTROLLER_MIN_DOCUMENTS = _env_int(
+    "PDF_PIPELINE_CONTROLLER_MIN_DOCUMENTS",
+    3,
+    minimum=1,
+)
+PDF_PIPELINE_CONTROLLER_MIN_PAGES = _env_int(
+    "PDF_PIPELINE_CONTROLLER_MIN_PAGES",
+    10,
+    minimum=1,
+)
+PDF_PIPELINE_CONTROLLER_MIN_BYTES = _env_int(
+    "PDF_PIPELINE_CONTROLLER_MIN_BYTES",
+    1_048_576,
+    minimum=1,
+)
+PDF_PIPELINE_CONTROLLER_MAX_ORDINARY_DECREASE = _env_int(
+    "PDF_PIPELINE_CONTROLLER_MAX_ORDINARY_DECREASE",
+    2,
+    minimum=1,
+)
+PDF_PIPELINE_CONTROLLER_MIN_THROUGHPUT_IMPROVEMENT = _env_float(
+    "PDF_PIPELINE_CONTROLLER_MIN_THROUGHPUT_IMPROVEMENT",
+    0.05,
+    minimum=0.0,
+    maximum=1.0,
+)
+PDF_PIPELINE_CONTROLLER_MAX_HOST_CPU_PCT = _env_float(
+    "PDF_PIPELINE_CONTROLLER_MAX_HOST_CPU_PCT",
+    85.0,
+    minimum=1.0,
+    maximum=100.0,
+)
+PDF_PIPELINE_CONTROLLER_MIN_AVAILABLE_MEMORY_BYTES = _env_int(
+    "PDF_PIPELINE_CONTROLLER_MIN_AVAILABLE_MEMORY_BYTES",
+    8 * 1_024**3,
+    minimum=1,
+)
+PDF_PIPELINE_CONTROLLER_MIN_AVAILABLE_DISK_BYTES = _env_int(
+    "PDF_PIPELINE_CONTROLLER_MIN_AVAILABLE_DISK_BYTES",
+    10 * 1_024**3,
+    minimum=1,
+)
+PDF_PIPELINE_CONTROLLER_MAX_FOREGROUND_P95_MS = _env_int(
+    "PDF_PIPELINE_CONTROLLER_MAX_FOREGROUND_P95_MS",
+    500,
+    minimum=1,
+)
+PDF_PIPELINE_ADAPTIVE_BENCHMARK_GATE_PATH = _configured_path(
+    os.getenv("PDF_PIPELINE_ADAPTIVE_BENCHMARK_GATE_PATH"),
+    PDF_PIPELINE_STATE_ROOT / "adaptive-enablement-v1.json",
+)
+PDF_PIPELINE_RECOVERY_ENABLED = _env_bool("PDF_PIPELINE_RECOVERY_ENABLED", True)
+PDF_PIPELINE_RECOVERY_PAUSE_AFTER_ATTEMPTS = _env_int(
+    "PDF_PIPELINE_RECOVERY_PAUSE_AFTER_ATTEMPTS",
+    25,
+    minimum=0,
+)
+PDF_PIPELINE_RECOVERY_BACKOFF_BASE_SECONDS = _env_int(
+    "PDF_PIPELINE_RECOVERY_BACKOFF_BASE_SECONDS",
+    1,
+    minimum=1,
+)
+PDF_PIPELINE_RECOVERY_BACKOFF_MAX_SECONDS = _env_int(
+    "PDF_PIPELINE_RECOVERY_BACKOFF_MAX_SECONDS",
+    300,
+    minimum=1,
+)
+if PDF_PIPELINE_RECOVERY_BACKOFF_BASE_SECONDS > PDF_PIPELINE_RECOVERY_BACKOFF_MAX_SECONDS:
+    raise ImproperlyConfigured(
+        "PDF_PIPELINE_RECOVERY_BACKOFF_BASE_SECONDS cannot exceed its maximum."
+    )
+PDF_PIPELINE_RECOVERY_JITTER_FRACTION = _env_float(
+    "PDF_PIPELINE_RECOVERY_JITTER_FRACTION",
+    0.20,
+    minimum=0.0,
+    maximum=1.0,
+)
+PDF_PIPELINE_RECOVERY_STABILITY_SECONDS = _env_int(
+    "PDF_PIPELINE_RECOVERY_STABILITY_SECONDS",
+    60,
+    minimum=5,
+)
+PDF_PIPELINE_COMPONENT_ERROR_LOOP_THRESHOLD = _env_int(
+    "PDF_PIPELINE_COMPONENT_ERROR_LOOP_THRESHOLD",
+    5,
+    minimum=1,
+)
+if PDF_PIPELINE_COMPONENT_ERROR_LOOP_THRESHOLD > 100:
+    raise ImproperlyConfigured(
+        "PDF_PIPELINE_COMPONENT_ERROR_LOOP_THRESHOLD cannot exceed 100."
+    )
 BITBUCKET_SUPERVISOR_POLL_SECONDS = _env_int(
     "BITBUCKET_SUPERVISOR_POLL_SECONDS",
     5,

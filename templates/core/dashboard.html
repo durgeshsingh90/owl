@@ -7,6 +7,10 @@
 {% block main_class %}knowledge-main{% endblock %}
 {% block global_status %}{% endblock %}
 
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'bitbucket_search/pdf_pipeline_dashboard.css' %}?v=pipeline-dashboard-v1">
+{% endblock %}
+
 {% block main_wrapper %}
 <div class="knowledge-layout">
     <aside class="knowledge-rail" aria-label="OWL navigation">
@@ -33,6 +37,53 @@
                 <div class="knowledge-app-grid">
                     <a class="knowledge-app-card knowledge-app-card--bookmarks" href="{% url 'bookmark_manager:index' %}" aria-describedby="bookmark-card-summary"><span class="knowledge-app-card__top"><span class="knowledge-app-card__icon" aria-hidden="true">⌑</span><span class="knowledge-app-card__status">Ready</span></span><strong>Bookmark Manager</strong><small id="bookmark-card-summary">Save, organise, and revisit important Confluence pages in their real hierarchy.</small><span class="knowledge-app-card__meta">Confluence library</span><span class="knowledge-app-card__open">Open <span aria-hidden="true">→</span></span></a>
                     <a class="knowledge-app-card knowledge-app-card--bitbucket" href="{% url 'bitbucket_search:index' %}" aria-describedby="bitbucket-card-summary"><span class="knowledge-app-card__top"><span class="knowledge-app-card__icon" aria-hidden="true">⌕</span><span class="knowledge-app-card__status">Ready</span></span><strong>Bitbucket Search</strong><small id="bitbucket-card-summary">Sync repositories and search their PDFs locally by filename, metadata, and page text.</small><span class="knowledge-app-card__meta">Repository PDFs &amp; Git activity</span><span class="knowledge-app-card__open">Open <span aria-hidden="true">→</span></span></a>
+                </div>
+            </section>
+
+            <section
+                class="knowledge-dashboard-section knowledge-pipeline"
+                aria-labelledby="home-pipeline-heading"
+                data-pipeline-dashboard
+                data-pipeline-metrics-url="{% url 'bitbucket_search:pipeline_metrics' %}"
+                data-pipeline-active-interval="5000"
+                data-pipeline-idle-interval="30000"
+            >
+                <div class="knowledge-section-heading">
+                    <div>
+                        <p class="knowledge-kicker">Background pipeline</p>
+                        <h2 id="home-pipeline-heading">PDF processing health</h2>
+                    </div>
+                    <a class="knowledge-section-link" href="{% url 'bitbucket_search:index_status' %}">Open live graphs <span aria-hidden="true">→</span></a>
+                </div>
+                <div class="knowledge-pipeline__surface">
+                    <div class="knowledge-pipeline__summary">
+                        <span class="knowledge-pipeline__state" data-pipeline-overall-state>Loading pipeline status</span>
+                        <div>
+                            <strong data-pipeline-activity>Waiting for a fresh snapshot</strong>
+                            <small data-pipeline-activity-secondary>No confirmed activity yet</small>
+                        </div>
+                        <span class="knowledge-pipeline__freshness" data-pipeline-freshness>Connecting to the local supervisor</span>
+                    </div>
+                    <dl class="knowledge-pipeline__metrics" aria-label="PDF pipeline summary">
+                        <div><dt>Total ETA</dt><dd data-pipeline-total-eta>Waiting for a current run</dd><small data-pipeline-eta-confidence>Not enough evidence yet</small></div>
+                        <div><dt>Extracted</dt><dd data-pipeline-extracted-rate>Warming</dd><small data-pipeline-rate-window>60-second window</small></div>
+                        <div><dt>Written</dt><dd data-pipeline-written-rate>Warming</dd><small data-pipeline-written-window>60-second window</small></div>
+                        <div><dt>Pipeline capacity</dt><dd data-pipeline-capacity-value>Checking</dd><small data-pipeline-capacity-detail>Classifying free and waiting workers</small></div>
+                        <div><dt>Writer backlog</dt><dd data-pipeline-backlog-value>Checking</dd><small data-pipeline-backlog-detail>Checking staged work</small></div>
+                        <div><dt>Available memory</dt><dd data-pipeline-memory>Checking</dd><small>Host memory available to OWL and other applications</small></div>
+                    </dl>
+                    <div class="knowledge-pipeline__recovery" data-pipeline-recovery-card data-state="healthy">
+                        <div>
+                            <span>Recovery</span>
+                            <strong data-pipeline-recovery-state>Checking</strong>
+                            <small data-pipeline-recovery-detail>No recovery evidence loaded yet.</small>
+                            <small data-pipeline-recovery-meta></small>
+                        </div>
+                        <button type="button" data-pipeline-recovery-resume hidden>Resume safely</button>
+                        <span data-pipeline-recovery-result role="status" aria-live="polite"></span>
+                    </div>
+                    <p class="knowledge-pipeline__reason"><span data-pipeline-state-reason>Waiting for evidence from the supervisor.</span> <a href="{% url 'bitbucket_search:index_status' %}">See capacity, throughput, and starvation graphs.</a></p>
+                    <span class="visually-hidden" data-pipeline-live aria-live="polite" aria-atomic="true"></span>
                 </div>
             </section>
 
@@ -223,4 +274,8 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'bitbucket_search/pdf_pipeline_dashboard.js' %}?v=pipeline-dashboard-v1" defer></script>
 {% endblock %}

@@ -5,6 +5,7 @@
 
 {% block extra_head %}
 <link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=repository-progress-v3">
+<link rel="stylesheet" href="{% static 'bitbucket_search/pdf_pipeline_dashboard.css' %}?v=pipeline-dashboard-v1">
 {% endblock %}
 
 {% block app_sidebar %}
@@ -52,6 +53,256 @@
             <div class="status-card__heading"><span class="status-symbol" aria-hidden="true">↻</span><div><h2>Daily automation</h2><strong>{{ automation_payload.label|default:"Not scheduled" }}</strong></div></div>
             <p>{{ automation_payload.detail|default:"Automatic repository refresh information is unavailable." }}{% if automation_payload.nextActionAt %} Next action: <time datetime="{{ automation_payload.nextActionAt }}">{{ automation_payload.nextActionDisplay }}</time>.{% endif %}</p>
         </article>
+    </section>
+
+    <section
+        class="bb-pipeline"
+        aria-labelledby="bb-pipeline-heading"
+        data-pipeline-dashboard
+        data-pipeline-metrics-url="{% url 'bitbucket_search:pipeline_metrics' %}"
+        data-pipeline-active-interval="5000"
+        data-pipeline-idle-interval="30000"
+        data-pipeline-state="loading"
+    >
+        <header class="bb-pipeline__heading">
+            <div>
+                <p class="eyebrow">End-to-end PDF pipeline</p>
+                <h2 id="bb-pipeline-heading">Capacity, flow, and recovery</h2>
+                <p>Live diagnostic history from durable extraction and publication boundaries. The staging threshold is backpressure, not a hard queue capacity.</p>
+            </div>
+            <p class="bb-pipeline__freshness" data-pipeline-freshness aria-atomic="true">
+                Waiting for the first server snapshot…
+            </p>
+        </header>
+
+        <p class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-pipeline-live></p>
+
+        <div class="bb-pipeline-values" aria-label="Current PDF pipeline values">
+            <article class="bb-pipeline-value bb-pipeline-value--primary">
+                <span>Total ETA</span>
+                <strong data-pipeline-total-eta>Calculating total ETA</strong>
+                <small data-pipeline-eta-confidence>Waiting for final inventory and stable throughput.</small>
+            </article>
+            <article class="bb-pipeline-value">
+                <span>Current activity</span>
+                <strong data-pipeline-activity>Loading pipeline status</strong>
+                <small data-pipeline-activity-secondary>No confirmed activity yet.</small>
+            </article>
+            <article class="bb-pipeline-value">
+                <span>Extracted/min</span>
+                <strong data-pipeline-extracted-rate>Warming</strong>
+                <small>Atomic durable-stage handoffs · <span data-pipeline-rate-window>60-second window</span></small>
+            </article>
+            <article class="bb-pipeline-value">
+                <span>Written/min</span>
+                <strong data-pipeline-written-rate>Warming</strong>
+                <small>Successful committed publications · <span data-pipeline-written-window>60-second window</span></small>
+            </article>
+            <article class="bb-pipeline-value">
+                <span>Extraction capacity</span>
+                <strong data-pipeline-capacity-value>—</strong>
+                <small data-pipeline-capacity-detail>Live, free, waiting, and unavailable slots will appear here.</small>
+            </article>
+            <article class="bb-pipeline-value">
+                <span>Durable backlog</span>
+                <strong data-pipeline-backlog-value>—</strong>
+                <small data-pipeline-backlog-detail>Waiting for staging and disk measurements.</small>
+            </article>
+        </div>
+
+        <div class="bb-pipeline-panels">
+            <article class="bb-pipeline-panel" aria-labelledby="bb-pipeline-capacity-heading">
+                <header class="bb-pipeline-panel__heading">
+                    <div>
+                        <p class="eyebrow">Extraction and publisher</p>
+                        <h3 id="bb-pipeline-capacity-heading">Capacity and state timeline</h3>
+                    </div>
+                    <span data-pipeline-capacity-range>Waiting for history</span>
+                </header>
+                <div class="bb-pipeline-chart" data-pipeline-capacity-chart-wrap>
+                    <svg
+                        viewBox="0 0 640 240"
+                        role="img"
+                        tabindex="0"
+                        focusable="true"
+                        aria-labelledby="bb-pipeline-capacity-chart-title bb-pipeline-capacity-chart-description"
+                        data-pipeline-capacity-chart
+                    >
+                        <title id="bb-pipeline-capacity-chart-title">Extraction capacity over time</title>
+                        <desc id="bb-pipeline-capacity-chart-description">No capacity samples are available yet.</desc>
+                    </svg>
+                    <p class="bb-pipeline-chart__empty" data-pipeline-capacity-empty>Collecting capacity samples…</p>
+                </div>
+                <ul class="bb-pipeline-legend" aria-label="Capacity timeline legend">
+                    <li data-series="active"><span aria-hidden="true"></span>Active</li>
+                    <li data-series="idle"><span aria-hidden="true"></span>Free · no demand</li>
+                    <li data-series="waiting"><span aria-hidden="true"></span>Waiting for eligible input</li>
+                    <li data-series="backpressured"><span aria-hidden="true"></span>Backpressured</li>
+                    <li data-series="controller"><span aria-hidden="true"></span>Controller-paused</li>
+                    <li data-series="recovery"><span aria-hidden="true"></span>Recovery-paused</li>
+                    <li data-series="unavailable"><span aria-hidden="true"></span>Unavailable</li>
+                </ul>
+                <ul class="bb-pipeline-legend bb-pipeline-legend--publisher" aria-label="Publisher ribbon legend">
+                    <li data-series="publisher-busy"><span aria-hidden="true"></span>Publisher busy</li>
+                    <li data-series="publisher-starved"><span aria-hidden="true"></span>Awaiting extractor input</li>
+                    <li data-series="publisher-idle"><span aria-hidden="true"></span>Idle · no demand</li>
+                    <li data-series="publisher-blocked"><span aria-hidden="true"></span>Blocked</li>
+                    <li data-series="publisher-recovery"><span aria-hidden="true"></span>Recovery-paused</li>
+                    <li data-series="publisher-unavailable"><span aria-hidden="true"></span>Unavailable</li>
+                </ul>
+                <dl class="bb-pipeline-panel__facts">
+                    <div><dt>Target</dt><dd data-pipeline-target>—</dd></div>
+                    <div><dt>Configured hard max</dt><dd data-pipeline-hard-max>—</dd></div>
+                    <div><dt>Live processes</dt><dd data-pipeline-live-workers>—</dd></div>
+                    <div><dt>Publisher</dt><dd data-pipeline-publisher>Unavailable</dd></div>
+                    <div><dt>OWL CPU</dt><dd data-pipeline-owl-cpu>Unavailable</dd></div>
+                    <div><dt>Memory available</dt><dd data-pipeline-memory>Unavailable</dd></div>
+                </dl>
+            </article>
+
+            <article class="bb-pipeline-panel" aria-labelledby="bb-pipeline-flow-heading">
+                <header class="bb-pipeline-panel__heading">
+                    <div>
+                        <p class="eyebrow">Durable boundaries</p>
+                        <h3 id="bb-pipeline-flow-heading">Flow balance and durable backlog</h3>
+                    </div>
+                    <span data-pipeline-flow-range>Waiting for history</span>
+                </header>
+                <div class="bb-pipeline-chart" data-pipeline-flow-chart-wrap>
+                    <svg
+                        viewBox="0 0 640 240"
+                        role="img"
+                        tabindex="0"
+                        focusable="true"
+                        aria-labelledby="bb-pipeline-flow-chart-title bb-pipeline-flow-chart-description"
+                        data-pipeline-flow-chart
+                    >
+                        <title id="bb-pipeline-flow-chart-title">Extraction, publication, and backlog over time</title>
+                        <desc id="bb-pipeline-flow-chart-description">No flow samples are available yet.</desc>
+                    </svg>
+                    <p class="bb-pipeline-chart__empty" data-pipeline-flow-empty>Collecting flow samples…</p>
+                </div>
+                <ul class="bb-pipeline-legend bb-pipeline-legend--flow" aria-label="Flow timeline legend">
+                    <li data-series="extracted"><span aria-hidden="true"></span>Extractor outputs/min</li>
+                    <li data-series="written"><span aria-hidden="true"></span>Durable publications/min</li>
+                    <li data-series="completed"><span aria-hidden="true"></span>Total completions/min</li>
+                    <li data-series="backlog"><span aria-hidden="true"></span>Backpressure depth (jobs)</li>
+                    <li data-series="threshold"><span aria-hidden="true"></span>Backpressure threshold (jobs)</li>
+                </ul>
+                <dl class="bb-pipeline-panel__facts">
+                    <div><dt>Pages/min</dt><dd data-pipeline-pages-rate>Unavailable</dd></div>
+                    <div><dt>Staged bytes</dt><dd data-pipeline-staged-bytes>—</dd></div>
+                    <div><dt>Oldest staged</dt><dd data-pipeline-oldest-staged>—</dd></div>
+                    <div><dt>Disk available</dt><dd data-pipeline-disk>Unavailable</dd></div>
+                    <div><dt>Cache reuse</dt><dd data-pipeline-cache-reuse>—</dd></div>
+                    <div><dt>Oldest eligible input</dt><dd data-pipeline-oldest-input>—</dd></div>
+                </dl>
+            </article>
+        </div>
+
+        <div class="bb-pipeline-diagnostics">
+            <article class="bb-pipeline-diagnostic" aria-labelledby="bb-pipeline-state-heading">
+                <p class="eyebrow">Constraint classifier</p>
+                <h3 id="bb-pipeline-state-heading" data-pipeline-overall-state>Measuring PDF pipeline</h3>
+                <p data-pipeline-state-reason>Waiting for enough evidence to identify the current constraint.</p>
+                <p class="bb-pipeline-diagnostic__meta" data-pipeline-state-meta>Confidence and observation window unavailable.</p>
+                <dl class="bb-pipeline-diagnostic__list" aria-label="Pipeline errors and retries">
+                    <div><dt>Failures/min</dt><dd data-pipeline-failure-rate>Unavailable</dd></div>
+                    <div><dt>Timeouts/min</dt><dd data-pipeline-timeouts>Unavailable</dd></div>
+                    <div><dt>SQLite busy errors</dt><dd data-pipeline-sqlite-busy-errors>Unavailable</dd></div>
+                    <div><dt>Recovery probes</dt><dd data-pipeline-recovery-probes>0</dd></div>
+                </dl>
+                <ul class="bb-pipeline-warning-list" data-pipeline-warnings aria-label="Pipeline warnings">
+                    <li>Telemetry is warming up.</li>
+                </ul>
+            </article>
+
+            <article class="bb-pipeline-diagnostic" aria-labelledby="bb-pipeline-eta-heading">
+                <p class="eyebrow">Forecast diagnostics</p>
+                <h3 id="bb-pipeline-eta-heading">ETA basis and coverage</h3>
+                <dl class="bb-pipeline-diagnostic__list">
+                    <div><dt>Estimate</dt><dd data-pipeline-eta-detail>Calculating total ETA</dd></div>
+                    <div><dt>Inventory</dt><dd data-pipeline-inventory-coverage>Waiting for inventory</dd></div>
+                    <div><dt>Basis</dt><dd data-pipeline-eta-basis>Insufficient evidence</dd></div>
+                    <div><dt>Range</dt><dd data-pipeline-eta-range>Unavailable</dd></div>
+                    <div><dt>Estimator freshness</dt><dd data-pipeline-eta-freshness>Unavailable</dd></div>
+                    <div><dt>Completed-run error</dt><dd data-pipeline-forecast-error>Not calibrated</dd></div>
+                </dl>
+            </article>
+
+            <article class="bb-pipeline-diagnostic" aria-labelledby="bb-pipeline-recovery-heading" data-pipeline-recovery-card data-state="healthy">
+                <p class="eyebrow">Component recovery</p>
+                <h3 id="bb-pipeline-recovery-heading" data-pipeline-recovery-state>Healthy</h3>
+                <p data-pipeline-recovery-detail>No component recovery episode is active.</p>
+                <p class="bb-pipeline-diagnostic__meta" data-pipeline-recovery-meta>Attempts 0 · no retry scheduled</p>
+                <dl class="bb-pipeline-diagnostic__list" aria-label="Recovery stability and resume safety">
+                    <div><dt>Last probe</dt><dd data-pipeline-recovery-last-attempt>None recorded</dd></div>
+                    <div><dt>Stability gate</dt><dd data-pipeline-recovery-stability>Unavailable</dd></div>
+                    <div><dt>Resume safety</dt><dd data-pipeline-recovery-blocked>No resume block reported</dd></div>
+                </dl>
+                <button class="bb-pipeline-resume" type="button" data-pipeline-recovery-resume hidden>Resume</button>
+                <p class="bb-pipeline-action-result" role="status" aria-live="polite" data-pipeline-recovery-result></p>
+            </article>
+        </div>
+
+        <section class="bb-pipeline-repositories" aria-labelledby="bb-pipeline-repositories-heading">
+            <header class="bb-pipeline-panel__heading">
+                <div>
+                    <p class="eyebrow">Current run</p>
+                    <h3 id="bb-pipeline-repositories-heading">Repository progress and fairness</h3>
+                    <p class="bb-pipeline-repositories__fairness" data-pipeline-fairness>No current run; fairness wait telemetry is not applicable.</p>
+                </div>
+                <span data-pipeline-run-id>No current run</span>
+            </header>
+            <div class="bb-pipeline-table-wrap" tabindex="0" role="region" aria-label="Current pipeline repository progress">
+                <table class="bb-pipeline-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">Repository</th>
+                            <th scope="col">Lifecycle / phase</th>
+                            <th scope="col">Published</th>
+                            <th scope="col">Remaining</th>
+                            <th scope="col">ETA</th>
+                            <th scope="col">Outcome</th>
+                        </tr>
+                    </thead>
+                    <tbody data-pipeline-repository-rows>
+                        <tr><td colspan="6">Waiting for a current run.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <div class="bb-pipeline-histories">
+            <details class="bb-pipeline-history">
+                <summary>Recovery event history <span data-pipeline-recovery-history-count>0 events</span></summary>
+                <div class="bb-pipeline-table-wrap" tabindex="0" role="region" aria-label="Recovery event history">
+                    <table class="bb-pipeline-table">
+                        <thead><tr><th scope="col">Time</th><th scope="col">Scope</th><th scope="col">Event</th><th scope="col">Reason</th><th scope="col">Outcome</th></tr></thead>
+                        <tbody data-pipeline-recovery-history-rows><tr><td colspan="5">No recovery events recorded.</td></tr></tbody>
+                    </table>
+                </div>
+            </details>
+            <details class="bb-pipeline-history">
+                <summary>Performance tuning history <span data-pipeline-tuning-history-count>0 events</span></summary>
+                <div class="bb-pipeline-table-wrap" tabindex="0" role="region" aria-label="Performance tuning history">
+                    <table class="bb-pipeline-table">
+                        <thead><tr><th scope="col">Time / mode</th><th scope="col">Target</th><th scope="col">Reason</th><th scope="col">Window / evidence</th><th scope="col">Result / rollback / cooldown</th></tr></thead>
+                        <tbody data-pipeline-tuning-history-rows><tr><td colspan="5">No tuning recommendations or changes recorded.</td></tr></tbody>
+                    </table>
+                </div>
+            </details>
+            <details class="bb-pipeline-history">
+                <summary>Accessible timeline values</summary>
+                <p>Equivalent numeric values for both graphs. Units and unavailable samples remain explicit.</p>
+                <div class="bb-pipeline-table-wrap" tabindex="0" role="region" aria-label="Pipeline timeline values">
+                    <table class="bb-pipeline-table bb-pipeline-table--timeline">
+                        <thead><tr><th scope="col">Time</th><th scope="col">Capacity: active / free / waiting / backpressured / paused / unavailable</th><th scope="col">Publisher</th><th scope="col">Extracted / written / completed per min</th><th scope="col">Backlog / threshold</th><th scope="col">Staged bytes</th></tr></thead>
+                        <tbody data-pipeline-sample-rows><tr><td colspan="6">No timeline samples available.</td></tr></tbody>
+                    </table>
+                </div>
+            </details>
+        </div>
     </section>
 
     <section class="bb-log-toolbar" aria-labelledby="bb-log-repository-heading">
@@ -244,4 +495,8 @@
     </section>
     {% endif %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'bitbucket_search/pdf_pipeline_dashboard.js' %}?v=pipeline-dashboard-v1" defer></script>
 {% endblock %}

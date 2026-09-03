@@ -6,6 +6,7 @@ import subprocess
 import sys
 import textwrap
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from threading import Barrier
 from types import SimpleNamespace
 
@@ -226,7 +227,10 @@ def test_simultaneous_claims_never_exceed_the_global_capacity(parallel_targets, 
 
 
 @pytest.mark.django_db
-def test_workers_finish_one_repository_before_claiming_the_next(parallel_targets, settings):
+def test_locality_spills_to_another_repository_instead_of_leaving_capacity_idle(
+    parallel_targets,
+    settings,
+):
     repositories = [parallel_targets(f"balanced-{number}", 4)[0] for number in range(4)]
     settings.PDF_MAX_EXTRACTION_WORKERS = 10
     settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY = 3
@@ -237,9 +241,14 @@ def test_workers_finish_one_repository_before_claiming_the_next(parallel_targets
     assert all(job is not None for job in claims)
     claimed_repository_ids = [job.document.repository_id for job in claims]
     assert claimed_repository_ids == [repositories[0].pk] * 3
-    assert pdf_indexing.claim_next_extraction_job() is None
+    spillover = pdf_indexing.claim_next_extraction_job()
+    assert spillover is not None
+    assert spillover.document.repository_id == repositories[1].pk
 
-    PDFExtractionJob.objects.filter(document__repository=repositories[0]).update(
+    PDFExtractionJob.objects.filter(
+        document__repository=repositories[0],
+        status=PDFExtractionJobStatus.RUNNING,
+    ).update(
         status=PDFExtractionJobStatus.SUCCEEDED,
         completed_at=timezone.now(),
     )
@@ -247,6 +256,29 @@ def test_workers_finish_one_repository_before_claiming_the_next(parallel_targets
 
     assert next_claim is not None
     assert next_claim.document.repository_id == repositories[1].pk
+
+
+@pytest.mark.django_db
+def test_oldest_repository_wait_bound_preempts_locality(parallel_targets, settings):
+    first_repository, _documents = parallel_targets("fairness-first", 4)
+    second_repository, _documents = parallel_targets("fairness-second", 1)
+    settings.PDF_MAX_EXTRACTION_WORKERS = 4
+    settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY = 4
+    settings.PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES = 1
+    settings.PDF_PIPELINE_REPOSITORY_FAIRNESS_MAX_WAIT_SECONDS = 60
+
+    first_claim = pdf_indexing.claim_next_extraction_job()
+    assert first_claim is not None
+    assert first_claim.document.repository_id == first_repository.pk
+    PDFExtractionJob.objects.filter(
+        document__repository=second_repository,
+        status=PDFExtractionJobStatus.QUEUED,
+    ).update(requested_at=timezone.now() - timedelta(minutes=2))
+
+    fairness_claim = pdf_indexing.claim_next_extraction_job()
+
+    assert fairness_claim is not None
+    assert fairness_claim.document.repository_id == second_repository.pk
 
 
 @pytest.mark.django_db(transaction=True)

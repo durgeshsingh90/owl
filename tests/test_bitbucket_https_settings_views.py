@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from django.forms import PasswordInput
@@ -27,6 +28,8 @@ SYNTHETIC_USERNAME = "submitted-cloud-username-must-not-persist"
 @pytest.fixture(autouse=True)
 def database_https_credential_backend(settings):
     settings.BITBUCKET_ALLOWED_HOSTS = ("bitbucket.org",)
+    settings.BITBUCKET_ALLOWED_HOSTS_EXPLICIT = True
+    settings.BITBUCKET_ALLOWED_HOSTS_SOURCE = "explicit"
     settings.BITBUCKET_SECRET_BACKEND = "database"
     settings.SECRET_KEY = "synthetic-test-secret-key-only-not-for-real-use-settings-view"
     reset_https_secret_store_cache()
@@ -59,7 +62,10 @@ def _csrf_client() -> Client:
 
 
 def _settings_csrf_token(client: Client) -> str:
-    response = client.get(reverse("bookmark_manager:settings"))
+    response = client.get(
+        reverse("bookmark_manager:settings"),
+        {"section": "repository-sources", "task": "credential"},
+    )
     assert response.status_code == 200
     return response.cookies["csrftoken"].value
 
@@ -92,25 +98,33 @@ def test_home_topbar_settings_gear_links_to_the_shared_settings_page(loopback_cl
 
 
 def test_settings_keeps_confluence_and_bookmark_data_controls(loopback_client):
-    response = loopback_client.get(reverse("bookmark_manager:settings"))
+    response = loopback_client.get(
+        reverse("bookmark_manager:settings"),
+        {"section": "confluence", "task": "confluence"},
+    )
     html = _html(response)
     confluence_token = _input_tag(html, "personal_access_token")
 
     assert response.status_code == 200
     assert "personal_access_token" in response.context["settings_form"].fields
     assert 'type="password"' in confluence_token
-    assert f'action="{reverse("bookmark_manager:export")}"' in html
-    assert ">Export JSON</button>" in html
-    assert f'action="{reverse("bookmark_manager:import")}"' in html
-    assert ">Import bookmarks</button>" in html
+    assert f'action="{reverse("bookmark_manager:export")}"' not in html
+
+    data_response = loopback_client.get(
+        reverse("bookmark_manager:settings"), {"section": "bookmark-data"}
+    )
+    data_html = _html(data_response)
+    assert f'action="{reverse("bookmark_manager:export")}"' in data_html
+    assert ">Export JSON</button>" in data_html
+    assert f'action="{reverse("bookmark_manager:import")}"' in data_html
+    assert ">Import bookmarks</button>" in data_html
 
 
-@pytest.mark.parametrize(
-    "view_name",
-    ("bookmark_manager:index", "bookmark_manager:settings"),
-)
-def test_bitbucket_settings_fields_have_unique_namespaced_dom_ids(loopback_client, view_name):
-    response = loopback_client.get(reverse(view_name))
+def test_bitbucket_settings_fields_have_unique_namespaced_dom_ids(loopback_client):
+    response = loopback_client.get(
+        reverse("bookmark_manager:settings"),
+        {"section": "repository-sources", "task": "credential"},
+    )
     html = _html(response)
     element_ids = re.findall(r'\sid="([^"]+)"', html)
 
@@ -123,9 +137,15 @@ def test_bitbucket_settings_fields_have_unique_namespaced_dom_ids(loopback_clien
         "id_bitbucket_https_token",
     }.issubset(element_ids)
 
+    drawer_html = _html(loopback_client.get(reverse("bookmark_manager:index")))
+    assert "id_bitbucket_https_token" not in drawer_html
+
 
 def test_settings_describes_each_supported_bitbucket_https_credential(loopback_client):
-    response = loopback_client.get(reverse("bookmark_manager:settings"))
+    response = loopback_client.get(
+        reverse("bookmark_manager:settings"),
+        {"section": "repository-sources", "task": "credential"},
+    )
     html = _html(response)
     form = response.context["bitbucket_credential_form"]
 
@@ -150,12 +170,15 @@ def test_settings_describes_each_supported_bitbucket_https_credential(loopback_c
     assert "encrypts this token locally" in form.fields["token"].help_text
     assert "never writes it into a repository URL" in form.fields["token"].help_text
     assert "exact host" in form.fields["token"].help_text
-    assert "repository read is sufficient" in html
+    assert "repository read is sufficient" in html.lower()
     assert "Do not grant write, admin, or delete" in html
 
 
 def test_bitbucket_password_input_is_blank_on_get_and_invalid_post(loopback_client):
-    initial = loopback_client.get(reverse("bookmark_manager:settings"))
+    initial = loopback_client.get(
+        reverse("bookmark_manager:settings"),
+        {"section": "repository-sources", "task": "credential"},
+    )
     initial_html = _html(initial)
     initial_token_input = _input_tag(initial_html, "token")
 
@@ -252,7 +275,9 @@ def test_database_credential_save_reload_and_remove_is_secret_free_and_keeps_rep
     )
 
     assert saved.status_code == 302
-    assert saved.url == reverse("bookmark_manager:settings")
+    saved_url = urlparse(saved.url)
+    assert saved_url.path == reverse("bookmark_manager:settings")
+    assert parse_qs(saved_url.query)["section"] == ["repository-sources"]
     record = BitbucketHTTPSCredential.objects.get(origin=CLOUD_ORIGIN)
     assert record.credential_ciphertext
     assert SYNTHETIC_VALUE not in record.credential_ciphertext
@@ -264,7 +289,10 @@ def test_database_credential_save_reload_and_remove_is_secret_free_and_keeps_rep
     assert SYNTHETIC_VALUE not in repr(dict(client.session.items()))
     assert SYNTHETIC_USERNAME not in repr(dict(client.session.items()))
 
-    reloaded = client.get(reverse("bookmark_manager:settings"))
+    reloaded = client.get(
+        reverse("bookmark_manager:settings"),
+        {"section": "repository-sources", "task": "credential"},
+    )
     reloaded_html = _html(reloaded)
     reloaded_token_input = _input_tag(reloaded_html, "token")
 
@@ -287,15 +315,19 @@ def test_database_credential_save_reload_and_remove_is_secret_free_and_keeps_rep
     )
 
     assert removed.status_code == 302
-    assert removed.url == reverse("bookmark_manager:settings")
+    removed_url = urlparse(removed.url)
+    assert removed_url.path == reverse("bookmark_manager:settings")
+    assert parse_qs(removed_url.query)["section"] == ["repository-sources"]
     assert not BitbucketHTTPSCredential.objects.exists()
     repository.refresh_from_db()
     assert repository.remote_url == "https://bitbucket.org/owl/private-architecture.git"
     assert BitbucketRepository.objects.filter(pk=repository.pk).exists()
 
-    after_remove = client.get(reverse("bookmark_manager:settings"))
+    after_remove = client.get(
+        reverse("bookmark_manager:settings"), {"section": "repository-sources"}
+    )
     after_remove_html = _html(after_remove)
     assert after_remove.status_code == 200
-    assert "No HTTPS credential saved" in after_remove_html
+    assert "Not configured" in after_remove_html
     assert SYNTHETIC_VALUE not in after_remove_html
     assert SYNTHETIC_USERNAME not in after_remove_html

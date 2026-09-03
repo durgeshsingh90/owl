@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from bitbucket_search.models import (
     BitbucketRepository,
+    PDFPipelineRun,
     RepositorySyncJob,
     RepositorySyncJobStatus,
     RepositorySyncOperation,
@@ -25,6 +26,13 @@ def _repository(name: str, *, enabled: bool = True) -> BitbucketRepository:
         remote_url=f"ssh://git@bitbucket.example.invalid/team/{name}.git",
         enabled=enabled,
     )
+
+
+@pytest.fixture(autouse=True)
+def _approve_synthetic_repository_host(settings):
+    settings.BITBUCKET_ALLOWED_HOSTS = ("bitbucket.example.invalid",)
+    settings.BITBUCKET_ALLOWED_HOSTS_EXPLICIT = True
+    settings.BITBUCKET_ALLOWED_HOSTS_SOURCE = "explicit"
 
 
 def test_queue_all_refreshes_enabled_repositories_and_preserves_operations(
@@ -56,6 +64,10 @@ def test_queue_all_refreshes_enabled_repositories_and_preserves_operations(
         result.job.pk for result in queued.newly_queued
     }
     assert not RepositorySyncJob.objects.filter(repository=disabled).exists()
+    assert queued.run is not None
+    assert queued.run.accepted_repository_count == 2
+    assert queued.run.repository_memberships.count() == 2
+    assert all(result.job.run_repository_id for result in queued.results)
 
 
 def test_queue_all_deduplicates_active_jobs_and_only_wakes_queued_work(
@@ -115,6 +127,7 @@ def test_queue_all_is_idempotent_across_repeated_requests(db, tmp_path, settings
         result.job.pk for result in initial.results
     }
     assert RepositorySyncJob.objects.count() == 2
+    assert PDFPipelineRun.objects.count() == 1
 
 
 @pytest.mark.parametrize(
@@ -226,3 +239,6 @@ def test_queue_all_revalidates_enabled_repositories_at_the_row_lock(db, monkeypa
     assert queued.eligible_total == 1
     assert [result.repository.pk for result in queued.results] == [retained.pk]
     assert not RepositorySyncJob.objects.filter(repository=disabled_during_queue).exists()
+    assert queued.run is not None
+    assert queued.run.accepted_repository_count == 1
+    assert queued.rejected_repository_ids == (disabled_during_queue.pk,)

@@ -93,7 +93,7 @@ def test_bitbucket_inventory_is_capped_at_five_hundred_and_search_at_one_hundred
 @pytest.mark.parametrize(
     ("configured_hosts", "expected_hosts"),
     [
-        (None, ("bitbucket.org", "github.com", "scm.mastercard.int")),
+        (None, ("bitbucket.org", "github.com")),
         ("git.example.invalid", ("git.example.invalid",)),
         ("", ()),
     ],

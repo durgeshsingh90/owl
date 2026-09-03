@@ -96,6 +96,11 @@
         openSettings();
     }
 
+    const settingsAutofocus = document.querySelector("[data-settings-autofocus]");
+    if (settingsAutofocus && typeof settingsAutofocus.focus === "function") {
+        window.requestAnimationFrame(() => settingsAutofocus.focus({preventScroll: true}));
+    }
+
     showPatButton?.addEventListener("click", () => {
         if (!patInput) {
             return;
@@ -386,6 +391,17 @@
         form.addEventListener("submit", (event) => {
             const confirmed = window.confirm(
                 "Remove this saved Bitbucket HTTPS credential? Repositories, downloaded files, and indexes will remain available.",
+            );
+            if (!confirmed) {
+                event.preventDefault();
+            }
+        });
+    });
+
+    document.querySelectorAll("[data-remove-repository-host-form]").forEach((form) => {
+        form.addEventListener("submit", (event) => {
+            const confirmed = window.confirm(
+                "Remove this repository host approval? OWL will not delete repositories, downloaded files, indexes, jobs, or credentials.",
             );
             if (!confirmed) {
                 event.preventDefault();

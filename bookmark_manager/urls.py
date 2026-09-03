@@ -49,4 +49,14 @@ urlpatterns = [
         views.remove_bitbucket_https_credential,
         name="bitbucket_https_credential_remove",
     ),
+    path(
+        "settings/repository-hosts/add/",
+        views.add_repository_host,
+        name="repository_host_add",
+    ),
+    path(
+        "settings/repository-hosts/remove/",
+        views.remove_repository_host,
+        name="repository_host_remove",
+    ),
 ]

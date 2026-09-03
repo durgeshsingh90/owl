@@ -239,6 +239,7 @@ class NotificationKind(models.TextChoices):
     BOOKMARK_EXPORT = "bookmark_export", "Bookmark export"
     CONFLUENCE_REFRESH = "confluence_refresh", "Confluence refresh"
     BITBUCKET_REFRESH = "bitbucket_refresh", "Bitbucket refresh"
+    PDF_PIPELINE_RECOVERY = "pdf_pipeline_recovery", "PDF pipeline recovery"
 
 
 class NotificationState(models.TextChoices):

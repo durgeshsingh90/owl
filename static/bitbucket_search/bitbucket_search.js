@@ -6,6 +6,14 @@
         return;
     }
 
+    // The durable pipeline snapshot owns activity, ETA and per-run repository
+    // lifecycle UI. The older repository-status poll remains responsible for
+    // catalogue totals and repository management controls only.
+    const pipelineDashboardActive = Boolean(
+        workspace.hasAttribute("data-pipeline-dashboard") &&
+        window.OWLPDFPipelineDashboard,
+    );
+
     const refreshAllForms = Array.from(
         workspace.querySelectorAll("[data-repositories-refresh-all]"),
     );
@@ -37,7 +45,7 @@
         connectionResult.disabled = true;
         setConnectionResult(
             "checking",
-            "Testing stored credentials and Git connections",
+            "Testing every saved repository URL with Git",
             "Please wait.",
         );
         const csrf = workspace.querySelector("input[name='csrfmiddlewaretoken']")?.value || "";
@@ -62,7 +70,7 @@
             setConnectionResult(
                 "failed",
                 "Git connection test failed",
-                "Check network, VPN, SSH agent, or stored HTTPS credentials.",
+                "Check the repository URLs, network, VPN, or Git credentials.",
             );
         } finally {
             connectionTestPending = false;
@@ -252,6 +260,37 @@
             form.dataset.repositoryCount = String(repositoryCount);
             form.dataset.enabledRepositoryCount = String(enabledRepositoryCount);
             form.dataset.activeRepositoryCount = String(activeRepositoryCount);
+            if (pipelineDashboardActive) {
+                if (repositorySubmissionPending) {
+                    form.dataset.pipelineIndicatorState = "submitting";
+                    button.disabled = true;
+                    button.setAttribute("aria-busy", "true");
+                    button.setAttribute("aria-label", "Adding repositories to the refresh queue");
+                    button.title = "Adding repositories to the queue";
+                    const labelElement = form.querySelector("[data-refresh-all-label]");
+                    const detailElement = form.querySelector("[data-refresh-all-detail]");
+                    const spinner = form.querySelector("[data-refresh-all-spinner]");
+                    const icon = form.querySelector("[data-refresh-all-icon]");
+                    const waiting = form.querySelector("[data-refresh-all-waiting]");
+                    const running = form.querySelector("[data-refresh-all-running-visual]");
+                    const runningStatic = form.querySelector("[data-refresh-all-running-static]");
+                    const attention = form.querySelector("[data-refresh-all-attention]");
+                    const complete = form.querySelector("[data-refresh-all-complete]");
+                    if (labelElement) labelElement.textContent = "Adding to queue…";
+                    if (detailElement) detailElement.textContent = "Submitting the background refresh request";
+                    if (spinner) spinner.hidden = false;
+                    [icon, waiting, running, runningStatic, attention, complete].forEach((node) => {
+                        if (node) node.hidden = true;
+                    });
+                    if (running) running.removeAttribute("src");
+                } else if (repositoryStatusPending) {
+                    // A failed secondary poll is not evidence of activity.
+                    // Retain the last authoritative pipeline rendering while
+                    // preventing a duplicate mutating request.
+                    button.disabled = true;
+                }
+                return;
+            }
             const classPrefix = form.hasAttribute("data-repositories-refresh-all-mobile")
                 ? "bb-mobile-refresh-all"
                 : "bb-refresh-all";
@@ -275,11 +314,13 @@
             if (spinner) spinner.hidden = hasOverallVisual || !busy;
             setRefreshIconBusy(icon, hasOverallVisual ? false : busy);
         });
-        renderOverallStatus(repositories, extraction, work, workerLimits);
+        if (!pipelineDashboardActive) {
+            renderOverallStatus(repositories, extraction, work, workerLimits);
+        }
     };
 
     updateRefreshAllButtons();
-    if (typeof window.setInterval === "function") {
+    if (!pipelineDashboardActive && typeof window.setInterval === "function") {
         window.setInterval(() => renderOverallStatus(), 1000);
     }
 
@@ -559,7 +600,7 @@
             card.dataset.repositoryRefreshExcluded = String(Boolean(repository.refreshExcluded));
             card.dataset.repositoryRemovalPending = String(Boolean(repository.hasRemovalPending));
             const stateIcon = card.querySelector("[data-repository-state-icon]");
-            if (stateIcon) {
+            if (stateIcon && !pipelineDashboardActive) {
                 const visibleState = working ? "working"
                     : repository.gitSyncFailed ? "git-failed"
                     : Number(repository.pdfIndexFailedCount || 0) ? "indexing-failed"
@@ -578,7 +619,7 @@
                 stateIcon.title = working ? workDetail : visibleLabel;
             }
             const workStatus = card.querySelector("[data-repository-work-label]");
-            if (workStatus) {
+            if (workStatus && !pipelineDashboardActive) {
                 const visiblyRunning = Number(repository.activity?.runningSyncJobs || 0) > 0
                     || Number(repository.activity?.runningPdfs || 0) > 0;
                 workStatus.textContent = visiblyRunning ? workDetail : "";
@@ -586,7 +627,7 @@
                 workStatus.hidden = !visiblyRunning;
             }
             const healthStatus = card.querySelector("[data-repository-health]");
-            if (healthStatus) {
+            if (healthStatus && !pipelineDashboardActive) {
                 healthStatus.dataset.healthState = healthState;
                 healthStatus.dataset.heartbeatAt = heartbeatAt;
                 healthStatus.textContent = healthLabel;
@@ -598,11 +639,11 @@
             const progressLabel = card.querySelector("[data-repository-progress-label]");
             const queuedOnly = String(repository.activity?.phase || "").includes("queued");
             const showProgress = working && Boolean(operation) && !queuedOnly;
-            if (progressContainer) {
+            if (progressContainer && !pipelineDashboardActive) {
                 progressContainer.hidden = !showProgress;
                 progressContainer.title = showProgress ? workDetail : "";
             }
-            if (progressBar) {
+            if (progressBar && !pipelineDashboardActive) {
                 if (showProgress && progressValue !== null) {
                     progressBar.value = progressValue;
                     progressBar.setAttribute("value", String(progressValue));
@@ -610,7 +651,7 @@
                     progressBar.removeAttribute("value");
                 }
             }
-            if (progressLabel) {
+            if (progressLabel && !pipelineDashboardActive) {
                 progressLabel.textContent = progressValue !== null
                     ? `${progressValue}%` : "Running";
             }
@@ -619,14 +660,14 @@
                 documents.textContent = `${repository.pdfCount} PDF · ${repository.vsdxCount} VSDX`;
             }
             const remaining = card.querySelector("[data-repository-remaining]");
-            if (remaining) {
+            if (remaining && !pipelineDashboardActive) {
                 const remainingCount = Number(repository.activity?.queuedPdfs || 0)
                     + Number(repository.activity?.runningPdfs || 0);
                 remaining.textContent = `Remaining ${remainingCount} PDF${remainingCount === 1 ? "" : "s"}`;
                 remaining.hidden = remainingCount === 0;
             }
             const ticks = card.querySelector("[data-repository-success-ticks]");
-            if (ticks) {
+            if (ticks && !pipelineDashboardActive) {
                 ticks.dataset.gitSucceeded = String(Boolean(repository.gitSucceeded));
                 ticks.dataset.indexSucceeded = String(Boolean(repository.indexSucceeded));
                 ticks.title = `Git ${repository.gitSucceeded ? "succeeded" : "not complete"}; PDF indexing ${repository.indexSucceeded ? "succeeded" : "not complete"}`;
@@ -821,7 +862,7 @@
             resetDeleteLock();
             updateRefreshAllButtons();
             updateSelectedRepositoryActions();
-            document.querySelectorAll("[data-repository-id]").forEach((card) => {
+            if (!pipelineDashboardActive) document.querySelectorAll("[data-repository-id]").forEach((card) => {
                 const icon = card.querySelector("[data-repository-state-icon]");
                 if (icon) {
                     icon.className = "bb-repository-state bb-repository-state--unknown";
