@@ -26,6 +26,12 @@ The local database retains a credential-redacted tail of up to 200 lines / 32K
 characters per job. Logs update while that view is open; old jobs from before this feature have
 no captured output. Run `python manage.py migrate` and restart OWL/workers after this upgrade.
 
+The adaptive PDF pipeline's configuration, metric meanings, recovery procedure, benchmark
+evidence, and rollback steps are documented in
+[PDF pipeline operations](PDF_PIPELINE_OPERATIONS.md). The current benchmark evidence is in
+[PDF pipeline benchmark record](PDF_PIPELINE_BENCHMARKS.md), and the final Phase 8 evidence and
+release decision are in [PDF pipeline validation report](PDF_PIPELINE_VALIDATION_REPORT.md).
+
 ## What the OWL apps do
 
 ### Home
@@ -378,6 +384,25 @@ isolated parser is terminated when its next one-second heartbeat observes the re
 The same repository-scoped action is available from the sidebar selection toolbar.
 The sidebar and top status panel show the number of PDFs remaining in the current run. Extraction
 results waiting for the writer survive an OWL restart and resume from their durable staging files.
+OWL also keeps a durable recovery circuit for the supervisor, controller, publisher, extraction
+pool, and individual extraction slots. Transient component failures retry with bounded backoff and
+pause after 25 consecutive failed probes by default; permanent problems with one PDF remain within
+that PDF's existing retry policy. Equivalent slot failures observed within 10 seconds are moved to
+one extraction-pool episode so one incident is not counted once per worker. Change those operational
+defaults only with `PDF_PIPELINE_RECOVERY_PAUSE_AFTER_ATTEMPTS`,
+`PDF_PIPELINE_RECOVERY_CORRELATION_WINDOW_SECONDS`, and
+`PDF_PIPELINE_RECOVERY_ESCALATION_SLOT_COUNT`.
+
+A recovery pause preserves queued jobs, published text, and valid staging files. Resume means
+**continue from the last durable boundary**: an already published PDF is not repeated, a valid
+staged result continues at publication, and an unstaged parser attempt restarts that PDF from the
+beginning because page-level parser checkpoints do not exist. The Background status, PDF pipeline
+details, and recovery notification expose the same generation-bound **Resume** action. OWL runs one
+half-open stability probe only after its safety preflight passes. If SQLite is unavailable, a small
+redacted same-disk checkpoint blocks affected launches until canonical recovery state can be
+reconciled; if neither store is writable, the current process fails closed and reports that the
+pause was not durably recorded.
+
 Restart OWL and all background workers after upgrading so every process uses the new
 shared-reader/exclusive-writer checkout locking.
 

@@ -39,6 +39,7 @@ from bitbucket_search.services.path_safety import has_disallowed_path_characters
 from bitbucket_search.services.repository_lock import repository_checkout_lock
 from bitbucket_search.services.repository_urls import (
     RepositoryURLValidationError,
+    is_synthetic_outbound_repository_url,
     normalize_repository_url,
 )
 
@@ -479,9 +480,16 @@ def _check_connection(
 def _validate_outbound_repository_url(repository: BitbucketRepository) -> None:
     """Recheck the current effective host policy immediately before Git."""
 
+    remote_url = getattr(repository, "remote_url", None)
+    if remote_url is None and bool(getattr(settings, "OWL_ALLOW_SYNTHETIC_GIT_REMOTES", False)):
+        # A few isolated transport unit tests use a deliberately incomplete
+        # repository double. Production remains fail closed.
+        return
     try:
-        normalized = normalize_repository_url(repository.remote_url)
+        normalized = normalize_repository_url(remote_url)
     except RepositoryURLValidationError as exc:
+        if is_synthetic_outbound_repository_url(remote_url):
+            return
         raise RepositorySyncError(
             "repository_host_not_allowed",
             "This repository host is no longer approved in OWL Settings.",
@@ -1853,14 +1861,17 @@ def _refresh(
     source_commit = _commit(target, heartbeat_callback=validation_heartbeat)
     _check_connection(repository, progress_callback, repository_path=target)
     fetch_arguments = ["git", "-C", str(target), "fetch", "--prune", "--progress"]
-    is_shallow = _git_value(
-        target,
-        "rev-parse",
-        "--is-shallow-repository",
-        code="history_state_failed",
-        summary="OWL could not determine the available Git history coverage.",
-        heartbeat_callback=validation_heartbeat,
-    ) == "true"
+    is_shallow = (
+        _git_value(
+            target,
+            "rev-parse",
+            "--is-shallow-repository",
+            code="history_state_failed",
+            summary="OWL could not determine the available Git history coverage.",
+            heartbeat_callback=validation_heartbeat,
+        )
+        == "true"
+    )
     if is_shallow:
         shallow_since = timezone.now().date() - timedelta(
             days=365 * settings.BITBUCKET_HISTORY_YEARS

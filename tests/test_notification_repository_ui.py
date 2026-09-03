@@ -212,9 +212,7 @@ def test_each_rendered_shell_has_notification_once_and_no_repository_logs_contro
     assert not elements.with_hook("data-repository-status-panel")
     assert len(elements.with_hook("data-bitbucket-schedule-tick-form")) == 1
     panel_ids = [
-        attrs["id"]
-        for _tag, attrs in elements.elements
-        if "data-notification-panel" in attrs
+        attrs["id"] for _tag, attrs in elements.elements if "data-notification-panel" in attrs
     ]
     assert len(set(panel_ids)) == 1
     id_counts = Counter(attrs["id"] for _tag, attrs in elements.elements if "id" in attrs)
@@ -242,6 +240,18 @@ def test_notification_repository_assets_include_compact_accessible_layout():
     assert "left: 8px" in css and "right: 8px" in css
     assert "{% static 'owl/owl.css' %}?v=" in base
     assert "{% static 'owl/owl.js' %}?v=" in base
+
+
+def test_recovery_popup_uses_the_viewport_and_keeps_its_heading_legible():
+    css = (PROJECT_ROOT / "static/owl/owl.css").read_text()
+    base = (PROJECT_ROOT / "templates/owl/base.html").read_text()
+
+    header_override = css.split("body.has-recovery-popup .app-header {", 1)[1].split("}", 1)[0]
+    heading = css.split(".recovery-popup__header h2 {", 1)[1].split("}", 1)[0]
+
+    assert "backdrop-filter: none" in header_override
+    assert "color: var(--notification-ink)" in heading
+    assert "pdf-pipeline-recovery-v4" in base
 
 
 def test_notification_repository_javascript_behaviors():

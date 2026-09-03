@@ -484,6 +484,60 @@ def test_changed_file_after_parsing_discards_staging_rows(tmp_path):
     assert result.content_sha256_before != result.content_sha256_after
 
 
+def test_validated_parent_fingerprint_removes_one_child_full_file_pass(
+    tmp_path,
+    monkeypatch,
+):
+    path = _source(tmp_path)
+    content = path.read_bytes()
+    original = pdf_extractor._fingerprint_file
+    fingerprint_calls: list[Path] = []
+
+    def counted_fingerprint(candidate, *, max_file_bytes):
+        fingerprint_calls.append(candidate)
+        return original(candidate, max_file_bytes=max_file_bytes)
+
+    monkeypatch.setattr(pdf_extractor, "_fingerprint_file", counted_fingerprint)
+
+    result = extract_pdf(
+        path,
+        max_file_bytes=10_000,
+        max_pages=100,
+        max_characters=10_000,
+        reader_factory=lambda _source_file: FakeReader((FakePage("searchable"),)),
+        expected_content_sha256=hashlib.sha256(content).hexdigest(),
+        expected_source_size=len(content),
+    )
+
+    assert result.state == PDFExtractionState.READY
+    assert fingerprint_calls == [path]
+    assert result.content_sha256_before == result.content_sha256_after
+
+
+def test_parent_fingerprint_optimization_still_rejects_concurrent_change(tmp_path):
+    path = _source(tmp_path)
+    original = path.read_bytes()
+
+    def reader_factory(_source_file):
+        path.write_bytes(b"%PDF-1.7\nchanged after parent hash")
+        return FakeReader((FakePage("obsolete text"),))
+
+    result = extract_pdf(
+        path,
+        max_file_bytes=10_000,
+        max_pages=100,
+        max_characters=10_000,
+        reader_factory=reader_factory,
+        expected_content_sha256=hashlib.sha256(original).hexdigest(),
+        expected_source_size=len(original),
+    )
+
+    assert result.state == PDFExtractionState.CHANGED
+    assert result.publishable is False
+    assert result.pages == ()
+    assert result.content_sha256_before != result.content_sha256_after
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [
@@ -525,6 +579,30 @@ def test_json_request_boundary_returns_staging_payload_without_echoing_the_path(
     assert payload["pages"][0]["page_number"] == 1
     assert payload["pages"][0]["text"] == "searchable text"
     assert str(path) not in str(payload)
+
+
+def test_json_request_accepts_only_a_complete_validated_parent_fingerprint(tmp_path):
+    path = _source(tmp_path)
+    content = path.read_bytes()
+    request = {
+        "path": str(path),
+        "max_file_bytes": 10_000,
+        "max_pages": 100,
+        "max_characters": 10_000,
+        "expected_content_sha256": hashlib.sha256(content).hexdigest(),
+        "expected_source_size": len(content),
+    }
+
+    payload = extract_pdf_request(
+        request,
+        reader_factory=lambda _source_file: FakeReader((FakePage("searchable text"),)),
+    )
+    assert payload["state"] == PDFExtractionState.READY
+
+    with pytest.raises(ValueError, match="fingerprint is incomplete"):
+        extract_pdf_request(
+            {key: value for key, value in request.items() if key != "expected_source_size"}
+        )
 
 
 def test_json_request_boundary_rejects_missing_or_extra_control_fields(tmp_path):

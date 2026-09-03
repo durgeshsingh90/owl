@@ -37,8 +37,7 @@ class ExpectedLoopbackDisconnectFilter(logging.Filter):
         if not message.startswith("- Broken pipe from "):
             return True
         return not any(
-            loopback in message
-            for loopback in ("'127.0.0.1'", '"127.0.0.1"', "'::1'", '"::1"')
+            loopback in message for loopback in ("'127.0.0.1'", '"127.0.0.1"', "'::1'", '"::1"')
         )
 
 

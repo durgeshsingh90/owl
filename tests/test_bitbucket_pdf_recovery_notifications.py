@@ -70,11 +70,7 @@ def _action_form(action: dict[str, object]) -> dict[str, object]:
         "episodeId": action["episodeId"],
         "expectedGeneration": action["expectedGeneration"],
         "pauseGeneration": action["pauseGeneration"],
-        **(
-            {"idempotencyKey": action["idempotencyKey"]}
-            if "idempotencyKey" in action
-            else {}
-        ),
+        **({"idempotencyKey": action["idempotencyKey"]} if "idempotencyKey" in action else {}),
     }
 
 
@@ -98,9 +94,7 @@ def test_recovery_notification_has_dedicated_kind_and_only_server_action():
     assert payload["targetPath"] == "/pdfs/status/"
     assert "eventKey" not in payload and "event_key" not in payload
     assert payload["action"] == pdf_recovery.recovery_resume_action(recovery)
-    assert payload["action"]["url"] == reverse(
-        "bitbucket_search:pdf_pipeline_recovery_resume"
-    )
+    assert payload["action"]["url"] == reverse("bitbucket_search:pdf_pipeline_recovery_resume")
     assert payload["action"]["method"] == "POST"
     assert len(payload["action"]["idempotencyKey"]) == 64
 
@@ -244,18 +238,22 @@ def test_popup_claim_and_acknowledgement_are_generation_safe_and_separate_from_r
     notification = Notification.objects.get()
     candidate = pdf_recovery.pending_recovery_popup_payload()
 
-    claimed = pdf_recovery.claim_recovery_popup(**{
-        "scope": candidate["claimAction"]["scope"],
-        "episode_id": candidate["claimAction"]["episodeId"],
-        "expected_generation": candidate["claimAction"]["expectedGeneration"],
-        "pause_generation": candidate["claimAction"]["pauseGeneration"],
-    })
-    duplicate_claim = pdf_recovery.claim_recovery_popup(**{
-        "scope": candidate["claimAction"]["scope"],
-        "episode_id": candidate["claimAction"]["episodeId"],
-        "expected_generation": candidate["claimAction"]["expectedGeneration"],
-        "pause_generation": candidate["claimAction"]["pauseGeneration"],
-    })
+    claimed = pdf_recovery.claim_recovery_popup(
+        **{
+            "scope": candidate["claimAction"]["scope"],
+            "episode_id": candidate["claimAction"]["episodeId"],
+            "expected_generation": candidate["claimAction"]["expectedGeneration"],
+            "pause_generation": candidate["claimAction"]["pauseGeneration"],
+        }
+    )
+    duplicate_claim = pdf_recovery.claim_recovery_popup(
+        **{
+            "scope": candidate["claimAction"]["scope"],
+            "episode_id": candidate["claimAction"]["episodeId"],
+            "expected_generation": candidate["claimAction"]["expectedGeneration"],
+            "pause_generation": candidate["claimAction"]["pauseGeneration"],
+        }
+    )
 
     assert claimed.changed is True
     assert duplicate_claim.duplicate is True

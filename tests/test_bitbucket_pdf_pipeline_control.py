@@ -34,11 +34,23 @@ def test_extraction_only_pause_still_allows_publisher_to_drain(settings):
 
 
 @pytest.mark.parametrize("scope", ("pipeline", "supervisor", "publisher"))
-def test_publisher_recovery_scope_blocks_publication_claims(scope, settings):
+def test_active_recovery_probe_can_publish_but_retry_wait_cannot(scope, settings):
     settings.PDF_PIPELINE_RECOVERY_ENABLED = True
-    _recovery(scope, PDFPipelineRecoveryState.RECOVERING)
+    recovery = _recovery(scope, PDFPipelineRecoveryState.RECOVERING)
 
+    assert pdf_pipeline_control.publication_admission_allowed() is True
+
+    recovery.state = PDFPipelineRecoveryState.RETRY_WAIT
+    recovery.save(update_fields=("state",))
     assert pdf_pipeline_control.publication_admission_allowed() is False
+
+
+def test_publisher_probe_drains_staging_without_admitting_new_extraction(settings):
+    settings.PDF_PIPELINE_RECOVERY_ENABLED = True
+    _recovery("publisher", PDFPipelineRecoveryState.RECOVERING)
+
+    assert pdf_pipeline_control.publication_admission_allowed() is True
+    assert pdf_pipeline_control.extraction_admission_allowed() is False
 
 
 def test_individual_paused_slot_does_not_stop_healthy_slots(settings):

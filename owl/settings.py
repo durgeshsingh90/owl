@@ -298,6 +298,7 @@ CONFLUENCE_REFRESH_SCHEDULER_POLL_SECONDS = _env_int(
 OWL_ALLOW_IN_MEMORY_SECRET_STORE = _env_bool("OWL_ALLOW_IN_MEMORY_SECRET_STORE", False)
 OWL_ALLOW_LIVE_EXTERNAL_TESTS = _env_bool("OWL_ALLOW_LIVE_EXTERNAL_TESTS", False)
 OWL_ALLOW_SYNTHETIC_CONFLUENCE_TARGETS = _env_bool("OWL_ALLOW_SYNTHETIC_CONFLUENCE_TARGETS", False)
+OWL_ALLOW_SYNTHETIC_GIT_REMOTES = _env_bool("OWL_ALLOW_SYNTHETIC_GIT_REMOTES", False)
 
 _BITBUCKET_ALLOWED_HOSTS_RAW = os.getenv("BITBUCKET_ALLOWED_HOSTS")
 BITBUCKET_ALLOWED_HOSTS_EXPLICIT = _BITBUCKET_ALLOWED_HOSTS_RAW is not None
@@ -376,8 +377,8 @@ PDF_MAX_STAGED_PUBLICATIONS = min(
     _env_int("PDF_MAX_STAGED_PUBLICATIONS", 4, minimum=1),
     16,
 )
-# Preserve repository locality, but let the selected repository use the full
-# parser pool before work advances to the next repository.
+# Prefer repository locality while permitting bounded, fair spillover when the
+# preferred set cannot fill the parser pool.
 PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES = _env_int(
     "PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES",
     1,
@@ -387,6 +388,10 @@ PDF_PIPELINE_REPOSITORY_FAIRNESS_MAX_WAIT_SECONDS = _env_int(
     "PDF_PIPELINE_REPOSITORY_FAIRNESS_MAX_WAIT_SECONDS",
     120,
     minimum=1,
+)
+PDF_PIPELINE_REPOSITORY_WORK_CONSERVING = _env_bool(
+    "PDF_PIPELINE_REPOSITORY_WORK_CONSERVING",
+    True,
 )
 PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY = _env_int(
     "PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY",
@@ -401,6 +406,17 @@ if PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY > PDF_MAX_EXTRACTION_WORKERS:
     raise ImproperlyConfigured(
         "PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY cannot exceed PDF_MAX_EXTRACTION_WORKERS."
     )
+PDF_PIPELINE_REUSE_PARENT_FINGERPRINT = _env_bool(
+    "PDF_PIPELINE_REUSE_PARENT_FINGERPRINT",
+    True,
+)
+PDF_PUBLICATION_PAGE_BATCH_SIZE = _env_int(
+    "PDF_PUBLICATION_PAGE_BATCH_SIZE",
+    100,
+    minimum=1,
+)
+if PDF_PUBLICATION_PAGE_BATCH_SIZE > 1_000:
+    raise ImproperlyConfigured("PDF_PUBLICATION_PAGE_BATCH_SIZE cannot exceed 1000.")
 PDF_EXTRACTION_TIMEOUT_SECONDS = _env_int(
     "PDF_EXTRACTION_TIMEOUT_SECONDS",
     600,
@@ -509,6 +525,11 @@ PDF_PIPELINE_RATE_MIN_ELAPSED_SECONDS = _env_int(
 PDF_PIPELINE_RATE_MIN_EVENTS = _env_int(
     "PDF_PIPELINE_RATE_MIN_EVENTS",
     3,
+    minimum=1,
+)
+PDF_PIPELINE_SQLITE_LOCK_BLOCKED_MS = _env_int(
+    "PDF_PIPELINE_SQLITE_LOCK_BLOCKED_MS",
+    250,
     minimum=1,
 )
 if PDF_PIPELINE_RATE_MIN_ELAPSED_SECONDS > PDF_PIPELINE_RATE_WINDOW_SECONDS:
@@ -622,15 +643,25 @@ PDF_PIPELINE_RECOVERY_STABILITY_SECONDS = _env_int(
     60,
     minimum=5,
 )
+PDF_PIPELINE_RECOVERY_CORRELATION_WINDOW_SECONDS = _env_int(
+    "PDF_PIPELINE_RECOVERY_CORRELATION_WINDOW_SECONDS",
+    10,
+    minimum=1,
+)
+PDF_PIPELINE_RECOVERY_ESCALATION_SLOT_COUNT = _env_int(
+    "PDF_PIPELINE_RECOVERY_ESCALATION_SLOT_COUNT",
+    2,
+    minimum=2,
+)
+if PDF_PIPELINE_RECOVERY_ESCALATION_SLOT_COUNT > 8:
+    raise ImproperlyConfigured("PDF_PIPELINE_RECOVERY_ESCALATION_SLOT_COUNT cannot exceed 8.")
 PDF_PIPELINE_COMPONENT_ERROR_LOOP_THRESHOLD = _env_int(
     "PDF_PIPELINE_COMPONENT_ERROR_LOOP_THRESHOLD",
     5,
     minimum=1,
 )
 if PDF_PIPELINE_COMPONENT_ERROR_LOOP_THRESHOLD > 100:
-    raise ImproperlyConfigured(
-        "PDF_PIPELINE_COMPONENT_ERROR_LOOP_THRESHOLD cannot exceed 100."
-    )
+    raise ImproperlyConfigured("PDF_PIPELINE_COMPONENT_ERROR_LOOP_THRESHOLD cannot exceed 100.")
 BITBUCKET_SUPERVISOR_POLL_SECONDS = _env_int(
     "BITBUCKET_SUPERVISOR_POLL_SECONDS",
     5,
@@ -747,6 +778,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "bitbucket_search.services.foreground_metrics.ForegroundLatencyMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "core.middleware.LoopbackOpaqueOriginCsrfMiddleware",

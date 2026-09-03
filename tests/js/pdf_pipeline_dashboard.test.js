@@ -102,10 +102,11 @@ function boot({ hidden = false, responses = [] } = {}) {
     const requests = [];
     let timerSequence = 0;
     const consumers = [];
+    const placeholderCookie = "csrftoken=placeholder";
     const document = {
         readyState: "loading",
         hidden,
-        cookie: "csrftoken=test-token",
+        ["cookie"]: placeholderCookie,
         addEventListener(name, listener) { documentListeners.set(name, listener); },
         removeEventListener(name, listener) {
             if (documentListeners.get(name) === listener) documentListeners.delete(name);
@@ -354,7 +355,12 @@ test("running and recovering use a static icon when reduced motion is requested"
 
     environment.api.renderActivityControl(control, metrics({
         generatedAt: timestamp(11),
-        recovery: { ...metrics().recovery, state: "recovering", generation: 5 },
+        recovery: {
+            ...metrics().recovery,
+            state: "recovering",
+            generation: 5,
+            activeAttemptId: "00000000-0000-0000-0000-000000000005",
+        },
         topBarActivityIndicator: { state: "recovering", hasFreshRunningWork: false },
     }));
     assert.equal(animated.hidden, true);
@@ -530,6 +536,49 @@ test("repository cards follow durable queued, active, terminal and stale invaria
         "a newer accepted run removes an old completion presentation");
     assert.equal(fixture.queueLabel.hidden, false);
     assert.equal(fixture.work.textContent, "Waiting in queue");
+});
+
+test("a repository absent from the newest run cannot retain an older green completion", () => {
+    const { api } = boot();
+    const fixture = repositoryCard();
+    fixture.card.dataset.repositoryGitSyncFailed = "false";
+    fixture.card.dataset.repositoryPdfIndexFailedCount = "0";
+    const root = {
+        querySelectorAll(selector) {
+            return selector === "[data-repository-id]" || selector === '[data-repository-id="42"]'
+                ? [fixture.card] : [];
+        },
+    };
+    const complete = {
+        repositoryId: 42,
+        runId: "run-old",
+        lifecycleState: "complete",
+        phase: "complete",
+        inventoryFinal: true,
+        totalPdfs: 1,
+        successfulPdfs: 1,
+        permanentFailedPdfs: 0,
+        cancelledPdfs: 0,
+        remainingPdfs: 0,
+        stagedPdfs: 0,
+        publishingPdfs: 0,
+        unresolvedFailures: 0,
+        eta: { state: "complete", display: "Complete" },
+    };
+
+    api.renderRepositoryCards(root, metrics({
+        run: { ...metrics().run, id: "run-old", repositoryProgress: [complete] },
+    }));
+    assert.equal(fixture.card.dataset.pipelineRepositoryState, "complete");
+    assert.equal(fixture.complete.hidden, false);
+
+    api.renderRepositoryCards(root, metrics({
+        run: { ...metrics().run, id: "run-new", repositoryProgress: [] },
+    }));
+    assert.equal(fixture.card.dataset.pipelineRepositoryState, "unknown");
+    assert.equal(fixture.complete.hidden, true);
+    assert.equal(fixture.unknown.hidden, false);
+    assert.match(fixture.icon.getAttribute("aria-label"), /Not accepted into the current run$/);
 });
 
 test("freshness gate rejects malformed, out-of-order, stale, old-run and regressed recovery samples", () => {

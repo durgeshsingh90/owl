@@ -158,8 +158,12 @@ def test_throughput_includes_once_only_bytes_pages_characters_and_latencies(
     assert throughput["latencySampleCounts"] == {
         "extraction": 1,
         "publication": 1,
+        "stagedWait": 1,
         "endToEnd": 1,
     }
+    assert throughput["stagedWaitLatencyP95Ms"] == 1_000
+    assert throughput["pagesPersistedPerMinute"] == pytest.approx(2, abs=1e-3)
+    assert throughput["seriesTotals"]["written"] == 1
 
 
 def test_eta_uses_overlapped_critical_path_not_phase_sum():
@@ -290,6 +294,130 @@ def test_classifier_safety_precedence_is_fail_closed():
     assert source_blocked["code"] == "source_blocked"
 
 
+@pytest.mark.parametrize(
+    (
+        "expected",
+        "activity_code",
+        "queue_updates",
+        "worker_updates",
+        "publisher_updates",
+        "resource_updates",
+    ),
+    [
+        ("idle", "idle", {}, {}, {"state": "idle_no_demand"}, {}),
+        ("balanced", "extracting", {}, {}, {"state": "busy"}, {}),
+        ("extraction_limited", "extracting", {}, {}, {"state": "starved"}, {}),
+        (
+            "publication_limited",
+            "extracting",
+            {"backpressureDepthJobs": 1, "backpressureDepthGrowthPerSecond": 0.5},
+            {},
+            {"state": "busy"},
+            {},
+        ),
+        (
+            "sqlite_contended",
+            "extracting",
+            {"backpressureDepthJobs": 1},
+            {},
+            {"state": "blocked", "sqliteBusyErrors": 1},
+            {},
+        ),
+        (
+            "backpressure",
+            "extracting",
+            {"backpressureDepthJobs": 4},
+            {},
+            {"state": "busy"},
+            {},
+        ),
+        (
+            "source_blocked",
+            "source_blocked",
+            {"inputQueuedJobs": 2},
+            {},
+            {"state": "starved"},
+            {},
+        ),
+        (
+            "degraded",
+            "extracting",
+            {"inputQueuedJobs": 2},
+            {"unavailable": 1},
+            {"state": "unavailable"},
+            {},
+        ),
+        ("cpu_limited", "extracting", {}, {}, {"state": "busy"}, {"hostCpuPct": 95}),
+        (
+            "memory_limited",
+            "extracting",
+            {},
+            {},
+            {"state": "busy"},
+            {"hostMemoryAvailableBytes": 1},
+        ),
+        (
+            "disk_limited",
+            "extracting",
+            {},
+            {},
+            {"state": "busy"},
+            {"diskAvailableBytes": 1},
+        ),
+    ],
+)
+def test_classifier_covers_stable_primary_states(
+    settings,
+    expected,
+    activity_code,
+    queue_updates,
+    worker_updates,
+    publisher_updates,
+    resource_updates,
+):
+    queues = {
+        "backpressureDepthJobs": 0,
+        "backpressureThresholdJobs": 4,
+        "backpressureDepthGrowthPerSecond": 0,
+        "inputQueuedJobs": 0,
+        **queue_updates,
+    }
+    publisher = {
+        "state": "busy",
+        "sqliteBusyErrors": 0,
+        "sqliteLockWaitP95Ms": 0,
+        "sqliteLockBlockedThresholdMs": 250,
+        **publisher_updates,
+    }
+    resources = {
+        "hostCpuPct": 10,
+        "hostMemoryAvailableBytes": settings.PDF_PIPELINE_CONTROLLER_MIN_AVAILABLE_MEMORY_BYTES,
+        "diskAvailableBytes": settings.PDF_PIPELINE_CONTROLLER_MIN_AVAILABLE_DISK_BYTES,
+        **resource_updates,
+    }
+    throughput = {
+        "rateWindowSeconds": 60,
+        "extractedRate": {"state": "available"},
+        "writtenRate": {"state": "available"},
+    }
+
+    result = metrics._state_snapshot(
+        {"code": activity_code},
+        queues,
+        {"unavailable": 0, **worker_updates},
+        publisher,
+        {"state": PDFPipelineRecoveryState.HEALTHY},
+        resources,
+        throughput,
+    )
+
+    assert result["code"] == expected
+    assert result["reasonCode"]
+    assert result["reason"]
+    assert result["confidence"] in {"warming", "low", "medium", "high"}
+    assert result["window"]["durationSeconds"] == 60
+
+
 def test_metrics_build_is_read_only_for_run_summary(settings, tmp_path):
     settings.BITBUCKET_TEMP_ROOT = tmp_path / "temporary"
     repository = _repository("Read only")
@@ -370,6 +498,45 @@ def test_idle_indicator_uses_saved_repository_not_only_current_run(settings, tmp
     assert payload["topBarActivityIndicator"]["hasFreshRunningWork"] is False
 
 
+def test_waiting_and_completing_states_never_claim_fresh_running_artwork():
+    now = timezone.now()
+    recovery = {"activeAttemptId": None}
+    for code in ("backpressured", "source_blocked", "completing"):
+        indicator = metrics._indicator_snapshot(
+            now,
+            {"code": code, "reasonCode": f"activity_{code}", "evidenceAt": None},
+            None,
+            1,
+            1,
+            recovery,
+        )
+
+        assert indicator["state"] == "queued"
+        assert indicator["hasFreshRunningWork"] is False
+        assert indicator["evidenceAt"] is None
+
+
+def test_indicator_uses_authoritative_heartbeat_time_instead_of_sample_time():
+    now = timezone.now()
+    heartbeat = now - timedelta(seconds=4)
+    indicator = metrics._indicator_snapshot(
+        now,
+        {
+            "code": "extracting",
+            "reasonCode": "activity_extracting",
+            "evidenceAt": heartbeat.isoformat(),
+        },
+        None,
+        1,
+        1,
+        {"activeAttemptId": None},
+    )
+
+    assert indicator["state"] == "running"
+    assert indicator["hasFreshRunningWork"] is True
+    assert indicator["evidenceAt"] == heartbeat.isoformat()
+
+
 def test_stale_snapshot_removes_nonterminal_eta_and_running_evidence(settings, tmp_path):
     settings.PDF_PIPELINE_STATE_ROOT = tmp_path / "pipeline-state"
     settings.PDF_PIPELINE_METRICS_STALE_SECONDS = 15
@@ -411,6 +578,8 @@ def test_payload_omits_repository_and_document_secrets_and_sanitizes_tuning(sett
     settings.BITBUCKET_TEMP_ROOT = tmp_path / "temporary"
     private_remote = "ssh://git@example.invalid/private/secret-repository.git"
     private_filename = "customer-passwords.pdf"
+    private_path = "/Users/private"
+    private_marker = "ABC123SECRET"
     repository = BitbucketRepository.objects.create(
         display_name="Sensitive display name",
         canonical_remote_key="example.invalid/private/secret-repository",
@@ -429,10 +598,11 @@ def test_payload_omits_repository_and_document_secrets_and_sanitizes_tuning(sett
         previous_target=2,
         proposed_target=3,
         reason_code="throughput_improved",
-        reason="Read /Users/private/secret-repository and token ABC123SECRET",
+        reason=f"Read {private_path}/secret-repository and token {private_marker}",
+        expected_effect_code="improve_durable_throughput",
         confidence="medium",
         observation_window_seconds=60,
-        evidence={"throughput": 1.25, "path": "/Users/private", "token": "ABC123SECRET"},
+        evidence={"throughput": 1.25, "path": private_path, "token": private_marker},
     )
 
     payload = metrics.build_pipeline_metrics_payload(at=timezone.now(), resident_roles={})
@@ -440,9 +610,11 @@ def test_payload_omits_repository_and_document_secrets_and_sanitizes_tuning(sett
 
     assert private_remote not in serialized
     assert private_filename not in serialized
-    assert "/Users/private" not in serialized
-    assert "ABC123SECRET" not in serialized
+    assert private_path not in serialized
+    assert private_marker not in serialized
     assert payload["tuningEvents"][0]["evidence"] == {"throughput": 1.25}
+    assert payload["tuningEvents"][0]["expectedEffectCode"] == ("improve_durable_throughput")
+    assert "additional admitted parser" in payload["tuningEvents"][0]["expectedEffect"]
 
 
 def test_sample_ring_is_bounded_and_reports_history_truncation(
@@ -505,3 +677,110 @@ Pages speculative: 5.
 
     assert available == 35 * 4096
     assert source == "darwin_vm_stat"
+
+
+def test_queue_growth_and_publisher_duty_cycle_use_bounded_sample_history(monkeypatch):
+    now = timezone.now()
+    monkeypatch.setattr(
+        metrics,
+        "_SAMPLES",
+        deque(
+            (
+                {
+                    "at": (now - timedelta(seconds=20)).isoformat(),
+                    "backpressureDepthJobs": 1,
+                    "stagedBytes": 100,
+                    "publisherState": "starved",
+                },
+                {
+                    "at": (now - timedelta(seconds=10)).isoformat(),
+                    "backpressureDepthJobs": 3,
+                    "stagedBytes": 300,
+                    "publisherState": "busy",
+                },
+            )
+        ),
+    )
+
+    assert metrics._gauge_growth_rate(
+        "backpressureDepthJobs", 5, now=now, window_seconds=60
+    ) == pytest.approx(0.2)
+    duty = metrics._publisher_duty_cycle("blocked", now=now, window_seconds=60)
+
+    assert duty["dutyCycleMeasuredSeconds"] == 20
+    assert duty["starvedPct"] == 50
+    assert duty["busyPct"] == 50
+    assert duty["blockedPct"] == 0
+    assert sum(duty[key] for key in ("busyPct", "starvedPct", "noDemandPct", "blockedPct")) == 100
+
+
+def test_process_table_snapshot_normalizes_host_and_descendant_cpu(monkeypatch):
+    monkeypatch.setattr(metrics.os, "getpid", lambda: 100)
+    monkeypatch.setattr(metrics, "_schedulable_cpu_count", lambda: 4)
+    monkeypatch.setattr(
+        metrics.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="100 1 40.0 100\n101 100 80.0 200\n102 101 20.0 300\n200 1 60.0 400\n",
+        ),
+    )
+
+    host_cpu, tree_cpu, tree_rss = metrics._process_table_snapshot()
+
+    assert host_cpu == 50
+    assert tree_cpu == 35
+    assert tree_rss == 600 * 1_024
+
+
+def test_completed_run_eta_accuracy_scores_shadow_forecasts(monkeypatch):
+    completed_at = timezone.now()
+    run_id = "00000000-0000-0000-0000-000000000011"
+    monkeypatch.setattr(
+        metrics,
+        "_SAMPLES",
+        deque(
+            (
+                {
+                    "at": (completed_at - timedelta(seconds=100)).isoformat(),
+                    "run": {
+                        "id": run_id,
+                        "totalEta": {"state": "available", "etaSeconds": 120},
+                        "repositories": [
+                            {
+                                "repositoryId": 7,
+                                "eta": {"state": "available", "etaSeconds": 80},
+                            }
+                        ],
+                    },
+                },
+                {
+                    "at": (completed_at - timedelta(seconds=50)).isoformat(),
+                    "run": {
+                        "id": run_id,
+                        "totalEta": {"state": "available", "etaSeconds": 40},
+                        "repositories": [
+                            {
+                                "repositoryId": 7,
+                                "eta": {"state": "available", "etaSeconds": 40},
+                            }
+                        ],
+                    },
+                },
+            )
+        ),
+    )
+    run = {
+        "id": run_id,
+        "completedAt": completed_at.isoformat(),
+        "pdfs": {"total": 10},
+        "repositoryProgress": [{"repositoryId": 7, "completedAt": completed_at.isoformat()}],
+    }
+
+    accuracy = metrics._eta_accuracy_snapshot(run)
+
+    assert accuracy["state"] == "available"
+    assert accuracy["checkpointCount"] == 2
+    assert accuracy["medianAbsolutePercentageError"] == 20
+    assert accuracy["meanBiasPercentage"] == 0
+    assert accuracy["repositorySummaries"][0]["checkpointCount"] == 2

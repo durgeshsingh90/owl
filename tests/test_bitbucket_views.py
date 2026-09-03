@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
-from html import escape
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -329,7 +328,7 @@ def test_refresh_all_controls_are_accessible_and_truthful_when_unavailable(loopb
     assert empty_response.status_code == 200
     assert empty_html.count('action="/pdfs/repositories/refresh/"') == 1
     assert "bb-refresh-all--disabled" in desktop_empty
-    assert "data-pipeline-indicator-state=\"hidden\"" in desktop_empty
+    assert 'data-pipeline-indicator-state="hidden"' in desktop_empty
     assert " hidden" in desktop_empty
     assert "disabled" in desktop_empty
     assert "No repositories connected" in empty_html
@@ -367,9 +366,7 @@ def test_refresh_all_controls_are_accessible_and_truthful_when_unavailable(loopb
     assert mixed_response.context["active_repository_count"] == 1
     assert mixed_response.context["active_enabled_repository_count"] == 0
     assert 'data-active-repository-count="1"' in mixed_html
-    _assert_refresh_waits_for_authoritative_pipeline_snapshot(
-        _workspace_refresh_form(mixed_html)
-    )
+    _assert_refresh_waits_for_authoritative_pipeline_snapshot(_workspace_refresh_form(mixed_html))
 
 
 def test_refresh_all_controls_enable_only_when_all_repositories_are_idle(loopback_client):
@@ -787,15 +784,15 @@ def test_git_ready_repository_shows_pdf_worker_phase_in_sidebar_and_refresh_tool
     for card in cards:
         icon = re.search(r"<span[^>]+data-repository-state-icon[^>]*>", card)
         assert icon is not None
-        assert "bb-repository-state--working" in icon.group()
+        assert "bb-repository-state--pipeline-unknown" in icon.group()
         assert "bb-repository-state--ready" not in icon.group()
-        assert escape(activity["label"]) in icon.group()
+        assert "Pipeline status loading" in icon.group()
         label = re.search(
             r"<small[^>]+data-repository-work-label[^>]*>(.*?)</small>", card, re.DOTALL
         )
         assert label is not None
-        assert (" hidden" in label.group()) is (running == 0)
-        assert label.group(1).strip() == escape(activity["detail"])
+        assert " hidden" in label.group()
+        assert label.group(1).strip() == "Pipeline status loading"
         health = re.search(r"<small[^>]+data-repository-health[^>]*>(.*?)</small>", card, re.DOTALL)
         assert health is not None
         assert (" hidden" in health.group()) is (running == 0)
@@ -803,7 +800,8 @@ def test_git_ready_repository_shows_pdf_worker_phase_in_sidebar_and_refresh_tool
         assert "data-repository-run-timer" not in card
         assert "data-repository-success-ticks" in card
     for card in _repository_cards(html, idle.pk):
-        assert "bb-repository-state--ready" in card
+        assert "bb-repository-state--pipeline-unknown" in card
+        assert "Pipeline status loading" in card
         assert "bb-repository-state--working" not in card
         assert re.search(r"data-repository-work-label[^>]*\bhidden", card)
     form = _workspace_refresh_form(html)
@@ -1490,7 +1488,7 @@ def test_topbar_connection_test_checks_every_saved_repository_url_with_its_actua
         exclude_from_refresh=True,
         sync_state=RepositorySyncState.DISABLED,
     )
-    saved_credential = Mock(username="stored-user", token="private-token")
+    saved_credential = Mock(username="stored-user", token="not-a-real-token")
     resolved_urls = []
     calls = []
 
@@ -1522,14 +1520,14 @@ def test_topbar_connection_test_checks_every_saved_repository_url_with_its_actua
         ssh_repository,
     ]
     assert calls[0][1].username == "stored-user"
-    assert calls[0][1].token == "private-token"
+    assert calls[0][1].token == "not-a-real-token"
     assert calls[1][1] is None
     assert calls[2][1] is None
     payload = response.json()
     assert payload["state"] == "connected"
     assert payload["detail"] == "3 repository URL checks passed."
     assert "ssh" not in payload
-    assert "private-token" not in response.content.decode()
+    assert "not-a-real-token" not in response.content.decode()
 
 
 @override_settings(BITBUCKET_ALLOWED_HOSTS=("scm.example.invalid",))
@@ -1706,7 +1704,9 @@ def test_repository_poller_tracks_daily_idle_and_catalog_publication_contract():
     assert "Apply people" not in javascript
 
 
-def test_ready_repository_renders_green_tick_counts_and_shared_action_selection(loopback_client):
+def test_git_ready_repository_waits_for_current_pipeline_before_completion(
+    loopback_client,
+):
     repository = BitbucketRepository.objects.create(
         display_name="networking",
         canonical_remote_key="bitbucket.org/workspace/networking",
@@ -1727,8 +1727,8 @@ def test_ready_repository_renders_green_tick_counts_and_shared_action_selection(
     assert len(cards) == 2
     for card in cards:
         assert 'data-repository-state="ready"' in card
-        assert "bb-repository-state--ready" in card
-        assert 'role="img" aria-label="networking: Ready"' in card
+        assert "bb-repository-state--pipeline-unknown" in card
+        assert 'role="img" aria-label="networking: Pipeline status loading"' in card
         assert '<strong data-repository-name title="networking">networking</strong>' in card
         assert "<small data-repository-documents>12 PDF · 3 VSDX</small>" in card
         assert 'name="repository_ids"' in card
@@ -1739,6 +1739,7 @@ def test_ready_repository_renders_green_tick_counts_and_shared_action_selection(
         assert "data-repository-menu" not in card
         assert "data-repository-run-timer" not in card
         assert "data-repository-success-ticks" in card
+        assert 'data-index-succeeded="false" hidden' in card
         assert "data-repository-remaining" in card
         assert "Remaining 0 PDFs" in card
         assert "Repository is ready." not in card

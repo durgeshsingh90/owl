@@ -16,6 +16,7 @@ os.environ["CONFLUENCE_SECRET_BACKEND"] = "memory"
 os.environ["OWL_ALLOW_IN_MEMORY_SECRET_STORE"] = "true"
 os.environ["OWL_ALLOW_LIVE_EXTERNAL_TESTS"] = "false"
 os.environ["OWL_ALLOW_SYNTHETIC_CONFLUENCE_TARGETS"] = "true"
+os.environ["OWL_ALLOW_SYNTHETIC_GIT_REMOTES"] = "true"
 os.environ["CONFLUENCE_ACTION_COOLDOWN_SECONDS"] = "0"
 os.environ["OWL_ALLOW_NON_LOOPBACK"] = "false"
 os.environ["DJANGO_DEBUG"] = "false"
@@ -28,4 +29,5 @@ os.environ["BITBUCKET_ALLOWED_HOSTS"] = ""
 
 from owl.settings import *  # noqa: E402,F403
 
+OWL_SYNTHETIC_GIT_LOG_HOSTS = ("private.invalid",)
 PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]

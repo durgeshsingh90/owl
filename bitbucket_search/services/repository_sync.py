@@ -17,7 +17,13 @@ from datetime import time as datetime_time
 from pathlib import Path
 
 from django.conf import settings
-from django.db import IntegrityError, OperationalError, connection, transaction
+from django.db import (
+    IntegrityError,
+    OperationalError,
+    close_old_connections,
+    connection,
+    transaction,
+)
 from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q, Sum
 from django.utils import timezone
 
@@ -66,6 +72,7 @@ from bitbucket_search.services.repository_lock import repository_worker_wakeup_l
 from bitbucket_search.services.repository_urls import (
     NormalizedRepositoryURL,
     RepositoryURLValidationError,
+    is_synthetic_repository_record_url,
     normalize_repository_url,
 )
 from bitbucket_search.services.repository_worker_timing import (
@@ -950,10 +957,11 @@ def _queue_job(
     try:
         normalize_repository_url(repository.remote_url)
     except RepositoryURLValidationError as exc:
-        raise RepositorySyncError(
-            "repository_host_not_allowed",
-            "This repository host is no longer approved in OWL Settings.",
-        ) from exc
+        if not is_synthetic_repository_record_url(repository.remote_url):
+            raise RepositorySyncError(
+                "repository_host_not_allowed",
+                "This repository host is no longer approved in OWL Settings.",
+            ) from exc
     active = repository.sync_jobs.filter(status__in=ACTIVE_JOB_STATUSES).first()
     if active is not None:
         attach_sync_job_to_membership(active, run_repository)
@@ -1134,9 +1142,7 @@ def register_and_queue_repositories(remote_urls: Sequence[object]) -> QueueRepos
         )
 
     accepted = tuple(
-        result
-        for result in provisional
-        if result.job_created or result.run_repository is None
+        result for result in provisional if result.job_created or result.run_repository is None
     )
     run = None
     memberships: dict[int, PDFPipelineRunRepository] = {}
@@ -1198,9 +1204,7 @@ def queue_repository_refresh(repository_id: int) -> QueueResult:
     with transaction.atomic():
         queued = _queue_repository_refresh(repository_id, enabled_only=False)
         if queued.job.run_repository_id:
-            run_repository = PDFPipelineRunRepository.objects.get(
-                pk=queued.job.run_repository_id
-            )
+            run_repository = PDFPipelineRunRepository.objects.get(pk=queued.job.run_repository_id)
         else:
             run = accept_pipeline_run(
                 (repository_id,),
@@ -1275,9 +1279,7 @@ def queue_all_repository_refreshes(*, require_idle: bool = False) -> QueueAllRep
             fallback_worker_jobs[queued.job.pk] = queued.job
 
     accepted = tuple(
-        result
-        for result in provisional
-        if result.job_created or not result.job.run_repository_id
+        result for result in provisional if result.job_created or not result.job.run_repository_id
     )
     run = (
         accept_pipeline_run(
@@ -1568,6 +1570,7 @@ def launch_sync_worker() -> subprocess.Popen[bytes]:
         "--idle-timeout",
         str(settings.BITBUCKET_WORKER_IDLE_SECONDS),
     ]
+    close_old_connections()
     try:
         process = subprocess.Popen(
             command,

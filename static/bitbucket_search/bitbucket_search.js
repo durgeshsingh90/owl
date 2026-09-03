@@ -10,6 +10,7 @@
     // lifecycle UI. The older repository-status poll remains responsible for
     // catalogue totals and repository management controls only.
     const pipelineDashboardActive = Boolean(
+        typeof workspace.hasAttribute === "function" &&
         workspace.hasAttribute("data-pipeline-dashboard") &&
         window.OWLPDFPipelineDashboard,
     );
@@ -597,6 +598,10 @@
                 Number(repository.activity?.queuedPdfs || 0) +
                 Number(repository.activity?.runningPdfs || 0),
             ));
+            card.dataset.repositoryGitSyncFailed = String(Boolean(repository.gitSyncFailed));
+            card.dataset.repositoryPdfIndexFailedCount = String(
+                Number(repository.pdfIndexFailedCount || 0),
+            );
             card.dataset.repositoryRefreshExcluded = String(Boolean(repository.refreshExcluded));
             card.dataset.repositoryRemovalPending = String(Boolean(repository.hasRemovalPending));
             const stateIcon = card.querySelector("[data-repository-state-icon]");

@@ -48,7 +48,13 @@ def test_expected_loopback_disconnect_filter_suppresses_only_harmless_broken_pip
         "django.server", logging.INFO, "", 0, "- Broken pipe from %s", (("127.0.0.1", 54321),), None
     )
     remote = logging.LogRecord(
-        "django.server", logging.INFO, "", 0, "- Broken pipe from %s", (("203.0.113.8", 54321),), None
+        "django.server",
+        logging.INFO,
+        "",
+        0,
+        "- Broken pipe from %s",
+        (("203.0.113.8", 54321),),
+        None,
     )
     application_error = logging.LogRecord(
         "owl.bitbucket.indexing",

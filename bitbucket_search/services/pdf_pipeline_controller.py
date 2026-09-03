@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -98,12 +98,10 @@ class ResourceSignals:
                 and float(value) >= 0
                 for value in numeric
             )
-            cpu_valid = self.schedulable_cpu_count is not None and int(
-                self.schedulable_cpu_count
-            ) >= 1
-            usage_valid = self.host_cpu_pct is not None and 0 <= float(
-                self.host_cpu_pct
-            ) <= 100
+            cpu_valid = (
+                self.schedulable_cpu_count is not None and int(self.schedulable_cpu_count) >= 1
+            )
+            usage_valid = self.host_cpu_pct is not None and 0 <= float(self.host_cpu_pct) <= 100
         except (TypeError, ValueError, OverflowError):
             return False
         return valid and cpu_valid and usage_valid
@@ -155,19 +153,13 @@ class ControllerObservation:
         )
         try:
             if timezone.is_naive(self.at) or any(
-                isinstance(value, bool)
-                or not math.isfinite(float(value))
-                or float(value) < 0
+                isinstance(value, bool) or not math.isfinite(float(value)) or float(value) < 0
                 for value in numeric_nonnegative
             ):
                 return False
             if any(
                 value is not None
-                and (
-                    isinstance(value, bool)
-                    or not math.isfinite(float(value))
-                    or float(value) < 0
-                )
+                and (isinstance(value, bool) or not math.isfinite(float(value)) or float(value) < 0)
                 for value in optional_nonnegative
             ):
                 return False
@@ -181,9 +173,9 @@ class ControllerObservation:
                 return False
             if self.failure_rate is not None and float(self.failure_rate) > 1:
                 return False
-            return self.publisher_starved_pct is None or 0 <= float(
-                self.publisher_starved_pct
-            ) <= 100
+            return (
+                self.publisher_starved_pct is None or 0 <= float(self.publisher_starved_pct) <= 100
+            )
         except (TypeError, ValueError, OverflowError):
             return False
 
@@ -235,28 +227,18 @@ def config_from_settings() -> ControllerConfig:
         observation_seconds=int(
             getattr(settings, "PDF_PIPELINE_CONTROLLER_OBSERVATION_SECONDS", 60)
         ),
-        cooldown_seconds=int(
-            getattr(settings, "PDF_PIPELINE_CONTROLLER_COOLDOWN_SECONDS", 120)
-        ),
-        hysteresis_samples=int(
-            getattr(settings, "PDF_PIPELINE_CONTROLLER_HYSTERESIS_SAMPLES", 3)
-        ),
-        minimum_documents=int(
-            getattr(settings, "PDF_PIPELINE_CONTROLLER_MIN_DOCUMENTS", 3)
-        ),
+        cooldown_seconds=int(getattr(settings, "PDF_PIPELINE_CONTROLLER_COOLDOWN_SECONDS", 120)),
+        hysteresis_samples=int(getattr(settings, "PDF_PIPELINE_CONTROLLER_HYSTERESIS_SAMPLES", 3)),
+        minimum_documents=int(getattr(settings, "PDF_PIPELINE_CONTROLLER_MIN_DOCUMENTS", 3)),
         minimum_pages=int(getattr(settings, "PDF_PIPELINE_CONTROLLER_MIN_PAGES", 10)),
-        minimum_bytes=int(
-            getattr(settings, "PDF_PIPELINE_CONTROLLER_MIN_BYTES", 1_048_576)
-        ),
+        minimum_bytes=int(getattr(settings, "PDF_PIPELINE_CONTROLLER_MIN_BYTES", 1_048_576)),
         max_ordinary_decrease=int(
             getattr(settings, "PDF_PIPELINE_CONTROLLER_MAX_ORDINARY_DECREASE", 2)
         ),
         minimum_throughput_improvement=float(
             getattr(settings, "PDF_PIPELINE_CONTROLLER_MIN_THROUGHPUT_IMPROVEMENT", 0.05)
         ),
-        max_host_cpu_pct=float(
-            getattr(settings, "PDF_PIPELINE_CONTROLLER_MAX_HOST_CPU_PCT", 85.0)
-        ),
+        max_host_cpu_pct=float(getattr(settings, "PDF_PIPELINE_CONTROLLER_MAX_HOST_CPU_PCT", 85.0)),
         min_available_memory_bytes=int(
             getattr(
                 settings,
@@ -326,9 +308,7 @@ def validate_benchmark_gate(config: ControllerConfig) -> BenchmarkGate:
         return BenchmarkGate(False, "benchmark_workload_not_representative")
     if (
         not isinstance(fixed_targets, list)
-        or not {1, 2, 4, 6, 8}.issubset(
-            {value for value in fixed_targets if type(value) is int}
-        )
+        or not {1, 2, 4, 6, 8}.issubset({value for value in fixed_targets if type(value) is int})
         or type(repetitions) is not int
         or repetitions < 3
     ):
@@ -388,9 +368,7 @@ def admission_target_from_owner_snapshot(*, at: datetime | None = None) -> int:
     if not isinstance(payload, dict) or payload.get("schemaVersion") != METRICS_SCHEMA_VERSION:
         return fallback
     try:
-        generated_at = datetime.fromisoformat(
-            str(payload["generatedAt"]).replace("Z", "+00:00")
-        )
+        generated_at = datetime.fromisoformat(str(payload["generatedAt"]).replace("Z", "+00:00"))
     except (KeyError, TypeError, ValueError):
         return fallback
     now = at or timezone.now()
@@ -462,9 +440,7 @@ def _safety_ceiling(
         resources.available_disk_bytes < config.min_available_disk_bytes
     ):
         return 0, "critical_disk_headroom"
-    if foreground_p95_ms is not None and (
-        foreground_p95_ms > config.max_foreground_p95_ms * 4
-    ):
+    if foreground_p95_ms is not None and (foreground_p95_ms > config.max_foreground_p95_ms * 4):
         return 0, "critical_foreground_latency"
     return effective_hard_max, None
 
@@ -479,6 +455,7 @@ def controller_snapshot(
     foreground_p95_ms: float | None = None,
     cooldown_until: datetime | None = None,
     proposed_target: int | None = None,
+    at: datetime | None = None,
 ) -> dict[str, Any]:
     """Build the explicit ceiling/precedence contract used by metrics and UI."""
 
@@ -504,9 +481,7 @@ def controller_snapshot(
         foreground_p95_ms=foreground_p95_ms,
     )
     ordinary_ceiling = (
-        resource_aware
-        if adaptive_active and resource_aware is not None
-        else effective_hard_max
+        resource_aware if adaptive_active and resource_aware is not None else effective_hard_max
     )
     effective = max(
         0,
@@ -530,7 +505,11 @@ def controller_snapshot(
         limiting_reason = "requested_target"
     return {
         "mode": config.mode,
-        "operatingMode": "adaptive" if adaptive_active else config.mode if config.mode != "adaptive" else "fixed",
+        "operatingMode": "adaptive"
+        if adaptive_active
+        else config.mode
+        if config.mode != "adaptive"
+        else "fixed",
         "adaptiveEnabled": adaptive_active,
         "adaptiveEnablementReason": gate.reason_code,
         "killSwitch": config.kill_switch,
@@ -545,7 +524,9 @@ def controller_snapshot(
         "backgroundCpuBudgetFraction": config.cpu_budget_fraction,
         "backgroundCpuSlotBudget": raw_slots,
         "otherActiveOrReservedCpuHeavyOwlSlots": competing_slots,
-        "resourceReservationFreshAt": timezone.now().isoformat() if signals.complete else None,
+        "resourceReservationFreshAt": (at or timezone.now()).isoformat()
+        if signals.complete
+        else None,
         "resourceAwarePdfCeiling": resource_aware,
         "safetyCeiling": safety_ceiling,
         "effectiveAdmissionTarget": effective,
@@ -557,6 +538,10 @@ def controller_snapshot(
 
 def _evidence(observation: ControllerObservation) -> dict[str, int | float | bool | None]:
     return {
+        "observation_seconds": observation.observation_seconds,
+        "completed_documents": observation.completed_documents,
+        "completed_pages": observation.completed_pages,
+        "completed_bytes": observation.completed_bytes,
         "eligible_jobs": observation.eligible_jobs,
         "active_extractors": observation.active_extractors,
         "occupancy_pct": observation.occupancy_pct,
@@ -568,7 +553,22 @@ def _evidence(observation: ControllerObservation) -> dict[str, int | float | boo
         "sqlite_busy_errors": observation.sqlite_busy_errors,
         "foreground_p95_ms": observation.foreground_p95_ms,
         "failure_rate": observation.failure_rate,
+        "host_cpu_pct": observation.resources.host_cpu_pct,
+        "available_memory_bytes": observation.resources.available_memory_bytes,
+        "available_disk_bytes": observation.resources.available_disk_bytes,
+        "semantic_workers_active": observation.resources.semantic_workers_active,
+        "git_workers_active": observation.resources.git_workers_active,
     }
+
+
+def _expected_effect_code(decision: ControllerDecision) -> str:
+    return {
+        "increase": "improve_durable_throughput",
+        "decrease": "relieve_measured_pressure",
+        "pause": "protect_integrity_and_foreground_work",
+        "rollback": "restore_last_effective_target",
+        "hold": "preserve_target_pending_evidence",
+    }[decision.action]
 
 
 def observation_from_metrics(
@@ -629,9 +629,7 @@ def observation_from_metrics(
     failure_rate = throughput.get("failedPerSecond")
     document_rate = throughput.get("documentsCompletedPerSecond")
     denominator = float(document_rate or 0) + float(failure_rate or 0)
-    normalized_failure_rate = (
-        float(failure_rate or 0) / denominator if denominator > 0 else None
-    )
+    normalized_failure_rate = float(failure_rate or 0) / denominator if denominator > 0 else None
     activity = payload.get("activity")
     activity = activity if isinstance(activity, Mapping) else {}
     return ControllerObservation(
@@ -649,9 +647,7 @@ def observation_from_metrics(
         eligible_jobs=int(queues.get("eligibleInputJobs") or 0),
         active_extractors=int(workers.get("active") or 0),
         occupancy_pct=(
-            float(workers["occupancyPct"])
-            if workers.get("occupancyPct") is not None
-            else None
+            float(workers["occupancyPct"]) if workers.get("occupancyPct") is not None else None
         ),
         backpressure_depth=int(queues.get("backpressureDepthJobs") or 0),
         backpressure_threshold=max(
@@ -664,9 +660,7 @@ def observation_from_metrics(
             else None
         ),
         publisher_starved_pct=(
-            float(publisher["starvedPct"])
-            if publisher.get("starvedPct") is not None
-            else None
+            float(publisher["starvedPct"]) if publisher.get("starvedPct") is not None else None
         ),
         extractor_outputs_per_second=(
             float(extracted_rate["perSecond"])
@@ -674,9 +668,7 @@ def observation_from_metrics(
             else None
         ),
         writer_publications_per_second=(
-            float(written_rate["perSecond"])
-            if written_rate.get("perSecond") is not None
-            else None
+            float(written_rate["perSecond"]) if written_rate.get("perSecond") is not None else None
         ),
         sqlite_busy_errors=(
             int(publisher["sqliteBusyErrors"])
@@ -806,8 +798,7 @@ def recommend_target(
         observation.backpressure_threshold // 4,
     )
     publisher_awaiting_input = (
-        observation.publisher_starved_pct is not None
-        and observation.publisher_starved_pct >= 25.0
+        observation.publisher_starved_pct is not None and observation.publisher_starved_pct >= 25.0
     )
     occupied = observation.occupancy_pct is not None and observation.occupancy_pct >= 80.0
     continuing_demand = observation.eligible_jobs >= max(2, current_target)
@@ -881,6 +872,7 @@ class PDFPipelineController:
             proposed_target=decision.proposed_target,
             reason_code=decision.reason_code,
             reason="Measured PDF pipeline guardrails produced this bounded decision.",
+            expected_effect_code=_expected_effect_code(decision),
             confidence=decision.confidence,
             observation_window_seconds=self.config.observation_seconds,
             evidence=decision.evidence,
@@ -897,11 +889,13 @@ class PDFPipelineController:
         pending = self._pending_evaluation
         if pending is None or observation.at < pending.evaluate_after:
             return None
-        outcome = "inconclusive"
+        outcome = "shadow_not_applied" if pending.shadow else "inconclusive"
         rollback: ControllerDecision | None = None
         current_rate = observation.writer_publications_per_second
         if not pending.shadow and pending.baseline_writer_rate and current_rate is not None:
-            improvement = (current_rate - pending.baseline_writer_rate) / pending.baseline_writer_rate
+            improvement = (
+                current_rate - pending.baseline_writer_rate
+            ) / pending.baseline_writer_rate
             if improvement >= self.config.minimum_throughput_improvement:
                 outcome = "helped"
             else:
@@ -966,6 +960,7 @@ class PDFPipelineController:
                 recovery_state=observation.recovery_state,
                 recovery_scope=observation.recovery_scope,
                 foreground_p95_ms=observation.foreground_p95_ms,
+                at=observation.at,
             )
         if self.config.mode == "adaptive" and not gate.passed:
             self.current_target = fixed_target
@@ -977,12 +972,11 @@ class PDFPipelineController:
                 recovery_state=observation.recovery_state,
                 recovery_scope=observation.recovery_scope,
                 foreground_p95_ms=observation.foreground_p95_ms,
+                at=observation.at,
             )
 
         if self.config.mode == "adaptive" and (
-            not observation.fresh
-            or not observation.valid
-            or not observation.resources.complete
+            not observation.fresh or not observation.valid or not observation.resources.complete
         ):
             # Never keep a prior adaptive increase when the owner loses the
             # critical evidence needed to justify it.
@@ -995,6 +989,7 @@ class PDFPipelineController:
                 recovery_state=observation.recovery_state,
                 recovery_scope=observation.recovery_scope,
                 foreground_p95_ms=observation.foreground_p95_ms,
+                at=observation.at,
             )
 
         if observation.recovery_state != SAFE_RECOVERY_STATE:
@@ -1016,6 +1011,7 @@ class PDFPipelineController:
                 recovery_scope=observation.recovery_scope,
                 foreground_p95_ms=observation.foreground_p95_ms,
                 cooldown_until=self.cooldown_until,
+                at=observation.at,
             )
 
         decision = recommend_target(
@@ -1087,7 +1083,43 @@ class PDFPipelineController:
             foreground_p95_ms=observation.foreground_p95_ms,
             cooldown_until=self.cooldown_until,
             proposed_target=proposed if self.config.mode == "shadow" else None,
+            at=observation.at,
         )
+
+
+def replay_controller_observations(
+    config: ControllerConfig,
+    observations: Iterable[ControllerObservation],
+) -> tuple[dict[str, Any], ...]:
+    """Replay a bounded chronological trace without writes or admission changes."""
+
+    controller = PDFPipelineController(config)
+    rows: list[dict[str, Any]] = []
+    previous_at: datetime | None = None
+    for index, observation in enumerate(observations):
+        if index >= 10_000:
+            raise ValueError("Controller replay is limited to 10000 observations.")
+        if not isinstance(observation, ControllerObservation):
+            raise ValueError("Controller replay entries must be controller observations.")
+        if timezone.is_naive(observation.at):
+            raise ValueError("Controller replay timestamps must be timezone-aware.")
+        if previous_at is not None and observation.at <= previous_at:
+            raise ValueError("Controller replay timestamps must be strictly increasing.")
+        snapshot = controller.evaluate(observation, persist=False)
+        rows.append(
+            {
+                "index": index,
+                "at": observation.at.isoformat(),
+                "effectiveAdmissionTarget": snapshot["effectiveAdmissionTarget"],
+                "proposedTarget": snapshot["proposedTarget"],
+                "limitingReason": snapshot["limitingReason"],
+                "tuningFrozen": snapshot["tuningFrozen"],
+                "cooldownUntil": snapshot["cooldownUntil"],
+                "resourceReservationFreshAt": snapshot["resourceReservationFreshAt"],
+            }
+        )
+        previous_at = observation.at
+    return tuple(rows)
 
 
 def _resource_mapping(resources: ResourceSignals) -> dict[str, int | float | None]:

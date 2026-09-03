@@ -11,18 +11,21 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
 from django.conf import settings
 from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
-from django.db import close_old_connections
+from django.db import close_old_connections, connection, connections
 from django.utils import timezone
 
 from bitbucket_search.models import (
     PDFExtractionJob,
+    PDFExtractionJobPhase,
     PDFExtractionJobStatus,
+    PDFPipelineRecovery,
     PDFPipelineRecoveryState,
     RepositorySyncJob,
     RepositorySyncJobStatus,
@@ -36,7 +39,10 @@ from bitbucket_search.services.pdf_pipeline_controller import (
     ControllerEvaluationError,
     PDFPipelineController,
 )
-from bitbucket_search.services.pdf_pipeline_metrics import sample_pipeline_metrics
+from bitbucket_search.services.pdf_pipeline_metrics import (
+    _eligible_input_snapshot,
+    sample_pipeline_metrics,
+)
 from bitbucket_search.services.pdf_pipeline_runs import reconcile_open_pipeline_runs
 from bitbucket_search.services.pdf_recovery import (
     RecoveryConflict,
@@ -47,6 +53,7 @@ from bitbucket_search.services.pdf_recovery import (
     begin_recovery_attempt,
     configured_recovery_stability_seconds,
     ensure_recovery_scope,
+    escalate_correlated_recovery,
     extraction_slot_scope,
     fail_recovery_attempt,
     record_recovery_incident,
@@ -107,6 +114,7 @@ class _WorkerRecoveryProbe:
     attempt_id: uuid.UUID
     generation: int
     started_monotonic: float
+    started_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +268,7 @@ def _prepare_pdf_worker_launch(
     role: str,
     *,
     monotonic_now: float | None = None,
+    active_parent_scopes: frozenset[str] = frozenset(),
 ) -> _WorkerLaunchPermission:
     """Return whether an absent PDF role may launch under its durable circuit."""
 
@@ -267,6 +276,58 @@ def _prepare_pdf_worker_launch(
     if scope is None or not getattr(settings, "PDF_PIPELINE_RECOVERY_ENABLED", True):
         return _WorkerLaunchPermission(allowed=True)
 
+    parent_scopes = [RecoveryScope.PIPELINE.value]
+    if scope.startswith("extraction_slot:"):
+        parent_scopes.extend((RecoveryScope.EXTRACTION_POOL.value, RecoveryScope.PUBLISHER.value))
+    for parent_scope in parent_scopes:
+        parent = ensure_recovery_scope(parent_scope)
+        parent_probe_active = bool(
+            parent_scope in active_parent_scopes
+            and parent.state
+            in {
+                PDFPipelineRecoveryState.RECOVERING,
+                PDFPipelineRecoveryState.RECOVERING_HALF_OPEN,
+            }
+        )
+        # A publisher probe may drain durable staged output, but new parser
+        # admission stays closed until that downstream probe is stable.
+        if parent_scope == RecoveryScope.PUBLISHER and parent.state != (
+            PDFPipelineRecoveryState.HEALTHY
+        ):
+            return _WorkerLaunchPermission(allowed=False)
+        if parent.state != PDFPipelineRecoveryState.HEALTHY and not parent_probe_active:
+            return _WorkerLaunchPermission(allowed=False)
+
+    # A broader probe owns the experiment. Do not nest a child probe and count
+    # one failed process against two recovery budgets.
+    if active_parent_scopes:
+        recovery = ensure_recovery_scope(scope)
+        return _WorkerLaunchPermission(allowed=recovery.state == PDFPipelineRecoveryState.HEALTHY)
+
+    return _prepare_recovery_scope_launch(scope, monotonic_now=monotonic_now)
+
+
+def _maintain_parent_recovery_probe(
+    scope: str,
+    probe: _WorkerRecoveryProbe | None,
+    *,
+    monotonic_now: float | None = None,
+) -> _WorkerLaunchPermission:
+    """Keep one in-memory owner for a durable group-scope probe."""
+
+    recovery = ensure_recovery_scope(scope)
+    if probe is not None:
+        if (
+            recovery.state
+            in {
+                PDFPipelineRecoveryState.RECOVERING,
+                PDFPipelineRecoveryState.RECOVERING_HALF_OPEN,
+            }
+            and recovery.active_attempt_id == probe.attempt_id
+            and recovery.generation == probe.generation
+        ):
+            return _WorkerLaunchPermission(allowed=True, probe=probe)
+        probe = None
     return _prepare_recovery_scope_launch(scope, monotonic_now=monotonic_now)
 
 
@@ -321,6 +382,7 @@ def _prepare_recovery_scope_launch(
             attempt_id=attempt_id,
             generation=transition.recovery.generation,
             started_monotonic=(time.monotonic() if monotonic_now is None else monotonic_now),
+            started_at=timezone.now(),
         ),
     )
 
@@ -336,7 +398,64 @@ def _record_pdf_worker_failure(
     scope = _pdf_recovery_scope_for_role(role)
     if scope is None or not getattr(settings, "PDF_PIPELINE_RECOVERY_ENABLED", True):
         return
+    owning_scopes = [RecoveryScope.PIPELINE.value]
+    if scope.startswith("extraction_slot:"):
+        owning_scopes.append(RecoveryScope.EXTRACTION_POOL.value)
+    for owning_scope in owning_scopes:
+        owner = ensure_recovery_scope(owning_scope)
+        if owner.state == PDFPipelineRecoveryState.HEALTHY:
+            continue
+        if (
+            owner.state
+            in {
+                PDFPipelineRecoveryState.RECOVERING,
+                PDFPipelineRecoveryState.RECOVERING_HALF_OPEN,
+            }
+            and owner.active_attempt_id is not None
+        ):
+            fail_recovery_attempt(
+                owning_scope,
+                attempt_id=owner.active_attempt_id,
+                expected_generation=owner.generation,
+                reason_code=reason_code,
+            )
+        # A broader episode already owns this component's incident stream.
+        # Do not reopen a child budget or count the same process exit twice.
+        return
     _record_recovery_scope_failure(scope, reason_code=reason_code, probe=probe)
+    if scope.startswith("extraction_slot:"):
+        _escalate_correlated_extraction_failures(reason_code)
+
+
+def _escalate_correlated_extraction_failures(
+    reason_code: RecoveryReasonCode,
+    *,
+    occurred_at: datetime | None = None,
+) -> None:
+    """Move a burst of equivalent slot failures into one pool episode."""
+
+    now = occurred_at or timezone.now()
+    cutoff = now - timedelta(seconds=int(settings.PDF_PIPELINE_RECOVERY_CORRELATION_WINDOW_SECONDS))
+    required = int(settings.PDF_PIPELINE_RECOVERY_ESCALATION_SLOT_COUNT)
+    scopes = tuple(
+        PDFPipelineRecovery.objects.filter(
+            scope__startswith="extraction_slot:",
+            reason_code=reason_code.value,
+            last_failure_at__gte=cutoff,
+        )
+        .exclude(state=PDFPipelineRecoveryState.HEALTHY)
+        .order_by("last_failure_at", "scope")
+        .values_list("scope", flat=True)
+    )
+    if len(scopes) < required:
+        return
+    escalate_correlated_recovery(
+        list(scopes),
+        target_scope=RecoveryScope.EXTRACTION_POOL,
+        reason_code=reason_code,
+        correlation_id=uuid.uuid4(),
+        occurred_at=now,
+    )
 
 
 def _record_recovery_scope_failure(
@@ -382,7 +501,7 @@ def _complete_stable_pdf_worker_probes(
     *,
     monotonic_now: float | None = None,
 ) -> None:
-    """Close replacement episodes only after a live process survives the gate."""
+    """Close replacement episodes only after the demand-aware stability gate."""
 
     now = time.monotonic() if monotonic_now is None else monotonic_now
     stability_seconds = configured_recovery_stability_seconds()
@@ -392,6 +511,21 @@ def _complete_stable_pdf_worker_probes(
             continue
         if now - probe.started_monotonic < stability_seconds:
             continue
+        if not _worker_probe_progress_confirmed(role, worker, probe):
+            # Allow one extra stability window for a process that is between
+            # short jobs. If eligible demand still produces no fresh owned
+            # heartbeat or durable boundary, fail the already-counted probe.
+            if now - probe.started_monotonic < stability_seconds * 2:
+                continue
+            _stop_resident_bitbucket_worker(worker)
+            fail_recovery_attempt(
+                probe.scope,
+                attempt_id=probe.attempt_id,
+                expected_generation=probe.generation,
+                reason_code=RecoveryReasonCode.NO_FORWARD_PROGRESS,
+            )
+            probes.pop(role, None)
+            continue
         succeed_recovery_attempt(
             probe.scope,
             attempt_id=probe.attempt_id,
@@ -399,6 +533,136 @@ def _complete_stable_pdf_worker_probes(
             stability_confirmed=True,
         )
         probes.pop(role, None)
+
+
+def _worker_probe_progress_confirmed(
+    role: str,
+    worker: subprocess.Popen[bytes],
+    probe: _WorkerRecoveryProbe,
+) -> bool:
+    """Require progress under demand; permit a full stable idle window otherwise."""
+
+    worker_pid = getattr(worker, "pid", None)
+    fresh_cutoff = timezone.now() - timedelta(
+        seconds=int(getattr(settings, "PDF_EXTRACTION_JOB_LEASE_SECONDS", 30))
+    )
+    if role == "pdf-writer-1":
+        candidates = PDFExtractionJob.objects.filter(
+            status=PDFExtractionJobStatus.RUNNING,
+            phase=PDFExtractionJobPhase.PUBLISHING,
+        )
+        if not candidates.exists():
+            return True
+        return bool(
+            candidates.filter(
+                worker_pid=worker_pid,
+                heartbeat_at__gte=fresh_cutoff,
+            ).exists()
+            or PDFExtractionJob.objects.filter(published_at__gte=probe.started_at).exists()
+        )
+
+    eligible_jobs, _oldest = _eligible_input_snapshot()
+    owned = PDFExtractionJob.objects.filter(
+        status=PDFExtractionJobStatus.RUNNING,
+        worker_pid=worker_pid,
+        heartbeat_at__gte=fresh_cutoff,
+    ).exclude(phase=PDFExtractionJobPhase.PUBLISHING)
+    if eligible_jobs <= 0 and not owned.exists():
+        return True
+    return bool(
+        owned.exists() or PDFExtractionJob.objects.filter(staged_at__gte=probe.started_at).exists()
+    )
+
+
+def _complete_parent_recovery_probe(
+    scope: str,
+    workers: dict[str, subprocess.Popen[bytes]],
+    probe: _WorkerRecoveryProbe | None,
+    *,
+    monotonic_now: float | None = None,
+) -> _WorkerRecoveryProbe | None:
+    """Finish one pool/pipeline probe only after demand-aware progress."""
+
+    if probe is None:
+        return None
+    now = time.monotonic() if monotonic_now is None else monotonic_now
+    stability_seconds = configured_recovery_stability_seconds()
+    if now - probe.started_monotonic < stability_seconds:
+        return probe
+    role_prefixes = (
+        ("pdf-index-",) if scope == RecoveryScope.EXTRACTION_POOL else ("pdf-index-", "pdf-writer-")
+    )
+    live_workers = {
+        role: worker
+        for role, worker in workers.items()
+        if role.startswith(role_prefixes) and worker.poll() is None
+    }
+    progress_confirmed = bool(live_workers) and _parent_probe_progress_confirmed(
+        scope,
+        live_workers,
+        probe,
+    )
+    if not progress_confirmed:
+        if now - probe.started_monotonic < stability_seconds * 2:
+            return probe
+        for worker in live_workers.values():
+            _stop_resident_bitbucket_worker(worker)
+        fail_recovery_attempt(
+            probe.scope,
+            attempt_id=probe.attempt_id,
+            expected_generation=probe.generation,
+            reason_code=RecoveryReasonCode.NO_FORWARD_PROGRESS,
+        )
+        return None
+    succeed_recovery_attempt(
+        probe.scope,
+        attempt_id=probe.attempt_id,
+        expected_generation=probe.generation,
+        stability_confirmed=True,
+    )
+    return None
+
+
+def _parent_probe_progress_confirmed(
+    scope: str,
+    workers: dict[str, subprocess.Popen[bytes]],
+    probe: _WorkerRecoveryProbe,
+) -> bool:
+    """Accept idle stability or fresh owned work at a durable boundary."""
+
+    worker_pids = tuple(
+        worker.pid for worker in workers.values() if isinstance(getattr(worker, "pid", None), int)
+    )
+    eligible_jobs, _oldest = _eligible_input_snapshot()
+    publishing_exists = PDFExtractionJob.objects.filter(
+        status=PDFExtractionJobStatus.RUNNING,
+        phase=PDFExtractionJobPhase.PUBLISHING,
+    ).exists()
+    demand_exists = eligible_jobs > 0 or (
+        scope != RecoveryScope.EXTRACTION_POOL and publishing_exists
+    )
+    if not demand_exists:
+        return True
+    fresh_cutoff = max(
+        probe.started_at,
+        timezone.now()
+        - timedelta(seconds=int(getattr(settings, "PDF_EXTRACTION_JOB_LEASE_SECONDS", 30))),
+    )
+    owned = PDFExtractionJob.objects.filter(
+        status=PDFExtractionJobStatus.RUNNING,
+        worker_pid__in=worker_pids,
+        heartbeat_at__gte=fresh_cutoff,
+    )
+    if scope == RecoveryScope.EXTRACTION_POOL:
+        owned = owned.exclude(phase=PDFExtractionJobPhase.PUBLISHING)
+    return bool(
+        owned.exists()
+        or PDFExtractionJob.objects.filter(staged_at__gte=probe.started_at).exists()
+        or (
+            scope != RecoveryScope.EXTRACTION_POOL
+            and PDFExtractionJob.objects.filter(published_at__gte=probe.started_at).exists()
+        )
+    )
 
 
 def _background_work_active() -> bool:
@@ -685,6 +949,12 @@ def _launch_resident_bitbucket_worker(
 
     environment = os.environ.copy()
     environment[RESIDENT_SUPERVISOR_PID_ENV] = str(os.getpid())
+    # Each management-command child opens its own Django connection after exec.
+    # Do not carry this supervisor thread's SQLite handle across the spawn.
+    if connection.in_atomic_block:
+        close_old_connections()
+    else:
+        connections.close_all()
     try:
         process = subprocess.Popen(
             arguments,
@@ -992,6 +1262,8 @@ def _run_bitbucket_queue_loop(
     semantic_failed_previous_pass = False
     pipeline_controller = PDFPipelineController()
     controller_recovery_probe: _WorkerRecoveryProbe | None = None
+    pipeline_recovery_probe: _WorkerRecoveryProbe | None = None
+    extraction_pool_recovery_probe: _WorkerRecoveryProbe | None = None
 
     def publish_repository_worker_state(active: bool) -> None:
         nonlocal repository_workers_active
@@ -1034,6 +1306,8 @@ def _run_bitbucket_queue_loop(
                         scope = _pdf_recovery_scope_for_role(role)
                         if scope is not None:
                             ensure_recovery_scope(scope)
+                    ensure_recovery_scope(RecoveryScope.PIPELINE.value)
+                    ensure_recovery_scope(RecoveryScope.EXTRACTION_POOL.value)
                     ensure_recovery_scope(RecoveryScope.CONTROLLER.value)
                 # This process owns stale-lease recovery for the whole pass,
                 # including the brief startup window before child controllers
@@ -1143,6 +1417,26 @@ def _run_bitbucket_queue_loop(
                             )
                         semantic_failed_previous_pass = False
 
+                active_parent_scopes: set[str] = set()
+                if getattr(settings, "PDF_PIPELINE_RECOVERY_ENABLED", True):
+                    pipeline_permission = _maintain_parent_recovery_probe(
+                        RecoveryScope.PIPELINE.value,
+                        pipeline_recovery_probe,
+                    )
+                    pipeline_recovery_probe = pipeline_permission.probe
+                    if pipeline_recovery_probe is not None:
+                        active_parent_scopes.add(RecoveryScope.PIPELINE.value)
+                    if pipeline_permission.allowed:
+                        pool_permission = _maintain_parent_recovery_probe(
+                            RecoveryScope.EXTRACTION_POOL.value,
+                            extraction_pool_recovery_probe,
+                        )
+                        extraction_pool_recovery_probe = pool_permission.probe
+                        if extraction_pool_recovery_probe is not None:
+                            active_parent_scopes.add(RecoveryScope.EXTRACTION_POOL.value)
+
+                failed_owner_scope_this_pass: str | None = None
+
                 for role, command in _resident_worker_specs():
                     worker = workers.get(role)
                     return_code = worker.poll() if worker is not None else None
@@ -1155,17 +1449,50 @@ def _run_bitbucket_queue_loop(
                             worker_pid=getattr(worker, "pid", None),
                             return_code=return_code,
                         )
-                        if _pdf_recovery_scope_for_role(role) is not None:
+                        role_scope = _pdf_recovery_scope_for_role(role)
+                        if role_scope is not None:
                             stage = "pdf_worker_failure_record"
                             try:
-                                _record_pdf_worker_failure(
+                                failure_reason = pending_failure_reasons.pop(
                                     role,
-                                    reason_code=pending_failure_reasons.pop(
-                                        role,
-                                        RecoveryReasonCode.PROCESS_EXIT,
-                                    ),
-                                    probe=recovery_probes.pop(role, None),
+                                    RecoveryReasonCode.PROCESS_EXIT,
                                 )
+                                child_probe = recovery_probes.pop(role, None)
+                                if pipeline_recovery_probe is not None:
+                                    _record_recovery_scope_failure(
+                                        RecoveryScope.PIPELINE.value,
+                                        reason_code=failure_reason,
+                                        probe=pipeline_recovery_probe,
+                                    )
+                                    pipeline_recovery_probe = None
+                                    failed_owner_scope_this_pass = RecoveryScope.PIPELINE.value
+                                elif failed_owner_scope_this_pass == RecoveryScope.PIPELINE.value:
+                                    pass
+                                elif (
+                                    role_scope.startswith("extraction_slot:")
+                                    and extraction_pool_recovery_probe is not None
+                                ):
+                                    _record_recovery_scope_failure(
+                                        RecoveryScope.EXTRACTION_POOL.value,
+                                        reason_code=failure_reason,
+                                        probe=extraction_pool_recovery_probe,
+                                    )
+                                    extraction_pool_recovery_probe = None
+                                    failed_owner_scope_this_pass = (
+                                        RecoveryScope.EXTRACTION_POOL.value
+                                    )
+                                elif (
+                                    failed_owner_scope_this_pass
+                                    == RecoveryScope.EXTRACTION_POOL.value
+                                    and role_scope.startswith("extraction_slot:")
+                                ):
+                                    pass
+                                else:
+                                    _record_pdf_worker_failure(
+                                        role,
+                                        reason_code=failure_reason,
+                                        probe=child_probe,
+                                    )
                             except (RecoveryConflict, RecoveryTransitionRejected) as exc:
                                 log_event(
                                     bitbucket_logger,
@@ -1181,7 +1508,10 @@ def _run_bitbucket_queue_loop(
 
                     stage = "resident_worker_launch_permission"
                     try:
-                        permission = _prepare_pdf_worker_launch(role)
+                        permission = _prepare_pdf_worker_launch(
+                            role,
+                            active_parent_scopes=frozenset(active_parent_scopes),
+                        )
                     except (RecoveryConflict, RecoveryTransitionRejected) as exc:
                         log_event(
                             bitbucket_logger,
@@ -1201,11 +1531,33 @@ def _run_bitbucket_queue_loop(
                         if _pdf_recovery_scope_for_role(role) is None:
                             raise
                         try:
-                            _record_pdf_worker_failure(
-                                role,
-                                reason_code=RecoveryReasonCode.LAUNCH_FAILED,
-                                probe=permission.probe,
-                            )
+                            role_scope = _pdf_recovery_scope_for_role(role)
+                            if pipeline_recovery_probe is not None:
+                                _record_recovery_scope_failure(
+                                    RecoveryScope.PIPELINE.value,
+                                    reason_code=RecoveryReasonCode.LAUNCH_FAILED,
+                                    probe=pipeline_recovery_probe,
+                                )
+                                pipeline_recovery_probe = None
+                                failed_owner_scope_this_pass = RecoveryScope.PIPELINE.value
+                            elif (
+                                role_scope is not None
+                                and role_scope.startswith("extraction_slot:")
+                                and extraction_pool_recovery_probe is not None
+                            ):
+                                _record_recovery_scope_failure(
+                                    RecoveryScope.EXTRACTION_POOL.value,
+                                    reason_code=RecoveryReasonCode.LAUNCH_FAILED,
+                                    probe=extraction_pool_recovery_probe,
+                                )
+                                extraction_pool_recovery_probe = None
+                                failed_owner_scope_this_pass = RecoveryScope.EXTRACTION_POOL.value
+                            else:
+                                _record_pdf_worker_failure(
+                                    role,
+                                    reason_code=RecoveryReasonCode.LAUNCH_FAILED,
+                                    probe=permission.probe,
+                                )
                         except (RecoveryConflict, RecoveryTransitionRejected) as exc:
                             log_event(
                                 bitbucket_logger,
@@ -1221,18 +1573,21 @@ def _run_bitbucket_queue_loop(
 
                 stage = "pdf_worker_stability"
                 _complete_stable_pdf_worker_probes(workers, recovery_probes)
-                if (
-                    supervisor_recovery_probe is not None
-                    and time.monotonic() - supervisor_recovery_probe.started_monotonic
-                    >= configured_recovery_stability_seconds()
-                ):
-                    succeed_recovery_attempt(
-                        supervisor_recovery_probe.scope,
-                        attempt_id=supervisor_recovery_probe.attempt_id,
-                        expected_generation=supervisor_recovery_probe.generation,
-                        stability_confirmed=True,
-                    )
-                    supervisor_recovery_probe = None
+                extraction_pool_recovery_probe = _complete_parent_recovery_probe(
+                    RecoveryScope.EXTRACTION_POOL.value,
+                    workers,
+                    extraction_pool_recovery_probe,
+                )
+                pipeline_recovery_probe = _complete_parent_recovery_probe(
+                    RecoveryScope.PIPELINE.value,
+                    workers,
+                    pipeline_recovery_probe,
+                )
+                supervisor_recovery_probe = _complete_parent_recovery_probe(
+                    RecoveryScope.SUPERVISOR.value,
+                    workers,
+                    supervisor_recovery_probe,
+                )
                 if failed_previous_pass:
                     log_event(
                         bitbucket_logger,
@@ -1308,7 +1663,10 @@ def _run_bitbucket_queue_loop(
                                         reason_code=RecoveryReasonCode.ERROR_LOOP,
                                         probe=controller_recovery_probe,
                                     )
-                                except (RecoveryConflict, RecoveryTransitionRejected) as recovery_exc:
+                                except (
+                                    RecoveryConflict,
+                                    RecoveryTransitionRejected,
+                                ) as recovery_exc:
                                     log_event(
                                         bitbucket_logger,
                                         logging.WARNING,
@@ -1334,8 +1692,7 @@ def _run_bitbucket_queue_loop(
                         else:
                             if (
                                 controller_recovery_probe is not None
-                                and time.monotonic()
-                                - controller_recovery_probe.started_monotonic
+                                and time.monotonic() - controller_recovery_probe.started_monotonic
                                 >= configured_recovery_stability_seconds()
                             ):
                                 try:

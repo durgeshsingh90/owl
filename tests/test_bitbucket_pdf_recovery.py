@@ -359,6 +359,136 @@ def test_new_detector_incident_is_coalesced_into_current_episode():
     assert duplicate.recovery.generation == first.recovery.generation
 
 
+def _failed_slot_probe(scope: str, *, attempt_id: uuid.UUID):
+    opened = pdf_recovery.record_recovery_incident(
+        scope,
+        reason_code="process_exit",
+        incident_id=uuid.uuid4(),
+        occurred_at=NOW,
+        pause_after_attempts=25,
+        jitter=_middle_jitter,
+    ).transition
+    started = pdf_recovery.begin_recovery_attempt(
+        scope,
+        expected_generation=opened.recovery.generation,
+        attempt_id=attempt_id,
+        occurred_at=opened.recovery.next_retry_at,
+    )
+    return pdf_recovery.fail_recovery_attempt(
+        scope,
+        attempt_id=attempt_id,
+        expected_generation=started.recovery.generation,
+        occurred_at=started.recovery.last_attempt_at + timedelta(seconds=1),
+        jitter=_middle_jitter,
+    ).recovery
+
+
+def test_scope_escalation_transfers_one_shared_attempt_once_and_is_idempotent():
+    shared_attempt_id = uuid.uuid4()
+    correlation_id = uuid.uuid4()
+    slots = (pdf_recovery.extraction_slot_scope(1), pdf_recovery.extraction_slot_scope(2))
+    for scope in slots:
+        _failed_slot_probe(scope, attempt_id=shared_attempt_id)
+
+    escalated = pdf_recovery.escalate_correlated_recovery(
+        slots,
+        target_scope=pdf_recovery.RecoveryScope.EXTRACTION_POOL,
+        reason_code="process_exit",
+        correlation_id=correlation_id,
+        occurred_at=NOW + timedelta(seconds=5),
+        pause_after_attempts=2,
+        jitter=_middle_jitter,
+    )
+
+    assert escalated is not None
+    assert escalated.transferred_attempt_ids == (shared_attempt_id,)
+    owner = escalated.transition.recovery
+    assert owner.state == PDFPipelineRecoveryState.RETRY_WAIT
+    assert owner.consecutive_failed_attempts == 1
+    assert owner.lifetime_attempts == 1
+    assert (
+        owner.events.filter(
+            kind=PDFPipelineRecoveryEventKind.ATTEMPT_FAILED,
+            attempt_id=shared_attempt_id,
+            correlation_id=correlation_id,
+        ).count()
+        == 1
+    )
+    assert set(
+        PDFPipelineRecovery.objects.filter(scope__in=slots).values_list("state", flat=True)
+    ) == {PDFPipelineRecoveryState.HEALTHY}
+    assert (
+        PDFPipelineRecoveryEvent.objects.filter(
+            recovery__scope__in=slots,
+            kind=PDFPipelineRecoveryEventKind.SUPERSEDED,
+            correlation_id=correlation_id,
+        ).count()
+        == 2
+    )
+
+    duplicate = pdf_recovery.escalate_correlated_recovery(
+        slots,
+        target_scope=pdf_recovery.RecoveryScope.EXTRACTION_POOL,
+        reason_code="process_exit",
+        correlation_id=correlation_id,
+        occurred_at=NOW + timedelta(seconds=6),
+        pause_after_attempts=2,
+    )
+    assert duplicate is not None
+    assert duplicate.transition.duplicate
+    owner.refresh_from_db()
+    assert owner.consecutive_failed_attempts == 1
+    assert owner.lifetime_attempts == 1
+
+
+def test_scope_escalation_opens_owner_at_distinct_probe_threshold():
+    slots = (pdf_recovery.extraction_slot_scope(3), pdf_recovery.extraction_slot_scope(4))
+    for scope in slots:
+        _failed_slot_probe(scope, attempt_id=uuid.uuid4())
+
+    escalated = pdf_recovery.escalate_correlated_recovery(
+        slots,
+        target_scope=pdf_recovery.RecoveryScope.EXTRACTION_POOL,
+        reason_code="process_exit",
+        occurred_at=NOW + timedelta(seconds=5),
+        pause_after_attempts=2,
+        jitter=_middle_jitter,
+    )
+
+    assert escalated is not None
+    owner = escalated.transition.recovery
+    assert owner.state == PDFPipelineRecoveryState.PAUSED
+    assert owner.consecutive_failed_attempts == 2
+    assert owner.lifetime_attempts == 2
+    assert owner.pause_generation == 1
+
+
+def test_scope_escalation_without_probes_moves_incidents_without_inventing_attempts():
+    slots = (pdf_recovery.extraction_slot_scope(5), pdf_recovery.extraction_slot_scope(6))
+    for scope in slots:
+        pdf_recovery.record_recovery_incident(
+            scope,
+            reason_code="stale_heartbeat",
+            incident_id=uuid.uuid4(),
+            occurred_at=NOW,
+            jitter=_middle_jitter,
+        )
+
+    escalated = pdf_recovery.escalate_correlated_recovery(
+        slots,
+        target_scope=pdf_recovery.RecoveryScope.EXTRACTION_POOL,
+        reason_code="stale_heartbeat",
+        occurred_at=NOW + timedelta(seconds=1),
+        jitter=_middle_jitter,
+    )
+
+    assert escalated is not None
+    assert escalated.transferred_attempt_ids == ()
+    assert escalated.transition.recovery.state == PDFPipelineRecoveryState.RETRY_WAIT
+    assert escalated.transition.recovery.consecutive_failed_attempts == 0
+    assert escalated.transition.recovery.lifetime_attempts == 0
+
+
 def test_zero_threshold_pauses_on_detection_without_inventing_an_attempt(
     isolated_recovery_state,
 ):

@@ -246,6 +246,13 @@ class PDFPipelineRecoveryEventKind(models.TextChoices):
     SUPERSEDED = "superseded", "Superseded"
 
 
+class TrustedRepositoryHostSource(models.TextChoices):
+    """Provenance for durable non-secret repository-host approvals."""
+
+    UI = "ui", "Added in Settings"
+    LEGACY = "legacy", "Migrated compatibility approval"
+
+
 class PDFPipelineTuningAction(models.TextChoices):
     """Sparse controller recommendation/application history."""
 
@@ -328,6 +335,12 @@ class TrustedRepositoryHost(models.Model):
     canonical_origin = models.URLField(max_length=2048, unique=True)
     hostname = models.CharField(max_length=253, db_index=True)
     port = models.PositiveIntegerField(default=443)
+    source = models.CharField(
+        max_length=16,
+        choices=TrustedRepositoryHostSource,
+        default=TrustedRepositoryHostSource.UI,
+        db_index=True,
+    )
     enabled = models.BooleanField(default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -434,9 +447,7 @@ class PDFPipelineRun(models.Model):
 
     class Meta:
         ordering = ["-accepted_at", "-id"]
-        indexes = [
-            models.Index(fields=("state", "-accepted_at"), name="bb_pipeline_run_state_idx")
-        ]
+        indexes = [models.Index(fields=("state", "-accepted_at"), name="bb_pipeline_run_state_idx")]
 
     def __str__(self) -> str:
         return f"{self.id} — {self.get_state_display()}"
@@ -570,6 +581,7 @@ class PDFPipelineRecoveryEvent(models.Model):
         related_name="events",
     )
     event_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    correlation_id = models.UUIDField(null=True, blank=True, db_index=True, editable=False)
     attempt_id = models.UUIDField(null=True, blank=True, db_index=True)
     generation = models.PositiveBigIntegerField()
     pause_generation = models.PositiveBigIntegerField(default=0)
@@ -601,6 +613,7 @@ class PDFPipelineTuningEvent(models.Model):
     proposed_target = models.PositiveSmallIntegerField()
     reason_code = models.CharField(max_length=64)
     reason = models.CharField(max_length=500)
+    expected_effect_code = models.CharField(max_length=64, blank=True)
     confidence = models.CharField(max_length=16)
     observation_window_seconds = models.PositiveIntegerField()
     evidence = models.JSONField(default=dict)
@@ -1004,7 +1017,6 @@ class PDFTextPage(models.Model):
                 name="bitbucket_pdf_page_number_gte_1",
             ),
         ]
-        indexes = [models.Index(fields=("revision", "page_number"), name="bb_pdf_page_lookup_idx")]
 
     def __str__(self) -> str:
         return f"{self.revision_id} — page {self.page_number}"

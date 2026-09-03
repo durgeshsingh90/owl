@@ -25,7 +25,6 @@ from bitbucket_search.models import (
     BitbucketRepository,
     PDFDocument,
     PDFDocumentLifecycle,
-    PDFExtractionJob,
     PDFExtractionJobStatus,
     PDFIndexState,
     RepositorySyncJob,
@@ -38,7 +37,6 @@ from bitbucket_search.services.git_output import bounded_git_output
 from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 from bitbucket_search.services.repository_activity import summarize_operation_activities
 from bitbucket_search.services.repository_worker_timing import (
-    current_pdf_extraction_jobs,
     latest_repository_pdf_run_jobs,
     running_pdf_start_filter,
     worker_timing,

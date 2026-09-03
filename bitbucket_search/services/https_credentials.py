@@ -149,7 +149,12 @@ def _allowed_hosts() -> frozenset[str]:
 
 
 def normalize_https_origin(value: object) -> str:
-    """Return ``https://host:effective-port`` for a safe approved origin."""
+    """Return ``https://host:effective-port`` for a safe approved origin.
+
+    Existing credential call sites historically passed either an origin or a
+    complete HTTPS repository clone URL. Keep accepting the latter while the
+    Settings host-approval form uses the stricter pathless normalizer directly.
+    """
 
     raw = unicodedata.normalize("NFKC", str(value or "")).strip()
     if not raw or len(raw) > 2048 or any(ord(character) < 32 for character in raw):
@@ -158,7 +163,12 @@ def normalize_https_origin(value: object) -> str:
         )
     candidate = raw if "://" in raw else f"https://{raw}"
     try:
-        normalized = normalize_repository_host_origin(candidate)
+        parsed = urlsplit(candidate)
+        normalized = (
+            https_origin_from_repository_url(candidate)
+            if parsed.path not in {"", "/"}
+            else normalize_repository_host_origin(candidate)
+        )
         require_repository_https_origin_allowed(normalized.canonical_origin)
     except (RepositoryHostValidationError, RepositoryHostNotAllowed) as exc:
         raise HTTPSCredentialValidationError(
@@ -170,9 +180,7 @@ def normalize_https_origin(value: object) -> str:
 def available_https_origins() -> tuple[str, ...]:
     """List safe default origins plus exact origins used by registered HTTPS remotes."""
 
-    origins = {
-        entry.canonical_origin for entry in effective_repository_host_policy().entries
-    }
+    origins = {entry.canonical_origin for entry in effective_repository_host_policy().entries}
     try:
         remote_urls = BitbucketRepository.objects.filter(
             remote_url__istartswith="https://"

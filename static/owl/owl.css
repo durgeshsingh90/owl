@@ -4375,6 +4375,14 @@ body.has-recovery-popup {
     overflow: hidden;
 }
 
+/* A backdrop-filter establishes a containing block for fixed descendants in
+ * Chromium. The recovery alert lives inside the sticky header's notification
+ * center, so disable that visual effect while the modal is open to keep its
+ * fixed overlay relative to the viewport rather than the 112px header. */
+body.has-recovery-popup .app-header {
+    backdrop-filter: none;
+}
+
 .recovery-popup {
     position: fixed;
     z-index: 1200;
@@ -4426,6 +4434,7 @@ body.has-recovery-popup {
 
 .recovery-popup__header h2 {
     margin-top: 0.25rem;
+    color: var(--notification-ink);
     font-size: clamp(1.2rem, 3vw, 1.55rem);
     line-height: 1.2;
 }

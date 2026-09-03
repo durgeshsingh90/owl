@@ -14,6 +14,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -21,7 +22,15 @@ from functools import wraps
 from pathlib import Path
 
 from django.conf import settings
-from django.db import DatabaseError, IntegrityError, OperationalError, connection, transaction
+from django.db import (
+    DatabaseError,
+    IntegrityError,
+    OperationalError,
+    close_old_connections,
+    connection,
+    connections,
+    transaction,
+)
 from django.db.models import (
     Case,
     Count,
@@ -77,6 +86,10 @@ from bitbucket_search.services.pdf_pipeline_control import (
     publication_admission_allowed,
 )
 from bitbucket_search.services.pdf_pipeline_runs import reconcile_run_repository
+from bitbucket_search.services.pdf_runtime_metrics import (
+    record_publication_transaction,
+    record_sqlite_lock_wait,
+)
 from bitbucket_search.services.repository_lock import (
     RepositoryCheckoutBusy,
     pdf_extraction_claim_lock,
@@ -1895,7 +1908,10 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
                 .values_list("id", flat=True)
                 .first()
             )
-            if starved_candidate_id is not None:
+            if (
+                getattr(settings, "PDF_PIPELINE_REPOSITORY_WORK_CONSERVING", True)
+                and starved_candidate_id is not None
+            ):
                 candidate_id = starved_candidate_id
                 admission_reason = "fairness_wait_bound"
             else:
@@ -1906,11 +1922,13 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
                     .first()
                 )
                 admission_reason = "locality_preferred"
-            if candidate_id is None:
+            if candidate_id is None and getattr(
+                settings,
+                "PDF_PIPELINE_REPOSITORY_WORK_CONSERVING",
+                True,
+            ):
                 candidate_id = (
-                    candidates.order_by("requested_at", "id")
-                    .values_list("id", flat=True)
-                    .first()
+                    candidates.order_by("requested_at", "id").values_list("id", flat=True).first()
                 )
                 admission_reason = "work_conserving_spillover"
         else:
@@ -1978,7 +1996,35 @@ def _reserve_sqlite_write() -> None:
         # this short transaction. Other writers can wait for the busy timeout
         # instead of racing an un-retryable snapshot/lock upgrade. No PDF
         # parsing, hashing, file access or subprocess wait occurs in this gate.
-        PDFExtractionJob.objects.filter(pk=-1).update(status=F("status"))
+        started = time.monotonic()
+        try:
+            PDFExtractionJob.objects.filter(pk=-1).update(status=F("status"))
+        except OperationalError as exc:
+            reason = str(exc).casefold()
+            record_sqlite_lock_wait(
+                (time.monotonic() - started) * 1_000,
+                succeeded="locked" not in reason and "busy" not in reason,
+            )
+            raise
+        else:
+            record_sqlite_lock_wait((time.monotonic() - started) * 1_000, succeeded=True)
+
+
+@contextmanager
+def _measured_publication_transaction():
+    """Measure the sole publisher's SQLite transaction without storing content."""
+
+    started = time.monotonic()
+    succeeded = False
+    try:
+        with transaction.atomic():
+            yield
+        succeeded = True
+    finally:
+        record_publication_transaction(
+            (time.monotonic() - started) * 1_000,
+            succeeded=succeeded,
+        )
 
 
 def _serialized_index_write(function):
@@ -2810,17 +2856,28 @@ def _log_extractor_diagnostic(staged: StagedPDFExtraction, *, job: PDFExtraction
 def run_isolated_pdf_extractor(
     path: Path,
     heartbeat: Callable[[], None],
+    *,
+    expected_content_sha256: str | None = None,
+    expected_source_size: int | None = None,
 ) -> StagedPDFExtraction:
     """Run the DB-free parser module with bounded output and a wall timeout."""
 
+    request_payload: dict[str, object] = {
+        "path": str(path),
+        "max_file_bytes": settings.PDF_MAX_FILE_BYTES,
+        "max_pages": settings.PDF_MAX_PAGES,
+        "max_characters": settings.PDF_MAX_TOTAL_TEXT_CHARS,
+        "max_page_characters": settings.PDF_MAX_PAGE_TEXT_CHARS,
+    }
+    if expected_content_sha256 is not None or expected_source_size is not None:
+        if expected_content_sha256 is None or expected_source_size is None:
+            raise ValueError("Expected extractor fingerprint fields must be supplied together.")
+        request_payload.update(
+            expected_content_sha256=expected_content_sha256,
+            expected_source_size=expected_source_size,
+        )
     request = json.dumps(
-        {
-            "path": str(path),
-            "max_file_bytes": settings.PDF_MAX_FILE_BYTES,
-            "max_pages": settings.PDF_MAX_PAGES,
-            "max_characters": settings.PDF_MAX_TOTAL_TEXT_CHARS,
-            "max_page_characters": settings.PDF_MAX_PAGE_TEXT_CHARS,
-        },
+        request_payload,
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -2847,6 +2904,13 @@ def run_isolated_pdf_extractor(
 
     with output_file as output:
         try:
+            # The parser is intentionally database-free. Closing this worker
+            # thread's Django handles before the POSIX pre-exec/fork boundary
+            # prevents an inherited SQLite descriptor from outliving its owner.
+            if connection.in_atomic_block:
+                close_old_connections()
+            else:
+                connections.close_all()
             process = subprocess.Popen(
                 [sys.executable, "-m", "bitbucket_search.services.pdf_extractor"],
                 cwd=settings.BASE_DIR,
@@ -2985,7 +3049,7 @@ def _attach_revision(
             error_code="partial_extraction",
             stage="text_publication",
         )
-    with transaction.atomic():
+    with _measured_publication_transaction():
         _reserve_sqlite_write()
         job = (
             PDFExtractionJob.objects.select_for_update()
@@ -3060,7 +3124,7 @@ def _attach_revision(
                         )
                         for page in staged.pages
                     ],
-                    batch_size=100,
+                    batch_size=settings.PDF_PUBLICATION_PAGE_BATCH_SIZE,
                 )
             elif not _existing_revision_is_valid(revision):
                 raise PDFIndexingError(
@@ -3286,7 +3350,7 @@ def _queue_current_target_after_obsolete_job(job_id: int) -> None:
 def _execute_claimed_extraction_job(
     job_id: int,
     *,
-    extraction_runner: ExtractionRunner = run_isolated_pdf_extractor,
+    extraction_runner: ExtractionRunner | None = None,
     defer_publication: bool = False,
 ) -> PDFExtractionJob:
     """Execute one lease and let only the controller publish SQLite/FTS rows."""
@@ -3364,7 +3428,22 @@ def _execute_claimed_extraction_job(
         if reusable is None:
             _update_job_progress(job.pk, PDFExtractionJobPhase.EXTRACTING, 20)
             expected_content_sha256 = content_sha256
-            staged = extraction_runner(path, extraction_heartbeat)
+            staged = (
+                run_isolated_pdf_extractor(
+                    path,
+                    extraction_heartbeat,
+                    **(
+                        {
+                            "expected_content_sha256": expected_content_sha256,
+                            "expected_source_size": source_size,
+                        }
+                        if getattr(settings, "PDF_PIPELINE_REUSE_PARENT_FINGERPRINT", True)
+                        else {}
+                    ),
+                )
+                if extraction_runner is None
+                else extraction_runner(path, extraction_heartbeat)
+            )
             if not isinstance(staged, StagedPDFExtraction):
                 raise PDFIndexingError(
                     "invalid_extractor_response",
@@ -3510,7 +3589,7 @@ def _execute_claimed_extraction_job(
 def _execute_claimed_extraction_with_checkout(
     job: PDFExtractionJob,
     *,
-    extraction_runner: ExtractionRunner = run_isolated_pdf_extractor,
+    extraction_runner: ExtractionRunner | None = None,
     defer_publication: bool = False,
 ) -> PDFExtractionJob:
     """Keep a checkout stable and defer if synchronization overtakes the claim."""
@@ -3595,7 +3674,7 @@ def _execute_claimed_extraction_with_checkout(
 def execute_claimed_extraction_job(
     job_id: int,
     *,
-    extraction_runner: ExtractionRunner = run_isolated_pdf_extractor,
+    extraction_runner: ExtractionRunner | None = None,
     defer_publication: bool = False,
 ) -> PDFExtractionJob:
     """Keep safe correlation IDs attached to every nested controller diagnostic."""
@@ -3646,6 +3725,7 @@ def work_one_extraction_job() -> PDFExtractionJob | None:
 def launch_index_worker() -> subprocess.Popen[bytes]:
     """Start the detached durable PDF queue worker without blocking the request."""
 
+    close_old_connections()
     try:
         process = subprocess.Popen(
             [
@@ -3677,6 +3757,7 @@ def launch_index_worker() -> subprocess.Popen[bytes]:
 def launch_pdf_writer() -> subprocess.Popen[bytes]:
     """Start the detached sole publisher used outside the resident supervisor."""
 
+    close_old_connections()
     process = subprocess.Popen(
         [
             sys.executable,

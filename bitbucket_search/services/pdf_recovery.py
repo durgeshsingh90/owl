@@ -35,8 +35,8 @@ from bitbucket_search.models import (
     PDFPipelineRecoveryEventKind,
     PDFPipelineRecoveryState,
 )
-from bitbucket_search.services.repository_lock import _file_lock
 from bitbucket_search.services import pdf_recovery_fallback
+from bitbucket_search.services.repository_lock import _file_lock
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,16 @@ class RecoveryTransitionResult:
 class RecoveryIncidentResult:
     classification: RecoveryFailureClassification
     transition: RecoveryTransitionResult | None
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryEscalationResult:
+    """One correlation-safe transfer from narrower scopes to their owner."""
+
+    transition: RecoveryTransitionResult
+    correlation_id: uuid.UUID
+    source_scopes: tuple[str, ...]
+    transferred_attempt_ids: tuple[uuid.UUID, ...]
 
 
 class RecoveryError(RuntimeError):
@@ -477,9 +487,7 @@ def ensure_recovery_scope(
         raise
     except (DatabaseError, OSError):
         try:
-            durable = pdf_recovery_fallback.persist_database_unavailable_pause(
-                canonical_scope
-            )
+            durable = pdf_recovery_fallback.persist_database_unavailable_pause(canonical_scope)
         except Exception:
             durable = False
         logger.error(
@@ -664,6 +672,242 @@ def record_recovery_incident(
             result = RecoveryTransitionResult(recovery, changed=True)
     _notify_transition(result.recovery, mark_unread=notify_unread)
     return RecoveryIncidentResult(classification, result)
+
+
+def escalate_correlated_recovery(
+    source_scopes: tuple[str, ...] | list[str],
+    *,
+    target_scope: str | RecoveryScope,
+    reason_code: object,
+    correlation_id: uuid.UUID | str | None = None,
+    occurred_at: datetime | None = None,
+    pause_after_attempts: int | None = None,
+    jitter: JitterFunction | None = None,
+) -> RecoveryEscalationResult | None:
+    """Transfer correlated failures into one broader owning episode.
+
+    Attempt identities, rather than child counters, are the accounting unit.
+    Replaying an escalation therefore cannot add the same failed probe twice.
+    """
+
+    classification = classify_recovery_failure(reason_code)
+    if classification.disposition != RecoveryFailureDisposition.RETRY_COMPONENT:
+        raise RecoveryTransitionRejected(
+            "Only retryable component failures can be escalated between recovery scopes."
+        )
+    owner_scope = canonical_recovery_scope(target_scope)
+    canonical_sources = tuple(sorted({canonical_recovery_scope(scope) for scope in source_scopes}))
+    if len(canonical_sources) < 2 or owner_scope in canonical_sources:
+        raise ValueError("Recovery escalation requires two distinct narrower scopes.")
+    if owner_scope == RecoveryScope.EXTRACTION_POOL and any(
+        not scope.startswith("extraction_slot:") for scope in canonical_sources
+    ):
+        raise ValueError("Only extraction slots can escalate to the extraction pool.")
+    correlation = _optional_uuid(correlation_id, label="correlation_id") or uuid.uuid4()
+    now = _aware_timestamp(occurred_at, label="occurred_at")
+    threshold = _pause_after_attempts(pause_after_attempts)
+    notify_unread = False
+
+    with _recovery_lock(), transaction.atomic():
+        existing_owner = (
+            PDFPipelineRecovery.objects.select_for_update().filter(scope=owner_scope).first()
+        )
+        if (
+            existing_owner is not None
+            and existing_owner.events.filter(correlation_id=correlation).exists()
+        ):
+            return RecoveryEscalationResult(
+                transition=RecoveryTransitionResult(
+                    existing_owner,
+                    changed=False,
+                    duplicate=True,
+                ),
+                correlation_id=correlation,
+                source_scopes=canonical_sources,
+                transferred_attempt_ids=(),
+            )
+        sources = tuple(
+            PDFPipelineRecovery.objects.select_for_update()
+            .filter(scope__in=canonical_sources, reason_code=classification.reason_code)
+            .exclude(state=PDFPipelineRecoveryState.HEALTHY)
+            .order_by("scope")
+        )
+        if len(sources) < 2:
+            return None
+
+        owner = existing_owner or PDFPipelineRecovery.objects.create(
+            scope=owner_scope,
+            pause_after_attempts=threshold,
+        )
+
+        source_attempt_ids: set[uuid.UUID] = set()
+        for source in sources:
+            events = source.events.filter(
+                kind=PDFPipelineRecoveryEventKind.ATTEMPT_FAILED,
+                attempt_id__isnull=False,
+            )
+            if source.first_failure_at is not None:
+                events = events.filter(occurred_at__gte=source.first_failure_at)
+            source_attempt_ids.update(events.values_list("attempt_id", flat=True))
+        already_owned = set(
+            owner.events.filter(
+                kind=PDFPipelineRecoveryEventKind.ATTEMPT_FAILED,
+                attempt_id__in=source_attempt_ids,
+            ).values_list("attempt_id", flat=True)
+        )
+        transferred_attempt_ids = tuple(sorted(source_attempt_ids - already_owned, key=str))
+        transferred_failures = len(transferred_attempt_ids)
+        opened_owner_episode = owner.state == PDFPipelineRecoveryState.HEALTHY
+        prior_state = owner.state
+        failed_attempts = min(
+            owner.pause_after_attempts,
+            (0 if opened_owner_episode else owner.consecutive_failed_attempts)
+            + transferred_failures,
+        )
+        should_pause = (
+            prior_state == PDFPipelineRecoveryState.PAUSED
+            or owner.pause_after_attempts == 0
+            or failed_attempts >= owner.pause_after_attempts
+        )
+        first_failure_at = min(
+            (source.first_failure_at or now for source in sources),
+            default=now,
+        )
+        updates: dict[str, object] = {
+            "state": (
+                PDFPipelineRecoveryState.PAUSED
+                if should_pause
+                else PDFPipelineRecoveryState.RETRY_WAIT
+            ),
+            "reason_family": classification.reason_family,
+            "reason_code": classification.reason_code,
+            "consecutive_failed_attempts": failed_attempts,
+            "lifetime_attempts": owner.lifetime_attempts + transferred_failures,
+            "first_failure_at": first_failure_at
+            if opened_owner_episode
+            else owner.first_failure_at,
+            "last_failure_at": now,
+            "active_attempt_id": None,
+            "recovered_at": None,
+            "last_outcome": "Correlated component failures moved to the owning recovery scope.",
+        }
+        if opened_owner_episode:
+            updates.update(
+                episode_id=uuid.uuid4(),
+                pause_after_attempts=threshold,
+                last_attempt_at=None,
+                resume_requested_at=None,
+                resume_idempotency_key_hash="",
+                resume_predecessor_generation=None,
+            )
+            # The threshold used above came from the freshly created row and is
+            # normally identical. Preserve an explicit test/config override.
+            owner.pause_after_attempts = threshold
+            failed_attempts = min(threshold, transferred_failures)
+            should_pause = threshold == 0 or failed_attempts >= threshold
+            updates["consecutive_failed_attempts"] = failed_attempts
+            updates["state"] = (
+                PDFPipelineRecoveryState.PAUSED
+                if should_pause
+                else PDFPipelineRecoveryState.RETRY_WAIT
+            )
+        if should_pause:
+            updates.update(
+                next_retry_at=None,
+                current_backoff_seconds=0,
+                pause_generation=(
+                    owner.pause_generation + 1
+                    if prior_state != PDFPipelineRecoveryState.PAUSED
+                    else owner.pause_generation
+                ),
+                paused_reason=_pause_message(
+                    classification.reason_code,
+                    threshold=owner.pause_after_attempts,
+                ),
+                paused_at=owner.paused_at or now,
+            )
+            notify_unread = prior_state != PDFPipelineRecoveryState.PAUSED
+        else:
+            delay = _configured_backoff(max(1, failed_attempts), jitter=jitter)
+            updates.update(
+                next_retry_at=now + timedelta(seconds=delay),
+                current_backoff_seconds=delay,
+                paused_reason="",
+                paused_at=None,
+            )
+        owner = _cas_update(owner, updates, now=now)
+        if opened_owner_episode:
+            _create_event(
+                owner,
+                kind=PDFPipelineRecoveryEventKind.EPISODE_OPENED,
+                reason_code=classification.reason_code,
+                outcome=owner.last_outcome,
+                occurred_at=now,
+                correlation_id=correlation,
+            )
+        for attempt_id in transferred_attempt_ids:
+            _create_event(
+                owner,
+                kind=PDFPipelineRecoveryEventKind.ATTEMPT_FAILED,
+                attempt_id=attempt_id,
+                reason_code=classification.reason_code,
+                outcome="Failed probe transferred during correlated scope escalation.",
+                occurred_at=now,
+                correlation_id=correlation,
+            )
+        if should_pause and prior_state != PDFPipelineRecoveryState.PAUSED:
+            _create_event(
+                owner,
+                kind=PDFPipelineRecoveryEventKind.PAUSED,
+                reason_code=classification.reason_code,
+                outcome=owner.paused_reason,
+                occurred_at=now,
+                correlation_id=correlation,
+            )
+        elif not opened_owner_episode and not transferred_attempt_ids:
+            _create_event(
+                owner,
+                kind=PDFPipelineRecoveryEventKind.SUPERSEDED,
+                reason_code=classification.reason_code,
+                outcome="Correlated incident coalesced into the owning recovery episode.",
+                occurred_at=now,
+                correlation_id=correlation,
+            )
+
+        for source in sources:
+            superseded_attempt_id = source.active_attempt_id
+            source = _cas_update(
+                source,
+                {
+                    "state": PDFPipelineRecoveryState.HEALTHY,
+                    "active_attempt_id": None,
+                    "next_retry_at": None,
+                    "current_backoff_seconds": 0,
+                    "recovered_at": now,
+                    "last_outcome": (
+                        "Recovery episode superseded by correlated owning-scope recovery."
+                    ),
+                },
+                now=now,
+            )
+            _create_event(
+                source,
+                kind=PDFPipelineRecoveryEventKind.SUPERSEDED,
+                attempt_id=superseded_attempt_id,
+                reason_code=classification.reason_code,
+                outcome=source.last_outcome,
+                occurred_at=now,
+                correlation_id=correlation,
+            )
+
+        result = RecoveryEscalationResult(
+            transition=RecoveryTransitionResult(owner, changed=True),
+            correlation_id=correlation,
+            source_scopes=tuple(source.scope for source in sources),
+            transferred_attempt_ids=transferred_attempt_ids,
+        )
+    _notify_transition(result.transition.recovery, mark_unread=notify_unread)
+    return result
 
 
 def begin_recovery_attempt(
@@ -1568,10 +1812,7 @@ def _reconcile_recovery_scope(
             already_conflict_paused = bool(
                 recovery.state == PDFPipelineRecoveryState.PAUSED
                 and recovery.reason_code == RecoveryReasonCode.CONTROL_STATE_CONFLICT
-                and (
-                    fallback_record is None
-                    or recovery.generation > fallback_record.generation
-                )
+                and (fallback_record is None or recovery.generation > fallback_record.generation)
             )
             if not already_conflict_paused:
                 recovery = _pause_for_control_state_conflict(recovery, fallback_record)
@@ -1582,16 +1823,17 @@ def _reconcile_recovery_scope(
                 recovery = _apply_fallback_record(recovery, fallback_record)
                 notify_after_commit = fallback_record.pendingReconciliation
                 checkpoint_after_commit = True
-            elif fallback_record.generation == recovery.generation and not (
-                fallback_record.clean_checkpoint()
-                == _fallback_record_from_recovery(recovery)
+            elif (
+                fallback_record.generation == recovery.generation
+                and fallback_record.clean_checkpoint() != _fallback_record_from_recovery(recovery)
             ):
                 recovery = _pause_for_control_state_conflict(recovery, fallback_record)
                 notify_after_commit = True
                 checkpoint_after_commit = True
-            elif fallback_record.generation < recovery.generation:
-                checkpoint_after_commit = True
-            elif fallback_record.pendingReconciliation:
+            elif (
+                fallback_record.generation < recovery.generation
+                or fallback_record.pendingReconciliation
+            ):
                 checkpoint_after_commit = True
             # A greater database generation wins for every state, including
             # healthy.  This deliberately prevents an older paused checkpoint
@@ -1886,6 +2128,7 @@ def _create_event(
     occurred_at: datetime,
     attempt_id: uuid.UUID | None = None,
     event_id: uuid.UUID | None = None,
+    correlation_id: uuid.UUID | None = None,
 ) -> PDFPipelineRecoveryEvent:
     values: dict[str, object] = {
         "recovery": recovery,
@@ -1899,6 +2142,8 @@ def _create_event(
     }
     if event_id is not None:
         values["event_id"] = event_id
+    if correlation_id is not None:
+        values["correlation_id"] = correlation_id
     return PDFPipelineRecoveryEvent.objects.create(**values)
 
 

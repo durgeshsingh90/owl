@@ -61,6 +61,7 @@
                         <div>
                             <strong data-pipeline-activity>Waiting for a fresh snapshot</strong>
                             <small data-pipeline-activity-secondary>No confirmed activity yet</small>
+                            <small data-pipeline-state-meta>Confidence and evidence unavailable</small>
                         </div>
                         <span class="knowledge-pipeline__freshness" data-pipeline-freshness>Connecting to the local supervisor</span>
                     </div>
@@ -68,9 +69,10 @@
                         <div><dt>Total ETA</dt><dd data-pipeline-total-eta>Waiting for a current run</dd><small data-pipeline-eta-confidence>Not enough evidence yet</small></div>
                         <div><dt>Extracted</dt><dd data-pipeline-extracted-rate>Warming</dd><small data-pipeline-rate-window>60-second window</small></div>
                         <div><dt>Written</dt><dd data-pipeline-written-rate>Warming</dd><small data-pipeline-written-window>60-second window</small></div>
-                        <div><dt>Pipeline capacity</dt><dd data-pipeline-capacity-value>Checking</dd><small data-pipeline-capacity-detail>Classifying free and waiting workers</small></div>
+                        <div><dt>Run repositories</dt><dd data-pipeline-run-repositories>Waiting</dd><small>Accepted · queued · active · completed</small></div>
+                        <div><dt>Current-run PDFs</dt><dd data-pipeline-run-pdfs>Waiting for inventory</dd><small>End-to-end successful and remaining outcomes</small></div>
                         <div><dt>Writer backlog</dt><dd data-pipeline-backlog-value>Checking</dd><small data-pipeline-backlog-detail>Checking staged work</small></div>
-                        <div><dt>Available memory</dt><dd data-pipeline-memory>Checking</dd><small>Host memory available to OWL and other applications</small></div>
+                        <div><dt>Resource safety</dt><dd data-pipeline-resource-summary>Checking</dd><small>OWL CPU · available memory · free disk</small></div>
                     </dl>
                     <div class="knowledge-pipeline__recovery" data-pipeline-recovery-card data-state="healthy">
                         <div>

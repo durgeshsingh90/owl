@@ -143,7 +143,9 @@
         const confirmedRunning = state === "running" && runningEvidenceIsFresh(payload, indicator);
         const confirmedRecovering = state === "recovering"
             && !payload?.snapshotStale
-            && ["recovering", "recovering_half_open", "resume_requested"].includes(recovery.state);
+            && ["recovering", "recovering_half_open"].includes(recovery.state)
+            && typeof recovery.activeAttemptId === "string"
+            && recovery.activeAttemptId.length > 0;
         if (state === "running" && !confirmedRunning) state = "unknown";
         if (state === "recovering" && !confirmedRecovering) state = "unknown";
         const repositoryCount = integer(Number(control?.dataset?.repositoryCount));
@@ -158,9 +160,16 @@
                 ? "No repository is currently eligible for Refresh all."
                 : "Add a repository before starting a workspace refresh."],
             submitting: ["Adding to queue", "Submitting one durable workspace refresh request."],
-            queued: ["Added to queue", queued
-                ? `${queued} ${queued === 1 ? "repository is" : "repositories are"} waiting in queue.`
-                : "The accepted repositories are waiting in queue."],
+            queued: [activity.code === "queued" ? "Added to queue" : activity.label || "Waiting",
+                activity.code === "backpressured"
+                    ? "Extraction is waiting for durable publication backlog to drain."
+                    : activity.code === "source_blocked"
+                        ? "Queued work is waiting for an eligible repository source."
+                        : activity.code === "completing"
+                            ? "Final durable run state is being reconciled."
+                            : queued
+                                ? `${queued} ${queued === 1 ? "repository is" : "repositories are"} waiting in queue.`
+                                : "The accepted repositories are waiting in queue."],
             running: [activity.label || "Repository work running", active || queued
                 ? `${active} active · ${queued} queued.`
                 : "Confirmed background work is making progress."],
@@ -350,6 +359,63 @@
     }
 
     function renderRepositoryCards(root, payload) {
+        const currentRun = object(payload?.run);
+        const fallbackLabel = payload?.snapshotStale
+            ? "Pipeline status unavailable"
+            : currentRun.id ? "Not accepted into the current run" : "No current PDF pipeline run";
+        const fallbackDetail = payload?.snapshotStale
+            ? "The latest authoritative pipeline snapshot is stale."
+            : currentRun.id
+                ? "This repository is not a member of the current accepted run."
+                : "No current accepted PDF pipeline run includes this repository.";
+        root?.querySelectorAll?.("[data-repository-id]").forEach((card) => {
+            const gitFailed = card.dataset.repositoryGitSyncFailed === "true";
+            const historicalFailures = integer(Number(card.dataset.repositoryPdfIndexFailedCount));
+            const fallbackState = gitFailed
+                ? "git_failed" : historicalFailures ? "historical_indexing_failure" : "unknown";
+            const cardLabel = gitFailed
+                ? "Git connection or pull failed"
+                : historicalFailures
+                    ? `${historicalFailures} historical PDF indexing ${historicalFailures === 1 ? "failure" : "failures"}`
+                    : fallbackLabel;
+            const cardDetail = gitFailed
+                ? "Repository access did not complete; see Repository logs."
+                : historicalFailures
+                    ? "Historical PDF failures remain available in Repository logs."
+                    : fallbackDetail;
+            card.dataset.pipelineRepositoryState = fallbackState;
+            card.dataset.pipelineRun = "";
+            const name = card.querySelector?.("[data-repository-name]")?.textContent?.trim()
+                || "Repository";
+            const stateIcon = card.querySelector?.("[data-repository-state-icon]");
+            if (stateIcon) {
+                stateIcon.className = `bb-repository-state bb-repository-state--${gitFailed
+                    ? "git-failed" : historicalFailures ? "indexing-failed" : "pipeline-unknown"}`;
+                stateIcon.dataset.pipelineRepositoryState = fallbackState;
+                setAttribute(stateIcon, "aria-label", `${name}: ${cardLabel}`);
+                stateIcon.title = cardDetail;
+            }
+            const queueLabel = card.querySelector?.("[data-repository-queue-label]");
+            if (queueLabel) queueLabel.hidden = true;
+            const workLabel = card.querySelector?.("[data-repository-work-label]");
+            if (workLabel) {
+                workLabel.textContent = cardLabel;
+                workLabel.title = cardDetail;
+                workLabel.hidden = false;
+            }
+            setNodeHidden(card, "[data-repository-remaining]", true);
+            setNodeHidden(card, "[data-repository-eta]", true);
+            setNodeHidden(card, "[data-repository-progress]", true);
+            setNodeHidden(card, "[data-repository-queued-icon]", true);
+            setNodeHidden(card, "[data-repository-queue-icon]", true);
+            setNodeHidden(card, "[data-repository-working-icon]", true);
+            setNodeHidden(card, "[data-repository-complete-icon]", true);
+            setNodeHidden(card, "[data-repository-attention-icon]", true);
+            setNodeHidden(card, "[data-repository-unknown-icon]", gitFailed || historicalFailures);
+            const activeVisual = setNodeHidden(card, "[data-repository-active-visual]", true);
+            if (activeVisual) activeVisual.removeAttribute?.("src");
+            setNodeHidden(card, "[data-repository-active-static]", true);
+        });
         const progress = list(object(payload?.run).repositoryProgress);
         progress.forEach((repository) => {
             const repositoryId = String(repository.repositoryId ?? "");
@@ -781,7 +847,8 @@
             appendCell(body.ownerDocument, row,
                 `${integer(event.previousTarget)} → ${integer(event.proposedTarget)} · ${humanize(event.action)}`);
             appendCell(body.ownerDocument, row,
-                `${event.reasonCode || "—"} · ${event.reason || "No explanation recorded"}`);
+                `${event.reasonCode || "—"} · ${event.reason || "No explanation recorded"}`
+                + `${event.expectedEffect ? ` · Expected: ${event.expectedEffect}` : ""}`);
             const evidence = Object.entries(object(event.evidence))
                 .map(([key, value]) => `${humanize(key)} ${value}`).join(" · ");
             appendCell(body.ownerDocument, row,
@@ -901,7 +968,8 @@
         setText(root, "[data-pipeline-backlog-value]",
             `${integer(queues.backpressureDepthJobs)} / ${integer(queues.backpressureThresholdJobs)} jobs`);
         setText(root, "[data-pipeline-backlog-detail]",
-            `${integer(queues.stagedWaitingJobs)} staged waiting · ${integer(queues.publicationInFlightJobs)} publishing`);
+            `${integer(queues.stagedWaitingJobs)} staged waiting · ${formatBytes(queues.stagedBytes)} · `
+            + `oldest ${formatAge(queues.oldestStagedWaitSeconds)}`);
         setText(root, "[data-pipeline-target]", formatNumber(controller.effectiveAdmissionTarget, 0));
         setText(root, "[data-pipeline-hard-max]", formatNumber(controller.configuredPdfHardMax, 0));
         setText(root, "[data-pipeline-live-workers]", formatNumber(workers.live, 0));
@@ -909,6 +977,13 @@
         setText(root, "[data-pipeline-owl-cpu]",
             finite(resources.owlProcessTreeCpuPct) ? `${formatNumber(resources.owlProcessTreeCpuPct)}%` : "Unavailable");
         setText(root, "[data-pipeline-memory]", formatBytes(resources.hostMemoryAvailableBytes));
+        const resourceParts = [
+            finite(resources.owlProcessTreeCpuPct)
+                ? `OWL CPU ${formatNumber(resources.owlProcessTreeCpuPct)}%` : "OWL CPU unavailable",
+            `memory ${formatBytes(resources.hostMemoryAvailableBytes)}`,
+            `disk ${formatBytes(resources.diskAvailableBytes)}`,
+        ];
+        setText(root, "[data-pipeline-resource-summary]", resourceParts.join(" · "));
         const pagesPerSecond = throughput.pagesPersistedPerSecond;
         setText(root, "[data-pipeline-pages-rate]",
             finite(pagesPerSecond) ? `${formatNumber(pagesPerSecond * 60)}/min` : "Unavailable");
@@ -934,10 +1009,16 @@
         setText(root, "[data-pipeline-eta-range]", formatRange(eta));
         setText(root, "[data-pipeline-eta-freshness]",
             eta.asOf ? `${formatDateTime(eta.asOf)} · ${humanize(eta.state)}` : "Unavailable");
-        const forecast = object(eta.completedRunForecastError || run.completedRunForecastError);
+        const forecast = object(run.etaAccuracy);
         setText(root, "[data-pipeline-forecast-error]",
             finite(forecast.medianAbsolutePercentageError)
-                ? `${formatNumber(forecast.medianAbsolutePercentageError)}% median absolute error`
+                ? `${formatNumber(forecast.medianAbsolutePercentageError)}% median absolute error · `
+                    + `${integer(forecast.checkpointCount)} checkpoints · ${humanize(forecast.workloadClass)}`
+                : `${humanize(forecast.state || "not calibrated")} · ${humanize(forecast.workloadClass || "unknown workload")}`);
+        setText(root, "[data-pipeline-forecast-bias]",
+            finite(forecast.meanBiasPercentage)
+                ? `${formatNumber(forecast.meanBiasPercentage)}% mean bias · `
+                    + `${integer(forecast.overEstimateCount)} over / ${integer(forecast.underEstimateCount)} under`
                 : "Not calibrated");
         const failures = throughput.failedPerSecond;
         setText(root, "[data-pipeline-failure-rate]",
@@ -948,6 +1029,14 @@
         setText(root, "[data-pipeline-sqlite-busy-errors]",
             finite(publisher.sqliteBusyErrors)
                 ? formatNumber(publisher.sqliteBusyErrors, 0) : "Unavailable");
+        setText(root, "[data-pipeline-sqlite-lock-wait]",
+            finite(publisher.sqliteLockWaitP50Ms) && finite(publisher.sqliteLockWaitP95Ms)
+                ? `${formatNumber(publisher.sqliteLockWaitP50Ms)} / ${formatNumber(publisher.sqliteLockWaitP95Ms)} ms`
+                : "Unavailable");
+        setText(root, "[data-pipeline-sqlite-blocked-threshold]",
+            finite(publisher.sqliteLockBlockedThresholdMs)
+                ? `${formatNumber(publisher.sqliteLockBlockedThresholdMs, 0)} ms`
+                : "Unavailable");
         const recovery = object(payload.recovery);
         setText(root, "[data-pipeline-recovery-probes]", integer(recovery.lifetimeAttempts));
         setText(root, "[data-pipeline-recovery-last-attempt]",
@@ -958,6 +1047,16 @@
         setText(root, "[data-pipeline-recovery-blocked]",
             recovery.resumeBlockedReason || "No resume block reported");
         const repositories = object(run.repositories);
+        setText(root, "[data-pipeline-run-repositories]", run.id
+            ? `${integer(repositories.accepted)} accepted · ${integer(repositories.queued)} queued · `
+                + `${integer(repositories.active)} active · ${integer(repositories.completed)} complete`
+            : "No current run");
+        setText(root, "[data-pipeline-run-pdfs]", run.id
+            ? pdfs.inventoryFinal
+                ? `${integer(pdfs.successful)} of ${integer(pdfs.total)} successful · `
+                    + `${integer(pdfs.remaining)} remaining`
+                : `${known} of ${accepted} inventories known · ${integer(pdfs.remaining)} remaining so far`
+            : "No current run");
         setText(root, "[data-pipeline-fairness]",
             run.id
                 ? `${integer(repositories.queued)} queued · ${integer(repositories.active)} active · `

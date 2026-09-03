@@ -785,7 +785,9 @@ def _build_repository_pdf_catalog(
         and repository.pdf_documents.filter(lifecycle_state=PDFDocumentLifecycle.ACTIVE).exists()
         and not repository.pdf_documents.filter(
             lifecycle_state=PDFDocumentLifecycle.ACTIVE,
-        ).exclude(added_evidence=PDFDocumentAddedEvidence.CONFIRMED).exists()
+        )
+        .exclude(added_evidence=PDFDocumentAddedEvidence.CONFIRMED)
+        .exists()
     )
     if can_reuse_history:
         log_event(

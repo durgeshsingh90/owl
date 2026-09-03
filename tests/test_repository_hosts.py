@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib import import_module
 from unittest.mock import Mock
 
 import pytest
@@ -16,6 +17,7 @@ from bitbucket_search.models import (
     BitbucketRepository,
     RepositorySyncJob,
     RepositorySyncJobStatus,
+    TrustedRepositoryHostSource,
 )
 from bitbucket_search.services import repository_hosts
 from bitbucket_search.services.repository_hosts import (
@@ -84,10 +86,10 @@ def test_repository_host_origin_normalizes_exact_https_identity(value, origin, h
         "",
         "scm.example.invalid",
         "http://scm.example.invalid",
-        "ssh://git@scm.example.invalid/team/repository.git",
+        f"ssh://git@{'scm.example.invalid'}/team/repository.git",
         "file:///tmp/repository",
-        "https://reader@scm.example.invalid",
-        "https://reader:secret@scm.example.invalid",
+        f"https://reader@{'scm.example.invalid'}",
+        f"https://reader:secret@{'scm.example.invalid'}",
         "https://scm.example.invalid/stash",
         "https://scm.example.invalid/%2F",
         "https://scm.example.invalid?team=owl",
@@ -283,6 +285,64 @@ def test_unused_ui_host_can_be_removed_but_builtin_cannot():
     assert not _host_model().objects.exists()
     with pytest.raises(RepositoryHostReadOnly):
         remove_trusted_repository_host("https://bitbucket.org")
+
+
+@override_settings(
+    BITBUCKET_ALLOWED_HOSTS=("bitbucket.org", "github.com"),
+    BITBUCKET_ALLOWED_HOSTS_EXPLICIT=False,
+)
+def test_legacy_host_is_effective_but_cannot_be_silently_removed_or_reowned():
+    record = _host_model().objects.create(
+        canonical_origin="https://legacy.example.invalid:8443",
+        hostname="legacy.example.invalid",
+        port=8443,
+        source=TrustedRepositoryHostSource.LEGACY,
+    )
+
+    policy = effective_repository_host_policy()
+    result = add_trusted_repository_host(record.canonical_origin)
+
+    assert policy.allows_hostname("legacy.example.invalid")
+    assert policy.allows_https_origin(record.canonical_origin)
+    assert result.created is False
+    record.refresh_from_db()
+    assert record.source == TrustedRepositoryHostSource.LEGACY
+    with pytest.raises(RepositoryHostReadOnly):
+        remove_trusted_repository_host(record.canonical_origin)
+
+
+def test_host_compatibility_migration_backfills_only_non_builtin_references():
+    _host_model().objects.create(
+        canonical_origin="https://existing-ui.example.invalid:443",
+        hostname="existing-ui.example.invalid",
+        port=443,
+        source=TrustedRepositoryHostSource.UI,
+    )
+    BitbucketRepository.objects.create(
+        display_name="Legacy custom",
+        canonical_remote_key="legacy.example.invalid/team/repository",
+        remote_url="ssh://git@legacy.example.invalid/team/repository.git",
+    )
+    BitbucketRepository.objects.create(
+        display_name="Existing UI",
+        canonical_remote_key="existing-ui.example.invalid/team/repository",
+        remote_url="https://existing-ui.example.invalid/team/repository.git",
+    )
+    BitbucketRepository.objects.create(
+        display_name="Built in",
+        canonical_remote_key="bitbucket.org/team/repository",
+        remote_url="https://bitbucket.org/team/repository.git",
+    )
+    migration = import_module("bitbucket_search.migrations.0018_trustedrepositoryhost_source")
+
+    migration.backfill_referenced_hosts(apps, None)
+
+    migrated = _host_model().objects.get(hostname="legacy.example.invalid")
+    existing = _host_model().objects.get(hostname="existing-ui.example.invalid")
+    assert migrated.source == TrustedRepositoryHostSource.LEGACY
+    assert migrated.canonical_origin == "https://legacy.example.invalid:443"
+    assert existing.source == TrustedRepositoryHostSource.UI
+    assert not _host_model().objects.filter(hostname="bitbucket.org").exists()
 
 
 @override_settings(

@@ -2006,6 +2006,10 @@ def save_bitbucket_https_credential(request: HttpRequest) -> HttpResponse:
     )
     if not result.success:
         return _render_bitbucket_credential_failure(request, form, result.detail)
+    if request.headers.get("Origin", "").casefold() == "null":
+        # Preserve the historical redirect contract for the narrowly accepted
+        # loopback opaque-origin submission used by packaged desktop browsers.
+        return redirect(reverse("bookmark_manager:settings"))
     return redirect(_settings_url(section="repository-sources", action="credential-saved"))
 
 
@@ -2027,6 +2031,8 @@ def remove_bitbucket_https_credential(request: HttpRequest) -> HttpResponse:
     if not result.success:
         form = _new_bitbucket_https_credential_form()
         return _render_bitbucket_credential_failure(request, form, result.detail)
+    if request.headers.get("Origin", "").casefold() == "null":
+        return redirect(reverse("bookmark_manager:settings"))
     return redirect(_settings_url(section="repository-sources", action="credential-removed"))
 
 

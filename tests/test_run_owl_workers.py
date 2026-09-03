@@ -19,6 +19,7 @@ from bitbucket_search.models import (
     BitbucketRepository,
     PDFDocument,
     PDFExtractionJob,
+    PDFExtractionJobPhase,
     PDFExtractionJobStatus,
     PDFPipelineRecovery,
     PDFPipelineRecoveryState,
@@ -1246,6 +1247,83 @@ def test_due_pdf_recovery_launch_closes_only_after_stability(tmp_path, settings)
     assert probes == {}
 
 
+def test_live_replacement_with_demand_needs_progress_before_recovery(
+    tmp_path, settings, monkeypatch
+):
+    settings.PDF_PIPELINE_STATE_ROOT = tmp_path / "pipeline-state"
+    settings.PDF_PIPELINE_RECOVERY_ENABLED = True
+    settings.PDF_PIPELINE_RECOVERY_PAUSE_AFTER_ATTEMPTS = 2
+    settings.PDF_PIPELINE_RECOVERY_BACKOFF_BASE_SECONDS = 1
+    settings.PDF_PIPELINE_RECOVERY_BACKOFF_MAX_SECONDS = 1
+    settings.PDF_PIPELINE_RECOVERY_JITTER_FRACTION = 0
+    settings.PDF_PIPELINE_RECOVERY_STABILITY_SECONDS = 5
+    job = _pdf_job(status=PDFExtractionJobStatus.RUNNING)
+    PDFExtractionJob.objects.filter(pk=job.pk).update(
+        phase=PDFExtractionJobPhase.PUBLISHING,
+        worker_pid=None,
+    )
+    run_owl._record_pdf_worker_failure(
+        "pdf-writer-1",
+        reason_code=run_owl.RecoveryReasonCode.PROCESS_EXIT,
+        probe=None,
+    )
+    PDFPipelineRecovery.objects.filter(scope="publisher").update(
+        next_retry_at=run_owl.timezone.now(),
+    )
+    permission = run_owl._prepare_pdf_worker_launch("pdf-writer-1", monotonic_now=10)
+    process = _ResidentProcess("bitbucket_pdf_writer", 808)
+    probes = {"pdf-writer-1": permission.probe}
+    stop_worker = Mock()
+    monkeypatch.setattr(run_owl, "_stop_resident_bitbucket_worker", stop_worker)
+
+    run_owl._complete_stable_pdf_worker_probes({"pdf-writer-1": process}, probes, monotonic_now=15)
+    recovery = PDFPipelineRecovery.objects.get(scope="publisher")
+    assert recovery.state == PDFPipelineRecoveryState.RECOVERING
+    assert "pdf-writer-1" in probes
+
+    run_owl._complete_stable_pdf_worker_probes({"pdf-writer-1": process}, probes, monotonic_now=20)
+    recovery.refresh_from_db()
+    assert recovery.state == PDFPipelineRecoveryState.RETRY_WAIT
+    assert recovery.reason_code == "no_forward_progress"
+    assert recovery.lifetime_attempts == 1
+    assert recovery.consecutive_failed_attempts == 1
+    assert probes == {}
+    stop_worker.assert_called_once_with(process)
+
+
+def test_fresh_owned_publisher_heartbeat_satisfies_demand_stability(tmp_path, settings):
+    settings.PDF_PIPELINE_STATE_ROOT = tmp_path / "pipeline-state"
+    settings.PDF_PIPELINE_RECOVERY_ENABLED = True
+    settings.PDF_PIPELINE_RECOVERY_PAUSE_AFTER_ATTEMPTS = 2
+    settings.PDF_PIPELINE_RECOVERY_BACKOFF_BASE_SECONDS = 1
+    settings.PDF_PIPELINE_RECOVERY_BACKOFF_MAX_SECONDS = 1
+    settings.PDF_PIPELINE_RECOVERY_JITTER_FRACTION = 0
+    settings.PDF_PIPELINE_RECOVERY_STABILITY_SECONDS = 5
+    job = _pdf_job(status=PDFExtractionJobStatus.RUNNING)
+    PDFExtractionJob.objects.filter(pk=job.pk).update(
+        phase=PDFExtractionJobPhase.PUBLISHING,
+        worker_pid=808,
+        heartbeat_at=run_owl.timezone.now(),
+    )
+    run_owl._record_pdf_worker_failure(
+        "pdf-writer-1",
+        reason_code=run_owl.RecoveryReasonCode.PROCESS_EXIT,
+        probe=None,
+    )
+    PDFPipelineRecovery.objects.filter(scope="publisher").update(
+        next_retry_at=run_owl.timezone.now(),
+    )
+    permission = run_owl._prepare_pdf_worker_launch("pdf-writer-1", monotonic_now=10)
+    process = _ResidentProcess("bitbucket_pdf_writer", 808)
+    probes = {"pdf-writer-1": permission.probe}
+
+    run_owl._complete_stable_pdf_worker_probes({"pdf-writer-1": process}, probes, monotonic_now=15)
+
+    recovery = PDFPipelineRecovery.objects.get(scope="publisher")
+    assert recovery.state == PDFPipelineRecoveryState.HEALTHY
+    assert probes == {}
+
+
 def test_failed_replacement_probe_opens_circuit_at_threshold(tmp_path, settings):
     settings.PDF_PIPELINE_STATE_ROOT = tmp_path / "pipeline-state"
     settings.PDF_PIPELINE_RECOVERY_ENABLED = True
@@ -1275,6 +1353,95 @@ def test_failed_replacement_probe_opens_circuit_at_threshold(tmp_path, settings)
     assert recovery.consecutive_failed_attempts == 1
     assert recovery.lifetime_attempts == 1
     assert run_owl._prepare_pdf_worker_launch("pdf-index-2").allowed is False
+
+
+def test_correlated_slot_failures_escalate_once_to_extraction_pool(tmp_path, settings):
+    settings.PDF_PIPELINE_STATE_ROOT = tmp_path / "pipeline-state"
+    settings.PDF_PIPELINE_RECOVERY_ENABLED = True
+    settings.PDF_PIPELINE_RECOVERY_PAUSE_AFTER_ATTEMPTS = 25
+    settings.PDF_PIPELINE_RECOVERY_CORRELATION_WINDOW_SECONDS = 10
+    settings.PDF_PIPELINE_RECOVERY_ESCALATION_SLOT_COUNT = 2
+
+    run_owl._record_pdf_worker_failure(
+        "pdf-index-1",
+        reason_code=run_owl.RecoveryReasonCode.STALE_HEARTBEAT,
+        probe=None,
+    )
+    assert PDFPipelineRecovery.objects.get(scope="extraction_pool").state == (
+        PDFPipelineRecoveryState.HEALTHY
+    )
+
+    run_owl._record_pdf_worker_failure(
+        "pdf-index-2",
+        reason_code=run_owl.RecoveryReasonCode.STALE_HEARTBEAT,
+        probe=None,
+    )
+
+    owner = PDFPipelineRecovery.objects.get(scope="extraction_pool")
+    assert owner.state == PDFPipelineRecoveryState.RETRY_WAIT
+    assert owner.lifetime_attempts == 0
+    assert owner.consecutive_failed_attempts == 0
+    assert set(
+        PDFPipelineRecovery.objects.filter(
+            scope__in=("extraction_slot:1", "extraction_slot:2")
+        ).values_list("state", flat=True)
+    ) == {PDFPipelineRecoveryState.HEALTHY}
+    assert run_owl._prepare_pdf_worker_launch("pdf-index-1").allowed is False
+
+    run_owl._record_pdf_worker_failure(
+        "pdf-index-3",
+        reason_code=run_owl.RecoveryReasonCode.STALE_HEARTBEAT,
+        probe=None,
+    )
+    owner.refresh_from_db()
+    assert owner.generation == 1
+    assert not PDFPipelineRecovery.objects.filter(scope="extraction_slot:3").exists()
+
+
+def test_extraction_pool_probe_allows_children_and_closes_after_idle_stability(
+    tmp_path,
+    settings,
+):
+    settings.PDF_PIPELINE_STATE_ROOT = tmp_path / "pipeline-state"
+    settings.PDF_PIPELINE_RECOVERY_ENABLED = True
+    settings.PDF_PIPELINE_RECOVERY_PAUSE_AFTER_ATTEMPTS = 25
+    settings.PDF_PIPELINE_RECOVERY_BACKOFF_BASE_SECONDS = 1
+    settings.PDF_PIPELINE_RECOVERY_BACKOFF_MAX_SECONDS = 1
+    settings.PDF_PIPELINE_RECOVERY_JITTER_FRACTION = 0
+    settings.PDF_PIPELINE_RECOVERY_STABILITY_SECONDS = 5
+    incident = run_owl.record_recovery_incident(
+        run_owl.RecoveryScope.EXTRACTION_POOL,
+        reason_code=run_owl.RecoveryReasonCode.PROCESS_EXIT,
+    ).transition
+    PDFPipelineRecovery.objects.filter(pk=incident.recovery.pk).update(
+        next_retry_at=run_owl.timezone.now()
+    )
+
+    permission = run_owl._maintain_parent_recovery_probe(
+        run_owl.RecoveryScope.EXTRACTION_POOL.value,
+        None,
+        monotonic_now=10,
+    )
+    assert permission.allowed is True
+    assert permission.probe is not None
+    child_permission = run_owl._prepare_pdf_worker_launch(
+        "pdf-index-1",
+        active_parent_scopes=frozenset({run_owl.RecoveryScope.EXTRACTION_POOL.value}),
+    )
+    assert child_permission.allowed is True
+
+    process = _ResidentProcess("bitbucket_index_worker", 808)
+    remaining = run_owl._complete_parent_recovery_probe(
+        run_owl.RecoveryScope.EXTRACTION_POOL.value,
+        {"pdf-index-1": process},
+        permission.probe,
+        monotonic_now=15,
+    )
+
+    assert remaining is None
+    recovery = PDFPipelineRecovery.objects.get(scope="extraction_pool")
+    assert recovery.state == PDFPipelineRecoveryState.HEALTHY
+    assert recovery.lifetime_attempts == 1
 
 
 def test_index_worker_exits_a_caught_database_error_loop_for_supervisor_recovery(

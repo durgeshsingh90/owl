@@ -19,6 +19,7 @@ from bitbucket_search.services.pdf_pipeline_controller import (
     config_from_settings,
     controller_snapshot,
     recommend_target,
+    replay_controller_observations,
     resource_ceiling,
     worker_slot_admitted,
 )
@@ -268,6 +269,9 @@ def test_increase_is_plus_one_and_requires_deterministic_hysteresis(settings, tm
     event = PDFPipelineTuningEvent.objects.get()
     assert event.action == PDFPipelineTuningAction.RECOMMEND
     assert (event.previous_target, event.proposed_target) == (4, 5)
+    assert event.expected_effect_code == "improve_durable_throughput"
+    assert event.evidence["completed_documents"] == 20
+    assert event.evidence["host_cpu_pct"] == 45.0
 
 
 def test_adaptive_applies_only_after_gate_and_cooldown_prevents_oscillation(
@@ -468,9 +472,7 @@ def test_adaptive_rolls_back_increase_without_measured_throughput_benefit(
 
 
 def test_kill_switch_stops_shadow_recommendations(settings, tmp_path):
-    controller = PDFPipelineController(
-        _config(settings, tmp_path, mode="shadow", kill_switch=True)
-    )
+    controller = PDFPipelineController(_config(settings, tmp_path, mode="shadow", kill_switch=True))
 
     snapshot = controller.evaluate(_observation())
 
@@ -504,3 +506,48 @@ def test_controller_failure_publishes_fixed_fallback_before_supervisor_error(
     )
     assert snapshot["controller"]["operatingMode"] == "observe"
     assert snapshot["controller"]["effectiveAdmissionTarget"] == 4
+
+
+def test_shadow_trace_replay_is_deterministic_and_never_changes_admission(
+    settings,
+    tmp_path,
+):
+    config = _config(settings, tmp_path, mode="shadow", hysteresis_samples=3)
+    started = timezone.now()
+    trace = tuple(_observation(at=started + timedelta(seconds=index)) for index in range(3))
+
+    first = replay_controller_observations(config, trace)
+    second = replay_controller_observations(config, trace)
+
+    assert first == second
+    assert [row["effectiveAdmissionTarget"] for row in first] == [4, 4, 4]
+    assert first[-1]["proposedTarget"] == 5
+    assert first[-1]["resourceReservationFreshAt"] == trace[-1].at.isoformat()
+    assert PDFPipelineTuningEvent.objects.count() == 0
+
+
+def test_shadow_trace_replay_rejects_nonchronological_input(settings, tmp_path):
+    config = _config(settings, tmp_path, mode="shadow")
+    observed = _observation()
+
+    with pytest.raises(ValueError, match="strictly increasing"):
+        replay_controller_observations(config, (observed, observed))
+
+
+def test_shadow_recommendation_records_truthful_nonapplied_outcome(settings, tmp_path):
+    config = _config(
+        settings,
+        tmp_path,
+        mode="shadow",
+        hysteresis_samples=1,
+        cooldown_seconds=60,
+    )
+    controller = PDFPipelineController(config)
+    observed = _observation()
+
+    controller.evaluate(observed)
+    first_event = PDFPipelineTuningEvent.objects.get()
+    controller.evaluate(replace(observed, at=observed.at + timedelta(seconds=61)))
+
+    first_event.refresh_from_db()
+    assert first_event.outcome == "shadow_not_applied"

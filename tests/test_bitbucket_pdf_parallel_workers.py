@@ -259,6 +259,30 @@ def test_locality_spills_to_another_repository_instead_of_leaving_capacity_idle(
 
 
 @pytest.mark.django_db
+def test_work_conservation_has_a_fixed_locality_rollback_switch(
+    parallel_targets,
+    settings,
+):
+    first_repository, _documents = parallel_targets("strict-first", 2)
+    second_repository, _documents = parallel_targets("strict-second", 1)
+    settings.PDF_MAX_EXTRACTION_WORKERS = 2
+    settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY = 1
+    settings.PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES = 1
+    settings.PDF_PIPELINE_REPOSITORY_WORK_CONSERVING = False
+
+    first = pdf_indexing.claim_next_extraction_job()
+    blocked = pdf_indexing.claim_next_extraction_job()
+
+    assert first is not None
+    assert first.document.repository_id == first_repository.pk
+    assert blocked is None
+    assert PDFExtractionJob.objects.filter(
+        document__repository=second_repository,
+        status=PDFExtractionJobStatus.QUEUED,
+    ).exists()
+
+
+@pytest.mark.django_db
 def test_oldest_repository_wait_bound_preempts_locality(parallel_targets, settings):
     first_repository, _documents = parallel_targets("fairness-first", 4)
     second_repository, _documents = parallel_targets("fairness-second", 1)

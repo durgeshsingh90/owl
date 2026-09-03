@@ -698,8 +698,8 @@ Steps and checkpoints:
 5. Close every OWL browser tab while work remains, verify server-side progress
    independently, reopen, and confirm state reconstruction. Separately stop OWL and
    restart it; no progress is claimed while stopped and durable work resumes safely.
-6. Complete Settings keyboard/narrow-screen journeys for the section routes, Confluence,
-   import/export, PDF pipeline controls, and exact trusted-host origin. Add a repository
+6. Complete Settings keyboard/narrow-screen journeys for Overview, Confluence,
+   Repository sources, Bookmark data, and the exact trusted-host origin. Add a repository
    with a separate full clone URL and verify credential-origin scoping, external-policy
    precedence, conflict handling, and dependency-safe host removal.
 7. Inject retryable component failures, a permanent corrupt PDF, an immediate disk-safety
@@ -871,7 +871,7 @@ The matrix is the minimum stable coverage map. Implementations may add narrower 
 | PIPE-T06 | Top bar/cards/Home/Logs share truth; activity asset, accessibility, narrow layout, and reduced motion are correct | P0 | Browser + accessibility | PIPE-006 |
 | PIPE-T07 | Settings sections and trusted-host/credential-origin/clone-URL contracts preserve precedence and safe removal | P0 | Unit + integration + browser + security | PIPE-007 |
 | PIPE-T08 | Durable recovery scopes, backoff, 25-attempt circuit, resume, history, and notification deduplication are exact | P0 | Unit + integration + resilience | PIPE-008 |
-| PIPE-T09 | Off/observe/shadow/adaptive modes have one owner and preserve every target/bound distinction | P0 | Unit + concurrency + restart | PIPE-009 |
+| PIPE-T09 | Fixed/observe/shadow/adaptive modes have one owner and preserve every target/bound distinction | P0 | Unit + concurrency + restart | PIPE-009 |
 | PIPE-T10 | 80-percent CPU-derived budget, competing OWL work, missing signals, and all safety/foreground guardrails limit admission | P0 | Unit + performance | PIPE-010 |
 | PIPE-T11 | Fresh isolated database/root per trial, fixed repeated matrix, variance, one-variable comparisons, and ignored reports | P0 | Performance + security gate | PIPE-011 |
 | PIPE-T12 | Browser-close/reopen and OWL-stop/restart truth, loopback authorization/redaction, fixed Git policy, and safe fallback | P0 | Integration + browser + security | PIPE-012 |

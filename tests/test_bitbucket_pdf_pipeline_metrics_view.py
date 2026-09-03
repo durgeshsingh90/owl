@@ -7,7 +7,6 @@ from django.urls import reverse
 
 from bitbucket_search.models import BitbucketRepository
 
-
 pytestmark = pytest.mark.django_db
 
 

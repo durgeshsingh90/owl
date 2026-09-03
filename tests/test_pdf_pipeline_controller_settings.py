@@ -46,7 +46,7 @@ def test_invalid_controller_configuration_fails_closed_at_startup(
             "CONFLUENCE_BASE_URL": "",
             "CONFLUENCE_PAT": "",
             "DJANGO_SECRET_KEY": (
-                "synthetic-controller-settings-secret-key-0123456789-abcdefgh"
+                "synthetic-test-secret-key-only-not-for-real-use-controller-0123456789"
             ),
             "OWL_DATA_ROOT": str(tmp_path / "runtime"),
             "OWL_ENV_FILE": str(tmp_path / "no-environment-file"),
@@ -66,3 +66,39 @@ def test_invalid_controller_configuration_fails_closed_at_startup(
 
     assert result.returncode != 0
     assert message in result.stderr
+
+
+def test_zero_recovery_threshold_is_valid_and_means_no_automatic_relaunch(tmp_path):
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "BITBUCKET_ALLOWED_HOSTS": "",
+            "CONFLUENCE_BASE_URL": "",
+            "CONFLUENCE_PAT": "",
+            "DJANGO_SECRET_KEY": (
+                "synthetic-test-secret-key-only-not-for-real-use-controller-0123456789"
+            ),
+            "OWL_DATA_ROOT": str(tmp_path / "runtime"),
+            "OWL_ENV_FILE": str(tmp_path / "no-environment-file"),
+            "PDF_PIPELINE_RECOVERY_PAUSE_AFTER_ATTEMPTS": "0",
+        }
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import owl.settings as configured; "
+                "print(configured.PDF_PIPELINE_RECOVERY_PAUSE_AFTER_ATTEMPTS)"
+            ),
+        ],
+        cwd=settings.BASE_DIR,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "0"

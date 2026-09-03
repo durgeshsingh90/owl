@@ -44,6 +44,73 @@ class Command(BaseCommand):
         parser.add_argument("--seed", type=int, default=1100)
         parser.add_argument("--trial-timeout-seconds", type=int, default=900)
         parser.add_argument(
+            "--sqlite-journal-mode",
+            choices=("delete", "wal"),
+            default="delete",
+            help=(
+                "SQLite journal mode for this isolated trial matrix. Keep this fixed "
+                "while comparing worker targets."
+            ),
+        )
+        parser.add_argument(
+            "--metrics-sampling",
+            action="store_true",
+            help=(
+                "Enable the normal bounded pipeline metrics sampler in each isolated "
+                "trial so its overhead can be measured separately."
+            ),
+        )
+        parser.add_argument(
+            "--per-repository-workers",
+            type=int,
+            default=None,
+            help=(
+                "Optional per-repository parser cap for locality/work-conservation "
+                "experiments; defaults to each fixed worker target."
+            ),
+        )
+        parser.add_argument(
+            "--strict-repository-locality",
+            action="store_true",
+            help="Disable work-conserving spillover for one isolated comparison run.",
+        )
+        parser.add_argument(
+            "--repeat-child-prehash",
+            action="store_true",
+            help="Disable parent-fingerprint handoff for one isolated I/O comparison run.",
+        )
+        parser.add_argument(
+            "--publication-page-batch-size",
+            type=int,
+            default=100,
+            help="PDF page bulk-create batch size for this isolated trial only.",
+        )
+        parser.add_argument(
+            "--with-duplicate-page-index",
+            action="store_true",
+            help=(
+                "Recreate the retired duplicate PDF-page lookup index inside each "
+                "disposable trial for a controlled before/after comparison."
+            ),
+        )
+        parser.add_argument(
+            "--source-padding-bytes-per-document",
+            type=int,
+            default=0,
+            help=(
+                "Add an unreferenced deterministic PDF stream of this average size; "
+                "use only in disposable capacity/representative trials."
+            ),
+        )
+        parser.add_argument(
+            "--include-failure-fixtures",
+            action="store_true",
+            help=(
+                "Replace the final three generated documents with blank, encrypted, "
+                "and malformed fixtures in each disposable trial."
+            ),
+        )
+        parser.add_argument(
             "--keep-trial-data",
             action="store_true",
             help="Keep synthetic trial databases/PDFs below ignored var/benchmarks.",
@@ -86,6 +153,15 @@ class Command(BaseCommand):
             seed=options["seed"],
             trial_timeout_seconds=options["trial_timeout_seconds"],
             keep_trial_data=options["keep_trial_data"],
+            sqlite_journal_mode=options["sqlite_journal_mode"],
+            metrics_sampling_enabled=options["metrics_sampling"],
+            per_repository_worker_limit=options["per_repository_workers"],
+            repository_work_conserving=not options["strict_repository_locality"],
+            reuse_parent_fingerprint=not options["repeat_child_prehash"],
+            publication_page_batch_size=options["publication_page_batch_size"],
+            duplicate_page_index=options["with_duplicate_page_index"],
+            source_padding_bytes_per_document=options["source_padding_bytes_per_document"],
+            include_failure_fixtures=options["include_failure_fixtures"],
         )
         try:
             validate_plan(plan)

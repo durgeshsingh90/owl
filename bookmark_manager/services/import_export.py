@@ -83,6 +83,7 @@ def _retry_database_lock(operation):
             )
             time.sleep(delay)
 
+
 _MISSING = object()
 _SAFE_ERROR_CODE = re.compile(r"^[A-Za-z0-9_.-]*$")
 _SENSITIVE_QUERY_KEY = re.compile(
@@ -626,9 +627,7 @@ def import_bookmarks_document(
     else:
         run.status = BookmarkImportStatus.COMPLETED
         run.outcome = f"Imported {imported} and skipped {skipped} of {len(records)} records."
-    _retry_database_lock(
-        lambda: run.save(update_fields=["status", "outcome", "completed_at"])
-    )
+    _retry_database_lock(lambda: run.save(update_fields=["status", "outcome", "completed_at"]))
     return BookmarkImportResult(run=run)
 
 
@@ -827,9 +826,7 @@ def import_bookmarks_text(
             f"Completed all {len(urls)} extracted URLs; added {imported} and "
             f"already present {skipped}."
         )
-    _retry_database_lock(
-        lambda: run.save(update_fields=["status", "outcome", "completed_at"])
-    )
+    _retry_database_lock(lambda: run.save(update_fields=["status", "outcome", "completed_at"]))
     return BookmarkImportResult(run=run)
 
 
@@ -2305,6 +2302,7 @@ def _record_failure(
         error_code=error_code,
     )
     try:
+
         def persist_failure():
             BookmarkImportFailure.objects.update_or_create(
                 import_run=run,
@@ -2341,6 +2339,7 @@ def _update_run_progress(
     run.imported_records = imported
     run.skipped_records = skipped
     try:
+
         def persist_progress():
             run.failed_records = run.failures.count()
             run.save(

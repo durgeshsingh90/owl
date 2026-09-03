@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import platform
 import shutil
@@ -19,7 +20,6 @@ import sys
 import time
 import uuid
 from collections import Counter
-from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +27,7 @@ from typing import Any
 
 from django.conf import settings
 from django.core.management import call_command
-from django.db import DatabaseError, close_old_connections, connection, connections
+from django.db import connection, connections
 
 BENCHMARK_SCHEMA_VERSION = 2
 BENCHMARK_KIND = "owl.synthetic-pdf-pipeline-benchmark"
@@ -36,9 +36,7 @@ FULL_WORKER_MATRIX = (1, 2, 4, 6, 8)
 MAX_TESTED_WORKERS = 8
 SQLITE_JOURNAL_MODES = ("delete", "wal")
 FOREGROUND_PROBE_INTERVAL_SECONDS = 0.2
-_SYNTHETIC_SECRET_KEY = (
-    "synthetic-pdf-benchmark-secret-key-never-for-real-use-0123456789-abcdefghij"
-)
+_SYNTHETIC_SECRET_KEY = "synthetic-test-secret-key-only-not-for-real-use-pdf-benchmark-0123456789"
 _TIER_CHARACTER_TARGETS = (96, 768, 6_144, 24_576)
 
 
@@ -56,6 +54,13 @@ class BenchmarkPlan:
     keep_trial_data: bool = False
     sqlite_journal_mode: str = "delete"
     metrics_sampling_enabled: bool = False
+    per_repository_worker_limit: int | None = None
+    repository_work_conserving: bool = True
+    reuse_parent_fingerprint: bool = True
+    publication_page_batch_size: int = 100
+    duplicate_page_index: bool = False
+    source_padding_bytes_per_document: int = 0
+    include_failure_fixtures: bool = False
 
 
 def utc_now() -> datetime:
@@ -98,6 +103,29 @@ def validate_plan(plan: BenchmarkPlan) -> BenchmarkPlan:
         raise ValueError("SQLite journal mode must be delete or wal.")
     if not isinstance(plan.metrics_sampling_enabled, bool):
         raise ValueError("Metrics sampling selection must be true or false.")
+    if plan.per_repository_worker_limit is not None and (
+        isinstance(plan.per_repository_worker_limit, bool)
+        or not 1 <= plan.per_repository_worker_limit <= MAX_TESTED_WORKERS
+    ):
+        raise ValueError(f"Per-repository workers must be between 1 and {MAX_TESTED_WORKERS}.")
+    if not isinstance(plan.repository_work_conserving, bool):
+        raise ValueError("Repository work-conservation selection must be true or false.")
+    if not isinstance(plan.reuse_parent_fingerprint, bool):
+        raise ValueError("Parent-fingerprint reuse selection must be true or false.")
+    if (
+        isinstance(plan.publication_page_batch_size, bool)
+        or not 1 <= plan.publication_page_batch_size <= 1_000
+    ):
+        raise ValueError("Publication page batch size must be between 1 and 1000.")
+    if not isinstance(plan.duplicate_page_index, bool):
+        raise ValueError("Duplicate page-index selection must be true or false.")
+    if (
+        isinstance(plan.source_padding_bytes_per_document, bool)
+        or not 0 <= plan.source_padding_bytes_per_document <= 10_000_000
+    ):
+        raise ValueError("Source padding per document must be between 0 and 10000000 bytes.")
+    if not isinstance(plan.include_failure_fixtures, bool):
+        raise ValueError("Failure-fixture selection must be true or false.")
     return plan
 
 
@@ -152,6 +180,10 @@ def _child_environment(
     data_root: Path,
     worker_count: int,
     metrics_sampling_enabled: bool,
+    per_repository_worker_limit: int | None = None,
+    repository_work_conserving: bool = True,
+    reuse_parent_fingerprint: bool = True,
+    publication_page_batch_size: int = 100,
 ) -> dict[str, str]:
     """Build a minimal child environment without inheriting integration secrets."""
 
@@ -189,16 +221,23 @@ def _child_environment(
             "CONFLUENCE_PAT": "",
             "BITBUCKET_ALLOWED_HOSTS": "",
             "PDF_MAX_EXTRACTION_WORKERS": str(worker_count),
-            "PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY": str(worker_count),
+            "PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY": str(
+                min(worker_count, per_repository_worker_limit or worker_count)
+            ),
             "PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES": "1",
+            "PDF_PIPELINE_REPOSITORY_WORK_CONSERVING": (
+                "true" if repository_work_conserving else "false"
+            ),
+            "PDF_PIPELINE_REUSE_PARENT_FINGERPRINT": (
+                "true" if reuse_parent_fingerprint else "false"
+            ),
+            "PDF_PUBLICATION_PAGE_BATCH_SIZE": str(publication_page_batch_size),
             "PDF_PIPELINE_CONTROLLER_MODE": "fixed",
             "PDF_PIPELINE_ADAPTIVE_ENABLED": "false",
             "PDF_PIPELINE_CONTROLLER_KILL_SWITCH": "false",
             "PDF_PIPELINE_MANUAL_FIXED_TARGET": str(worker_count),
             "PDF_PIPELINE_INITIAL_TARGET": str(worker_count),
-            "PDF_PIPELINE_METRICS_ENABLED": (
-                "true" if metrics_sampling_enabled else "false"
-            ),
+            "PDF_PIPELINE_METRICS_ENABLED": ("true" if metrics_sampling_enabled else "false"),
             "PDF_PIPELINE_METRICS_SNAPSHOT_ENABLED": (
                 "true" if metrics_sampling_enabled else "false"
             ),
@@ -244,6 +283,24 @@ def _trial_command(
     ]
     if plan.metrics_sampling_enabled:
         command.append("--metrics-sampling")
+    if plan.per_repository_worker_limit is not None:
+        command.extend(("--per-repository-workers", str(plan.per_repository_worker_limit)))
+    if not plan.repository_work_conserving:
+        command.append("--strict-repository-locality")
+    if not plan.reuse_parent_fingerprint:
+        command.append("--repeat-child-prehash")
+    command.extend(("--publication-page-batch-size", str(plan.publication_page_batch_size)))
+    if plan.duplicate_page_index:
+        command.append("--with-duplicate-page-index")
+    if plan.source_padding_bytes_per_document:
+        command.extend(
+            (
+                "--source-padding-bytes-per-document",
+                str(plan.source_padding_bytes_per_document),
+            )
+        )
+    if plan.include_failure_fixtures:
+        command.append("--include-failure-fixtures")
     return command
 
 
@@ -337,7 +394,15 @@ def run_benchmark(plan: BenchmarkPlan) -> tuple[dict[str, Any], Path]:
                 completed = subprocess.run(
                     command,
                     cwd=settings.BASE_DIR,
-                    env=_child_environment(data_root=data_root, worker_count=worker_count),
+                    env=_child_environment(
+                        data_root=data_root,
+                        worker_count=worker_count,
+                        metrics_sampling_enabled=plan.metrics_sampling_enabled,
+                        per_repository_worker_limit=plan.per_repository_worker_limit,
+                        repository_work_conserving=plan.repository_work_conserving,
+                        reuse_parent_fingerprint=plan.reuse_parent_fingerprint,
+                        publication_page_batch_size=plan.publication_page_batch_size,
+                    ),
                     capture_output=True,
                     text=True,
                     timeout=plan.trial_timeout_seconds,
@@ -425,6 +490,15 @@ def run_benchmark(plan: BenchmarkPlan) -> tuple[dict[str, Any], Path]:
             "seed": plan.seed,
             "workerTargets": list(plan.worker_targets),
             "repetitions": plan.repetitions,
+            "sqliteJournalMode": plan.sqlite_journal_mode,
+            "metricsSamplingEnabled": plan.metrics_sampling_enabled,
+            "perRepositoryWorkerLimit": plan.per_repository_worker_limit,
+            "repositoryWorkConserving": plan.repository_work_conserving,
+            "reuseParentFingerprint": plan.reuse_parent_fingerprint,
+            "publicationPageBatchSize": plan.publication_page_batch_size,
+            "duplicatePageIndex": plan.duplicate_page_index,
+            "sourcePaddingBytesPerDocument": plan.source_padding_bytes_per_document,
+            "failureFixturesIncluded": plan.include_failure_fixtures,
         },
         "machine": {
             "system": platform.system(),
@@ -437,8 +511,9 @@ def run_benchmark(plan: BenchmarkPlan) -> tuple[dict[str, Any], Path]:
         "trials": trials,
         "failedTrialCount": failed_trials,
         "limitations": [
-            "This calibration scaffold measures the existing PDF extraction, durable staging, and publication path.",
-            "Semantic concurrency, concurrent browser/search load, cold-cache control, host I/O, thermal state, and representative 20,000-25,000 PDF evidence require the later benchmark phase.",
+            "This harness measures the existing PDF extraction, durable staging, and publication path with concurrent exact-search and dashboard-payload probes.",
+            "The foreground probes call the production read services directly; visible browser rendering and network latency require separate UI validation.",
+            "Semantic-model concurrency, reproducible cold-cache control, thermal state, controlled recovery injection, and representative 20,000-25,000 PDF / roughly 50 GB evidence remain required before the gate can pass.",
             "A report from this harness is not by itself permission to enable adaptive mode or exceed the tested ceiling of eight extractors.",
         ],
     }
@@ -452,7 +527,13 @@ def _escape_pdf_literal(value: str) -> str:
     return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
-def _write_text_pdf(path: Path, page_texts: list[str]) -> None:
+def _write_text_pdf(
+    path: Path,
+    page_texts: list[str],
+    *,
+    source_padding_bytes: int = 0,
+    encrypted: bool = False,
+) -> None:
     from pypdf import PdfWriter
     from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
@@ -475,6 +556,28 @@ def _write_text_pdf(path: Path, page_texts: list[str]) -> None:
             f"BT /F1 10 Tf 20 720 Td ({_escape_pdf_literal(text)}) Tj ET".encode("ascii")
         )
         page[NameObject("/Contents")] = writer._add_object(stream)
+    if source_padding_bytes:
+        padding = DecodedStreamObject()
+        padding.set_data(b"0" * source_padding_bytes)
+        writer._add_object(padding)
+    if encrypted:
+        writer.encrypt("placeholder")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with path.open("xb") as target:
+        writer.write(target)
+
+
+def _write_blank_pdf(path: Path, *, page_count: int, source_padding_bytes: int = 0) -> None:
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject
+
+    writer = PdfWriter()
+    for _page_number in range(page_count):
+        writer.add_blank_page(width=612, height=792)
+    if source_padding_bytes:
+        padding = DecodedStreamObject()
+        padding.set_data(b"0" * source_padding_bytes)
+        writer._add_object(padding)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with path.open("xb") as target:
         writer.write(target)
@@ -524,6 +627,7 @@ def _seed_synthetic_corpus(plan: BenchmarkPlan) -> dict[str, Any]:
     corpus_digest = hashlib.sha256()
     tier_counts: Counter[str] = Counter()
     duplicate_count = 0
+    failure_fixture_counts: Counter[str] = Counter()
     prior_bytes: bytes | None = None
     source_bytes = 0
     for document_number in range(plan.document_count):
@@ -533,7 +637,43 @@ def _seed_synthetic_corpus(plan: BenchmarkPlan) -> dict[str, Any]:
         tier_counts[tier_name] += 1
         relative_path = f"documents/{document_number:06d}-{tier_name}.pdf"
         target = checkout / relative_path
-        if prior_bytes is not None and (document_number + 1) % 9 == 0:
+        fixture_offset = plan.document_count - document_number
+        fixture_kind = (
+            {1: "malformed", 2: "encrypted", 3: "blank"}.get(fixture_offset)
+            if plan.include_failure_fixtures and plan.document_count >= 3
+            else None
+        )
+        padding_multiplier = (0.25, 0.75, 1.25, 1.75)[tier_index]
+        source_padding_bytes = round(plan.source_padding_bytes_per_document * padding_multiplier)
+        if fixture_kind == "malformed":
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            target.write_bytes(b"%PDF-1.7\nmalformed benchmark fixture\n")
+            failure_fixture_counts[fixture_kind] += 1
+        elif fixture_kind == "encrypted":
+            page_texts = [
+                _synthetic_page_text(
+                    document_number=document_number,
+                    page_number=page_number,
+                    seed=plan.seed,
+                    target_characters=_TIER_CHARACTER_TARGETS[tier_index],
+                )
+                for page_number in range(1, plan.pages_per_document + 1)
+            ]
+            _write_text_pdf(
+                target,
+                page_texts,
+                source_padding_bytes=source_padding_bytes,
+                encrypted=True,
+            )
+            failure_fixture_counts[fixture_kind] += 1
+        elif fixture_kind == "blank":
+            _write_blank_pdf(
+                target,
+                page_count=plan.pages_per_document,
+                source_padding_bytes=source_padding_bytes,
+            )
+            failure_fixture_counts[fixture_kind] += 1
+        elif prior_bytes is not None and (document_number + 1) % 9 == 0:
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             target.write_bytes(prior_bytes)
             duplicate_count += 1
@@ -547,7 +687,11 @@ def _seed_synthetic_corpus(plan: BenchmarkPlan) -> dict[str, Any]:
                 )
                 for page_number in range(1, plan.pages_per_document + 1)
             ]
-            _write_text_pdf(target, page_texts)
+            _write_text_pdf(
+                target,
+                page_texts,
+                source_padding_bytes=source_padding_bytes,
+            )
             prior_bytes = target.read_bytes()
         content = target.read_bytes()
         source_bytes += len(content)
@@ -570,6 +714,7 @@ def _seed_synthetic_corpus(plan: BenchmarkPlan) -> dict[str, Any]:
         "queuedDocuments": queued_count,
         "duplicateDocumentCount": duplicate_count,
         "tierCounts": dict(sorted(tier_counts.items())),
+        "failureFixtureCounts": dict(sorted(failure_fixture_counts.items())),
     }
 
 
@@ -648,6 +793,12 @@ def run_internal_worker(*, role: str, timeout_seconds: int) -> None:
                 return
             time.sleep(0.02)
     finally:
+        if role == "publisher":
+            from bitbucket_search.services.pdf_runtime_metrics import (
+                flush_publisher_runtime_metrics,
+            )
+
+            flush_publisher_runtime_metrics()
         connections.close_all()
     raise RuntimeError("The benchmark worker exceeded its trial deadline.")
 
@@ -664,7 +815,9 @@ def _stop_trial_processes(processes: list[subprocess.Popen[bytes]]) -> None:
             process.wait(timeout=5)
 
 
-def _drain_existing_pipeline(*, timeout_seconds: int) -> float:
+def _drain_existing_pipeline(
+    *, timeout_seconds: int
+) -> tuple[float, dict[str, int | str | None], dict[str, Any]]:
     from django.db import close_old_connections, connections
 
     from bitbucket_search.models import PDFExtractionJob, PDFExtractionJobStatus
@@ -679,29 +832,37 @@ def _drain_existing_pipeline(*, timeout_seconds: int) -> float:
         str(timeout_seconds),
     ]
     processes: list[subprocess.Popen[bytes]] = []
+    resident_roles: dict[str, subprocess.Popen[bytes]] = {}
+    metrics_enabled = bool(getattr(settings, "PDF_PIPELINE_METRICS_ENABLED", False))
+    metrics_interval = max(1.0, float(getattr(settings, "PDF_PIPELINE_METRICS_SAMPLE_SECONDS", 5)))
+    next_metrics_sample = started
+    metrics_samples = 0
+    metrics_errors = 0
+    concurrent_probe = _new_concurrent_probe_state()
+    next_foreground_probe = started
     deadline = started + timeout_seconds
     try:
-        for _number in range(settings.PDF_MAX_EXTRACTION_WORKERS):
-            processes.append(
-                subprocess.Popen(
-                    [*base_command, "--internal-worker-role", "extractor"],
-                    cwd=settings.BASE_DIR,
-                    env=os.environ.copy(),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    close_fds=True,
-                )
-            )
-        processes.append(
-            subprocess.Popen(
-                [*base_command, "--internal-worker-role", "publisher"],
+        for worker_number in range(1, settings.PDF_MAX_EXTRACTION_WORKERS + 1):
+            process = subprocess.Popen(
+                [*base_command, "--internal-worker-role", "extractor"],
                 cwd=settings.BASE_DIR,
                 env=os.environ.copy(),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 close_fds=True,
             )
+            processes.append(process)
+            resident_roles[f"pdf-index-{worker_number}"] = process
+        publisher = subprocess.Popen(
+            [*base_command, "--internal-worker-role", "publisher"],
+            cwd=settings.BASE_DIR,
+            env=os.environ.copy(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
         )
+        processes.append(publisher)
+        resident_roles["pdf-writer-1"] = publisher
         while time.monotonic() < deadline:
             if any(process.poll() not in (None, 0) for process in processes):
                 raise RuntimeError("An isolated benchmark worker process failed.")
@@ -710,6 +871,30 @@ def _drain_existing_pipeline(*, timeout_seconds: int) -> float:
                 status__in=(PDFExtractionJobStatus.QUEUED, PDFExtractionJobStatus.RUNNING)
             ).exists()
             close_old_connections()
+            if metrics_enabled and time.monotonic() >= next_metrics_sample:
+                try:
+                    from bitbucket_search.services.pdf_pipeline_metrics import (
+                        sample_pipeline_metrics,
+                    )
+
+                    sample_pipeline_metrics(resident_roles=resident_roles)
+                except Exception:
+                    metrics_errors += 1
+                else:
+                    metrics_samples += 1
+                finally:
+                    close_old_connections()
+                    next_metrics_sample = time.monotonic() + metrics_interval
+            if time.monotonic() >= next_foreground_probe:
+                try:
+                    _sample_concurrent_probe(
+                        concurrent_probe,
+                        resident_roles=resident_roles,
+                        elapsed_seconds=time.monotonic() - started,
+                    )
+                finally:
+                    close_old_connections()
+                    next_foreground_probe = time.monotonic() + FOREGROUND_PROBE_INTERVAL_SECONDS
             if not active:
                 break
             time.sleep(0.02)
@@ -727,12 +912,418 @@ def _drain_existing_pipeline(*, timeout_seconds: int) -> float:
     finally:
         _stop_trial_processes(processes)
         connections.close_all()
-    return time.monotonic() - started
+    duration = time.monotonic() - started
+    return (
+        duration,
+        {
+            "state": "enabled" if metrics_enabled else "disabled",
+            "samples": metrics_samples,
+            "errors": metrics_errors,
+        },
+        _concurrent_probe_summary(concurrent_probe, duration_seconds=duration),
+    )
 
 
 def _database_bytes() -> int:
     database_root = Path(settings.DATABASE_ROOT)
     return sum(path.stat().st_size for path in database_root.rglob("*") if path.is_file())
+
+
+def _latency_summary(values: list[float]) -> dict[str, float | int]:
+    return {
+        "p50": round(float(_percentile(values, 0.50) or 0.0), 6),
+        "p95": round(float(_percentile(values, 0.95) or 0.0), 6),
+        "sampleCount": len(values),
+    }
+
+
+def _new_concurrent_probe_state() -> dict[str, Any]:
+    return {
+        "exactSearchMs": [],
+        "exactSearchRequests": 0,
+        "exactSearchFailures": 0,
+        "exactSearchResultBearing": 0,
+        "dashboardMs": [],
+        "dashboardRequests": 0,
+        "dashboardFailures": 0,
+        "backpressureDepthJobs": [],
+        "stagedBytes": [],
+        "oldestStagedWaitSeconds": [],
+        "hostCpuPct": [],
+        "owlProcessTreeCpuPct": [],
+        "owlProcessTreeRssBytes": [],
+        "hostMemoryAvailableBytes": [],
+        "diskAvailableBytes": [],
+        "totalEtaForecasts": [],
+        "repositoryEtaForecasts": {},
+    }
+
+
+def _append_numeric(target: list[float], value: object) -> None:
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    ):
+        target.append(float(value))
+
+
+def _sample_concurrent_probe(
+    state: dict[str, Any],
+    *,
+    resident_roles: dict[str, subprocess.Popen[bytes]],
+    elapsed_seconds: float,
+) -> None:
+    """Issue read-only foreground probes while the isolated writer is active."""
+
+    from django.db.models import Count, Q
+
+    from bitbucket_search.models import PDFExtractionJob
+    from bitbucket_search.services.pdf_pipeline_metrics import (
+        build_pipeline_metrics_payload,
+    )
+    from bitbucket_search.services.pdf_search import search_documents
+    from bitbucket_search.services.pdf_search_query import PDFSearchQuery, PDFSearchScope
+
+    state["exactSearchRequests"] += 1
+    started = time.perf_counter()
+    try:
+        result = search_documents(
+            PDFSearchQuery(
+                chips=("benchmarktoken000000",),
+                scopes=(PDFSearchScope.CONTENT,),
+            )
+        )
+    except Exception:
+        state["exactSearchFailures"] += 1
+    else:
+        state["exactSearchMs"].append((time.perf_counter() - started) * 1_000)
+        if result.total:
+            state["exactSearchResultBearing"] += 1
+
+    state["dashboardRequests"] += 1
+    started = time.perf_counter()
+    try:
+        payload = build_pipeline_metrics_payload(resident_roles=resident_roles)
+    except Exception:
+        state["dashboardFailures"] += 1
+    else:
+        state["dashboardMs"].append((time.perf_counter() - started) * 1_000)
+        queues = payload.get("queues") if isinstance(payload, dict) else None
+        resources = payload.get("resources") if isinstance(payload, dict) else None
+        if isinstance(queues, dict):
+            for field in (
+                "backpressureDepthJobs",
+                "stagedBytes",
+                "oldestStagedWaitSeconds",
+            ):
+                _append_numeric(state[field], queues.get(field))
+        if isinstance(resources, dict):
+            for field in (
+                "hostCpuPct",
+                "owlProcessTreeCpuPct",
+                "owlProcessTreeRssBytes",
+                "hostMemoryAvailableBytes",
+                "diskAvailableBytes",
+            ):
+                _append_numeric(state[field], resources.get(field))
+
+    progress = PDFExtractionJob.objects.aggregate(
+        total=Count("id"),
+        completed=Count("id", filter=Q(completed_at__isnull=False)),
+    )
+    total = int(progress["total"] or 0)
+    completed = int(progress["completed"] or 0)
+    if completed >= 3 and completed < total and elapsed_seconds > 0:
+        state["totalEtaForecasts"].append(
+            {
+                "elapsedSeconds": elapsed_seconds,
+                "predictedSeconds": (total - completed) / (completed / elapsed_seconds),
+            }
+        )
+    repository_rows = PDFExtractionJob.objects.values("document__repository_id").annotate(
+        total=Count("id"),
+        completed=Count("id", filter=Q(completed_at__isnull=False)),
+    )
+    repository_forecasts = state["repositoryEtaForecasts"]
+    for row in repository_rows:
+        repository_total = int(row["total"] or 0)
+        repository_completed = int(row["completed"] or 0)
+        if repository_completed < 2 or repository_completed >= repository_total:
+            continue
+        repository_id = str(row["document__repository_id"])
+        repository_forecasts.setdefault(repository_id, []).append(
+            {
+                "elapsedSeconds": elapsed_seconds,
+                "predictedSeconds": (
+                    (repository_total - repository_completed)
+                    / (repository_completed / elapsed_seconds)
+                ),
+            }
+        )
+
+
+def _forecast_summary(
+    forecasts: list[dict[str, float]], *, duration_seconds: float
+) -> dict[str, Any]:
+    absolute_percentage_errors: list[float] = []
+    bias_percentages: list[float] = []
+    for forecast in forecasts:
+        actual = duration_seconds - float(forecast["elapsedSeconds"])
+        if actual <= 0.01:
+            continue
+        error = float(forecast["predictedSeconds"]) - actual
+        absolute_percentage_errors.append(abs(error) * 100 / actual)
+        bias_percentages.append(error * 100 / actual)
+    return {
+        "checkpointCount": len(absolute_percentage_errors),
+        "medianAbsolutePercentageError": (
+            round(float(statistics.median(absolute_percentage_errors)), 3)
+            if absolute_percentage_errors
+            else None
+        ),
+        "meanBiasPercentage": (
+            round(float(statistics.fmean(bias_percentages)), 3) if bias_percentages else None
+        ),
+        "overEstimateCount": sum(value > 0 for value in bias_percentages),
+        "underEstimateCount": sum(value < 0 for value in bias_percentages),
+    }
+
+
+def _concurrent_probe_summary(state: dict[str, Any], *, duration_seconds: float) -> dict[str, Any]:
+    exact_requests = int(state["exactSearchRequests"])
+    dashboard_requests = int(state["dashboardRequests"])
+    repository_forecasts = state["repositoryEtaForecasts"]
+    return {
+        "sampleIntervalSeconds": FOREGROUND_PROBE_INTERVAL_SECONDS,
+        "exactSearch": {
+            **_latency_summary(state["exactSearchMs"]),
+            "requestCount": exact_requests,
+            "failureCount": int(state["exactSearchFailures"]),
+            "availabilityPct": (
+                round(
+                    (exact_requests - int(state["exactSearchFailures"])) * 100 / exact_requests,
+                    3,
+                )
+                if exact_requests
+                else None
+            ),
+            "resultBearingCount": int(state["exactSearchResultBearing"]),
+        },
+        "dashboard": {
+            **_latency_summary(state["dashboardMs"]),
+            "requestCount": dashboard_requests,
+            "failureCount": int(state["dashboardFailures"]),
+            "availabilityPct": (
+                round(
+                    (dashboard_requests - int(state["dashboardFailures"]))
+                    * 100
+                    / dashboard_requests,
+                    3,
+                )
+                if dashboard_requests
+                else None
+            ),
+        },
+        "queues": {
+            "maximumBackpressureDepthJobs": int(max(state["backpressureDepthJobs"], default=0)),
+            "maximumStagedBytes": int(max(state["stagedBytes"], default=0)),
+            "maximumOldestStagedWaitSeconds": round(
+                max(state["oldestStagedWaitSeconds"], default=0.0), 3
+            ),
+        },
+        "resources": {
+            "maximumHostCpuPct": (
+                round(max(state["hostCpuPct"]), 3) if state["hostCpuPct"] else None
+            ),
+            "maximumOwlProcessTreeCpuPct": (
+                round(max(state["owlProcessTreeCpuPct"]), 3)
+                if state["owlProcessTreeCpuPct"]
+                else None
+            ),
+            "maximumOwlProcessTreeRssBytes": (
+                int(max(state["owlProcessTreeRssBytes"]))
+                if state["owlProcessTreeRssBytes"]
+                else None
+            ),
+            "minimumHostMemoryAvailableBytes": (
+                int(min(state["hostMemoryAvailableBytes"]))
+                if state["hostMemoryAvailableBytes"]
+                else None
+            ),
+            "minimumDiskAvailableBytes": (
+                int(min(state["diskAvailableBytes"])) if state["diskAvailableBytes"] else None
+            ),
+        },
+        "etaCalibration": {
+            "workloadClass": "mixed_tier_generated",
+            "warmupSeconds": (
+                round(float(state["totalEtaForecasts"][0]["elapsedSeconds"]), 3)
+                if state["totalEtaForecasts"]
+                else None
+            ),
+            "total": _forecast_summary(
+                state["totalEtaForecasts"], duration_seconds=duration_seconds
+            ),
+            "repositories": {
+                repository_id: _forecast_summary(
+                    forecasts,
+                    duration_seconds=duration_seconds,
+                )
+                for repository_id, forecasts in sorted(repository_forecasts.items())
+            },
+        },
+    }
+
+
+def _sqlite_connection_and_index_snapshot() -> dict[str, Any]:
+    """Measure connection setup and record the exact SQLite/index contract."""
+
+    connections.close_all()
+    started = time.monotonic()
+    connection.ensure_connection()
+    connection_setup_ms = (time.monotonic() - started) * 1_000
+    with connection.cursor() as cursor:
+        cursor.execute("PRAGMA busy_timeout")
+        busy_timeout_ms = int(cursor.fetchone()[0])
+        cursor.execute("PRAGMA synchronous")
+        synchronous = int(cursor.fetchone()[0])
+        cursor.execute("PRAGMA journal_mode")
+        journal_mode = str(cursor.fetchone()[0]).casefold()
+        cursor.execute("PRAGMA index_list('bitbucket_search_pdftextpage')")
+        raw_indexes = cursor.fetchall()
+        indexes: list[dict[str, Any]] = []
+        for _sequence, name, unique, origin, partial in raw_indexes:
+            quoted_name = str(name).replace('"', '""')
+            cursor.execute(f'PRAGMA index_info("{quoted_name}")')
+            indexes.append(
+                {
+                    "name": str(name),
+                    "unique": bool(unique),
+                    "origin": str(origin),
+                    "partial": bool(partial),
+                    "columns": [str(row[2]) for row in cursor.fetchall()],
+                }
+            )
+        cursor.execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM bitbucket_search_pdftextpage "
+            "WHERE revision_id = %s ORDER BY page_number",
+            [1],
+        )
+        lookup_plan = [str(row[3]) for row in cursor.fetchall()]
+        cursor.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' "
+            "AND tbl_name = 'bitbucket_search_pdftextpage'"
+        )
+        fts_trigger_count = int(cursor.fetchone()[0])
+    return {
+        "connectionSetupMs": round(connection_setup_ms, 6),
+        "busyTimeoutMs": busy_timeout_ms,
+        "journalMode": journal_mode,
+        "synchronous": synchronous,
+        "pdfTextPageIndexes": indexes,
+        "pdfTextPageLookupPlan": lookup_plan,
+        "pdfTextPageTriggerCount": fts_trigger_count,
+    }
+
+
+def _wal_checkpoint_snapshot(journal_mode: str) -> dict[str, Any]:
+    if journal_mode != "wal":
+        return {"state": "not_applicable", "durationMs": None}
+    started = time.monotonic()
+    with connection.cursor() as cursor:
+        cursor.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        row = cursor.fetchone()
+    duration_ms = (time.monotonic() - started) * 1_000
+    return {
+        "state": "measured",
+        "durationMs": round(duration_ms, 6),
+        "busy": int(row[0]),
+        "logFrames": int(row[1]),
+        "checkpointedFrames": int(row[2]),
+    }
+
+
+def _foreground_search_snapshot(
+    *, document_count: int, include_failure_fixtures: bool
+) -> dict[str, Any]:
+    """Measure repeatable exact-search and page-lookup latency after publication."""
+
+    from bitbucket_search.models import PDFTextPage, PDFTextRevision
+    from bitbucket_search.services.pdf_search import search_documents
+    from bitbucket_search.services.pdf_search_query import PDFSearchQuery, PDFSearchScope
+
+    document_numbers = tuple(
+        document_number
+        for document_number in range(document_count)
+        if (document_number + 1) % 9 != 0
+        and not (
+            include_failure_fixtures
+            and document_count >= 3
+            and document_number >= document_count - 3
+        )
+    )[:20]
+    sample_count = len(document_numbers)
+    if not document_numbers:
+        return {
+            "exactSearchMs": _latency_summary([]),
+            "exactSearchFailures": 0,
+            "pageLookupMs": _latency_summary([]),
+            "availabilityPct": None,
+        }
+    exact_durations: list[float] = []
+    exact_failures = 0
+    page_lookup_durations: list[float] = []
+    revision_ids = tuple(
+        PDFTextRevision.objects.order_by("id").values_list("id", flat=True)[:sample_count]
+    )
+
+    # Warm the SQLite connection, FTS statement path, and ORM relation loading
+    # outside the measurements. The corpus and query sequence stay identical
+    # for before/after index experiments.
+    search_documents(
+        PDFSearchQuery(
+            chips=(f"benchmarktoken{document_numbers[0]:06d}",),
+            scopes=(PDFSearchScope.CONTENT,),
+        )
+    )
+    if revision_ids:
+        list(
+            PDFTextPage.objects.filter(revision_id=revision_ids[0])
+            .order_by("page_number")
+            .values_list("page_number", flat=True)
+        )
+
+    for document_number in document_numbers:
+        started = time.perf_counter()
+        result = search_documents(
+            PDFSearchQuery(
+                chips=(f"benchmarktoken{document_number:06d}",),
+                scopes=(PDFSearchScope.CONTENT,),
+            )
+        )
+        exact_durations.append((time.perf_counter() - started) * 1_000)
+        if result.total < 1:
+            exact_failures += 1
+
+    for revision_id in revision_ids:
+        started = time.perf_counter()
+        list(
+            PDFTextPage.objects.filter(revision_id=revision_id)
+            .order_by("page_number")
+            .values_list("page_number", "extraction_state")
+        )
+        page_lookup_durations.append((time.perf_counter() - started) * 1_000)
+
+    return {
+        "exactSearchMs": _latency_summary(exact_durations),
+        "exactSearchFailures": exact_failures,
+        "pageLookupMs": _latency_summary(page_lookup_durations),
+        "availabilityPct": round(
+            ((sample_count - exact_failures) / sample_count) * 100,
+            3,
+        ),
+    }
 
 
 def run_internal_trial(
@@ -756,11 +1347,26 @@ def run_internal_trial(
 
     trial_started_at = utc_now()
     call_command("migrate", interactive=False, verbosity=0)
+    if plan.duplicate_page_index:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "CREATE INDEX bb_pdf_page_lookup_idx "
+                "ON bitbucket_search_pdftextpage(revision_id, page_number)"
+            )
+    with connection.cursor() as cursor:
+        cursor.execute(f"PRAGMA journal_mode={plan.sqlite_journal_mode}")
+        row = cursor.fetchone()
+    actual_journal_mode = str(row[0] if row else "").casefold()
+    if actual_journal_mode != plan.sqlite_journal_mode:
+        raise RuntimeError("The isolated SQLite journal mode did not match the benchmark plan.")
+    sqlite_contract = _sqlite_connection_and_index_snapshot()
     setup_started = time.monotonic()
     workload = _seed_synthetic_corpus(plan)
     setup_duration = time.monotonic() - setup_started
     before_usage = _resource_usage()
-    pipeline_duration = _drain_existing_pipeline(timeout_seconds=plan.trial_timeout_seconds)
+    pipeline_duration, metrics_sampling, concurrent_foreground = _drain_existing_pipeline(
+        timeout_seconds=plan.trial_timeout_seconds
+    )
     after_usage = _resource_usage()
 
     from bitbucket_search.models import (
@@ -771,7 +1377,27 @@ def run_internal_trial(
         PDFTextRevision,
     )
 
-    jobs = list(PDFExtractionJob.objects.all())
+    jobs = list(PDFExtractionJob.objects.select_related("document"))
+    end_to_end_durations = [
+        (job.completed_at - job.requested_at).total_seconds()
+        for job in jobs
+        if job.completed_at is not None
+    ]
+    extraction_durations = [
+        (job.staged_at - job.started_at).total_seconds()
+        for job in jobs
+        if job.started_at is not None and job.staged_at is not None
+    ]
+    staged_wait_durations = [
+        (job.publication_started_at - job.staged_at).total_seconds()
+        for job in jobs
+        if job.staged_at is not None and job.publication_started_at is not None
+    ]
+    publication_durations = [
+        (job.published_at - job.publication_started_at).total_seconds()
+        for job in jobs
+        if job.publication_started_at is not None and job.published_at is not None
+    ]
     job_durations = [
         (job.completed_at - job.started_at).total_seconds()
         for job in jobs
@@ -790,6 +1416,23 @@ def run_internal_trial(
         PDFDocument.objects.values_list("extracted_character_count", flat=True)
     )
     rate = (persisted_documents / pipeline_duration) * 60 if pipeline_duration else 0.0
+    minute_factor = 60 / pipeline_duration if pipeline_duration else 0.0
+    repository_waits: dict[int, list[float]] = {}
+    for job in jobs:
+        if job.started_at is None:
+            continue
+        repository_waits.setdefault(job.document.repository_id, []).append(
+            (job.started_at - job.requested_at).total_seconds()
+        )
+    all_repository_waits = [value for values in repository_waits.values() for value in values]
+    from bitbucket_search.services.pdf_runtime_metrics import publisher_runtime_snapshot
+
+    publisher_runtime = publisher_runtime_snapshot(window_seconds=plan.trial_timeout_seconds)
+    wal_checkpoint = _wal_checkpoint_snapshot(actual_journal_mode)
+    foreground = _foreground_search_snapshot(
+        document_count=plan.document_count,
+        include_failure_fixtures=plan.include_failure_fixtures,
+    )
     correctness_ok = (
         len(jobs) == plan.document_count
         and active == 0
@@ -804,6 +1447,8 @@ def run_internal_trial(
         "startedAt": trial_started_at.isoformat(),
         "workload": workload,
         "setupDurationSeconds": round(setup_duration, 6),
+        "sqliteJournalMode": actual_journal_mode,
+        "metricsSampling": metrics_sampling,
         "pipeline": {
             "durationSeconds": round(pipeline_duration, 6),
             "persistedDocuments": persisted_documents,
@@ -811,10 +1456,41 @@ def run_internal_trial(
             "sourceBytes": workload["sourceBytes"],
             "extractedCharacters": extracted_characters,
             "persistedDocumentsPerMinute": round(rate, 6),
-            "jobLatencySeconds": {
-                "p50": round(float(_percentile(job_durations, 0.50) or 0.0), 6),
-                "p95": round(float(_percentile(job_durations, 0.95) or 0.0), 6),
-                "sampleCount": len(job_durations),
+            "persistedPagesPerMinute": round(persisted_pages * minute_factor, 6),
+            "sourceBytesPerMinute": round(workload["sourceBytes"] * minute_factor, 6),
+            "extractedCharactersPerMinute": round(extracted_characters * minute_factor, 6),
+            "latencySeconds": {
+                "extraction": _latency_summary(extraction_durations),
+                "stagedWait": _latency_summary(staged_wait_durations),
+                "publication": _latency_summary(publication_durations),
+                "workerJob": _latency_summary(job_durations),
+                "endToEnd": _latency_summary(end_to_end_durations),
+            },
+            "repositoryWaitSeconds": {
+                "p50": round(
+                    float(
+                        _percentile(
+                            all_repository_waits,
+                            0.50,
+                        )
+                        or 0.0
+                    ),
+                    6,
+                ),
+                "p95": round(
+                    float(
+                        _percentile(
+                            all_repository_waits,
+                            0.95,
+                        )
+                        or 0.0
+                    ),
+                    6,
+                ),
+                "oldestByRepository": {
+                    str(repository_id): round(max(values), 6)
+                    for repository_id, values in sorted(repository_waits.items())
+                },
             },
             "statusCounts": {
                 "succeeded": succeeded,
@@ -825,6 +1501,13 @@ def run_internal_trial(
             "revisionCount": PDFTextRevision.objects.count(),
             "databaseBytes": _database_bytes(),
         },
+        "sqlite": {
+            **sqlite_contract,
+            "publisherRuntime": publisher_runtime,
+            "walCheckpoint": wal_checkpoint,
+        },
+        "foreground": foreground,
+        "concurrentForeground": concurrent_foreground,
         "resources": _usage_delta(before_usage, after_usage),
         "correctness": {
             "allJobsTerminal": active == 0,

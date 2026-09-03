@@ -39,6 +39,7 @@
 
     {% if selected_settings_section == "overview" %}
     <div class="settings-section">
+        <form method="post" hidden aria-hidden="true" tabindex="-1">{% csrf_token %}</form>
         <header class="settings-section__header">
             <p class="eyebrow">Workspace configuration</p>
             <h2 id="settings-section-heading" tabindex="-1" data-settings-autofocus>Overview</h2>
@@ -193,7 +194,7 @@
                             {% elif host.state == "managed_externally" %}Managed externally
                             {% elif host.state == "unavailable" %}Unavailable under current policy
                             {% else %}Approved — not yet verified{% endif %}
-                            · {% if host.source == "built_in" %}Built in{% elif host.source == "environment" %}Environment{% else %}Added in Settings{% endif %}
+                            · {% if host.source == "built_in" %}Built in{% elif host.source == "environment" %}Environment{% elif host.source == "legacy" %}Migrated compatibility approval{% else %}Added in Settings{% endif %}
                         </span>
                         <small>{{ host.dependencies.repository_count }} dependent repositor{{ host.dependencies.repository_count|pluralize:"y,ies" }} · HTTPS credential:
                             {% if not host.available %}Unavailable

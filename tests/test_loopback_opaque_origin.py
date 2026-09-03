@@ -115,7 +115,7 @@ def test_loopback_schedule_tick_accepts_opaque_origin_form_with_valid_csrf_token
 @override_settings(
     BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",),
     BITBUCKET_SECRET_BACKEND="database",
-    SECRET_KEY="synthetic-loopback-credential-test-key-only-not-for-real-use-0123456789",
+    SECRET_KEY="synthetic-test-secret-key-only-not-for-real-use-loopback-0123456789",
 )
 def test_loopback_bitbucket_https_credentials_accept_opaque_origin_with_valid_csrf_token():
     reset_https_secret_store_cache()
@@ -129,7 +129,7 @@ def test_loopback_bitbucket_https_credentials_accept_opaque_origin_with_valid_cs
             "origin": CLOUD_ORIGIN,
             "credential_kind": BitbucketHTTPSCredentialKind.CLOUD_API_TOKEN,
             "account_name": "",
-            "token": "synthetic-loopback-browser-value-4917-never-valid",
+            "token": "not-a-real-token",
             "return_to": "settings",
         },
         HTTP_ORIGIN="null",
@@ -311,4 +311,9 @@ def test_custom_csrf_middleware_replaces_django_default_in_the_same_slot():
 
     assert custom in settings.MIDDLEWARE
     assert default not in settings.MIDDLEWARE
-    assert settings.MIDDLEWARE.index(custom) == 3
+    assert settings.MIDDLEWARE.index(custom) == (
+        settings.MIDDLEWARE.index("django.middleware.common.CommonMiddleware") + 1
+    )
+    assert settings.MIDDLEWARE.index(custom) < settings.MIDDLEWARE.index(
+        "django.contrib.auth.middleware.AuthenticationMiddleware"
+    )

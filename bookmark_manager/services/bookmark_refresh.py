@@ -692,6 +692,7 @@ def launch_refresh_worker(run_id: int) -> subprocess.Popen[bytes]:
         "--run-id",
         str(run_id),
     ]
+    close_old_connections()
     process = subprocess.Popen(
         command,
         cwd=settings.BASE_DIR,

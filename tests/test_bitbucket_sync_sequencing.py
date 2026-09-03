@@ -345,10 +345,13 @@ def test_extraction_workers_are_capped_per_repository_and_reuse_released_slot(se
     replacement = pdf_indexing.claim_next_extraction_job()
     assert replacement is not None
     assert replacement.document.repository_id == repository.pk
-    assert PDFExtractionJob.objects.filter(
-        document__repository=repository,
-        status=PDFExtractionJobStatus.RUNNING,
-    ).count() == 3
+    assert (
+        PDFExtractionJob.objects.filter(
+            document__repository=repository,
+            status=PDFExtractionJobStatus.RUNNING,
+        ).count()
+        == 3
+    )
 
 
 @pytest.mark.parametrize(

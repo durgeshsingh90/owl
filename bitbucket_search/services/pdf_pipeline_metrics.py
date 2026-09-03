@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from django.conf import settings
-from django.db.models import Case, Count, Exists, Min, OuterRef, Q, Value, When
+from django.db.models import Case, Count, Exists, Max, Min, OuterRef, Q, Sum, Value, When
 from django.utils import timezone
 
 from bitbucket_search.models import (
@@ -47,6 +47,7 @@ from bitbucket_search.models import (
     RepositorySyncPhase,
     RepositorySyncState,
 )
+from bitbucket_search.services.foreground_metrics import foreground_latency_snapshot
 from bitbucket_search.services.pdf_pipeline_controller import (
     ControllerEvaluationError,
     PDFPipelineController,
@@ -57,6 +58,7 @@ from bitbucket_search.services.pdf_pipeline_runs import (
     TERMINAL_RUN_STATES,
     latest_current_run,
 )
+from bitbucket_search.services.pdf_runtime_metrics import publisher_runtime_snapshot
 
 SCHEMA_VERSION = 1
 SNAPSHOT_FILENAME = "metrics-v1.json"
@@ -298,7 +300,82 @@ def _process_peak_rss_bytes() -> int | None:
     return max(0, value * 1_024)
 
 
-def resource_snapshot() -> dict[str, Any]:
+def _process_table_snapshot() -> tuple[float, float, int] | None:
+    """Return normalized host/tree CPU and current tree RSS from bounded ``ps`` output."""
+
+    if os.name == "nt":
+        return None
+    try:
+        result = subprocess.run(
+            ("ps", "-axo", "pid=,ppid=,%cpu=,rss="),
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=1,
+            env={"LC_ALL": "C", "PATH": os.environ.get("PATH", "")},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or len(result.stdout) > 8_000_000:
+        return None
+    rows: list[tuple[int, int, float, int]] = []
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 4:
+            continue
+        try:
+            pid, parent_pid = int(fields[0]), int(fields[1])
+            cpu_pct, rss_kib = float(fields[2]), int(fields[3])
+        except (TypeError, ValueError):
+            continue
+        if pid > 0 and parent_pid >= 0 and math.isfinite(cpu_pct) and rss_kib >= 0:
+            rows.append((pid, parent_pid, max(0.0, cpu_pct), rss_kib))
+    if not rows:
+        return None
+    descendants = {os.getpid()}
+    changed = True
+    while changed:
+        changed = False
+        for pid, parent_pid, _cpu_pct, _rss_kib in rows:
+            if parent_pid in descendants and pid not in descendants:
+                descendants.add(pid)
+                changed = True
+    cpu_count = _schedulable_cpu_count() or 1
+    host_cpu = min(100.0, sum(row[2] for row in rows) / cpu_count)
+    tree_cpu = min(100.0, sum(row[2] for row in rows if row[0] in descendants) / cpu_count)
+    tree_rss = sum(row[3] * 1_024 for row in rows if row[0] in descendants)
+    return round(host_cpu, 2), round(tree_cpu, 2), tree_rss
+
+
+def _semantic_resource_snapshot(
+    resident_roles: Mapping[str, object] | None,
+) -> tuple[int, int, int, int] | None:
+    """Return configured/live/active/backlog semantic counts when the app is available."""
+
+    try:
+        from semantic_search.models import SemanticIndexJob, SemanticIndexJobStatus
+    except (ImportError, LookupError):
+        return None
+    live_roles, _exited = _live_roles(resident_roles)
+    configured = (
+        int(getattr(settings, "SEMANTIC_MAX_WORKERS", 0))
+        if bool(getattr(settings, "SEMANTIC_SEARCH_ENABLED", False))
+        else 0
+    )
+    live = sum(1 for role in live_roles if role.startswith("semantic-index-"))
+    try:
+        active = SemanticIndexJob.objects.filter(status=SemanticIndexJobStatus.RUNNING).count()
+        backlog = SemanticIndexJob.objects.filter(
+            status__in=(SemanticIndexJobStatus.QUEUED, SemanticIndexJobStatus.RUNNING)
+        ).count()
+    except Exception:
+        return None
+    return configured, live, active, backlog
+
+
+def resource_snapshot(*, resident_roles: Mapping[str, object] | None = None) -> dict[str, Any]:
     """Collect portable signals and mark unsupported host gauges unavailable."""
 
     availability: dict[str, str] = {}
@@ -306,14 +383,17 @@ def resource_snapshot() -> dict[str, Any]:
     memory_total, memory_total_source = _memory_total_bytes()
     memory_available, memory_available_source = _memory_available_bytes()
     peak_rss = _process_peak_rss_bytes()
+    process_table = _process_table_snapshot() if resident_roles is not None else None
+    semantic = _semantic_resource_snapshot(resident_roles)
+    live_roles, _exited_roles = _live_roles(resident_roles)
     try:
         disk_available = shutil.disk_usage(Path(settings.OWL_DATA_ROOT)).free
     except OSError:
         disk_available = None
     values = {
         "schedulableCpuCount": cpu_count,
-        "hostCpuPct": None,
-        "owlProcessTreeCpuPct": None,
+        "hostCpuPct": process_table[0] if process_table is not None else None,
+        "owlProcessTreeCpuPct": process_table[1] if process_table is not None else None,
         "hostMemoryTotalBytes": memory_total,
         "hostMemoryUsedPct": (
             round(
@@ -326,21 +406,35 @@ def resource_snapshot() -> dict[str, Any]:
         "hostMemoryAvailableBytes": memory_available,
         # ``ru_maxrss`` is a high-water mark for this process only.  It must
         # never be presented as current RSS for OWL's whole process tree.
-        "owlProcessTreeRssBytes": None,
+        "owlProcessTreeRssBytes": process_table[2] if process_table is not None else None,
         "owlCurrentProcessPeakRssBytes": peak_rss,
         "diskAvailableBytes": disk_available,
-        "semanticWorkersActive": None,
+        "semanticWorkerTarget": semantic[0] if semantic is not None else None,
+        "semanticWorkersLive": semantic[1] if semantic is not None else None,
+        "semanticWorkersActive": semantic[2] if semantic is not None else None,
+        "semanticBacklogJobs": semantic[3] if semantic is not None else None,
+        "gitWorkersActive": sum(1 for role in live_roles if role.startswith("repository-sync-"))
+        if resident_roles is not None
+        else None,
         "thermalState": None,
     }
     for key, value in values.items():
         if value is None:
             availability[key] = "platform_signal_unavailable"
-    availability["owlProcessTreeRssBytes"] = "process_tree_sampler_unavailable"
+    if process_table is None:
+        availability["owlProcessTreeRssBytes"] = "process_tree_sampler_unavailable"
     values["availability"] = availability
     values["sources"] = {
         "hostMemoryTotalBytes": memory_total_source,
         "hostMemoryAvailableBytes": memory_available_source,
         "owlCurrentProcessPeakRssBytes": "getrusage_peak",
+        "hostCpuPct": "ps_process_table_normalized_by_schedulable_cpu"
+        if process_table is not None
+        else None,
+        "owlProcessTreeCpuPct": "ps_descendant_sum_normalized_by_schedulable_cpu"
+        if process_table is not None
+        else None,
+        "owlProcessTreeRssBytes": "ps_descendant_rss_sum" if process_table is not None else None,
     }
     return values
 
@@ -418,6 +512,43 @@ def _eligible_input_snapshot() -> tuple[int, datetime | None]:
     return int(result["total"] or 0), result["oldest"]
 
 
+def _sample_datetime(sample: Mapping[str, Any]) -> datetime | None:
+    try:
+        value = datetime.fromisoformat(str(sample.get("at", "")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return value if not timezone.is_naive(value) else None
+
+
+def _gauge_growth_rate(
+    field: str,
+    current: int | float | None,
+    *,
+    now: datetime,
+    window_seconds: int,
+) -> float | None:
+    if current is None:
+        return None
+    cutoff = now - timedelta(seconds=max(1, int(window_seconds)))
+    with _RING_LOCK:
+        candidates = tuple(_SAMPLES)
+    for sample in candidates:
+        sampled_at = _sample_datetime(sample)
+        previous = sample.get(field)
+        if (
+            sampled_at is None
+            or sampled_at < cutoff
+            or sampled_at >= now
+            or not isinstance(previous, (int, float))
+            or isinstance(previous, bool)
+        ):
+            continue
+        elapsed = (now - sampled_at).total_seconds()
+        if elapsed > 0:
+            return round((float(current) - float(previous)) / elapsed, 6)
+    return None
+
+
 def _queue_snapshot(now: datetime) -> dict[str, Any]:
     fresh_cutoff = now - timedelta(
         seconds=int(getattr(settings, "PDF_PIPELINE_METRICS_STALE_SECONDS", 15))
@@ -447,22 +578,38 @@ def _queue_snapshot(now: datetime) -> dict[str, Any]:
     staged_waiting = staged.exclude(pk__in=publication_in_flight.values("pk"))
     staged_bytes, oldest_stage_age = _stage_files()
     eligible_input, oldest_eligible = _eligible_input_snapshot()
+    window = int(getattr(settings, "PDF_PIPELINE_RATE_WINDOW_SECONDS", 60))
+    depth = staged.count()
+    depth_growth = _gauge_growth_rate(
+        "backpressureDepthJobs", depth, now=now, window_seconds=window
+    )
+    bytes_growth = _gauge_growth_rate("stagedBytes", staged_bytes, now=now, window_seconds=window)
     return {
         "inputQueuedJobs": queued.count(),
         "eligibleInputJobs": eligible_input,
         "activeExtractionJobs": active_extracting.count(),
         "stagedWaitingJobs": staged_waiting.count(),
         "publicationInFlightJobs": publication_in_flight.count(),
-        "backpressureDepthJobs": staged.count(),
+        "backpressureDepthJobs": depth,
         "backpressureThresholdJobs": int(settings.PDF_MAX_STAGED_PUBLICATIONS),
         "stagedBytes": staged_bytes,
-        "backpressureDepthGrowthPerSecond": None,
-        "stagedBytesGrowthPerSecond": None,
+        "backpressureDepthGrowthPerSecond": depth_growth,
+        "stagedBytesGrowthPerSecond": bytes_growth,
+        "growthWindowSeconds": window,
         "oldestEligibleWaitSeconds": (
             max(0, round((now - oldest_eligible).total_seconds(), 3)) if oldest_eligible else None
         ),
         "oldestStagedWaitSeconds": oldest_stage_age,
-        "availability": {},
+        "availability": {
+            **(
+                {"backpressureDepthGrowth": "insufficient_sample_history"}
+                if depth_growth is None
+                else {}
+            ),
+            **(
+                {"stagedBytesGrowth": "insufficient_sample_history"} if bytes_growth is None else {}
+            ),
+        },
     }
 
 
@@ -564,13 +711,76 @@ def _worker_snapshot(
     }
 
 
+def _publisher_duty_cycle(
+    current_state: str,
+    *,
+    now: datetime,
+    window_seconds: int,
+) -> dict[str, Any]:
+    """Partition measured live publisher time across mutually exclusive states."""
+
+    live_states = ("busy", "starved", "idle_no_demand", "blocked")
+    cutoff = now - timedelta(seconds=max(1, int(window_seconds)))
+    with _RING_LOCK:
+        prior = tuple(_SAMPLES)
+    points: list[tuple[datetime, str]] = []
+    for sample in prior:
+        sampled_at = _sample_datetime(sample)
+        state = str(sample.get("publisherState", ""))
+        if sampled_at is not None and cutoff <= sampled_at < now and state in live_states:
+            points.append((sampled_at, state))
+    points.sort(key=lambda item: item[0])
+    if current_state in live_states:
+        points.append((now, current_state))
+    totals = {state: 0.0 for state in live_states}
+    for index in range(len(points) - 1):
+        sampled_at, state = points[index]
+        next_at = points[index + 1][0]
+        totals[state] += max(0.0, (next_at - sampled_at).total_seconds())
+    measured_seconds = sum(totals.values())
+    if measured_seconds <= 0:
+        return {
+            "busyPct": None,
+            "starvedPct": None,
+            "noDemandPct": None,
+            "blockedPct": None,
+            "dutyCycleWindowSeconds": window_seconds,
+            "dutyCycleMeasuredSeconds": 0,
+            "dutyCycleSampleCount": len(points),
+        }
+    percentages = {state: round(totals[state] * 100 / measured_seconds, 2) for state in live_states}
+    # Keep the public partition exact after decimal rounding.
+    largest = max(live_states, key=lambda state: totals[state])
+    percentages[largest] = round(percentages[largest] + 100.0 - sum(percentages.values()), 2)
+    return {
+        "busyPct": percentages["busy"],
+        "starvedPct": percentages["starved"],
+        "noDemandPct": percentages["idle_no_demand"],
+        "blockedPct": percentages["blocked"],
+        "dutyCycleWindowSeconds": window_seconds,
+        "dutyCycleMeasuredSeconds": round(measured_seconds, 3),
+        "dutyCycleSampleCount": len(points),
+    }
+
+
 def _publisher_snapshot(
     queue: Mapping[str, Any],
     *,
+    now: datetime | None = None,
     resident_roles: Mapping[str, object] | None,
 ) -> dict[str, Any]:
     live_roles, _exited = _live_roles(resident_roles)
     live = "pdf-writer-1" in live_roles
+    window = int(getattr(settings, "PDF_PIPELINE_RATE_WINDOW_SECONDS", 60))
+    runtime = publisher_runtime_snapshot(window_seconds=window)
+    lock_blocked_ms = int(getattr(settings, "PDF_PIPELINE_SQLITE_LOCK_BLOCKED_MS", 250))
+    lock_contended = bool(
+        (runtime["sqliteBusyErrors"] or 0) > 0
+        or (
+            runtime["sqliteLockWaitP95Ms"] is not None
+            and runtime["sqliteLockWaitP95Ms"] >= lock_blocked_ms
+        )
+    )
     paused = PDFPipelineRecovery.objects.filter(
         scope__in=("publisher", "pipeline"),
         state=PDFPipelineRecoveryState.PAUSED,
@@ -579,6 +789,8 @@ def _publisher_snapshot(
         state = "paused_by_recovery"
     elif not live:
         state = "unavailable"
+    elif lock_contended and queue["backpressureDepthJobs"]:
+        state = "blocked"
     elif queue["publicationInFlightJobs"]:
         state = "busy"
     elif queue["stagedWaitingJobs"]:
@@ -587,19 +799,31 @@ def _publisher_snapshot(
         state = "starved"
     else:
         state = "idle_no_demand"
+    duty_cycle = _publisher_duty_cycle(
+        state,
+        now=now or timezone.now(),
+        window_seconds=window,
+    )
     return {
         "live": live,
+        "expected": True,
+        "heartbeatFresh": (
+            bool(queue["publicationInFlightJobs"])
+            if resident_roles is not None and queue["publicationInFlightJobs"]
+            else None
+        ),
         "state": state,
-        "busyPct": None,
-        "starvedPct": None,
-        "noDemandPct": None,
-        "blockedPct": None,
-        "sqliteTransactionPct": None,
-        "sqliteLockWaitP95Ms": None,
-        "sqliteBusyErrors": None,
+        "reasonCode": "blocked_sqlite" if state == "blocked" and lock_contended else None,
+        **duty_cycle,
+        **{key: value for key, value in runtime.items() if key != "availability"},
+        "sqliteLockBlockedThresholdMs": lock_blocked_ms,
         "availability": {
-            "dutyCycle": "insufficient_sample_history",
-            "sqliteLockTiming": "not_instrumented",
+            **(
+                {"dutyCycle": "insufficient_sample_history"}
+                if duty_cycle["dutyCycleMeasuredSeconds"] <= 0
+                else {}
+            ),
+            **runtime["availability"],
         },
     }
 
@@ -647,6 +871,9 @@ def _recovery_events() -> list[dict[str, Any]]:
     return [
         {
             "id": str(event.event_id),
+            "correlationId": (
+                str(event.correlation_id) if event.correlation_id is not None else None
+            ),
             "at": event.occurred_at.isoformat(),
             "scope": event.recovery.scope,
             "kind": event.kind,
@@ -682,6 +909,8 @@ def _rate_event_rows(now: datetime, window_seconds: int) -> tuple[dict[str, Any]
             "published_at",
             "completed_at",
             "completion_kind",
+            "retry_count",
+            "phase",
         )
         .iterator(chunk_size=256)
     )
@@ -798,6 +1027,11 @@ def _throughput_snapshot(now: datetime) -> dict[str, Any]:
             for row in (*written_rows, *cache_rows)
             if (duration := _duration_ms(row["started_at"], row["published_at"])) is not None
         )
+    staged_wait_latency = _latency_summary(
+        duration
+        for row in written_rows
+        if (duration := _duration_ms(row["staged_at"], row["publication_started_at"])) is not None
+    )
     pages_persisted = sum(int(row["pages_processed"] or 0) for row in written_rows)
     characters_persisted = sum(int(row["characters_extracted"] or 0) for row in written_rows)
     characters_extracted = sum(int(row["characters_extracted"] or 0) for row in extracted_rows)
@@ -805,32 +1039,100 @@ def _throughput_snapshot(now: datetime) -> dict[str, Any]:
     timeout_failures = sum(
         1 for row in failed_rows if "timeout" in str(row["error_code"] or "").casefold()
     )
+    interruptions = sum(
+        1 for row in failed_rows if row["status"] == PDFExtractionJobStatus.INTERRUPTED
+    )
+    retries = sum(int(row["retry_count"] or 0) for row in rows)
+    series_query = PDFExtractionJob.objects.filter(
+        Q(staged_at__gte=_SERIES_STARTED_AT)
+        | Q(published_at__gte=_SERIES_STARTED_AT)
+        | Q(completed_at__gte=_SERIES_STARTED_AT)
+    )
+    series_totals = series_query.aggregate(
+        extracted=Count("id", filter=Q(staged_at__gte=_SERIES_STARTED_AT)),
+        written=Count(
+            "id",
+            filter=Q(
+                completion_kind=PDFPipelineCompletionKind.NORMAL_PUBLICATION,
+                published_at__gte=_SERIES_STARTED_AT,
+            ),
+        ),
+        cache_reuse=Count(
+            "id",
+            filter=Q(
+                completion_kind=PDFPipelineCompletionKind.CACHE_REUSE,
+                published_at__gte=_SERIES_STARTED_AT,
+            ),
+        ),
+        pages=Sum(
+            "pages_processed",
+            filter=Q(
+                completion_kind=PDFPipelineCompletionKind.NORMAL_PUBLICATION,
+                published_at__gte=_SERIES_STARTED_AT,
+            ),
+        ),
+        source_bytes=Sum("target_file_size", filter=Q(staged_at__gte=_SERIES_STARTED_AT)),
+        characters=Sum(
+            "characters_extracted",
+            filter=Q(
+                completion_kind=PDFPipelineCompletionKind.NORMAL_PUBLICATION,
+                published_at__gte=_SERIES_STARTED_AT,
+            ),
+        ),
+    )
+    completed_per_second = ((written_rate["eventCount"] or 0) + len(cache_rows)) / elapsed
+    cache_per_second = len(cache_rows) / elapsed
+    pages_per_second = pages_persisted / elapsed
+    chars_extracted_per_second = characters_extracted / elapsed
+    chars_persisted_per_second = characters_persisted / elapsed
+    bytes_per_second = source_bytes / elapsed
     return {
         "rateWindowSeconds": window,
         "extractedRate": extracted_rate,
         "writtenRate": written_rate,
-        "cacheReuseCompletionsPerSecond": round(len(cache_rows) / elapsed, 6),
-        "documentsCompletedPerSecond": round(
-            ((written_rate["eventCount"] or 0) + len(cache_rows)) / elapsed,
-            6,
-        ),
-        "pagesPersistedPerSecond": round(pages_persisted / elapsed, 6),
-        "charactersExtractedPerSecond": round(characters_extracted / elapsed, 6),
-        "charactersPersistedPerSecond": round(characters_persisted / elapsed, 6),
-        "sourceBytesProcessedPerSecond": round(source_bytes / elapsed, 6),
+        "cacheReuseCompletionsPerSecond": round(cache_per_second, 6),
+        "cacheReuseCompletionsPerMinute": round(cache_per_second * 60, 3),
+        "documentsCompletedPerSecond": round(completed_per_second, 6),
+        "documentsCompletedPerMinute": round(completed_per_second * 60, 3),
+        "pagesPersistedPerSecond": round(pages_per_second, 6),
+        "pagesPersistedPerMinute": round(pages_per_second * 60, 3),
+        "charactersExtractedPerSecond": round(chars_extracted_per_second, 6),
+        "charactersExtractedPerMinute": round(chars_extracted_per_second * 60, 3),
+        "charactersPersistedPerSecond": round(chars_persisted_per_second, 6),
+        "charactersPersistedPerMinute": round(chars_persisted_per_second * 60, 3),
+        "sourceBytesProcessedPerSecond": round(bytes_per_second, 6),
+        "sourceBytesProcessedPerMinute": round(bytes_per_second * 60, 3),
         "failedPerSecond": round(len(failed_rows) / elapsed, 6),
+        "failedPerMinute": round(len(failed_rows) * 60 / elapsed, 3),
         "timeoutPerSecond": round(timeout_failures / elapsed, 6),
+        "timeoutPerMinute": round(timeout_failures * 60 / elapsed, 3),
+        "interruptedPerSecond": round(interruptions / elapsed, 6),
+        "interruptedPerMinute": round(interruptions * 60 / elapsed, 3),
+        "retriesPerSecond": round(retries / elapsed, 6),
+        "retriesPerMinute": round(retries * 60 / elapsed, 3),
         "extractionLatencyMeanMs": extraction_latency["meanMs"],
         "extractionLatencyP50Ms": extraction_latency["p50Ms"],
         "extractionLatencyP95Ms": extraction_latency["p95Ms"],
         "publicationLatencyMeanMs": publication_latency["meanMs"],
         "publicationLatencyP50Ms": publication_latency["p50Ms"],
         "publicationLatencyP95Ms": publication_latency["p95Ms"],
+        "stagedWaitLatencyMeanMs": staged_wait_latency["meanMs"],
+        "stagedWaitLatencyP50Ms": staged_wait_latency["p50Ms"],
+        "stagedWaitLatencyP95Ms": staged_wait_latency["p95Ms"],
         "endToEndLatencyP95Ms": end_to_end_latency["p95Ms"],
         "latencySampleCounts": {
             "extraction": extraction_latency["sampleCount"],
             "publication": publication_latency["sampleCount"],
+            "stagedWait": staged_wait_latency["sampleCount"],
             "endToEnd": end_to_end_latency["sampleCount"],
+        },
+        "seriesTotals": {
+            "extracted": int(series_totals["extracted"] or 0),
+            "written": int(series_totals["written"] or 0),
+            "cacheReuse": int(series_totals["cache_reuse"] or 0),
+            "pagesPersisted": int(series_totals["pages"] or 0),
+            "sourceBytesProcessed": int(series_totals["source_bytes"] or 0),
+            "charactersPersisted": int(series_totals["characters"] or 0),
         },
         "availability": {
             **(
@@ -842,6 +1144,11 @@ def _throughput_snapshot(now: datetime) -> dict[str, Any]:
                 {}
                 if publication_latency["sampleCount"]
                 else {"publicationLatency": "no_completed_publications_in_window"}
+            ),
+            **(
+                {}
+                if staged_wait_latency["sampleCount"]
+                else {"stagedWaitLatency": "no_completed_publications_in_window"}
             ),
             **(
                 {}
@@ -1120,6 +1427,9 @@ def _run_snapshot(now: datetime, throughput: Mapping[str, Any]) -> dict[str, Any
                 "lastProgressAt": (
                     membership.last_progress_at.isoformat() if membership.last_progress_at else None
                 ),
+                "completedAt": (
+                    membership.completed_at.isoformat() if membership.completed_at else None
+                ),
                 "inventoryFinal": membership.inventory_final,
                 "totalPdfs": membership.total_pdfs,
                 "successfulPdfs": membership.successful_pdfs,
@@ -1148,6 +1458,7 @@ def _run_snapshot(now: datetime, throughput: Mapping[str, Any]) -> dict[str, Any
         "state": run.state,
         "acceptedAt": run.accepted_at.isoformat(),
         "lastProgressAt": run.last_progress_at.isoformat() if run.last_progress_at else None,
+        "completedAt": run.completed_at.isoformat() if run.completed_at else None,
         "repositories": {
             "accepted": len(memberships),
             "queued": repository_counts.get(PDFPipelineRunState.QUEUED, 0),
@@ -1176,6 +1487,124 @@ def _run_snapshot(now: datetime, throughput: Mapping[str, Any]) -> dict[str, Any
     }
 
 
+def _forecast_error_rows(
+    samples: Iterable[Mapping[str, Any]],
+    *,
+    completed_at: datetime,
+) -> tuple[dict[str, float], ...]:
+    rows: list[dict[str, float]] = []
+    for sample in samples:
+        sampled_at = _sample_datetime(sample)
+        eta = sample.get("eta")
+        if sampled_at is None or sampled_at >= completed_at or not isinstance(eta, Mapping):
+            continue
+        predicted = eta.get("etaSeconds")
+        if eta.get("state") != "available" or not isinstance(predicted, (int, float)):
+            continue
+        actual = max(0.0, (completed_at - sampled_at).total_seconds())
+        if actual < 1.0:
+            continue
+        error = float(predicted) - actual
+        rows.append(
+            {
+                "predictedSeconds": round(float(predicted), 3),
+                "actualSeconds": round(actual, 3),
+                "absolutePercentageError": round(abs(error) * 100 / actual, 3),
+                "biasPercentage": round(error * 100 / actual, 3),
+            }
+        )
+    return tuple(rows)
+
+
+def _error_summary(rows: Iterable[Mapping[str, float]]) -> dict[str, Any]:
+    values = tuple(rows)
+    if not values:
+        return {
+            "checkpointCount": 0,
+            "medianAbsolutePercentageError": None,
+            "meanBiasPercentage": None,
+            "overEstimateCount": 0,
+            "underEstimateCount": 0,
+        }
+    absolute = [float(row["absolutePercentageError"]) for row in values]
+    bias = [float(row["biasPercentage"]) for row in values]
+    return {
+        "checkpointCount": len(values),
+        "medianAbsolutePercentageError": round(percentile(absolute, 50) or 0.0, 3),
+        "meanBiasPercentage": round(sum(bias) / len(bias), 3),
+        "overEstimateCount": sum(1 for value in bias if value > 0),
+        "underEstimateCount": sum(1 for value in bias if value < 0),
+    }
+
+
+def _eta_accuracy_snapshot(run: Mapping[str, Any]) -> dict[str, Any]:
+    """Score completed shadow forecasts retained in the bounded sample ring."""
+
+    run_id = str(run.get("id") or "")
+    total_pdfs = int(run.get("pdfs", {}).get("total") or 0)
+    workload_class = "small" if total_pdfs < 100 else "medium" if total_pdfs < 1_000 else "large"
+    completed_raw = run.get("completedAt")
+    try:
+        completed_at = datetime.fromisoformat(str(completed_raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        completed_at = None
+    with _RING_LOCK:
+        samples = tuple(
+            sample
+            for sample in _SAMPLES
+            if isinstance(sample.get("run"), Mapping)
+            and str(sample["run"].get("id") or "") == run_id
+        )
+    if completed_at is None or timezone.is_naive(completed_at):
+        return {
+            "state": "collecting",
+            "workloadClass": workload_class,
+            **_error_summary(()),
+            "repositorySummaries": [],
+        }
+    total_rows = _forecast_error_rows(
+        ({**sample, "eta": sample["run"].get("totalEta")} for sample in samples),
+        completed_at=completed_at,
+    )
+    repository_summaries = []
+    for repository in run.get("repositoryProgress", []):
+        repository_id = repository.get("repositoryId")
+        completed_value = repository.get("completedAt")
+        try:
+            repository_completed_at = datetime.fromisoformat(
+                str(completed_value).replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            continue
+        repository_rows = _forecast_error_rows(
+            (
+                {
+                    **sample,
+                    "eta": next(
+                        (
+                            item.get("eta")
+                            for item in sample["run"].get("repositories", [])
+                            if item.get("repositoryId") == repository_id
+                        ),
+                        None,
+                    ),
+                }
+                for sample in samples
+            ),
+            completed_at=repository_completed_at,
+        )
+        repository_summaries.append(
+            {"repositoryId": repository_id, **_error_summary(repository_rows)}
+        )
+    summary = _error_summary(total_rows)
+    return {
+        "state": "available" if summary["checkpointCount"] else "insufficient_history",
+        "workloadClass": workload_class,
+        **summary,
+        "repositorySummaries": repository_summaries,
+    }
+
+
 def _activity_snapshot(
     now: datetime,
     run: Mapping[str, Any] | None,
@@ -1188,26 +1617,30 @@ def _activity_snapshot(
     sync_rows = tuple(
         RepositorySyncJob.objects.filter(
             status=RepositorySyncJobStatus.RUNNING,
+            worker_pid__isnull=False,
             heartbeat_at__gte=fresh_cutoff,
-        ).values("operation", "phase")
+        ).values("operation", "phase", "heartbeat_at")
     )
-    extraction_phases = set(
+    extraction_rows = tuple(
         PDFExtractionJob.objects.filter(
             status=PDFExtractionJobStatus.RUNNING,
+            worker_pid__isnull=False,
             phase__in=(
                 PDFExtractionJobPhase.VALIDATING,
                 PDFExtractionJobPhase.HASHING,
                 PDFExtractionJobPhase.EXTRACTING,
             ),
             heartbeat_at__gte=fresh_cutoff,
-        ).values_list("phase", flat=True)
+        ).values("phase", "heartbeat_at")
     )
-    writing = PDFExtractionJob.objects.filter(
+    extraction_phases = {row["phase"] for row in extraction_rows}
+    writing_heartbeat = PDFExtractionJob.objects.filter(
         status=PDFExtractionJobStatus.RUNNING,
         phase=PDFExtractionJobPhase.PUBLISHING,
         worker_pid__isnull=False,
         heartbeat_at__gte=fresh_cutoff,
-    ).exists()
+    ).aggregate(value=Max("heartbeat_at"))["value"]
+    writing = writing_heartbeat is not None
     recovery_state = recovery["state"]
     if recovery_state == PDFPipelineRecoveryState.PAUSED:
         code = "paused"
@@ -1245,8 +1678,15 @@ def _activity_snapshot(
         code = run["state"]
     elif run and run["repositories"]["queued"]:
         code = "queued"
-    elif queues["inputQueuedJobs"]:
+    elif (
+        queues["backpressureDepthJobs"] >= queues["backpressureThresholdJobs"]
+        and queues["eligibleInputJobs"]
+    ):
+        code = "backpressured"
+    elif queues["inputQueuedJobs"] and not queues["eligibleInputJobs"]:
         code = "source_blocked"
+    elif queues["inputQueuedJobs"]:
+        code = "queued"
     elif run and run["state"] == PDFPipelineRunState.ACTIVE:
         code = "completing"
     else:
@@ -1254,11 +1694,17 @@ def _activity_snapshot(
     secondary = []
     if code in {"extracting", "writing", "extracting_and_writing"} and sync_rows:
         secondary.append({"code": "pulling", "repositoryCount": len(sync_rows)})
+    evidence_times = [
+        row["heartbeat_at"] for row in (*sync_rows, *extraction_rows) if row["heartbeat_at"]
+    ]
+    if writing_heartbeat is not None:
+        evidence_times.append(writing_heartbeat)
     return {
         "code": code,
         "label": _ACTIVITY_LABELS[code],
         "secondary": secondary,
         "reasonCode": f"activity_{code}",
+        "evidenceAt": max(evidence_times).isoformat() if evidence_times else None,
         "evidence": {
             "activeExtractionJobs": queues["activeExtractionJobs"],
             "publisherState": "busy" if writing else "not_busy",
@@ -1273,6 +1719,7 @@ def _indicator_snapshot(
     run: Mapping[str, Any] | None,
     repository_count: int,
     actionable_repository_count: int,
+    recovery: Mapping[str, Any],
 ) -> dict[str, Any]:
     code = activity["code"]
     running_codes = {
@@ -1285,21 +1732,17 @@ def _indicator_snapshot(
         "extracting",
         "writing",
         "extracting_and_writing",
-        "reusing_cached",
-        "backpressured",
-        "source_blocked",
-        "completing",
     }
     if repository_count == 0 and run is None:
         state = "hidden"
     elif code == "idle":
         state = "idle_actionable" if actionable_repository_count else "idle_unavailable"
-    elif code == "queued":
+    elif code == "queued" or code in {"backpressured", "source_blocked", "completing"}:
         state = "queued"
     elif code == "retry_wait":
         state = "retry_wait"
     elif code == "recovering":
-        state = "recovering"
+        state = "recovering" if recovery.get("activeAttemptId") else "retry_wait"
     elif code == "paused":
         state = "paused"
     elif code in TERMINAL_RUN_STATES:
@@ -1308,12 +1751,17 @@ def _indicator_snapshot(
         state = "running"
     else:
         state = "unknown"
-    has_fresh = state == "running"
+    has_fresh = state == "running" or (
+        state == "recovering" and bool(recovery.get("activeAttemptId"))
+    )
+    evidence_at = (
+        recovery.get("lastAttemptAt") if state == "recovering" else activity.get("evidenceAt")
+    )
     return {
         "state": state,
         "hasFreshRunningWork": has_fresh,
         "evidenceCodes": [activity["reasonCode"]] if has_fresh else [],
-        "evidenceAt": now.isoformat() if has_fresh else None,
+        "evidenceAt": evidence_at if has_fresh else None,
         "freshForSeconds": int(getattr(settings, "PDF_PIPELINE_METRICS_STALE_SECONDS", 15)),
     }
 
@@ -1324,46 +1772,167 @@ def _state_snapshot(
     workers: Mapping[str, Any],
     publisher: Mapping[str, Any],
     recovery: Mapping[str, Any],
+    resources: Mapping[str, Any] | None = None,
+    throughput: Mapping[str, Any] | None = None,
+    *,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
-    constraints: list[str] = []
+    resources = resources or {}
+    throughput = throughput or {}
+    now = now or timezone.now()
+    window_seconds = int(throughput.get("rateWindowSeconds") or 60)
+    window_start = now - timedelta(seconds=window_seconds)
+    detected: list[str] = []
+    host_cpu = resources.get("hostCpuPct")
+    memory_available = resources.get("hostMemoryAvailableBytes")
+    disk_available = resources.get("diskAvailableBytes")
+    if (
+        isinstance(host_cpu, (int, float))
+        and not isinstance(host_cpu, bool)
+        and host_cpu >= float(getattr(settings, "PDF_PIPELINE_CONTROLLER_MAX_HOST_CPU_PCT", 85.0))
+    ):
+        detected.append("cpu_limited")
+    if (
+        isinstance(memory_available, int)
+        and not isinstance(memory_available, bool)
+        and memory_available
+        < int(
+            getattr(
+                settings,
+                "PDF_PIPELINE_CONTROLLER_MIN_AVAILABLE_MEMORY_BYTES",
+                8 * 1_024**3,
+            )
+        )
+    ):
+        detected.append("memory_limited")
+    if (
+        isinstance(disk_available, int)
+        and not isinstance(disk_available, bool)
+        and disk_available
+        < int(
+            getattr(
+                settings,
+                "PDF_PIPELINE_CONTROLLER_MIN_AVAILABLE_DISK_BYTES",
+                10 * 1_024**3,
+            )
+        )
+    ):
+        detected.append("disk_limited")
+    sqlite_contended = bool(
+        (publisher.get("sqliteBusyErrors") or 0) > 0
+        or (
+            isinstance(publisher.get("sqliteLockWaitP95Ms"), (int, float))
+            and publisher["sqliteLockWaitP95Ms"]
+            >= publisher.get("sqliteLockBlockedThresholdMs", 250)
+        )
+    )
+    if sqlite_contended:
+        detected.append("sqlite_contended")
+    if queues["backpressureDepthJobs"] >= queues["backpressureThresholdJobs"]:
+        detected.append("backpressure")
+    if activity["code"] == "source_blocked":
+        detected.append("source_blocked")
+    if publisher["state"] == "blocked" or (
+        queues["backpressureDepthJobs"] > 0
+        and (queues.get("backpressureDepthGrowthPerSecond") or 0) > 0
+    ):
+        detected.append("publication_limited")
+    if publisher["state"] == "starved":
+        detected.append("extraction_limited")
+
     if recovery["state"] == PDFPipelineRecoveryState.PAUSED:
         code, reason_code = "recovery_paused", "component_recovery_circuit_open"
     elif recovery["state"] != PDFPipelineRecoveryState.HEALTHY:
         code, reason_code = "recovering", "component_recovery_active"
+    elif "disk_limited" in detected:
+        code, reason_code = "disk_limited", "available_disk_below_safety_floor"
+    elif "memory_limited" in detected:
+        code, reason_code = "memory_limited", "available_memory_below_safety_floor"
+    elif "cpu_limited" in detected:
+        code, reason_code = "cpu_limited", "host_cpu_above_safety_ceiling"
     elif publisher["state"] == "unavailable" and queues["backpressureDepthJobs"]:
         code, reason_code = "degraded", "publisher_unavailable_with_backlog"
+    elif "source_blocked" in detected:
+        code, reason_code = "source_blocked", "queued_input_not_progressing"
     elif workers["unavailable"] and queues["inputQueuedJobs"]:
         code, reason_code = "degraded", "extractor_process_unavailable"
-    elif activity["code"] == "source_blocked":
-        code, reason_code = "source_blocked", "queued_input_not_progressing"
-    elif queues["backpressureDepthJobs"] >= queues["backpressureThresholdJobs"]:
+    elif "sqlite_contended" in detected:
+        code, reason_code = "sqlite_contended", "sqlite_lock_wait_or_busy_error"
+    elif "backpressure" in detected:
         code, reason_code = "backpressure", "staged_depth_at_threshold"
     elif activity["code"] == "idle":
         code, reason_code = "idle", "no_current_demand"
-    elif publisher["state"] == "blocked" or queues["backpressureDepthJobs"] > 0:
+    elif "publication_limited" in detected:
         code, reason_code = "publication_limited", "durable_publication_backlog"
-    elif publisher["state"] == "starved":
+    elif "extraction_limited" in detected:
         code, reason_code = "extraction_limited", "publisher_awaiting_extractor_output"
+    elif (
+        throughput.get("extractedRate", {}).get("state") == "available"
+        and throughput.get("writtenRate", {}).get("state") == "available"
+    ):
+        code, reason_code = "balanced", "measured_flow_within_guardrails"
     else:
         code, reason_code = "warming_up", "collecting_observation_window"
     labels = {
         "recovery_paused": "PDF pipeline paused",
         "recovering": "PDF pipeline recovering",
+        "balanced": "PDF pipeline balanced",
         "backpressure": "PDF extraction backpressured",
         "degraded": "PDF pipeline degraded",
         "source_blocked": "PDF source blocked",
         "idle": "PDF pipeline idle",
         "extraction_limited": "PDF extraction limited",
         "publication_limited": "PDF publication limited",
+        "sqlite_contended": "SQLite contended",
+        "cpu_limited": "Host CPU constrained",
+        "memory_limited": "Available memory constrained",
+        "disk_limited": "Available disk constrained",
         "warming_up": "Measuring PDF pipeline",
     }
+    evidence = {
+        "recovery_paused": f"Recovery circuit is open after {int(recovery.get('consecutiveFailedAttempts') or 0)} failed attempts.",
+        "recovering": f"Recovery state is {recovery['state']}.",
+        "disk_limited": f"Available disk is {disk_available} bytes, below the configured safety floor.",
+        "memory_limited": f"Available memory is {memory_available} bytes, below the configured safety floor.",
+        "cpu_limited": f"Normalized host CPU is {host_cpu}% over the {window_seconds}-second observation window.",
+        "degraded": "Required resident pipeline capacity is unavailable while durable work remains.",
+        "source_blocked": f"{queues['inputQueuedJobs']} queued jobs have no currently eligible repository input.",
+        "sqlite_contended": (
+            f"SQLite lock-wait p95 is {publisher.get('sqliteLockWaitP95Ms')} ms with "
+            f"{publisher.get('sqliteBusyErrors')} busy errors in {window_seconds} seconds."
+        ),
+        "backpressure": (
+            f"Durable publication depth is {queues['backpressureDepthJobs']} at the "
+            f"{queues['backpressureThresholdJobs']}-job threshold."
+        ),
+        "idle": "No current eligible extraction or publication demand is measured.",
+        "publication_limited": (
+            f"{queues['backpressureDepthJobs']} durable publications remain and the writer is "
+            f"{publisher['state']}."
+        ),
+        "extraction_limited": "The live publisher is awaiting extractor output.",
+        "balanced": f"Extraction and publication flow are measured within guardrails over {window_seconds} seconds.",
+        "warming_up": f"The {window_seconds}-second observation window does not yet contain stable flow evidence.",
+    }
+    constraints = [constraint for constraint in dict.fromkeys(detected) if constraint != code]
     return {
         "code": code,
         "label": labels[code],
         "reasonCode": reason_code,
-        "reason": labels[code],
-        "confidence": "high" if code in {"idle", "recovery_paused"} else "low",
+        "reason": evidence[code],
+        "confidence": (
+            "warming"
+            if code == "warming_up"
+            else "high"
+            if code in {"idle", "recovery_paused", "disk_limited", "memory_limited"}
+            else "medium"
+        ),
         "constraints": constraints,
+        "window": {
+            "startedAt": window_start.isoformat(),
+            "endedAt": now.isoformat(),
+            "durationSeconds": window_seconds,
+        },
     }
 
 
@@ -1372,15 +1941,38 @@ def _controller_snapshot(
     *,
     recovery_state: str = PDFPipelineRecoveryState.HEALTHY,
     recovery_scope: str | None = None,
+    at: datetime | None = None,
 ) -> dict[str, Any]:
     return controller_snapshot(
         resources,
         recovery_state=recovery_state,
         recovery_scope=recovery_scope,
+        at=at,
     )
 
 
 def _tuning_events() -> list[dict[str, Any]]:
+    reason_text = {
+        "measured_extraction_headroom": "Eligible demand occupied the admitted parsers while the publisher had measured headroom.",
+        "host_cpu_pressure": "Measured host CPU crossed the configured background-work guardrail.",
+        "foreground_latency_pressure": "Measured foreground latency crossed its configured guardrail.",
+        "sqlite_contention": "SQLite reported contention during the observation window.",
+        "failure_rate_pressure": "The measured terminal failure rate crossed its guardrail.",
+        "publication_backlog_rising": "Durable staged output was at the threshold and still increasing.",
+        "increase_no_measured_benefit": "The prior increase did not produce the required durable-throughput gain.",
+        "critical_memory_headroom": "Available memory fell below the critical headroom boundary.",
+        "critical_disk_headroom": "Available disk fell below the critical headroom boundary.",
+        "critical_foreground_latency": "Foreground latency crossed the critical pause boundary.",
+        "recovery_freeze": "Component recovery froze admission tuning.",
+    }
+    expected_effect_text = {
+        "improve_durable_throughput": "Test whether one additional admitted parser improves durable written throughput.",
+        "relieve_measured_pressure": "Reduce parser admission to relieve the measured limiting pressure.",
+        "protect_integrity_and_foreground_work": "Pause new parser admission while preserving in-flight durable work.",
+        "restore_last_effective_target": "Restore the prior target after an increase did not help.",
+        "preserve_target_pending_evidence": "Keep admission unchanged until sufficient evidence is available.",
+    }
+
     def safe_code(value: object) -> str:
         candidate = str(value or "")
         return candidate if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", candidate) else "unknown"
@@ -1408,7 +2000,16 @@ def _tuning_events() -> list[dict[str, Any]]:
             # Human text is deliberately derived from the stable code at the
             # presentation layer.  A legacy/free-form database value can
             # contain a path or operator detail and is never exported here.
-            "reason": "Pipeline tuning evaluated measured safety and throughput guardrails.",
+            "reason": reason_text.get(
+                safe_code(event.reason_code),
+                "Pipeline tuning evaluated measured safety and throughput guardrails.",
+            ),
+            "expectedEffectCode": safe_code(event.expected_effect_code)
+            if event.expected_effect_code
+            else None,
+            "expectedEffect": expected_effect_text.get(safe_code(event.expected_effect_code))
+            if event.expected_effect_code
+            else None,
             "observationWindowSeconds": event.observation_window_seconds,
             "evidence": numeric_evidence(event.evidence),
             "confidence": safe_code(event.confidence),
@@ -1429,21 +2030,24 @@ def build_pipeline_metrics_payload(
 
     now = at or timezone.now()
     queues = _queue_snapshot(now)
-    resources = resource_snapshot()
+    resources = resource_snapshot(resident_roles=resident_roles)
     recovery = _recovery_snapshot()
     controller = _controller_snapshot(
         resources,
         recovery_state=recovery["state"],
         recovery_scope=recovery["scope"],
+        at=now,
     )
     workers = _worker_snapshot(
         queues,
         resident_roles=resident_roles,
         requested_target=controller["effectiveAdmissionTarget"],
     )
-    publisher = _publisher_snapshot(queues, resident_roles=resident_roles)
+    publisher = _publisher_snapshot(queues, now=now, resident_roles=resident_roles)
     throughput = _throughput_snapshot(now)
     run = _run_snapshot(now, throughput)
+    if run is not None:
+        run["etaAccuracy"] = _eta_accuracy_snapshot(run)
     repository_count = BitbucketRepository.objects.count()
     actionable_repository_count = BitbucketRepository.objects.filter(
         enabled=True,
@@ -1456,8 +2060,18 @@ def build_pipeline_metrics_payload(
         run,
         repository_count,
         actionable_repository_count,
+        recovery,
     )
-    state = _state_snapshot(activity, queues, workers, publisher, recovery)
+    state = _state_snapshot(
+        activity,
+        queues,
+        workers,
+        publisher,
+        recovery,
+        resources,
+        throughput,
+        now=now,
+    )
     with _RING_LOCK:
         samples = list(_SAMPLES) if include_samples else []
         history_complete = not _HISTORY_TRUNCATED
@@ -1482,11 +2096,7 @@ def build_pipeline_metrics_payload(
         "queues": queues,
         "throughput": throughput,
         "resources": resources,
-        "foreground": {
-            "exactSearchAvailable": True,
-            "exactSearchP95Ms": None,
-            "dashboardP95Ms": None,
-        },
+        "foreground": foreground_latency_snapshot(),
         "samples": samples,
         "tuningEvents": _tuning_events(),
     }
@@ -1494,6 +2104,7 @@ def build_pipeline_metrics_payload(
 
 def _sample_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     throughput = payload["throughput"]
+    run = payload.get("run")
     return {
         "at": payload["generatedAt"],
         "intervalSeconds": payload["sampleIntervalSeconds"],
@@ -1511,12 +2122,55 @@ def _sample_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         "publisherState": payload["publisher"]["state"],
         "backpressureDepthJobs": payload["queues"]["backpressureDepthJobs"],
         "backpressureThresholdJobs": payload["queues"]["backpressureThresholdJobs"],
+        "stagedBytes": payload["queues"]["stagedBytes"],
         "extractorOutputs": throughput["extractedRate"]["eventCount"],
         "writerPublications": throughput["writtenRate"]["eventCount"],
         "extractorOutputsPerSecond": throughput["extractedRate"]["perSecond"],
         "writerPublicationsPerSecond": throughput["writtenRate"]["perSecond"],
         "hostCpuPct": payload["resources"]["hostCpuPct"],
         "hostMemoryAvailableBytes": payload["resources"]["hostMemoryAvailableBytes"],
+        "run": (
+            {
+                "id": run["id"],
+                "state": run["state"],
+                "pdfs": {
+                    "total": run["pdfs"]["total"],
+                    "successful": run["pdfs"]["successful"],
+                    "remaining": run["pdfs"]["remaining"],
+                    "inventoryFinal": run["pdfs"]["inventoryFinal"],
+                },
+                "totalEta": {
+                    key: run["totalEta"].get(key)
+                    for key in (
+                        "state",
+                        "etaSeconds",
+                        "confidence",
+                        "reasonCode",
+                        "inventoryFinal",
+                    )
+                },
+                "repositories": [
+                    {
+                        "repositoryId": repository["repositoryId"],
+                        "lifecycleState": repository["lifecycleState"],
+                        "remainingPdfs": repository["remainingPdfs"],
+                        "eta": {
+                            key: repository["eta"].get(key)
+                            for key in (
+                                "state",
+                                "etaSeconds",
+                                "confidence",
+                                "reasonCode",
+                                "inventoryFinal",
+                            )
+                        },
+                    }
+                    for repository in run["repositoryProgress"]
+                ],
+            }
+            if isinstance(run, Mapping)
+            else None
+        ),
         "availability": {
             **payload["resources"].get("availability", {}),
             **payload["queues"].get("availability", {}),
@@ -1655,6 +2309,7 @@ def sample_pipeline_metrics(
                 payload["resources"],
                 recovery_state=payload["recovery"]["state"],
                 recovery_scope=payload["recovery"]["scope"],
+                at=at or timezone.now(),
             )
         payload["workers"] = _worker_snapshot(
             payload["queues"],
@@ -1667,6 +2322,9 @@ def sample_pipeline_metrics(
             payload["workers"],
             payload["publisher"],
             payload["recovery"],
+            payload["resources"],
+            payload["throughput"],
+            now=at or timezone.now(),
         )
     sample = _sample_from_payload(payload)
     global _HISTORY_TRUNCATED
@@ -1694,6 +2352,7 @@ def metrics_payload_for_request(*, at: datetime | None = None) -> dict[str, Any]
     now = at or timezone.now()
     snapshot = read_metrics_snapshot(at=now)
     if snapshot is not None:
+        snapshot["foreground"] = foreground_latency_snapshot()
         if snapshot.get("snapshotStale"):
             snapshot["topBarActivityIndicator"] = {
                 "state": "unknown",

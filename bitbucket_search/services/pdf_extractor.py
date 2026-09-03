@@ -33,6 +33,7 @@ _JSON_REQUEST_MAX_BYTES = 16 * 1024
 _LFS_VERSION = b"version https://git-lfs.github.com/spec/v1"
 _LFS_OID = re.compile(rb"^oid sha256:[0-9a-f]{64}$", re.MULTILINE)
 _LFS_SIZE = re.compile(rb"^size [0-9]+$", re.MULTILINE)
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class PDFExtractionState(StrEnum):
@@ -371,6 +372,34 @@ def _fingerprint_file(path: Path, *, max_file_bytes: int) -> _Fingerprint:
     return _Fingerprint(digest.hexdigest(), size, bytes(prefix))
 
 
+def _validated_parent_fingerprint(
+    path: Path,
+    *,
+    expected_sha256: str,
+    expected_size: int,
+    max_file_bytes: int,
+) -> _Fingerprint:
+    """Reuse the parent's full hash while retaining local LFS/type checks."""
+
+    if not _SHA256.fullmatch(expected_sha256):
+        raise ValueError("expected_content_sha256 must be a SHA-256 digest.")
+    if (
+        isinstance(expected_size, bool)
+        or not isinstance(expected_size, int)
+        or expected_size < 0
+        or expected_size > max_file_bytes
+    ):
+        raise ValueError("expected_source_size is invalid.")
+    metadata = path.stat()
+    if not stat.S_ISREG(metadata.st_mode):
+        raise _ExtractionAbort(PDFExtractionState.CORRUPT)
+    if metadata.st_size != expected_size:
+        raise _ExtractionAbort(PDFExtractionState.CHANGED)
+    with path.open("rb") as source:
+        prefix = source.read(_LFS_POINTER_MAX_BYTES)
+    return _Fingerprint(expected_sha256, expected_size, prefix)
+
+
 def _is_git_lfs_pointer(fingerprint: _Fingerprint) -> bool:
     if fingerprint.size <= 0 or fingerprint.size > _LFS_POINTER_MAX_BYTES:
         return False
@@ -514,6 +543,8 @@ def extract_pdf(
     max_characters: int,
     max_page_characters: int | None = None,
     reader_factory: PDFReaderFactory | None = None,
+    expected_content_sha256: str | None = None,
+    expected_source_size: int | None = None,
 ) -> PDFExtractionResult:
     """Extract one PDF into immutable staging rows without touching a database.
 
@@ -532,8 +563,31 @@ def extract_pdf(
     )
     candidate = Path(path)
 
+    if (expected_content_sha256 is None) is not (expected_source_size is None):
+        raise ValueError("Expected fingerprint fields must be supplied together.")
+    if expected_content_sha256 is not None and (
+        not isinstance(expected_content_sha256, str)
+        or not _SHA256.fullmatch(expected_content_sha256)
+    ):
+        raise ValueError("expected_content_sha256 must be a SHA-256 digest.")
+    if expected_source_size is not None and (
+        isinstance(expected_source_size, bool)
+        or not isinstance(expected_source_size, int)
+        or expected_source_size < 0
+        or expected_source_size > file_limit
+    ):
+        raise ValueError("expected_source_size is invalid.")
     try:
-        before = _fingerprint_file(candidate, max_file_bytes=file_limit)
+        before = (
+            _validated_parent_fingerprint(
+                candidate,
+                expected_sha256=expected_content_sha256,
+                expected_size=expected_source_size,
+                max_file_bytes=file_limit,
+            )
+            if expected_content_sha256 is not None and expected_source_size is not None
+            else _fingerprint_file(candidate, max_file_bytes=file_limit)
+        )
     except _ExtractionAbort as exc:
         return _result(exc.state, diagnostic=exc.diagnostic)
     except Exception as exc:
@@ -657,8 +711,13 @@ def extract_pdf_request(
     if not isinstance(payload, Mapping):
         raise ValueError("The extraction request must be a JSON object.")
     required = {"path", "max_file_bytes", "max_pages", "max_characters"}
-    if set(payload) not in {frozenset(required), frozenset((*required, "max_page_characters"))}:
+    optional = {"max_page_characters", "expected_content_sha256", "expected_source_size"}
+    supplied = set(payload)
+    if not required <= supplied or not supplied - required <= optional:
         raise ValueError("The extraction request has unsupported or missing fields.")
+    expected_fields = {"expected_content_sha256", "expected_source_size"}
+    if bool(supplied & expected_fields) and not expected_fields <= supplied:
+        raise ValueError("The extraction request expected fingerprint is incomplete.")
     raw_path = payload["path"]
     if not isinstance(raw_path, str) or not raw_path or len(raw_path) > 4096 or "\x00" in raw_path:
         raise ValueError("The extraction path is invalid.")
@@ -673,6 +732,8 @@ def extract_pdf_request(
             else None
         ),
         reader_factory=reader_factory,
+        expected_content_sha256=payload.get("expected_content_sha256"),
+        expected_source_size=payload.get("expected_source_size"),
     )
     return result.to_payload()
 

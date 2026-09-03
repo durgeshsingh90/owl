@@ -143,10 +143,10 @@ def test_http_save_lists_domain_category_and_supports_rename(client, monkeypatch
     settings_page = client.get(reverse("bookmark_manager:settings"))
     settings_html = settings_page.content.decode()
     assert settings_page.status_code == 200
-    assert "Developer portal" in settings_html
-    assert "SDK documentation and platform runbooks" in settings_html
-    assert f"?category={category.pk}&amp;sort=added_newest" in settings_html
-    assert 'aria-label="Domain categories"' in settings_html
+    assert "Developer portal" not in settings_html
+    assert "SDK documentation and platform runbooks" not in settings_html
+    assert f"?category={category.pk}&amp;sort=added_newest" not in settings_html
+    assert 'aria-label="Domain categories"' not in settings_html
 
 
 def test_domain_description_is_escaped_and_can_be_cleared(client):

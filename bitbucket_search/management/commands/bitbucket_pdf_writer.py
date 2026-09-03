@@ -12,6 +12,7 @@ from django.db import DatabaseError, close_old_connections
 
 from bitbucket_search.services.logging_events import get_logger, log_event
 from bitbucket_search.services.pdf_indexing import work_one_publication_job
+from bitbucket_search.services.pdf_runtime_metrics import flush_publisher_runtime_metrics
 from core.process_supervision import resident_supervisor_is_alive
 
 logger = get_logger("writer")
@@ -32,6 +33,7 @@ class Command(BaseCommand):
         try:
             return self._run(**options)
         finally:
+            flush_publisher_runtime_metrics()
             log_event(
                 logger,
                 logging.INFO,

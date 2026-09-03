@@ -31,6 +31,7 @@ from bitbucket_search.models import (
     RepositorySyncOperation,
     RepositorySyncState,
 )
+from bitbucket_search.services import pdf_indexing
 from bitbucket_search.services.git_sync import managed_repository_path
 from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 from bitbucket_search.services.pdf_indexing import (
@@ -710,6 +711,102 @@ def test_successful_parent_publication_attaches_pages_and_fts_atomically(indexed
         assert cursor.fetchall()
 
 
+def test_default_parser_receives_the_parent_validated_fingerprint(
+    indexed_pdf_target,
+    monkeypatch,
+):
+    repository, _document, pdf_path = indexed_pdf_target
+    queue_repository_pdf_extractions(repository)
+    claimed = claim_next_extraction_job()
+    captured: dict[str, object] = {}
+
+    def parser(path, heartbeat, **fingerprint):
+        heartbeat()
+        captured.update(fingerprint)
+        return _ready_stage(path, "fingerprint handoff")
+
+    monkeypatch.setattr(pdf_indexing, "run_isolated_pdf_extractor", parser)
+
+    result = execute_claimed_extraction_job(claimed.pk)
+
+    content = pdf_path.read_bytes()
+    assert result.status == PDFExtractionJobStatus.SUCCEEDED
+    assert captured == {
+        "expected_content_sha256": hashlib.sha256(content).hexdigest(),
+        "expected_source_size": len(content),
+    }
+
+
+def test_parent_fingerprint_handoff_has_a_rollback_switch(
+    indexed_pdf_target,
+    monkeypatch,
+    settings,
+):
+    repository, _document, pdf_path = indexed_pdf_target
+    settings.PDF_PIPELINE_REUSE_PARENT_FINGERPRINT = False
+    queue_repository_pdf_extractions(repository)
+    claimed = claim_next_extraction_job()
+    captured: dict[str, object] = {}
+
+    def parser(path, heartbeat, **fingerprint):
+        heartbeat()
+        captured.update(fingerprint)
+        return _ready_stage(path, "full child fingerprint")
+
+    monkeypatch.setattr(pdf_indexing, "run_isolated_pdf_extractor", parser)
+
+    result = execute_claimed_extraction_job(claimed.pk)
+
+    assert result.status == PDFExtractionJobStatus.SUCCEEDED
+    assert captured == {}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_parser_work_and_staging_run_outside_a_database_transaction(indexed_pdf_target):
+    repository, _document, pdf_path = indexed_pdf_target
+    queue_repository_pdf_extractions(repository)
+    claimed = claim_next_extraction_job()
+
+    def parser(_path, heartbeat):
+        assert connection.in_atomic_block is False
+        heartbeat()
+        assert connection.in_atomic_block is False
+        return _ready_stage(pdf_path, "outside transaction")
+
+    result = execute_claimed_extraction_job(claimed.pk, extraction_runner=parser)
+
+    assert result.status == PDFExtractionJobStatus.SUCCEEDED
+
+
+def test_publication_page_batch_size_is_a_single_configured_variable(
+    indexed_pdf_target,
+    settings,
+):
+    repository, _document, pdf_path = indexed_pdf_target
+    settings.PDF_PUBLICATION_PAGE_BATCH_SIZE = 2
+    queue_repository_pdf_extractions(repository)
+    claimed = claim_next_extraction_job()
+
+    with CaptureQueriesContext(connection) as queries:
+        result = execute_claimed_extraction_job(
+            claimed.pk,
+            extraction_runner=lambda _path, _heartbeat: _ready_stage(
+                pdf_path,
+                "batch page one",
+                "batch page two",
+                "batch page three",
+            ),
+        )
+
+    page_inserts = [
+        query["sql"]
+        for query in queries.captured_queries
+        if 'INSERT INTO "bitbucket_search_pdftextpage"' in query["sql"]
+    ]
+    assert result.status == PDFExtractionJobStatus.SUCCEEDED
+    assert len(page_inserts) == 2
+
+
 def test_existing_content_revision_is_reused_without_invoking_parser(indexed_pdf_target):
     repository, document, pdf_path = indexed_pdf_target
     content_hash = hashlib.sha256(pdf_path.read_bytes()).hexdigest()
@@ -922,7 +1019,13 @@ def test_isolated_runner_uses_the_database_free_json_protocol(tmp_path, settings
     with pdf_path.open("wb") as destination:
         writer.write(destination)
 
-    result = run_isolated_pdf_extractor(pdf_path, Mock())
+    content = pdf_path.read_bytes()
+    result = run_isolated_pdf_extractor(
+        pdf_path,
+        Mock(),
+        expected_content_sha256=hashlib.sha256(content).hexdigest(),
+        expected_source_size=len(content),
+    )
 
     assert result.state == PDFTextRevisionState.NO_TEXT
     assert result.publishable is True

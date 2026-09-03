@@ -14,6 +14,7 @@ import re
 import stat
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from enum import StrEnum
@@ -232,10 +233,8 @@ def write_fallback(record: FallbackRecoveryRecord) -> None:
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     if directory.is_symlink() or not directory.is_dir():
         raise OSError("Recovery fallback directory is unavailable.")
-    try:
+    with suppress(OSError):
         directory.chmod(0o700)
-    except OSError:
-        pass
 
     destination = directory / f"{record.scopeFingerprint}.json"
     if not destination.exists() and _bounded_file_count(directory) >= MAX_FALLBACK_FILES:
@@ -265,10 +264,8 @@ def write_fallback(record: FallbackRecoveryRecord) -> None:
     finally:
         if descriptor is not None:
             os.close(descriptor)
-        try:
+        with suppress(FileNotFoundError):
             temporary.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def persist_database_unavailable_pause(
@@ -346,7 +343,8 @@ def persist_database_unavailable_pause(
         failures = min(16, (retry.failures if retry is not None else 0) + 1)
         _write_retry_state[fingerprint] = _RetryState(
             failures=failures,
-            next_retry_monotonic=clock + min(
+            next_retry_monotonic=clock
+            + min(
                 _RETRY_BACKOFF_MAX_SECONDS,
                 float(2 ** min(failures - 1, 6)),
             ),
@@ -438,10 +436,9 @@ def _validated_record(
     _canonical_uuid(record.episodeId)
     if record.activeAttemptId is not None:
         _canonical_uuid(record.activeAttemptId)
-    if (
-        not isinstance(record.resumeIdempotencyKeyHash, str)
-        or not _IDEMPOTENCY_HASH_PATTERN.fullmatch(record.resumeIdempotencyKeyHash)
-    ):
+    if not isinstance(
+        record.resumeIdempotencyKeyHash, str
+    ) or not _IDEMPOTENCY_HASH_PATTERN.fullmatch(record.resumeIdempotencyKeyHash):
         raise ValueError("The recovery fallback resume key is invalid.")
     for timestamp in (
         record.firstFailureAt,
@@ -466,9 +463,7 @@ def _validated_record(
         raise ValueError("The paused recovery fallback is incomplete.")
     if record.state == "retry_wait" and record.nextRetryAt is None:
         raise ValueError("The retry recovery fallback is incomplete.")
-    if record.state in {"recovering", "recovering_half_open"} and (
-        record.activeAttemptId is None
-    ):
+    if record.state in {"recovering", "recovering_half_open"} and (record.activeAttemptId is None):
         raise ValueError("The active recovery fallback is incomplete.")
     if record.state == "resume_requested" and record.resumeRequestedAt is None:
         raise ValueError("The resumed recovery fallback is incomplete.")

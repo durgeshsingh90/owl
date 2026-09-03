@@ -30,21 +30,25 @@ def _render(repository):
     )
 
 
-def test_repository_card_uses_two_success_ticks_without_timestamps_or_totals():
+def test_repository_card_defers_pipeline_success_until_authoritative_hydration():
     html = _render(_repository())
 
     assert "data-repository-success-ticks" in html
     assert 'data-git-succeeded="true"' in html
-    assert 'data-index-succeeded="true"' in html
+    assert 'data-index-succeeded="false"' in html
+    assert (
+        'data-repository-success-ticks data-git-succeeded="true" data-index-succeeded="false" hidden'
+        in html
+    )
     assert "data-repository-run-timer" not in html
     assert "data-repository-index-counts" not in html
     assert "git-started-at" not in html
     assert "index-started-at" not in html
 
 
-def test_each_repository_render_gets_its_own_double_tick_state():
+def test_each_repository_render_starts_without_a_speculative_pipeline_tick():
     html = _render(_repository(index_succeeded=False)) + _render(_repository())
 
     assert html.count("data-repository-success-ticks") == 2
-    assert html.count('data-index-succeeded="false"') == 1
-    assert html.count('data-index-succeeded="true"') == 1
+    assert html.count('data-index-succeeded="false"') == 2
+    assert 'data-index-succeeded="true"' not in html

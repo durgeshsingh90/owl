@@ -278,11 +278,7 @@ def _require_recovery_loopback_action(request: HttpRequest) -> HttpResponse | No
     valid_port = not host_port or (
         host_port.isdecimal() and len(host_port) <= 5 and 1 <= int(host_port) <= 65_535
     )
-    if (
-        peer_is_loopback
-        and host_domain in {"localhost", "127.0.0.1", "[::1]"}
-        and valid_port
-    ):
+    if peer_is_loopback and host_domain in {"localhost", "127.0.0.1", "[::1]"} and valid_port:
         return None
     log_event(logger, logging.WARNING, "recovery_action_rejected", reason="non_loopback")
     return HttpResponseForbidden(
@@ -2916,13 +2912,6 @@ def refresh_all_repositories(request: HttpRequest) -> HttpResponse:
                 "alreadyQueued": already_queued_count,
                 "alreadyRunning": already_running_count,
                 "workersStarted": workers_started,
-                "runId": str(queued.run.pk) if queued.run is not None else None,
-                "acceptedRepositoryIds": [
-                    result.repository.pk
-                    for result in queued.results
-                    if result.run_repository is not None
-                ],
-                "rejectedRepositoryIds": list(queued.rejected_repository_ids),
             },
             status=202,
         )

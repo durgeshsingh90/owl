@@ -26,6 +26,7 @@ from bitbucket_search.models import (
     BitbucketRepository,
     RepositorySyncJob,
     RepositorySyncJobStatus,
+    TrustedRepositoryHostSource,
 )
 
 MAX_REPOSITORY_HOST_ORIGIN_LENGTH = 2_048
@@ -430,7 +431,7 @@ def effective_repository_host_policy() -> EffectiveRepositoryHostPolicy:
         rows = tuple(
             model.objects.filter(enabled=True)
             .order_by("canonical_origin", "pk")
-            .values("canonical_origin", "hostname", "port")
+            .values("canonical_origin", "hostname", "port", "source")
         )
     except (LookupError, DatabaseError):
         return EffectiveRepositoryHostPolicy(
@@ -453,7 +454,11 @@ def effective_repository_host_policy() -> EffectiveRepositoryHostPolicy:
             canonical_origin=normalized.canonical_origin,
             hostname=normalized.hostname,
             port=normalized.port,
-            source="ui",
+            source=(
+                row["source"]
+                if row["source"] in TrustedRepositoryHostSource.values
+                else TrustedRepositoryHostSource.LEGACY
+            ),
         )
 
     entries = {entry.canonical_origin: entry for entry in built_in_entries}
@@ -676,21 +681,26 @@ def list_repository_host_summaries() -> tuple[RepositoryHostSummary, ...]:
             continue
         dependencies = repository_host_dependencies(normalized.canonical_origin)
         effective = effective_by_origin.get(normalized.canonical_origin)
+        stored_source = (
+            row.source
+            if row.source in TrustedRepositoryHostSource.values
+            else TrustedRepositoryHostSource.LEGACY
+        )
         available = bool(
             row.enabled
             and not policy.externally_managed
             and effective is not None
-            and effective.source == "ui"
+            and effective.source == stored_source
         )
         # Do not replace the authoritative built-in/environment summary with a
         # redundant historical UI row for the same canonical origin.
-        if effective is not None and effective.source != "ui":
+        if effective is not None and effective.source in {"built_in", "environment"}:
             continue
         summaries[normalized.canonical_origin] = RepositoryHostSummary(
             canonical_origin=normalized.canonical_origin,
             hostname=normalized.hostname,
             port=normalized.port,
-            source="ui",
+            source=stored_source,
             enabled=bool(row.enabled),
             available=available,
             state=(
@@ -733,6 +743,7 @@ def add_trusted_repository_host(value: object) -> RepositoryHostMutationResult:
                     "hostname": normalized.hostname,
                     "port": normalized.port,
                     "enabled": True,
+                    "source": TrustedRepositoryHostSource.UI,
                 },
             )
             changed = False
@@ -788,6 +799,11 @@ def remove_trusted_repository_host(value: object) -> RepositoryHostMutationResul
         if record is None:
             raise RepositoryHostNotFound(
                 "repository_host_not_found", "This UI-managed repository host no longer exists."
+            )
+        if record.source != TrustedRepositoryHostSource.UI:
+            raise RepositoryHostReadOnly(
+                "repository_host_read_only",
+                "Migrated repository host approvals are read-only compatibility records.",
             )
         if connection.vendor == "sqlite":
             model.objects.filter(pk=record.pk).update(enabled=F("enabled"))

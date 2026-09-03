@@ -23,6 +23,7 @@
     data-pipeline-metrics-url="{% url 'bitbucket_search:pipeline_metrics' %}"
     data-pipeline-active-interval="5000"
     data-pipeline-idle-interval="30000"
+    data-pipeline-state="loading"
     data-repository-status-url="{% url 'bitbucket_search:repository_status' %}"
     data-repository-connection-test-url="{% url 'bitbucket_search:repository_connection_test' %}"
     data-extraction-active="{{ extraction_payload.active|yesno:'true,false' }}"
@@ -393,6 +394,7 @@
                         {% else %}
                         Showing <strong>{{ pdf_document_count|default:0 }} PDF{{ pdf_document_count|default:0|pluralize }}</strong>
                         {% endif %}
+                        <span data-extraction-summary>{{ extraction_status.indexed_documents }} indexed · {{ extraction_status.pending_documents }} pending</span>
                         <a class="bb-results-pipeline-link" href="{% url 'bitbucket_search:index_status' %}">Pipeline: <span data-pipeline-activity>Loading status</span></a>
                     </p>
                     <span class="bb-pdf-selection-count" data-pdf-selection-count hidden>0 PDFs selected</span>
