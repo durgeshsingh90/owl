@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from datetime import time as datetime_time
@@ -94,10 +94,50 @@ AUTOMATIC_RETRYABLE_STATUSES = (
 STALE_JOB_AFTER = timedelta(seconds=settings.BITBUCKET_REPOSITORY_JOB_LEASE_SECONDS)
 WORKER_WAKE_RESERVATION_AFTER = timedelta(seconds=30)
 _RESIDENT_REPOSITORY_WORKERS_ACTIVE = threading.Event()
+_SQLITE_FAST_RETRY_ATTEMPTS = 6
+_SQLITE_FAST_RETRY_BASE_SECONDS = 0.05
+_SQLITE_FAST_RETRY_MAX_ELAPSED_SECONDS = 1.0
 
 
 class RepositoryRefreshInProgress(RuntimeError):
     """A bulk refresh must wait for existing repository work to finish."""
+
+
+def _is_confirmed_sqlite_contention(error: OperationalError) -> bool:
+    cause = error.__cause__
+    sqlite_code = getattr(cause, "sqlite_errorcode", None)
+    return bool(
+        isinstance(cause, sqlite3.Error)
+        and isinstance(sqlite_code, int)
+        and sqlite_code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+    )
+
+
+def _retry_fast_sqlite_contention[T](operation: Callable[[], T]) -> T:
+    """Retry only immediate SQLite lock/upgrade races, never long lock timeouts."""
+
+    for attempt in range(_SQLITE_FAST_RETRY_ATTEMPTS):
+        started = time.monotonic()
+        try:
+            return operation()
+        except OperationalError as error:
+            elapsed = time.monotonic() - started
+            if (
+                not _is_confirmed_sqlite_contention(error)
+                or elapsed >= _SQLITE_FAST_RETRY_MAX_ELAPSED_SECONDS
+                or attempt + 1 >= _SQLITE_FAST_RETRY_ATTEMPTS
+            ):
+                raise
+            delay = _SQLITE_FAST_RETRY_BASE_SECONDS * 2**attempt
+            log_event(
+                logger,
+                logging.INFO,
+                "repository_sqlite_write_retry",
+                retry_number=attempt + 1,
+                elapsed_ms=int(elapsed * 1_000),
+            )
+            time.sleep(delay)
+    raise AssertionError("SQLite retry loop exhausted without returning or raising")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1094,7 +1134,6 @@ def _find_compatible_repository(
     )
 
 
-@transaction.atomic
 def register_and_queue_repositories(remote_urls: Sequence[object]) -> QueueRepositoryBatchResult:
     """Register and queue one whole validated batch with a shared durable run."""
 
@@ -1104,8 +1143,19 @@ def register_and_queue_repositories(remote_urls: Sequence[object]) -> QueueRepos
             "repository_url_required",
             "Enter at least one repository URL.",
         )
-    _interrupt_stale_jobs()
+    return _retry_fast_sqlite_contention(
+        lambda: _register_and_queue_repositories_once(normalized_urls)
+    )
+
+
+@transaction.atomic
+def _register_and_queue_repositories_once(
+    normalized_urls: tuple[NormalizedRepositoryURL, ...],
+) -> QueueRepositoryBatchResult:
+    """Perform one atomic registration attempt after validation is complete."""
+
     reserve_repository_write()
+    _interrupt_stale_jobs()
     provisional: list[QueueResult] = []
     seen_repository_ids: set[int] = set()
     for normalized in normalized_urls:
@@ -1185,9 +1235,9 @@ def _queue_repository_refresh(
     enabled_only: bool,
     run_repository: PDFPipelineRunRepository | None = None,
 ) -> QueueResult:
-    _interrupt_stale_jobs()
     with transaction.atomic():
         reserve_repository_write()
+        _interrupt_stale_jobs()
         repositories = BitbucketRepository.objects.select_for_update()
         if enabled_only:
             repositories = repositories.filter(enabled=True, exclude_from_refresh=False).exclude(
@@ -1454,6 +1504,22 @@ def reserve_queued_repository_worker_wakeups(
     job_ids: tuple[int, ...] | None = None,
     at=None,
 ) -> WorkerWakeReservation:
+    """Reserve helper launches after retrying only fast SQLite lock races."""
+
+    observed_at = at or timezone.now()
+    return _retry_fast_sqlite_contention(
+        lambda: _reserve_queued_repository_worker_wakeups_once(
+            job_ids=job_ids,
+            at=observed_at,
+        )
+    )
+
+
+def _reserve_queued_repository_worker_wakeups_once(
+    *,
+    job_ids: tuple[int, ...] | None = None,
+    at=None,
+) -> WorkerWakeReservation:
     """Reserve bounded helper launches across tabs and Django worker processes.
 
     A queued job's existing heartbeat/PID columns form a short launch lease. The
@@ -1471,6 +1537,7 @@ def reserve_queued_repository_worker_wakeups(
     # named OS lock across the capacity read and lease updates so separate Django
     # processes cannot reserve the same worker slot from stale snapshots.
     with repository_worker_wakeup_lock(), transaction.atomic():
+        reserve_repository_write()
         queued_jobs = tuple(
             RepositorySyncJob.objects.select_for_update()
             .filter(status=RepositorySyncJobStatus.QUEUED)

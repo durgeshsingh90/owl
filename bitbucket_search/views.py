@@ -235,6 +235,16 @@ def _logged_web_action(operation: str, *, quiet: bool = False):
     return decorate
 
 
+def _is_confirmed_sqlite_contention(error: OperationalError) -> bool:
+    cause = error.__cause__
+    sqlite_code = getattr(cause, "sqlite_errorcode", None)
+    return bool(
+        isinstance(cause, sqlite3.Error)
+        and isinstance(sqlite_code, int)
+        and sqlite_code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+    )
+
+
 def _is_loopback_request(request: HttpRequest) -> bool:
     candidate = request.META.get("REMOTE_ADDR", "")
     try:
@@ -2235,6 +2245,32 @@ def add_repository(request: HttpRequest) -> HttpResponse:
             )
         messages.error(request, str(exc))
         return redirect(f"{reverse('bitbucket_search:repositories')}#bb-add-repository")
+    except OperationalError as error:
+        if not _is_confirmed_sqlite_contention(error):
+            raise
+        detail = (
+            "OWL's local database is temporarily busy with background work. "
+            "No repository was added; try again in a moment."
+        )
+        log_event(
+            logger,
+            logging.INFO,
+            "repository_add_deferred",
+            error=error,
+            stage="repository_registration",
+            status="database_busy",
+        )
+        if _is_async_request(request):
+            return JsonResponse(
+                {
+                    "state": "database_busy",
+                    "code": "repository_database_busy",
+                    "detail": detail,
+                },
+                status=503,
+            )
+        messages.warning(request, detail)
+        return redirect(f"{reverse('bitbucket_search:repositories')}#bb-add-repository")
 
     # Reserve all newly queued jobs together so the redirected page's automatic
     # schedule tick cannot start duplicate helpers for the same work.
@@ -2246,9 +2282,25 @@ def add_repository(request: HttpRequest) -> HttpResponse:
     if queued_job_ids:
         failed_job_ids = []
         for job_id in queued_job_ids:
-            _workers_started, launch_failed = _wake_queued_repository_workers(
-                job_ids=(job_id,),
-            )
+            try:
+                _workers_started, launch_failed = _wake_queued_repository_workers(
+                    job_ids=(job_id,),
+                )
+            except OperationalError as error:
+                if not _is_confirmed_sqlite_contention(error):
+                    raise
+                # Registration already committed. Leave the durable job queued;
+                # the resident pool or the next page schedule tick will claim it.
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "repository_worker_wakeup_deferred",
+                    error=error,
+                    job_id=job_id,
+                    stage="worker_wakeup",
+                    status="database_busy",
+                )
+                continue
             if launch_failed:
                 mark_worker_launch_failed(job_id)
                 failed_job_ids.append(job_id)
@@ -2977,14 +3029,7 @@ def tick_repository_schedule(request: HttpRequest) -> JsonResponse:
         queued = queue_due_daily_repository_refreshes()
         workers_started, launch_failed = _wake_queued_repository_workers()
     except OperationalError as error:
-        cause = error.__cause__
-        sqlite_code = getattr(cause, "sqlite_errorcode", None)
-        is_database_busy = (
-            isinstance(cause, sqlite3.Error)
-            and isinstance(sqlite_code, int)
-            and sqlite_code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
-        )
-        if not is_database_busy:
+        if not _is_confirmed_sqlite_contention(error):
             raise
         # Another short SQLite writer can temporarily own the database. The
         # browser retries this idempotent tick, and any jobs already committed

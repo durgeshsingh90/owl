@@ -1260,6 +1260,80 @@ def test_add_repository_rejects_invalid_batch_before_queuing_any_repository(loop
     assert not RepositorySyncJob.objects.exists()
 
 
+@override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
+def test_add_repository_reports_confirmed_database_contention_without_debug_page(
+    loopback_client,
+    monkeypatch,
+):
+    register = Mock(side_effect=_sqlite_busy_operational_error())
+    monkeypatch.setattr("bitbucket_search.views.register_and_queue_repositories", register)
+
+    response = loopback_client.post(
+        reverse("bitbucket_search:repository_add"),
+        {"repository_url": "git@bitbucket.org:workspace/database-busy.git"},
+        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "state": "database_busy",
+        "code": "repository_database_busy",
+        "detail": (
+            "OWL's local database is temporarily busy with background work. "
+            "No repository was added; try again in a moment."
+        ),
+    }
+    register.assert_called_once_with(["ssh://git@bitbucket.org/workspace/database-busy.git"])
+    assert b"OperationalError" not in response.content
+    assert not BitbucketRepository.objects.exists()
+
+
+@override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
+def test_add_repository_redirects_native_form_when_database_is_busy(
+    loopback_client,
+    monkeypatch,
+):
+    register = Mock(side_effect=_sqlite_busy_operational_error())
+    monkeypatch.setattr("bitbucket_search.views.register_and_queue_repositories", register)
+
+    response = loopback_client.post(
+        reverse("bitbucket_search:repository_add"),
+        {"repository_url": "git@bitbucket.org:workspace/native-form-busy.git"},
+        follow=True,
+    )
+
+    assert response.status_code == 200
+    assert response.redirect_chain == [
+        (f"{reverse('bitbucket_search:repositories')}#bb-add-repository", 302)
+    ]
+    assert "local database is temporarily busy with background work" in response.content.decode()
+    assert "OperationalError" not in response.content.decode()
+    assert not BitbucketRepository.objects.exists()
+
+
+@override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
+def test_add_repository_keeps_durable_job_when_wakeup_reservation_hits_sqlite_lock(
+    loopback_client,
+    monkeypatch,
+):
+    wake = Mock(side_effect=_sqlite_busy_operational_error())
+    monkeypatch.setattr("bitbucket_search.views._wake_queued_repository_workers", wake)
+
+    response = loopback_client.post(
+        reverse("bitbucket_search:repository_add"),
+        {"repository_url": "git@bitbucket.org:workspace/deferred-wakeup.git"},
+        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+    )
+
+    assert response.status_code == 202
+    assert response.json()["state"] == "queued"
+    repository = BitbucketRepository.objects.get()
+    job = RepositorySyncJob.objects.get(repository=repository)
+    assert repository.sync_state == RepositorySyncState.QUEUED
+    assert job.status == RepositorySyncJobStatus.QUEUED
+    wake.assert_called_once_with(job_ids=(job.pk,))
+
+
 @override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org", "scm.example.invalid"))
 def test_add_internal_bitbucket_repository_preserves_context_path_and_queues_clone(
     loopback_client,
