@@ -3054,9 +3054,10 @@ def repository_status(request: HttpRequest) -> JsonResponse:
             "workerLimits": {
                 "git": settings.BITBUCKET_MAX_REPO_WORKERS,
                 "indexing": settings.PDF_MAX_EXTRACTION_WORKERS,
+                "staging": 1,
                 "publication": 1,
                 "total": (
-                    settings.BITBUCKET_MAX_REPO_WORKERS + settings.PDF_MAX_EXTRACTION_WORKERS + 1
+                    settings.BITBUCKET_MAX_REPO_WORKERS + settings.PDF_MAX_EXTRACTION_WORKERS + 2
                 ),
             },
             "totals": {

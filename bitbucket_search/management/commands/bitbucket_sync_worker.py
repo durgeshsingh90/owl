@@ -13,6 +13,7 @@ from django.db import OperationalError, close_old_connections
 from bitbucket_search.services.logging_events import get_logger, log_event
 from bitbucket_search.services.pdf_indexing import (
     launch_index_worker,
+    launch_pdf_stager,
     launch_pdf_writer,
     sweep_pdf_extraction_queue,
     work_one_extraction_job,
@@ -153,6 +154,7 @@ class Command(BaseCommand):
                 # below the same setting, including this sync worker.
                 if spawn_index_workers:
                     try:
+                        launch_pdf_stager()
                         launch_pdf_writer()
                     except OSError as exc:
                         log_event(

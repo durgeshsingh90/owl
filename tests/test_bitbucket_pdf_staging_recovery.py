@@ -21,6 +21,7 @@ from bitbucket_search.models import (
     RepositorySyncState,
 )
 from bitbucket_search.services import pdf_indexing
+from bitbucket_search.services import pdf_jsonl_staging as pdf_jsonl
 from bitbucket_search.services.git_sync import managed_repository_path
 from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 
@@ -93,6 +94,15 @@ def _claimed_job(repository: BitbucketRepository) -> PDFExtractionJob:
     return claimed
 
 
+def _seal_staged_records() -> pdf_jsonl.JSONLChunk:
+    stager = pdf_jsonl.JSONLStager()
+    staged = pdf_indexing.work_one_staging_job(stager)
+    assert staged is not None
+    sealed = getattr(staged, "sealed_chunk", None) or stager.seal_current()
+    assert sealed is not None
+    return sealed
+
+
 def _leave_post_rename_orphan(
     monkeypatch,
     repository: BitbucketRepository,
@@ -158,6 +168,7 @@ def test_crash_after_rename_before_phase_commit_promotes_matching_orphan(
     assert job.phase == PDFExtractionJobPhase.PUBLISHING
     assert job.worker_pid is None
 
+    _seal_staged_records()
     published = pdf_indexing.work_one_publication_job()
     document.refresh_from_db()
     assert published is not None
@@ -187,6 +198,7 @@ def test_phase_commit_before_writer_claim_remains_ready_and_publishes_once(
     assert staged.worker_pid is None
     assert target.exists()
 
+    _seal_staged_records()
     published = pdf_indexing.work_one_publication_job()
     document.refresh_from_db()
     assert published is not None
@@ -221,7 +233,7 @@ def test_stage_handoff_fsyncs_file_and_parent_directory(
         assert "directory" in flushed_types
 
 
-def test_publication_commit_before_unlink_is_cleaned_without_republishing_or_requeueing_semantic(
+def test_publication_commit_before_chunk_status_is_replayed_without_duplicate_publication(
     staged_recovery_target,
     monkeypatch,
     django_capture_on_commit_callbacks,
@@ -235,43 +247,45 @@ def test_publication_commit_before_unlink_is_cleaned_without_republishing_or_req
         extraction_runner=lambda _path, _heartbeat: _ready_stage(pdf_path),
         defer_publication=True,
     )
-    target = pdf_indexing._publication_staging_path(staged.pk)
+    chunk = _seal_staged_records()
     queued_semantic: list[tuple[str, int]] = []
     monkeypatch.setattr(
         signals,
         "_queue_safely",
         lambda source_type, source_id: queued_semantic.append((source_type, source_id)),
     )
-    original_remove = pdf_indexing._remove_publication_staging_file
+    original_mark_imported = pdf_jsonl.mark_chunk_imported
 
-    def crash_before_unlink(_target: Path) -> bool:
+    def crash_before_imported_status(*_args, **_kwargs):
         raise SimulatedProcessCrash
 
     monkeypatch.setattr(
-        pdf_indexing,
-        "_remove_publication_staging_file",
-        crash_before_unlink,
+        pdf_jsonl,
+        "mark_chunk_imported",
+        crash_before_imported_status,
     )
     with django_capture_on_commit_callbacks(execute=True), pytest.raises(SimulatedProcessCrash):
         pdf_indexing.work_one_publication_job()
 
     staged.refresh_from_db()
     assert staged.status == PDFExtractionJobStatus.SUCCEEDED
-    assert target.exists()
+    assert chunk.path.exists()
+    assert pdf_jsonl.list_chunks()[0].status == pdf_jsonl.CHUNK_STATUS_IMPORTING
     assert len(queued_semantic) == 1
 
     monkeypatch.setattr(
-        pdf_indexing,
-        "_remove_publication_staging_file",
-        original_remove,
+        pdf_jsonl,
+        "mark_chunk_imported",
+        original_mark_imported,
     )
     attach_revision = Mock(side_effect=AssertionError("terminal output must not republish"))
     monkeypatch.setattr(pdf_indexing, "_attach_revision", attach_revision)
     with django_capture_on_commit_callbacks(execute=True):
-        result = pdf_indexing.reconcile_staged_publications(force=True)
+        result = pdf_indexing.work_one_publication_job()
 
-    assert result.cleaned_job_ids == (staged.pk,)
-    assert not target.exists()
+    assert result is not None
+    assert result.pk == staged.pk
+    assert pdf_jsonl.list_chunks()[0].status == pdf_jsonl.CHUNK_STATUS_IMPORTED
     assert len(queued_semantic) == 1
     attach_revision.assert_not_called()
 
@@ -387,7 +401,7 @@ def test_unverified_manifest_is_cleaned_and_only_its_pdf_is_requeued(
     assert replacement.document_id == job.document_id
 
 
-def test_writer_rejects_tampered_manifest_and_requeues_only_that_pdf(
+def test_stager_rejects_tampered_manifest_and_requeues_only_that_pdf(
     staged_recovery_target,
 ):
     repository, _document, pdf_path = staged_recovery_target
@@ -402,10 +416,10 @@ def test_writer_rejects_tampered_manifest_and_requeues_only_that_pdf(
     payload["extraction_sha256"] = "0" * 64
     target.write_text(json.dumps(payload), encoding="utf-8")
 
-    result = pdf_indexing.work_one_publication_job()
+    result = pdf_indexing.work_one_staging_job(pdf_jsonl.JSONLStager())
 
     staged.refresh_from_db()
-    assert result is not None
+    assert result is None
     assert staged.status == PDFExtractionJobStatus.INTERRUPTED
     assert not target.exists()
     replacement = PDFExtractionJob.objects.get(
@@ -413,6 +427,35 @@ def test_writer_rejects_tampered_manifest_and_requeues_only_that_pdf(
         status=PDFExtractionJobStatus.QUEUED,
     )
     assert replacement.retry_count == staged.retry_count + 1
+
+
+def test_writer_retains_failed_chunk_and_tracks_its_pdf_failure(
+    staged_recovery_target,
+):
+    repository, _document, pdf_path = staged_recovery_target
+    claimed = _claimed_job(repository)
+    staged = pdf_indexing.execute_claimed_extraction_job(
+        claimed.pk,
+        extraction_runner=lambda _path, _heartbeat: _ready_stage(pdf_path),
+        defer_publication=True,
+    )
+    chunk = _seal_staged_records()
+    record = json.loads(chunk.path.read_text(encoding="utf-8"))
+    record["content"] = "X" + record["content"][1:]
+    chunk.path.write_text(
+        json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    assert chunk.path.stat().st_size == chunk.byte_count
+
+    assert pdf_indexing.work_one_publication_job() is None
+
+    staged.refresh_from_db()
+    failed_chunk = pdf_jsonl.list_chunks()[0]
+    assert staged.status == PDFExtractionJobStatus.FAILED
+    assert staged.error_code == "invalid_staged_extraction"
+    assert failed_chunk.status == pdf_jsonl.CHUNK_STATUS_FAILED
+    assert failed_chunk.path.exists()
 
 
 def test_cancelled_job_stage_is_removed_without_promotion(

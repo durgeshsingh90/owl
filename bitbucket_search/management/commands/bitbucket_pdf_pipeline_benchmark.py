@@ -118,7 +118,7 @@ class Command(BaseCommand):
         parser.add_argument("--internal-trial", action="store_true", help=argparse.SUPPRESS)
         parser.add_argument(
             "--internal-worker-role",
-            choices=("extractor", "publisher"),
+            choices=("extractor", "stager", "publisher"),
             help=argparse.SUPPRESS,
         )
         parser.add_argument("--result-path", type=Path, help=argparse.SUPPRESS)

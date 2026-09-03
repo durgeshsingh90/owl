@@ -766,8 +766,6 @@ def recommend_target(
         observation.foreground_p95_ms > config.max_foreground_p95_ms
     ):
         pressure_reasons.append("foreground_latency_pressure")
-    if observation.sqlite_busy_errors is not None and observation.sqlite_busy_errors > 0:
-        pressure_reasons.append("sqlite_contention")
     if observation.failure_rate is not None and observation.failure_rate > 0.05:
         pressure_reasons.append("failure_rate_pressure")
     backlog_rising = (
@@ -775,8 +773,6 @@ def recommend_target(
         and observation.backpressure_growth_per_second > 0
         and observation.backpressure_depth >= observation.backpressure_threshold
     )
-    if backlog_rising:
-        pressure_reasons.append("publication_backlog_rising")
     if pressure_reasons:
         proposed = min(
             current_target,
@@ -789,6 +785,19 @@ def recommend_target(
             "decrease",
             proposed,
             pressure_reasons[0],
+            observation.confidence,
+            evidence,
+        )
+    # JSONL is the intentional elastic boundary. A slower or temporarily busy
+    # SQLite consumer may build a disk queue, but it must never turn into an
+    # automatic extractor reduction.
+    if backlog_rising or (
+        observation.sqlite_busy_errors is not None and observation.sqlite_busy_errors > 0
+    ):
+        return ControllerDecision(
+            "hold",
+            current_target,
+            "sqlite_backlog_allowed",
             observation.confidence,
             evidence,
         )

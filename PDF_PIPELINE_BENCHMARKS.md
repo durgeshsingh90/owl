@@ -52,8 +52,8 @@ PATH="$PWD/.venv/bin:$PATH" python manage.py bitbucket_pdf_pipeline_benchmark \
 Useful one-variable controls are `--strict-repository-locality`,
 `--repeat-child-prehash`, `--sqlite-journal-mode wal`,
 `--publication-page-batch-size N`, `--metrics-sampling`, and the disposable
-`--with-duplicate-page-index` comparison switch. `--full-matrix` selects fixed
-targets 1, 2, 4, 6, and 8.
+`--with-duplicate-page-index` comparison switch. `--full-matrix` now selects fixed
+targets 1, 2, 4, 8, 12, and 16.
 
 The representative benchmark gate has not passed at this point. Adaptive admission
 must remain disabled until the Phase 5 workload, guardrail, foreground-concurrency,
@@ -114,6 +114,17 @@ run; the harness truthfully lists these limitations.
 ### Gate decision
 
 The adaptive benchmark gate is **not passed**. No adaptive-enablement manifest is
-created, targets above eight are not tested, and adaptive mode remains unable to take
+created, representative targets above eight are not validated, and adaptive mode remains unable to take
 control. Observe/shadow behavior and the conservative fixed default are the releasable
 outcome until representative evidence satisfies every gate check.
+
+## JSONL topology smoke verification
+
+Report `20260903T230920Z-980331a7a6e6` is a non-representative, one-run smoke check of
+the later extraction to JSONL to SQLite topology at 16 extractors. It used 32 synthetic
+PDFs, two repositories, two pages per PDF, one JSONL stager, one SQLite writer, and the
+rollback journal. All 32 jobs completed, all persisted-document integrity checks passed,
+SQLite reported zero busy errors, and the run finished in 1.422 seconds (about 1,350
+documents/minute). This proves the harness and 16-process topology execute end to end; it
+does not replace the large-corpus, thermal, semantic-concurrency, recovery, or ETA gate
+required before adaptive control can be enabled.

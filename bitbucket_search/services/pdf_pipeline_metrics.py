@@ -30,6 +30,7 @@ from django.utils import timezone
 
 from bitbucket_search.models import (
     BitbucketRepository,
+    PDFDocument,
     PDFDocumentLifecycle,
     PDFExtractionJob,
     PDFExtractionJobPhase,
@@ -48,6 +49,7 @@ from bitbucket_search.models import (
     RepositorySyncState,
 )
 from bitbucket_search.services.foreground_metrics import foreground_latency_snapshot
+from bitbucket_search.services.pdf_jsonl_staging import staging_directory, staging_snapshot
 from bitbucket_search.services.pdf_pipeline_controller import (
     ControllerEvaluationError,
     PDFPipelineController,
@@ -440,10 +442,17 @@ def resource_snapshot(*, resident_roles: Mapping[str, object] | None = None) -> 
 
 
 def _stage_files() -> tuple[int, int | None]:
-    root = Path(settings.BITBUCKET_TEMP_ROOT).resolve() / "pdf-publication"
+    root = staging_directory()
     try:
         files = tuple(
-            path for path in root.iterdir() if path.is_file() and path.name.startswith("job-")
+            path
+            for path in root.iterdir()
+            if path.is_file()
+            and (
+                path.name.startswith("job-")
+                or path.name == "current.jsonl"
+                or (path.name.startswith("chunk_") and path.name.endswith(".jsonl"))
+            )
         )
     except (FileNotFoundError, OSError):
         return 0, None
@@ -577,6 +586,7 @@ def _queue_snapshot(now: datetime) -> dict[str, Any]:
     )
     staged_waiting = staged.exclude(pk__in=publication_in_flight.values("pk"))
     staged_bytes, oldest_stage_age = _stage_files()
+    jsonl = staging_snapshot(now=now)
     eligible_input, oldest_eligible = _eligible_input_snapshot()
     window = int(getattr(settings, "PDF_PIPELINE_RATE_WINDOW_SECONDS", 60))
     depth = staged.count()
@@ -600,6 +610,7 @@ def _queue_snapshot(now: datetime) -> dict[str, Any]:
             max(0, round((now - oldest_eligible).total_seconds(), 3)) if oldest_eligible else None
         ),
         "oldestStagedWaitSeconds": oldest_stage_age,
+        "jsonl": jsonl,
         "availability": {
             **(
                 {"backpressureDepthGrowth": "insufficient_sample_history"}
@@ -655,12 +666,7 @@ def _worker_snapshot(
     admitted_live = max(0, live_count - paused_controller)
     active = min(admitted_live, int(queue["activeExtractionJobs"]))
     remaining_live = max(0, admitted_live - active)
-    if (
-        int(queue["backpressureDepthJobs"]) >= int(queue["backpressureThresholdJobs"])
-        and int(queue["eligibleInputJobs"]) > 0
-    ):
-        backpressured = remaining_live
-    elif int(queue["inputQueuedJobs"]) > 0:
+    if int(queue["inputQueuedJobs"]) > 0:
         waiting = remaining_live
     else:
         idle = remaining_live
@@ -773,6 +779,7 @@ def _publisher_snapshot(
     live = "pdf-writer-1" in live_roles
     window = int(getattr(settings, "PDF_PIPELINE_RATE_WINDOW_SECONDS", 60))
     runtime = publisher_runtime_snapshot(window_seconds=window)
+    jsonl = queue.get("jsonl") if isinstance(queue.get("jsonl"), Mapping) else {}
     lock_blocked_ms = int(getattr(settings, "PDF_PIPELINE_SQLITE_LOCK_BLOCKED_MS", 250))
     lock_contended = bool(
         (runtime["sqliteBusyErrors"] or 0) > 0
@@ -789,13 +796,16 @@ def _publisher_snapshot(
         state = "paused_by_recovery"
     elif not live:
         state = "unavailable"
-    elif lock_contended and queue["backpressureDepthJobs"]:
+    elif lock_contended and jsonl.get("queuedChunks"):
         state = "blocked"
-    elif queue["publicationInFlightJobs"]:
+    elif jsonl.get("writerState") == "WRITING" or jsonl.get("sealedChunksWaiting"):
         state = "busy"
-    elif queue["stagedWaitingJobs"]:
-        state = "blocked"
-    elif queue["activeExtractionJobs"] or queue["inputQueuedJobs"]:
+    elif (
+        jsonl.get("currentSizeBytes")
+        or jsonl.get("incomingRecords")
+        or queue["activeExtractionJobs"]
+        or queue["inputQueuedJobs"]
+    ):
         state = "starved"
     else:
         state = "idle_no_demand"
@@ -814,6 +824,8 @@ def _publisher_snapshot(
         ),
         "state": state,
         "reasonCode": "blocked_sqlite" if state == "blocked" and lock_contended else None,
+        "writerState": jsonl.get("writerState", "IDLE"),
+        "currentChunk": jsonl.get("currentChunk"),
         **duty_cycle,
         **{key: value for key, value in runtime.items() if key != "availability"},
         "sqliteLockBlockedThresholdMs": lock_blocked_ms,
@@ -886,6 +898,37 @@ def _recovery_events() -> list[dict[str, Any]]:
             "-occurred_at", "-id"
         )[:50]
     ]
+
+
+def _pipeline_count_snapshot() -> dict[str, int]:
+    """Expose stable corpus/job totals without treating retries as hidden loss."""
+
+    active_documents = PDFDocument.objects.filter(lifecycle_state=PDFDocumentLifecycle.ACTIVE)
+    active_jobs = PDFExtractionJob.objects.filter(
+        document__lifecycle_state=PDFDocumentLifecycle.ACTIVE
+    )
+    extracting_phases = (
+        PDFExtractionJobPhase.VALIDATING,
+        PDFExtractionJobPhase.HASHING,
+        PDFExtractionJobPhase.EXTRACTING,
+    )
+    return {
+        "pdfsDiscovered": active_documents.count(),
+        "pdfsPendingExtraction": active_jobs.filter(status=PDFExtractionJobStatus.QUEUED).count(),
+        "pdfsCurrentlyExtracting": active_jobs.filter(
+            status=PDFExtractionJobStatus.RUNNING,
+            phase__in=extracting_phases,
+        ).count(),
+        "pdfsSuccessfullyExtracted": active_jobs.filter(staged_at__isnull=False)
+        .order_by()
+        .values("document_id")
+        .distinct()
+        .count(),
+        "extractionFailures": active_jobs.filter(
+            status__in=(PDFExtractionJobStatus.FAILED, PDFExtractionJobStatus.INTERRUPTED)
+        ).count(),
+        "pdfsSuccessfullyWritten": active_documents.filter(indexed_revision__isnull=False).count(),
+    }
 
 
 def _rate_event_rows(now: datetime, window_seconds: int) -> tuple[dict[str, Any], ...]:
@@ -1033,6 +1076,7 @@ def _throughput_snapshot(now: datetime) -> dict[str, Any]:
         if (duration := _duration_ms(row["staged_at"], row["publication_started_at"])) is not None
     )
     pages_persisted = sum(int(row["pages_processed"] or 0) for row in written_rows)
+    pages_extracted = sum(int(row["pages_processed"] or 0) for row in extracted_rows)
     characters_persisted = sum(int(row["characters_extracted"] or 0) for row in written_rows)
     characters_extracted = sum(int(row["characters_extracted"] or 0) for row in extracted_rows)
     source_bytes = sum(int(row["target_file_size"] or 0) for row in extracted_rows)
@@ -1083,6 +1127,7 @@ def _throughput_snapshot(now: datetime) -> dict[str, Any]:
     completed_per_second = ((written_rate["eventCount"] or 0) + len(cache_rows)) / elapsed
     cache_per_second = len(cache_rows) / elapsed
     pages_per_second = pages_persisted / elapsed
+    extracted_pages_per_second = pages_extracted / elapsed
     chars_extracted_per_second = characters_extracted / elapsed
     chars_persisted_per_second = characters_persisted / elapsed
     bytes_per_second = source_bytes / elapsed
@@ -1096,6 +1141,8 @@ def _throughput_snapshot(now: datetime) -> dict[str, Any]:
         "documentsCompletedPerMinute": round(completed_per_second * 60, 3),
         "pagesPersistedPerSecond": round(pages_per_second, 6),
         "pagesPersistedPerMinute": round(pages_per_second * 60, 3),
+        "pagesExtractedPerSecond": round(extracted_pages_per_second, 6),
+        "pagesExtractedPerMinute": round(extracted_pages_per_second * 60, 3),
         "charactersExtractedPerSecond": round(chars_extracted_per_second, 6),
         "charactersExtractedPerMinute": round(chars_extracted_per_second * 60, 3),
         "charactersPersistedPerSecond": round(chars_persisted_per_second, 6),
@@ -1678,11 +1725,6 @@ def _activity_snapshot(
         code = run["state"]
     elif run and run["repositories"]["queued"]:
         code = "queued"
-    elif (
-        queues["backpressureDepthJobs"] >= queues["backpressureThresholdJobs"]
-        and queues["eligibleInputJobs"]
-    ):
-        code = "backpressured"
     elif queues["inputQueuedJobs"] and not queues["eligibleInputJobs"]:
         code = "source_blocked"
     elif queues["inputQueuedJobs"]:
@@ -1828,14 +1870,10 @@ def _state_snapshot(
     )
     if sqlite_contended:
         detected.append("sqlite_contended")
-    if queues["backpressureDepthJobs"] >= queues["backpressureThresholdJobs"]:
-        detected.append("backpressure")
     if activity["code"] == "source_blocked":
         detected.append("source_blocked")
-    if publisher["state"] == "blocked" or (
-        queues["backpressureDepthJobs"] > 0
-        and (queues.get("backpressureDepthGrowthPerSecond") or 0) > 0
-    ):
+    jsonl = queues.get("jsonl") if isinstance(queues.get("jsonl"), Mapping) else {}
+    if publisher["state"] == "blocked" or int(jsonl.get("queuedChunks") or 0) > 0:
         detected.append("publication_limited")
     if publisher["state"] == "starved":
         detected.append("extraction_limited")
@@ -1850,7 +1888,7 @@ def _state_snapshot(
         code, reason_code = "memory_limited", "available_memory_below_safety_floor"
     elif "cpu_limited" in detected:
         code, reason_code = "cpu_limited", "host_cpu_above_safety_ceiling"
-    elif publisher["state"] == "unavailable" and queues["backpressureDepthJobs"]:
+    elif publisher["state"] == "unavailable" and int(jsonl.get("queuedChunks") or 0) > 0:
         code, reason_code = "degraded", "publisher_unavailable_with_backlog"
     elif "source_blocked" in detected:
         code, reason_code = "source_blocked", "queued_input_not_progressing"
@@ -1858,8 +1896,6 @@ def _state_snapshot(
         code, reason_code = "degraded", "extractor_process_unavailable"
     elif "sqlite_contended" in detected:
         code, reason_code = "sqlite_contended", "sqlite_lock_wait_or_busy_error"
-    elif "backpressure" in detected:
-        code, reason_code = "backpressure", "staged_depth_at_threshold"
     elif activity["code"] == "idle":
         code, reason_code = "idle", "no_current_demand"
     elif "publication_limited" in detected:
@@ -1877,7 +1913,6 @@ def _state_snapshot(
         "recovery_paused": "PDF pipeline paused",
         "recovering": "PDF pipeline recovering",
         "balanced": "PDF pipeline balanced",
-        "backpressure": "PDF extraction backpressured",
         "degraded": "PDF pipeline degraded",
         "source_blocked": "PDF source blocked",
         "idle": "PDF pipeline idle",
@@ -1901,14 +1936,10 @@ def _state_snapshot(
             f"SQLite lock-wait p95 is {publisher.get('sqliteLockWaitP95Ms')} ms with "
             f"{publisher.get('sqliteBusyErrors')} busy errors in {window_seconds} seconds."
         ),
-        "backpressure": (
-            f"Durable publication depth is {queues['backpressureDepthJobs']} at the "
-            f"{queues['backpressureThresholdJobs']}-job threshold."
-        ),
         "idle": "No current eligible extraction or publication demand is measured.",
         "publication_limited": (
-            f"{queues['backpressureDepthJobs']} durable publications remain and the writer is "
-            f"{publisher['state']}."
+            f"{int(jsonl.get('queuedChunks') or 0)} durable JSONL chunks remain and the "
+            f"SQLite writer is {publisher['state']}; extraction admission remains independent."
         ),
         "extraction_limited": "The live publisher is awaiting extractor output.",
         "balanced": f"Extraction and publication flow are measured within guardrails over {window_seconds} seconds.",
@@ -2045,6 +2076,32 @@ def build_pipeline_metrics_payload(
     )
     publisher = _publisher_snapshot(queues, now=now, resident_roles=resident_roles)
     throughput = _throughput_snapshot(now)
+    counts = _pipeline_count_snapshot()
+    jsonl = queues["jsonl"]
+    if int(jsonl["queuedChunks"]):
+        flow_balance = {
+            "state": "SQLITE_BACKLOG",
+            "label": "SQLite backlog",
+            "reason": "SQLite ingestion has sealed JSONL chunks waiting on disk.",
+        }
+    elif publisher["state"] == "starved":
+        flow_balance = {
+            "state": "EXTRACTION_STARVING_SQLITE",
+            "label": "Extraction starving SQLite",
+            "reason": "The SQLite writer is waiting for the next sealed extraction chunk.",
+        }
+    elif not counts["pdfsPendingExtraction"] and not counts["pdfsCurrentlyExtracting"]:
+        flow_balance = {
+            "state": "IDLE",
+            "label": "Idle",
+            "reason": "No extraction or ingestion work is waiting.",
+        }
+    else:
+        flow_balance = {
+            "state": "BALANCED",
+            "label": "Balanced",
+            "reason": "No durable extractor or SQLite queue constraint is currently visible.",
+        }
     run = _run_snapshot(now, throughput)
     if run is not None:
         run["etaAccuracy"] = _eta_accuracy_snapshot(run)
@@ -2091,6 +2148,9 @@ def build_pipeline_metrics_payload(
         "controller": controller,
         "workers": workers,
         "publisher": publisher,
+        "counts": counts,
+        "jsonlStaging": jsonl,
+        "flowBalance": flow_balance,
         "recovery": recovery,
         "recoveryEvents": _recovery_events(),
         "queues": queues,

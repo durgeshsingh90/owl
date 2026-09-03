@@ -35,6 +35,7 @@ from bitbucket_search.services.pdf_indexing import (
     stale_extraction_worker_pids,
     sweep_pdf_extraction_queue,
 )
+from bitbucket_search.services.pdf_jsonl_staging import staging_directory, staging_snapshot
 from bitbucket_search.services.pdf_pipeline_controller import (
     ControllerEvaluationError,
     PDFPipelineController,
@@ -231,6 +232,7 @@ def _resident_bitbucket_worker_specs() -> tuple[tuple[str, str], ...]:
             (f"pdf-index-{worker_number}", "bitbucket_index_worker")
             for worker_number in range(1, extraction_workers + 1)
         ),
+        ("pdf-stager-1", "bitbucket_pdf_stager"),
         ("pdf-writer-1", "bitbucket_pdf_writer"),
     )
 
@@ -255,6 +257,8 @@ def _pdf_recovery_scope_for_role(role: str) -> str | None:
 
     if role == "pdf-writer-1":
         return RecoveryScope.PUBLISHER.value
+    if role == "pdf-stager-1":
+        return RecoveryScope.STAGER.value
     if role.startswith("pdf-index-"):
         try:
             slot = int(role.removeprefix("pdf-index-"))
@@ -278,7 +282,7 @@ def _prepare_pdf_worker_launch(
 
     parent_scopes = [RecoveryScope.PIPELINE.value]
     if scope.startswith("extraction_slot:"):
-        parent_scopes.extend((RecoveryScope.EXTRACTION_POOL.value, RecoveryScope.PUBLISHER.value))
+        parent_scopes.append(RecoveryScope.EXTRACTION_POOL.value)
     for parent_scope in parent_scopes:
         parent = ensure_recovery_scope(parent_scope)
         parent_probe_active = bool(
@@ -289,12 +293,6 @@ def _prepare_pdf_worker_launch(
                 PDFPipelineRecoveryState.RECOVERING_HALF_OPEN,
             }
         )
-        # A publisher probe may drain durable staged output, but new parser
-        # admission stays closed until that downstream probe is stable.
-        if parent_scope == RecoveryScope.PUBLISHER and parent.state != (
-            PDFPipelineRecoveryState.HEALTHY
-        ):
-            return _WorkerLaunchPermission(allowed=False)
         if parent.state != PDFPipelineRecoveryState.HEALTHY and not parent_probe_active:
             return _WorkerLaunchPermission(allowed=False)
 
@@ -547,19 +545,30 @@ def _worker_probe_progress_confirmed(
         seconds=int(getattr(settings, "PDF_EXTRACTION_JOB_LEASE_SECONDS", 30))
     )
     if role == "pdf-writer-1":
-        candidates = PDFExtractionJob.objects.filter(
-            status=PDFExtractionJobStatus.RUNNING,
-            phase=PDFExtractionJobPhase.PUBLISHING,
-        )
-        if not candidates.exists():
+        staged = staging_snapshot()
+        if not staged["queuedChunks"]:
             return True
         return bool(
-            candidates.filter(
+            PDFExtractionJob.objects.filter(
+                status=PDFExtractionJobStatus.RUNNING,
+                phase=PDFExtractionJobPhase.PUBLISHING,
                 worker_pid=worker_pid,
                 heartbeat_at__gte=fresh_cutoff,
             ).exists()
             or PDFExtractionJob.objects.filter(published_at__gte=probe.started_at).exists()
         )
+    if role == "pdf-stager-1":
+        root = staging_directory()
+        incoming_exists = any(root.glob("job-*.json")) if root.exists() else False
+        if not incoming_exists:
+            return True
+        for path in root.glob("chunk_*.jsonl"):
+            try:
+                if path.stat().st_mtime >= probe.started_at.timestamp():
+                    return True
+            except OSError:
+                continue
+        return False
 
     eligible_jobs, _oldest = _eligible_input_snapshot()
     owned = PDFExtractionJob.objects.filter(
@@ -590,7 +599,9 @@ def _complete_parent_recovery_probe(
     if now - probe.started_monotonic < stability_seconds:
         return probe
     role_prefixes = (
-        ("pdf-index-",) if scope == RecoveryScope.EXTRACTION_POOL else ("pdf-index-", "pdf-writer-")
+        ("pdf-index-",)
+        if scope == RecoveryScope.EXTRACTION_POOL
+        else ("pdf-index-", "pdf-stager-", "pdf-writer-")
     )
     live_workers = {
         role: worker

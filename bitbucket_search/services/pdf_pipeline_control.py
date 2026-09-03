@@ -49,12 +49,9 @@ def _recovery_allows(
 
 
 def extraction_admission_allowed() -> bool:
-    """Allow a new parser only while its upstream/downstream scopes are healthy."""
+    """Keep extraction independent from JSONL backlog and SQLite health."""
 
-    return _recovery_allows(_EXTRACTION_BLOCKING_SCOPES) and _recovery_allows(
-        ("publisher",),
-        allowed_states=(PDFPipelineRecoveryState.HEALTHY,),
-    )
+    return _recovery_allows(_EXTRACTION_BLOCKING_SCOPES)
 
 
 def publication_admission_allowed() -> bool:

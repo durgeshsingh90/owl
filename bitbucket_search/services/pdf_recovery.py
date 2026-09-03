@@ -49,7 +49,7 @@ MAX_PAUSE_AFTER_ATTEMPTS: Final = 10_000
 MAX_BACKOFF_SECONDS: Final = 86_400
 
 _SCOPE_PATTERN = re.compile(
-    r"(?:pipeline|supervisor|controller|extraction_pool|publisher|"
+    r"(?:pipeline|supervisor|controller|extraction_pool|stager|publisher|"
     r"extraction_slot:[1-9][0-9]{0,3}|repository:[1-9][0-9]{0,18})"
 )
 _IDEMPOTENCY_KEY_PATTERN = re.compile(r"[A-Za-z0-9._~:+/=-]{16,256}")
@@ -72,6 +72,7 @@ class RecoveryScope(StrEnum):
     SUPERVISOR = "supervisor"
     CONTROLLER = "controller"
     EXTRACTION_POOL = "extraction_pool"
+    STAGER = "stager"
     PUBLISHER = "publisher"
 
 
@@ -1378,6 +1379,7 @@ def recovery_scope_label(scope: str | RecoveryScope) -> str:
         RecoveryScope.SUPERVISOR: "PDF pipeline supervisor",
         RecoveryScope.CONTROLLER: "PDF admission controller",
         RecoveryScope.EXTRACTION_POOL: "PDF extraction pool",
+        RecoveryScope.STAGER: "PDF JSONL stager",
         RecoveryScope.PUBLISHER: "PDF publisher",
     }[RecoveryScope(canonical)]
 

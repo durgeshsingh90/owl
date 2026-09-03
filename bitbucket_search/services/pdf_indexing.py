@@ -68,6 +68,7 @@ from bitbucket_search.models import (
     RepositorySyncJobStatus,
     RepositorySyncState,
 )
+from bitbucket_search.services import pdf_jsonl_staging as pdf_jsonl
 from bitbucket_search.services.document_actions import DocumentActionError, validated_pdf_path
 from bitbucket_search.services.filesystem_paths import filesystem_path
 from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
@@ -1409,16 +1410,18 @@ def reconcile_staged_publications(
     root = _publication_staging_path(1).parent
     paths: list[Path] = []
     examined_entries = 0
-    for entry_number, path in enumerate(root.iterdir(), start=1):
-        if entry_number > bounded_limit:
+    for path in root.iterdir():
+        manifest_match = _STAGED_MANIFEST_FILENAME.fullmatch(path.name)
+        temporary_match = _STAGED_TEMP_FILENAME.fullmatch(path.name)
+        if manifest_match is None and temporary_match is None:
+            continue
+        if examined_entries >= bounded_limit:
             break
         examined_entries += 1
-        if _STAGED_MANIFEST_FILENAME.fullmatch(path.name):
+        if manifest_match is not None:
             paths.append(path)
             continue
-        temporary_match = _STAGED_TEMP_FILENAME.fullmatch(path.name)
-        if temporary_match is None:
-            continue
+        assert temporary_match is not None
         try:
             temporary_is_stale = (
                 datetime.fromtimestamp(
@@ -1843,14 +1846,6 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
             >= settings.PDF_MAX_EXTRACTION_WORKERS
         ):
             return None
-        if (
-            PDFExtractionJob.objects.filter(
-                status=PDFExtractionJobStatus.RUNNING,
-                phase=PDFExtractionJobPhase.PUBLISHING,
-            ).count()
-            >= settings.PDF_MAX_STAGED_PUBLICATIONS
-        ):
-            return None
         active_repository_ids = tuple(
             row["document__repository_id"] for row in active_by_repository
         )
@@ -2039,9 +2034,7 @@ def _serialized_index_write(function):
 
 
 def _publication_staging_path(job_id: int) -> Path:
-    root = Path(settings.BITBUCKET_TEMP_ROOT).resolve() / "pdf-publication"
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return root / f"job-{int(job_id)}.json"
+    return pdf_jsonl.incoming_manifest_path(job_id)
 
 
 def _maximum_staged_manifest_bytes() -> int:
@@ -2229,6 +2222,17 @@ def _read_staged_manifest(
     *,
     require_current_target: bool,
 ) -> _ValidatedStagedManifest:
+    payload = _read_staged_manifest_payload(target)
+    return _validate_staged_manifest(
+        payload,
+        job,
+        require_current_target=require_current_target,
+    )
+
+
+def _read_staged_manifest_payload(target: Path) -> dict[str, object]:
+    """Read one bounded incoming manifest while preserving its signed envelope."""
+
     try:
         before = target.lstat()
         if (
@@ -2258,11 +2262,12 @@ def _read_staged_manifest(
             "invalid_staged_extraction",
             "The durable staged PDF result could not be verified.",
         ) from exc
-    return _validate_staged_manifest(
-        payload,
-        job,
-        require_current_target=require_current_target,
-    )
+    if not isinstance(payload, dict):
+        raise PDFIndexingError(
+            "invalid_staged_extraction",
+            "The durable staged PDF result has an invalid manifest.",
+        )
+    return payload
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -2289,7 +2294,6 @@ def _remove_publication_staging_file(target: Path) -> bool:
     return True
 
 
-@_serialized_index_write
 def _stage_extraction_for_publication(
     job_id: int,
     *,
@@ -2318,7 +2322,7 @@ def _stage_extraction_for_publication(
         os.replace(temporary, target)
         _fsync_directory(target.parent)
         staged_at = timezone.now()
-        with transaction.atomic():
+        with pdf_extraction_claim_lock(), transaction.atomic():
             _reserve_sqlite_write()
             updated = PDFExtractionJob.objects.filter(
                 pk=job_id,
@@ -2326,6 +2330,8 @@ def _stage_extraction_for_publication(
             ).update(
                 phase=PDFExtractionJobPhase.PUBLISHING,
                 progress=95,
+                pages_processed=staged.page_count,
+                characters_extracted=staged.extracted_character_count,
                 staged_at=Case(
                     When(staged_at__isnull=True, then=Value(staged_at)),
                     default=F("staged_at"),
@@ -2371,31 +2377,94 @@ def _release_publication_lease(job_id: int) -> None:
     ).update(worker_pid=None, heartbeat_at=timezone.now())
 
 
-def work_one_publication_job() -> PDFExtractionJob | None:
-    """Publish one durably staged extraction through the single SQLite writer."""
+def work_one_staging_job(
+    stager: pdf_jsonl.JSONLStager | None = None,
+) -> pdf_jsonl.JSONLAppendResult | pdf_jsonl.JSONLChunk | None:
+    """Move one complete extractor spool into the single-writer JSONL stream."""
 
-    if not publication_admission_allowed():
-        return None
-    publication_candidates = PDFExtractionJob.objects.filter(
-        status=PDFExtractionJobStatus.RUNNING,
-        phase=PDFExtractionJobPhase.PUBLISHING,
-        worker_pid__isnull=True,
-    )
-    # The resident writer spends most of its lifetime polling an empty queue.
-    # Keep that path to a plain read: do not acquire the cross-process claim
-    # gate or reserve SQLite's single writer unless publication work was
-    # visible. A candidate can still disappear before the gate is acquired,
-    # so the transaction below deliberately repeats the predicate.
-    if not publication_candidates.exists():
-        return None
+    owner = stager or pdf_jsonl.JSONLStager()
+    incoming: list[tuple[int, Path]] = []
+    for target in owner.root.iterdir():
+        match = _STAGED_MANIFEST_FILENAME.fullmatch(target.name)
+        if match is not None:
+            incoming.append((int(match.group(1)), target))
+    for job_id, target in sorted(incoming):
+        job = (
+            PDFExtractionJob.objects.select_related(
+                "document__repository",
+                "document__local_policy",
+            )
+            .filter(pk=job_id)
+            .first()
+        )
+        if job is None or job.status != PDFExtractionJobStatus.RUNNING:
+            _remove_publication_staging_file(target)
+            continue
+        # The extractor writes the file before its brief phase transition. A
+        # crash-gap sweep will promote an orphan; never consume it prematurely.
+        if job.phase != PDFExtractionJobPhase.PUBLISHING:
+            continue
+        try:
+            payload = _read_staged_manifest_payload(target)
+            manifest = _validate_staged_manifest(
+                payload,
+                job,
+                require_current_target=True,
+            )
+        except (PDFExtractionTargetChanged, PDFIndexingError):
+            transitioned, _worker_pid = _mark_unverified_stage_for_reextraction(
+                job.pk,
+                observed_at=timezone.now(),
+                force=True,
+                worker_pids=frozenset(),
+            )
+            if transitioned:
+                _remove_publication_staging_file(target)
+                queue_repository_pdf_extractions(
+                    job.document.repository_id,
+                    repository_sync_job=job.repository_sync_job_id,
+                    recover_interrupted=True,
+                )
+            continue
+        result = owner.append_manifest(
+            job_id=job.pk,
+            file_path=job.target_relative_path,
+            file_name=Path(job.target_relative_path).name,
+            content="\n".join(page.text for page in manifest.extraction.pages),
+            manifest=payload,
+            incoming_path=target,
+        )
+        log_event(
+            logger,
+            logging.INFO,
+            "pdf_jsonl_record_staged",
+            job_id=job.pk,
+            byte_count=result.current_size_bytes,
+            chunk_name=(result.sealed_chunk.path.name if result.sealed_chunk else None),
+        )
+        return result
 
+    extraction_active = PDFExtractionJob.objects.filter(
+        status__in=(PDFExtractionJobStatus.QUEUED, PDFExtractionJobStatus.RUNNING),
+    ).exclude(phase=PDFExtractionJobPhase.PUBLISHING)
+    if not extraction_active.exists():
+        sealed = owner.seal_current()
+        if sealed is not None:
+            log_event(
+                logger,
+                logging.INFO,
+                "pdf_jsonl_remainder_sealed",
+                byte_count=sealed.byte_count,
+                count=sealed.record_count,
+                chunk_name=sealed.path.name,
+            )
+        return sealed
+    return None
+
+
+def _claim_chunk_publication_job(job_id: int) -> PDFExtractionJob | None:
     with pdf_extraction_claim_lock(), transaction.atomic():
         _reserve_sqlite_write()
-        job_id = (
-            publication_candidates.order_by("started_at", "id").values_list("id", flat=True).first()
-        )
-        if job_id is None:
-            return None
         claimed = PDFExtractionJob.objects.filter(
             pk=job_id,
             status=PDFExtractionJobStatus.RUNNING,
@@ -2409,19 +2478,81 @@ def work_one_publication_job() -> PDFExtractionJob | None:
             ),
             heartbeat_at=timezone.now(),
         )
-        if claimed != 1:
-            return None
-    job = PDFExtractionJob.objects.select_related(
+    if claimed != 1:
+        return None
+    return PDFExtractionJob.objects.select_related(
         "document__repository",
         "document__local_policy",
     ).get(pk=job_id)
-    target = _publication_staging_path(job.pk)
-    try:
-        manifest = _read_staged_manifest(
-            target,
-            job,
-            require_current_target=True,
+
+
+def _validated_jsonl_record(
+    record: Mapping[str, object],
+    job: PDFExtractionJob,
+    *,
+    require_current_target: bool,
+) -> _ValidatedStagedManifest:
+    if (
+        record.get("file_path") != job.target_relative_path
+        or record.get("file_name") != Path(job.target_relative_path).name
+        or not isinstance(record.get("content"), str)
+    ):
+        raise PDFIndexingError(
+            "invalid_staged_extraction",
+            "The JSONL PDF record does not match its indexing request.",
         )
+    manifest = _validate_staged_manifest(
+        record.get("manifest"),
+        job,
+        require_current_target=require_current_target,
+    )
+    if record["content"] != "\n".join(page.text for page in manifest.extraction.pages):
+        raise PDFIndexingError(
+            "invalid_staged_extraction",
+            "The JSONL PDF text failed its integrity check.",
+        )
+    return manifest
+
+
+def _publish_jsonl_record(record: Mapping[str, object]) -> PDFExtractionJob | None:
+    manifest_payload = record.get("manifest")
+    job_payload = manifest_payload.get("job") if isinstance(manifest_payload, dict) else None
+    job_id = job_payload.get("id") if isinstance(job_payload, dict) else None
+    if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id <= 0:
+        raise PDFIndexingError(
+            "invalid_staged_extraction",
+            "The JSONL PDF record has an invalid job identity.",
+        )
+    job = (
+        PDFExtractionJob.objects.select_related(
+            "document__repository",
+            "document__local_policy",
+        )
+        .filter(pk=job_id)
+        .first()
+    )
+    if job is None:
+        return None
+    if job.status == PDFExtractionJobStatus.SUCCEEDED:
+        manifest = _validated_jsonl_record(record, job, require_current_target=False)
+        if not _verified_published_manifest(job, manifest):
+            raise PDFIndexingError(
+                "invalid_staged_extraction",
+                "A replayed JSONL record does not match its committed PDF revision.",
+            )
+        return job
+    if (
+        job.status != PDFExtractionJobStatus.RUNNING
+        or job.phase != PDFExtractionJobPhase.PUBLISHING
+    ):
+        # A cancelled, failed, or requeued target supersedes this immutable
+        # record. Its replacement extraction will create a fresh record.
+        return job
+    job = _claim_chunk_publication_job(job.pk)
+    if job is None:
+        return PDFExtractionJob.objects.filter(pk=job_id).first()
+    try:
+        manifest = _validated_jsonl_record(record, job, require_current_target=True)
         _attach_revision(
             job.pk,
             content_sha256=manifest.content_sha256,
@@ -2429,60 +2560,75 @@ def work_one_publication_job() -> PDFExtractionJob | None:
         )
     except PDFExtractionDeferred:
         _release_publication_lease(job.pk)
-        log_event(
-            logger,
-            logging.INFO,
-            "pdf_publication_deferred",
-            repository_id=job.document.repository_id,
-            document_id=job.document_id,
-            job_id=job.pk,
-            reason="repository_sync",
-        )
-        return None
+        raise
     except DatabaseError:
         _release_publication_lease(job.pk)
         raise
     except PDFExtractionTargetChanged as exc:
         _fail_job(job.pk, exc)
         _queue_current_target_after_obsolete_job(job.pk)
-    except (OSError, UnicodeError, json.JSONDecodeError, PDFIndexingError) as exc:
-        error = (
-            exc
-            if isinstance(exc, PDFIndexingError)
-            else PDFIndexingError(
-                "invalid_staged_extraction",
-                "The durable staged PDF result could not be verified.",
-            )
-        )
-        if error.code == "invalid_staged_extraction":
-            transitioned, _worker_pid = _mark_unverified_stage_for_reextraction(
-                job.pk,
-                observed_at=timezone.now(),
-                force=True,
-                worker_pids=frozenset((os.getpid(),)),
-            )
-            if transitioned:
-                queue_repository_pdf_extractions(
-                    job.document.repository_id,
-                    repository_sync_job=job.repository_sync_job_id,
-                    recover_interrupted=True,
-                )
-        else:
-            _fail_job(job.pk, error)
+    except PDFIndexingError as exc:
+        _release_publication_lease(job.pk)
+        _fail_job(job.pk, exc)
+        raise
     except Exception:
-        # Preserve valid staged data across an unexpected writer failure. The
-        # worker command may exit, but the replacement can claim immediately
-        # instead of waiting for the stale-lease timeout.
         _release_publication_lease(job.pk)
         raise
-    finally:
-        if (
-            PDFExtractionJob.objects.filter(pk=job.pk)
-            .exclude(status=PDFExtractionJobStatus.RUNNING)
-            .exists()
-        ):
-            _remove_publication_staging_file(target)
     return PDFExtractionJob.objects.select_related("document__repository").get(pk=job.pk)
+
+
+def work_one_publication_job() -> PDFExtractionJob | None:
+    """Import one sealed JSONL chunk through the sole SQLite writer."""
+
+    if not publication_admission_allowed():
+        return None
+    chunk = pdf_jsonl.claim_oldest_chunk()
+    if chunk is None:
+        return None
+    last_job: PDFExtractionJob | None = None
+    try:
+        record_count = 0
+        for _line_number, record in pdf_jsonl.iter_chunk_records(chunk.path):
+            record_count += 1
+            last_job = _publish_jsonl_record(record)
+        if record_count != chunk.record_count:
+            raise pdf_jsonl.JSONLStagingError(
+                "The sealed JSONL chunk record count changed after rotation."
+            )
+    except PDFExtractionDeferred:
+        log_event(
+            logger,
+            logging.INFO,
+            "pdf_publication_deferred",
+            chunk_name=chunk.path.name,
+            reason="repository_sync",
+        )
+        return None
+    except DatabaseError:
+        raise
+    except (pdf_jsonl.JSONLStagingError, PDFIndexingError) as exc:
+        pdf_jsonl.mark_chunk_failed(chunk, error_code="invalid_jsonl_chunk")
+        log_event(
+            logger,
+            logging.ERROR,
+            "pdf_jsonl_chunk_failed",
+            error=exc,
+            chunk_name=chunk.path.name,
+            error_code="invalid_jsonl_chunk",
+        )
+        return None
+    except Exception:
+        raise
+    imported = pdf_jsonl.mark_chunk_imported(chunk)
+    log_event(
+        logger,
+        logging.INFO,
+        "pdf_jsonl_chunk_imported",
+        byte_count=imported.byte_count,
+        count=imported.record_count,
+        chunk_name=imported.path.name,
+    )
+    return last_job
 
 
 @_serialized_index_write
@@ -3754,17 +3900,48 @@ def launch_index_worker() -> subprocess.Popen[bytes]:
     return process
 
 
+def launch_pdf_stager() -> subprocess.Popen[bytes]:
+    """Start the detached single JSONL stager used outside the supervisor."""
+
+    close_old_connections()
+    idle_timeout = max(
+        int(settings.PDF_EXTRACTION_WORKER_IDLE_SECONDS),
+        int(settings.PDF_EXTRACTION_TIMEOUT_SECONDS) + 30,
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(Path(settings.BASE_DIR) / "manage.py"),
+            "bitbucket_pdf_stager",
+            "--idle-timeout",
+            str(idle_timeout),
+        ],
+        cwd=settings.BASE_DIR,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        start_new_session=os.name != "nt",
+    )
+    log_event(logger, logging.INFO, "pdf_stager_spawned", worker_pid=process.pid)
+    return process
+
+
 def launch_pdf_writer() -> subprocess.Popen[bytes]:
     """Start the detached sole publisher used outside the resident supervisor."""
 
     close_old_connections()
+    idle_timeout = max(
+        int(settings.PDF_EXTRACTION_WORKER_IDLE_SECONDS),
+        int(settings.PDF_EXTRACTION_TIMEOUT_SECONDS) + 30,
+    )
     process = subprocess.Popen(
         [
             sys.executable,
             str(Path(settings.BASE_DIR) / "manage.py"),
             "bitbucket_pdf_writer",
             "--idle-timeout",
-            str(settings.PDF_EXTRACTION_WORKER_IDLE_SECONDS),
+            str(idle_timeout),
         ],
         cwd=settings.BASE_DIR,
         stdin=subprocess.DEVNULL,

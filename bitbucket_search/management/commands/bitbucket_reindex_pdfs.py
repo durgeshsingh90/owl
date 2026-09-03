@@ -10,6 +10,7 @@ from bitbucket_search.models import BitbucketRepository
 from bitbucket_search.services.logging_events import get_logger, log_event
 from bitbucket_search.services.pdf_indexing import (
     launch_index_worker,
+    launch_pdf_stager,
     launch_pdf_writer,
     queue_repository_pdf_extractions,
 )
@@ -55,6 +56,7 @@ class Command(BaseCommand):
             queued_ids.extend(result.queued_job_ids)
 
         if queued_ids and not options["no_launch"]:
+            launch_pdf_stager()
             launch_pdf_writer()
             for _worker_number in range(settings.PDF_MAX_EXTRACTION_WORKERS):
                 try:

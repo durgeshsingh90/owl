@@ -54,6 +54,31 @@ function metrics(overrides = {}) {
             expectedResident: 8,
         },
         publisher: { state: "busy", sqliteBusyErrors: null },
+        counts: {
+            pdfsDiscovered: 100,
+            pdfsPendingExtraction: 40,
+            pdfsCurrentlyExtracting: 3,
+            pdfsSuccessfullyExtracted: 57,
+            extractionFailures: 2,
+            pdfsSuccessfullyWritten: 55,
+        },
+        jsonlStaging: {
+            currentSizeBytes: 1024,
+            sealedChunksWaiting: 2,
+            queuedChunks: 3,
+            queuedBytes: 4096,
+            writerState: "WRITING",
+            currentChunk: "chunk_000001.jsonl",
+            retainedChunks: 4,
+            retainedBytes: 8192,
+            failedChunks: 0,
+            nextCleanupEligibleAt: timestamp(30),
+        },
+        flowBalance: {
+            state: "SQLITE_BACKLOG",
+            label: "SQLite backlog",
+            reason: "SQLite ingestion has sealed JSONL chunks waiting on disk.",
+        },
         recovery: {
             state: "healthy",
             generation: 4,
@@ -80,6 +105,7 @@ function metrics(overrides = {}) {
             writtenRate: { state: "warming", perMinute: null },
             cacheReuseCompletionsPerSecond: 0,
             documentsCompletedPerSecond: 0.2,
+            pagesExtractedPerSecond: 3,
             pagesPersistedPerSecond: 2.5,
             failedPerSecond: null,
         },
@@ -649,6 +675,13 @@ test("generic markers render truthful units, warming and unavailable values", ()
         "[data-pipeline-extracted-rate]": "",
         "[data-pipeline-written-rate]": "",
         "[data-pipeline-pages-rate]": "",
+        "[data-pipeline-extracted-pages-rate]": "",
+        "[data-pipeline-current-jsonl]": "",
+        "[data-pipeline-jsonl-queue]": "",
+        "[data-pipeline-jsonl-writer]": "",
+        "[data-pipeline-flow-diagnosis]": "",
+        "[data-pipeline-pdfs-written]": "",
+        "[data-pipeline-jsonl-retained]": "",
         "[data-pipeline-owl-cpu]": "",
         "[data-pipeline-failure-rate]": "",
         "[data-pipeline-freshness]": "",
@@ -660,6 +693,14 @@ test("generic markers render truthful units, warming and unavailable values", ()
     assert.equal(root.node("[data-pipeline-extracted-rate]").textContent, "12/min");
     assert.equal(root.node("[data-pipeline-written-rate]").textContent, "Warming");
     assert.equal(root.node("[data-pipeline-pages-rate]").textContent, "150/min");
+    assert.equal(root.node("[data-pipeline-extracted-pages-rate]").textContent, "180/min");
+    assert.equal(root.node("[data-pipeline-current-jsonl]").textContent, "1 KB");
+    assert.equal(root.node("[data-pipeline-jsonl-queue]").textContent, "2 sealed · 4 KB");
+    assert.equal(root.node("[data-pipeline-jsonl-writer]").textContent,
+        "WRITING · chunk_000001.jsonl");
+    assert.match(root.node("[data-pipeline-flow-diagnosis]").textContent, /^SQLite backlog/);
+    assert.equal(root.node("[data-pipeline-pdfs-written]").textContent, "55");
+    assert.equal(root.node("[data-pipeline-jsonl-retained]").textContent, "4 chunks · 8 KB");
     assert.equal(root.node("[data-pipeline-owl-cpu]").textContent, "Unavailable");
     assert.equal(root.node("[data-pipeline-failure-rate]").textContent, "Unavailable");
     assert.match(root.node("[data-pipeline-freshness]").textContent, /^Updated /);

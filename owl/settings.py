@@ -365,17 +365,19 @@ BITBUCKET_SEARCH_PAGE_SIZE = min(
     _env_int("BITBUCKET_SEARCH_PAGE_SIZE", 100, minimum=10),
     100,
 )
-# Four isolated parsers feed one dedicated SQLite publisher. This workstation
-# has ample CPU and memory for parallel text extraction while the sole writer
-# keeps database publication deterministic. Local installs can tune the pool
-# without changing source; cap it so one accidental value cannot exhaust RAM.
+# Sixteen isolated parsers feed one JSONL stager and one dedicated SQLite
+# publisher. Local installs can tune the pool without changing source; retain a
+# defensive cap so one accidental value cannot exhaust RAM.
 PDF_MAX_EXTRACTION_WORKERS = min(
-    _env_int("PDF_MAX_EXTRACTION_WORKERS", 4, minimum=1),
-    8,
+    _env_int("PDF_MAX_EXTRACTION_WORKERS", 16, minimum=1),
+    32,
 )
+# Retained for dashboard/backward-configuration compatibility only. Durable
+# JSONL chunks may grow beyond this soft warning threshold and never throttle
+# extraction.
 PDF_MAX_STAGED_PUBLICATIONS = min(
-    _env_int("PDF_MAX_STAGED_PUBLICATIONS", 4, minimum=1),
-    16,
+    _env_int("PDF_MAX_STAGED_PUBLICATIONS", 16, minimum=1),
+    1_000_000,
 )
 # Prefer repository locality while permitting bounded, fair spillover when the
 # preferred set cannot fill the parser pool.
@@ -417,6 +419,14 @@ PDF_PUBLICATION_PAGE_BATCH_SIZE = _env_int(
 )
 if PDF_PUBLICATION_PAGE_BATCH_SIZE > 1_000:
     raise ImproperlyConfigured("PDF_PUBLICATION_PAGE_BATCH_SIZE cannot exceed 1000.")
+PDF_JSONL_CHUNK_SIZE_BYTES = min(
+    _env_int("PDF_JSONL_CHUNK_SIZE_BYTES", 50 * 1024 * 1024, minimum=1),
+    1024 * 1024 * 1024,
+)
+# Blank deliberately follows BITBUCKET_TEMP_ROOT at access time. This keeps
+# test/runtime data-root overrides isolated without exposing extracted text.
+PDF_JSONL_STAGING_DIRECTORY = os.getenv("PDF_JSONL_STAGING_DIRECTORY", "").strip()
+PDF_JSONL_RETENTION_DAYS = _env_int("PDF_JSONL_RETENTION_DAYS", 7, minimum=0)
 PDF_EXTRACTION_TIMEOUT_SECONDS = _env_int(
     "PDF_EXTRACTION_TIMEOUT_SECONDS",
     600,
@@ -464,8 +474,8 @@ PDF_PIPELINE_INITIAL_TARGET = _env_int(
     minimum=0,
 )
 PDF_PIPELINE_TESTED_HARD_MAX = min(
-    _env_int("PDF_PIPELINE_TESTED_HARD_MAX", 8, minimum=1),
-    8,
+    _env_int("PDF_PIPELINE_TESTED_HARD_MAX", 16, minimum=1),
+    32,
 )
 if PDF_PIPELINE_CONFIGURED_MIN_TARGET > PDF_MAX_EXTRACTION_WORKERS:
     raise ImproperlyConfigured(

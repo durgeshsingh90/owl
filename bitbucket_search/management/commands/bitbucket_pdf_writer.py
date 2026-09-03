@@ -12,7 +12,12 @@ from django.db import DatabaseError, close_old_connections
 
 from bitbucket_search.services.logging_events import get_logger, log_event
 from bitbucket_search.services.pdf_indexing import work_one_publication_job
+from bitbucket_search.services.pdf_jsonl_staging import (
+    cleanup_expired_imported_chunks,
+    sqlite_chunk_writer_lock,
+)
 from bitbucket_search.services.pdf_runtime_metrics import flush_publisher_runtime_metrics
+from bitbucket_search.services.repository_lock import RepositoryCheckoutBusy
 from core.process_supervision import resident_supervisor_is_alive
 
 logger = get_logger("writer")
@@ -29,9 +34,25 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         started = time.monotonic()
-        log_event(logger, logging.INFO, "pdf_writer_started", worker_pid=os.getpid())
         try:
-            return self._run(**options)
+            with sqlite_chunk_writer_lock(blocking=False):
+                removed = cleanup_expired_imported_chunks()
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "pdf_writer_started",
+                    worker_pid=os.getpid(),
+                    count=len(removed),
+                )
+                return self._run(**options)
+        except RepositoryCheckoutBusy:
+            log_event(
+                logger,
+                logging.INFO,
+                "pdf_writer_already_running",
+                worker_pid=os.getpid(),
+            )
+            return None
         finally:
             flush_publisher_runtime_metrics()
             log_event(

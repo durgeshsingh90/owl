@@ -1445,9 +1445,10 @@ def test_repository_status_is_compact_and_never_returns_the_remote_url(loopback_
     assert payload["automation"]["state"] == "due"
     assert payload["workerLimits"] == {
         "git": 4,
-        "indexing": 4,
+        "indexing": 16,
+        "staging": 1,
         "publication": 1,
-        "total": 9,
+        "total": 22,
     }
     assert len(payload["catalog"]["publicationSignature"]) == 64
     assert payload["totals"] == {

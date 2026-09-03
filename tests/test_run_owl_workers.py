@@ -12,6 +12,7 @@ from django.db import OperationalError
 
 from bitbucket_search.management.commands import (
     bitbucket_index_worker,
+    bitbucket_pdf_stager,
     bitbucket_pdf_writer,
     bitbucket_sync_worker,
 )
@@ -554,22 +555,24 @@ def test_resident_worker_specs_preserve_configured_pdf_concurrency(settings):
         ("repository-sync-3", "bitbucket_sync_worker"),
         ("pdf-index-1", "bitbucket_index_worker"),
         ("pdf-index-2", "bitbucket_index_worker"),
+        ("pdf-stager-1", "bitbucket_pdf_stager"),
         ("pdf-writer-1", "bitbucket_pdf_writer"),
     )
 
 
-def test_default_pdf_pipeline_uses_four_extractors_and_one_writer(settings):
+def test_default_pdf_pipeline_uses_sixteen_extractors_one_stager_and_one_writer(settings):
     specs = run_owl._resident_bitbucket_worker_specs()
     repository_specs = [spec for spec in specs if spec[1] == "bitbucket_sync_worker"]
     pdf_specs = [spec for spec in specs if spec[1] == "bitbucket_index_worker"]
 
     assert settings.BITBUCKET_MAX_REPO_WORKERS == 4
     assert len(repository_specs) == 4
-    assert settings.PDF_MAX_EXTRACTION_WORKERS == 4
-    assert settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY == 4
+    assert settings.PDF_MAX_EXTRACTION_WORKERS == 16
+    assert settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY == 16
     assert pdf_specs == [
-        (f"pdf-index-{worker_number}", "bitbucket_index_worker") for worker_number in range(1, 5)
+        (f"pdf-index-{worker_number}", "bitbucket_index_worker") for worker_number in range(1, 17)
     ]
+    assert ("pdf-stager-1", "bitbucket_pdf_stager") in specs
     assert ("pdf-writer-1", "bitbucket_pdf_writer") in specs
 
 
@@ -655,6 +658,7 @@ def test_resident_supervisor_recovers_leases_before_launch_and_stops_owned_worke
         "bitbucket_index_worker",
         "bitbucket_index_worker",
         "bitbucket_index_worker",
+        "bitbucket_pdf_stager",
         "bitbucket_pdf_writer",
         "semantic_index_worker",
         "semantic_index_worker",
@@ -772,6 +776,7 @@ def test_semantic_reconciliation_failure_does_not_block_other_recovery_or_worker
     assert [process.role for process in launched] == [
         "bitbucket_sync_worker",
         "bitbucket_index_worker",
+        "bitbucket_pdf_stager",
         "bitbucket_pdf_writer",
         "semantic_index_worker",
     ]
@@ -865,10 +870,14 @@ def test_resident_launcher_disables_detached_helpers_only_for_sync_worker(
 def test_orphaned_resident_workers_exit_before_claiming(monkeypatch):
     index_work = Mock()
     writer_work = Mock()
+    stager_work = Mock()
     repository_work = Mock()
     semantic_work = Mock()
     monkeypatch.setattr(
         bitbucket_index_worker, "resident_supervisor_is_alive", Mock(return_value=False)
+    )
+    monkeypatch.setattr(
+        bitbucket_pdf_stager, "resident_supervisor_is_alive", Mock(return_value=False)
     )
     monkeypatch.setattr(
         bitbucket_pdf_writer, "resident_supervisor_is_alive", Mock(return_value=False)
@@ -880,16 +889,19 @@ def test_orphaned_resident_workers_exit_before_claiming(monkeypatch):
         semantic_index_worker, "resident_supervisor_is_alive", Mock(return_value=False)
     )
     monkeypatch.setattr(bitbucket_index_worker, "work_one_extraction_job", index_work)
+    monkeypatch.setattr(bitbucket_pdf_stager, "work_one_staging_job", stager_work)
     monkeypatch.setattr(bitbucket_pdf_writer, "work_one_publication_job", writer_work)
     monkeypatch.setattr(bitbucket_sync_worker, "work_one_job", repository_work)
     monkeypatch.setattr(semantic_index_worker, "work_one_semantic_job", semantic_work)
 
     call_command("bitbucket_index_worker", "--once", "--no-startup-sweep")
+    call_command("bitbucket_pdf_stager", "--once")
     call_command("bitbucket_pdf_writer", "--once")
     call_command("bitbucket_sync_worker", "--once", "--repository-only")
     call_command("semantic_index_worker", "--once", "--no-startup-sweep")
 
     index_work.assert_not_called()
+    stager_work.assert_not_called()
     writer_work.assert_not_called()
     repository_work.assert_not_called()
     semantic_work.assert_not_called()
@@ -1275,6 +1287,7 @@ def test_live_replacement_with_demand_needs_progress_before_recovery(
     probes = {"pdf-writer-1": permission.probe}
     stop_worker = Mock()
     monkeypatch.setattr(run_owl, "_stop_resident_bitbucket_worker", stop_worker)
+    monkeypatch.setattr(run_owl, "staging_snapshot", Mock(return_value={"queuedChunks": 1}))
 
     run_owl._complete_stable_pdf_worker_probes({"pdf-writer-1": process}, probes, monotonic_now=15)
     recovery = PDFPipelineRecovery.objects.get(scope="publisher")
@@ -1291,7 +1304,9 @@ def test_live_replacement_with_demand_needs_progress_before_recovery(
     stop_worker.assert_called_once_with(process)
 
 
-def test_fresh_owned_publisher_heartbeat_satisfies_demand_stability(tmp_path, settings):
+def test_fresh_owned_publisher_heartbeat_satisfies_demand_stability(
+    tmp_path, settings, monkeypatch
+):
     settings.PDF_PIPELINE_STATE_ROOT = tmp_path / "pipeline-state"
     settings.PDF_PIPELINE_RECOVERY_ENABLED = True
     settings.PDF_PIPELINE_RECOVERY_PAUSE_AFTER_ATTEMPTS = 2
@@ -1316,6 +1331,7 @@ def test_fresh_owned_publisher_heartbeat_satisfies_demand_stability(tmp_path, se
     permission = run_owl._prepare_pdf_worker_launch("pdf-writer-1", monotonic_now=10)
     process = _ResidentProcess("bitbucket_pdf_writer", 808)
     probes = {"pdf-writer-1": permission.probe}
+    monkeypatch.setattr(run_owl, "staging_snapshot", Mock(return_value={"queuedChunks": 1}))
 
     run_owl._complete_stable_pdf_worker_probes({"pdf-writer-1": process}, probes, monotonic_now=15)
 

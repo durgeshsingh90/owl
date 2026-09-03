@@ -55,7 +55,7 @@ def test_empty_publication_poll_skips_claim_gate_and_sqlite_write_reservation(mo
     reserve_write.assert_not_called()
 
 
-def test_publication_preflight_is_rechecked_inside_claim_gate(monkeypatch):
+def test_unsealed_publication_job_does_not_bypass_jsonl_queue(monkeypatch):
     job = _publication_job()
     reserve_write = Mock()
     gate_entries: list[int] = []
@@ -63,7 +63,6 @@ def test_publication_preflight_is_rechecked_inside_claim_gate(monkeypatch):
     @contextmanager
     def competing_claim_gate():
         gate_entries.append(1)
-        PDFExtractionJob.objects.filter(pk=job.pk).update(worker_pid=98765)
         yield
 
     monkeypatch.setattr(pdf_indexing, "pdf_extraction_claim_lock", competing_claim_gate)
@@ -72,9 +71,9 @@ def test_publication_preflight_is_rechecked_inside_claim_gate(monkeypatch):
     assert pdf_indexing.work_one_publication_job() is None
 
     job.refresh_from_db()
-    assert gate_entries == [1]
-    reserve_write.assert_called_once_with()
-    assert job.worker_pid == 98765
+    assert gate_entries == []
+    reserve_write.assert_not_called()
+    assert job.worker_pid is None
 
 
 def test_writer_empty_polling_backs_off_to_a_bounded_delay(monkeypatch):

@@ -1,16 +1,17 @@
 # PDF pipeline operations
 
-This guide is the operator contract for the adaptive PDF pipeline introduced by work
-prompt 011. It describes the shipped observe-first behavior, not a promise that automatic
-tuning is enabled. The stable product requirements are `PIPE-001` through `PIPE-012` in
+This guide is the operator contract for the PDF pipeline introduced by work prompt 011 and
+subsequently hardened with a durable JSONL staging queue. It describes the shipped
+observe-first behavior, not a promise that automatic tuning is enabled. The stable product
+requirements are `PIPE-001` through `PIPE-012` in
 `work_prompts/001_OWL_MASTER_REQUIREMENTS.md`; the matching acceptance tests are
 `PIPE-T01` through `PIPE-T12` in
 `work_prompts/002_FEATURE_TEST_AND_CUSTOMER_JOURNEYS.md`.
 
 ## Release state and safe default
 
-OWL still uses isolated parser processes, durable staging files, one controlled
-SQLite/FTS publisher, and searches the last committed index. The new default controller
+OWL uses isolated parser processes, a sole JSONL staging writer, size-only 50 MB chunks,
+one controlled SQLite/FTS publisher, and searches the last committed index. The default controller
 mode is `observe`. It measures and explains capacity but does not change admission.
 
 The representative adaptive benchmark gate has **not passed**. In particular, the small
@@ -25,7 +26,7 @@ measurements.
 
 `python3 start.py` is the supported launcher. It applies database migrations when needed
 and starts `run_owl`, which owns the web server, scheduler, repository workers, semantic
-workers, PDF controller, isolated extractors, and publisher. Only one supervisor may own
+workers, PDF controller, isolated extractors, JSONL stager, and publisher. Only one supervisor may own
 that pool for an OWL data root.
 
 An accepted pipeline run and its repository membership are durable server records.
@@ -34,11 +35,46 @@ not stop accepted work. Reopening a page discards client-only state and renders 
 durable run snapshot.
 
 Stopping `run_owl`, shutting down the laptop, or losing power stops computation. OWL does
-not claim otherwise. On the next launch it reconciles interrupted leases, valid staging
-files, completed publications, recovery circuits, and queued jobs, then continues from
+not claim otherwise. On the next launch it reconciles interrupted leases, extractor spools,
+`current.jsonl`, sealed/importing/imported chunks, completed publications, recovery circuits,
+and queued jobs, then continues from
 the last durable boundary. An already published PDF is not repeated; a validated staged
 result resumes at publication; an extraction interrupted before staging restarts that
 one PDF from the beginning because no page-level parser checkpoint exists.
+
+## JSONL staging and retention
+
+Extractors write validated text only to private atomic per-PDF spool files; they do not
+publish extracted content, pages, or FTS rows to SQLite. Existing SQLite job claims,
+heartbeats, and durable failure logs remain the control plane. Exactly one stager consumes
+those spools and appends one complete UTF-8 object per PDF to `current.jsonl`. Every object
+contains `file_path`, `file_name`, `content`, and the existing authenticated page/job
+manifest required for safe publication.
+
+Rotation is based only on `PDF_JSONL_CHUNK_SIZE_BYTES`. Reaching the target flushes and
+fsyncs the file, atomically renames it to `chunk_NNNNNN.jsonl`, immediately creates a fresh
+`current.jsonl`, and writes atomic sidecar state. There is no PDF-count or time-based
+rotation. When no extraction work remains, the stager seals the non-empty remainder.
+
+Exactly one SQLite writer incrementally reads a sealed chunk one line at a time. Existing
+per-PDF publication transactions retain bulk page inserts, FTS triggers, signals, and
+short lock duration; the chunk becomes `IMPORTED` only after every record's transaction
+has committed. A crash can therefore replay an `IMPORTING` chunk: already committed jobs
+are verified and skipped, avoiding duplicate records, while unfinished jobs continue.
+
+Imported chunks retain `imported_at` and are deleted only after
+`PDF_JSONL_RETENTION_DAYS`. Cleanup runs when either writer starts. It never deletes
+`current.jsonl`, sealed, importing, failed, uncommitted, or unverifiable chunks.
+
+| Purpose | Setting | Default |
+|---|---|---:|
+| Extractor processes | `PDF_MAX_EXTRACTION_WORKERS` | `16` (configurable, defensive cap 32) |
+| JSONL target size | `PDF_JSONL_CHUNK_SIZE_BYTES` | `52428800` (50 MiB) |
+| Private staging directory | `PDF_JSONL_STAGING_DIRECTORY` | Empty; follows `BITBUCKET_TEMP_ROOT/pdf-publication` |
+| Imported-chunk retention | `PDF_JSONL_RETENTION_DAYS` | `7` |
+
+SQLite backlog never reduces or blocks the extractor pool. The existing
+`PDF_MAX_STAGED_PUBLICATIONS` value is now only a legacy dashboard warning threshold.
 
 ## Controller configuration
 
@@ -51,10 +87,10 @@ change. Never put credentials or private paths in the tracked example.
 | Explicit adaptive opt-in | `PDF_PIPELINE_ADAPTIVE_ENABLED` | `false`; it is necessary but not sufficient for adaptive control. |
 | Immediate disable | `PDF_PIPELINE_CONTROLLER_KILL_SWITCH` | `false`; `true` restores conservative fixed admission. |
 | Manual target | `PDF_PIPELINE_MANUAL_FIXED_TARGET` | Empty; when set, it overrides controller recommendations within configured/tested bounds. |
-| Configured worker ceiling | `PDF_MAX_EXTRACTION_WORKERS` | `4`; legacy fixed target and hard configured limit, capped at the tested maximum of 8. |
+| Configured worker ceiling | `PDF_MAX_EXTRACTION_WORKERS` | `16`; fixed target and configured limit, defensively capped at 32. |
 | Minimum target | `PDF_PIPELINE_CONFIGURED_MIN_TARGET` | `1`; safety/recovery may still reduce effective admission to zero. |
 | Initial/fixed target | `PDF_PIPELINE_INITIAL_TARGET` | Defaults to `PDF_MAX_EXTRACTION_WORKERS`. |
-| Tested hard maximum | `PDF_PIPELINE_TESTED_HARD_MAX` | `8`; values above 8 are unsupported by this release. |
+| Tested hard maximum | `PDF_PIPELINE_TESTED_HARD_MAX` | `16`; the JSONL topology has an isolated 16-worker smoke result, but representative adaptive enablement remains blocked. |
 | Shared CPU preference | `PDF_PIPELINE_BACKGROUND_CPU_BUDGET_FRACTION` | `0.80`; a ceiling after competing OWL reservations, never a utilization target. |
 | Gate manifest | `PDF_PIPELINE_ADAPTIVE_BENCHMARK_GATE_PATH` | Private path under the data root by default; adaptive refuses missing, incompatible, incomplete, or failing evidence. |
 | Observation/cooldown | `PDF_PIPELINE_CONTROLLER_OBSERVATION_SECONDS`, `PDF_PIPELINE_CONTROLLER_COOLDOWN_SECONDS` | `60`, `120`; prevent reactions to short samples and oscillation. |
@@ -102,8 +138,8 @@ These controls are available in `.env.example`:
 - `PDF_PIPELINE_SQLITE_LOCK_BLOCKED_MS=250` classifies meaningful publisher lock
   contention.
 
-`Extracted/min` counts PDFs only after the validated staging file has been atomically
-handed off and the durable job transition commits. `Written/min` counts PDFs only after
+`Extracted/min` counts PDFs only after the validated extractor spool and durable job
+transition commit. `Written/min` counts PDFs only after
 the publication transaction commits. Cache reuse is separate and can explain why total
 completion exceeds publication rate. Pages, bytes, characters, queue depth, staged bytes,
 oldest staged age, transaction timing, lock wait, failures, retries, and resource gauges
@@ -119,8 +155,9 @@ State labels are evidence classifications:
 - `idle` means fresh evidence shows no durable demand.
 - `waiting` or `starved` means capacity is available but no eligible extractor or
   publisher input is currently available.
-- `backpressured` or `publication limited` means durable staged work is constraining
-  extraction or publication is the current bottleneck.
+- `SQLite backlog` means sealed chunks are waiting on disk; it identifies the writer as
+  the slower stage but does not throttle extraction.
+- `Extraction starving SQLite` means the writer is ready but no sealed chunk is available.
 - `blocked` means a concrete constraint such as SQLite lock contention prevents progress.
 - `retry wait`, `recovering`, and `paused` are recovery states, not ordinary idle states.
 - `degraded` means some required capacity or evidence is unavailable while work remains.
@@ -236,8 +273,8 @@ PDF controller target never changes `BITBUCKET_MAX_REPO_WORKERS`.
    data root and restart it with `python3 start.py`. Do not start a second worker pool.
 3. If ETA is warming, allow at least 30 seconds and three completions. If stale, confirm
    the supervisor metrics owner is alive; do not treat the last number as current.
-4. If the publisher is blocked, close duplicate OWL instances and inspect SQLite lock
-   timing and disk headroom. Valid staged files should remain in place.
+4. If the publisher is blocked, inspect the sealed-chunk count, queued JSONL bytes,
+   current chunk, SQLite lock timing, and disk headroom. Valid chunks remain in place.
 5. If recovery is paused, correct the displayed hazard, then use the generation-bound
    **Resume** action. Repeated Resume clicks are safe; an obsolete generation is rejected.
 6. If a host cannot be added, check whether environment policy is authoritative. Approve

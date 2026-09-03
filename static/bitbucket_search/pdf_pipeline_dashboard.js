@@ -871,10 +871,12 @@
         const workers = object(payload.workers);
         const publisher = object(payload.publisher);
         const queues = object(payload.queues);
+        const jsonl = object(payload.jsonlStaging || queues.jsonl);
         const throughput = object(payload.throughput);
         if (payload.snapshotStale) warnings.push("The supervisor snapshot is stale; running state and ETA are unavailable.");
         if (integer(workers.unavailable) > 0) warnings.push(`${integer(workers.unavailable)} expected extraction controller${integer(workers.unavailable) === 1 ? " is" : "s are"} unavailable.`);
-        if (publisher.state === "unavailable" && integer(queues.backpressureDepthJobs) > 0) warnings.push("Durable staged work is waiting while the PDF publisher is unavailable.");
+        if (publisher.state === "unavailable" && integer(jsonl.queuedChunks) > 0) warnings.push("Durable JSONL chunks are waiting while the SQLite writer is unavailable.");
+        if (integer(jsonl.failedChunks) > 0) warnings.push(`${integer(jsonl.failedChunks)} retained JSONL chunk${integer(jsonl.failedChunks) === 1 ? " needs" : "s need"} attention.`);
         if (object(payload.recovery).state === "paused") warnings.push("A recovery circuit is paused; preserved work will not resume automatically.");
         if (number(throughput.failedPerSecond) > 0) warnings.push("PDF failures were observed in the current metrics window.");
         list(object(payload.state).constraints).forEach((constraint) => warnings.push(humanize(constraint)));
@@ -943,6 +945,9 @@
         const resources = object(payload.resources);
         const controller = object(payload.controller);
         const publisher = object(payload.publisher);
+        const counts = object(payload.counts);
+        const jsonl = object(payload.jsonlStaging || queues.jsonl);
+        const flowBalance = object(payload.flowBalance);
         setText(root, "[data-pipeline-total-eta]", eta.display || "Waiting for a current run");
         setText(root, "[data-pipeline-eta-confidence]",
             eta.state === "available"
@@ -966,14 +971,22 @@
             `${integer(workers.live)} live of ${integer(workers.expectedResident)} expected · `
             + `${integer(workers.waitingForEligibleInput)} waiting · ${integer(workers.unavailable)} unavailable`);
         setText(root, "[data-pipeline-backlog-value]",
-            `${integer(queues.backpressureDepthJobs)} / ${integer(queues.backpressureThresholdJobs)} jobs`);
+            `${integer(jsonl.queuedChunks)} chunks · ${formatBytes(jsonl.queuedBytes)}`);
         setText(root, "[data-pipeline-backlog-detail]",
-            `${integer(queues.stagedWaitingJobs)} staged waiting · ${formatBytes(queues.stagedBytes)} · `
-            + `oldest ${formatAge(queues.oldestStagedWaitSeconds)}`);
+            `${integer(jsonl.sealedChunksWaiting)} sealed waiting · current ${formatBytes(jsonl.currentSizeBytes)} · `
+            + `${integer(jsonl.incomingRecords)} incoming`);
         setText(root, "[data-pipeline-target]", formatNumber(controller.effectiveAdmissionTarget, 0));
         setText(root, "[data-pipeline-hard-max]", formatNumber(controller.configuredPdfHardMax, 0));
         setText(root, "[data-pipeline-live-workers]", formatNumber(workers.live, 0));
+        setText(root, "[data-pipeline-extractors-active]",
+            `${integer(counts.pdfsCurrentlyExtracting)} of ${integer(workers.expectedResident)}`);
         setText(root, "[data-pipeline-publisher]", humanize(publisher.state));
+        setText(root, "[data-pipeline-pdfs-discovered]",
+            formatNumber(counts.pdfsDiscovered, 0));
+        setText(root, "[data-pipeline-pdfs-pending]",
+            formatNumber(counts.pdfsPendingExtraction, 0));
+        setText(root, "[data-pipeline-extraction-failures]",
+            formatNumber(counts.extractionFailures, 0));
         setText(root, "[data-pipeline-owl-cpu]",
             finite(resources.owlProcessTreeCpuPct) ? `${formatNumber(resources.owlProcessTreeCpuPct)}%` : "Unavailable");
         setText(root, "[data-pipeline-memory]", formatBytes(resources.hostMemoryAvailableBytes));
@@ -987,7 +1000,26 @@
         const pagesPerSecond = throughput.pagesPersistedPerSecond;
         setText(root, "[data-pipeline-pages-rate]",
             finite(pagesPerSecond) ? `${formatNumber(pagesPerSecond * 60)}/min` : "Unavailable");
+        setText(root, "[data-pipeline-extracted-pages-rate]",
+            finite(throughput.pagesExtractedPerSecond)
+                ? `${formatNumber(throughput.pagesExtractedPerSecond * 60)}/min`
+                : "Unavailable");
         setText(root, "[data-pipeline-staged-bytes]", formatBytes(queues.stagedBytes));
+        setText(root, "[data-pipeline-current-jsonl]", formatBytes(jsonl.currentSizeBytes));
+        setText(root, "[data-pipeline-jsonl-queue]",
+            `${integer(jsonl.sealedChunksWaiting)} sealed · ${formatBytes(jsonl.queuedBytes)}`);
+        setText(root, "[data-pipeline-jsonl-writer]",
+            `${jsonl.writerState || "IDLE"}${jsonl.currentChunk ? ` · ${jsonl.currentChunk}` : ""}`);
+        setText(root, "[data-pipeline-flow-diagnosis]",
+            `${flowBalance.label || humanize(flowBalance.state || "unknown")} · ${flowBalance.reason || "No diagnosis available"}`);
+        setText(root, "[data-pipeline-pdfs-written]",
+            formatNumber(counts.pdfsSuccessfullyWritten, 0));
+        setText(root, "[data-pipeline-jsonl-retained]",
+            `${integer(jsonl.retainedChunks)} chunks · ${formatBytes(jsonl.retainedBytes)}`);
+        setText(root, "[data-pipeline-jsonl-cleanup]",
+            jsonl.nextCleanupEligibleAt || jsonl.oldestCleanupEligibleAt
+                ? formatDateTime(jsonl.nextCleanupEligibleAt || jsonl.oldestCleanupEligibleAt)
+                : "None scheduled");
         setText(root, "[data-pipeline-oldest-staged]", formatAge(queues.oldestStagedWaitSeconds));
         setText(root, "[data-pipeline-disk]", formatBytes(resources.diskAvailableBytes));
         const cacheRate = throughput.cacheReuseCompletionsPerSecond;

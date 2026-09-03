@@ -31,9 +31,9 @@ from django.db import connection, connections
 
 BENCHMARK_SCHEMA_VERSION = 2
 BENCHMARK_KIND = "owl.synthetic-pdf-pipeline-benchmark"
-DEFAULT_WORKER_TARGETS = (4, 6, 8)
-FULL_WORKER_MATRIX = (1, 2, 4, 6, 8)
-MAX_TESTED_WORKERS = 8
+DEFAULT_WORKER_TARGETS = (8, 12, 16)
+FULL_WORKER_MATRIX = (1, 2, 4, 8, 12, 16)
+MAX_TESTED_WORKERS = 16
 SQLITE_JOURNAL_MODES = ("delete", "wal")
 FOREGROUND_PROBE_INTERVAL_SECONDS = 0.2
 _SYNTHETIC_SECRET_KEY = "synthetic-test-secret-key-only-not-for-real-use-pdf-benchmark-0123456789"
@@ -762,9 +762,11 @@ def run_internal_worker(*, role: str, timeout_seconds: int) -> None:
     from bitbucket_search.services.pdf_indexing import (
         work_one_extraction_job,
         work_one_publication_job,
+        work_one_staging_job,
     )
+    from bitbucket_search.services.pdf_jsonl_staging import JSONLStager
 
-    if role not in {"extractor", "publisher"}:
+    if role not in {"extractor", "stager", "publisher"}:
         raise ValueError("Internal benchmark worker role is invalid.")
     if not 30 <= timeout_seconds <= 86_400:
         raise ValueError("Internal benchmark timeout is invalid.")
@@ -776,12 +778,16 @@ def run_internal_worker(*, role: str, timeout_seconds: int) -> None:
     ):
         raise ValueError("Internal benchmark workers require a generated isolated data root.")
     deadline = time.monotonic() + timeout_seconds
+    stager = JSONLStager() if role == "stager" else None
     try:
         while time.monotonic() < deadline:
             close_old_connections()
-            completed = (
-                work_one_publication_job() if role == "publisher" else work_one_extraction_job()
-            )
+            if role == "publisher":
+                completed = work_one_publication_job()
+            elif role == "stager":
+                completed = work_one_staging_job(stager)
+            else:
+                completed = work_one_extraction_job()
             close_old_connections()
             if completed is not None:
                 continue
@@ -853,6 +859,16 @@ def _drain_existing_pipeline(
             )
             processes.append(process)
             resident_roles[f"pdf-index-{worker_number}"] = process
+        stager = subprocess.Popen(
+            [*base_command, "--internal-worker-role", "stager"],
+            cwd=settings.BASE_DIR,
+            env=os.environ.copy(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        processes.append(stager)
+        resident_roles["pdf-stager-1"] = stager
         publisher = subprocess.Popen(
             [*base_command, "--internal-worker-role", "publisher"],
             cwd=settings.BASE_DIR,

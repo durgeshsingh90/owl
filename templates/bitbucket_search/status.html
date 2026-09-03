@@ -68,7 +68,7 @@
             <div>
                 <p class="eyebrow">End-to-end PDF pipeline</p>
                 <h2 id="bb-pipeline-heading">Capacity, flow, and recovery</h2>
-                <p>Live diagnostic history from durable extraction and publication boundaries. The staging threshold is backpressure, not a hard queue capacity.</p>
+                <p>Live diagnostic history from durable extraction and publication boundaries. The on-disk JSONL queue may grow while SQLite catches up; it never reduces extraction admission.</p>
             </div>
             <p class="bb-pipeline__freshness" data-pipeline-freshness aria-atomic="true">
                 Waiting for the first server snapshot…
@@ -154,7 +154,11 @@
                     <div><dt>Target</dt><dd data-pipeline-target>—</dd></div>
                     <div><dt>Configured hard max</dt><dd data-pipeline-hard-max>—</dd></div>
                     <div><dt>Live processes</dt><dd data-pipeline-live-workers>—</dd></div>
+                    <div><dt>Extractors active</dt><dd data-pipeline-extractors-active>—</dd></div>
                     <div><dt>Publisher</dt><dd data-pipeline-publisher>Unavailable</dd></div>
+                    <div><dt>PDFs discovered</dt><dd data-pipeline-pdfs-discovered>—</dd></div>
+                    <div><dt>Pending extraction</dt><dd data-pipeline-pdfs-pending>—</dd></div>
+                    <div><dt>Extraction failures</dt><dd data-pipeline-extraction-failures>—</dd></div>
                     <div><dt>OWL CPU</dt><dd data-pipeline-owl-cpu>Unavailable</dd></div>
                     <div><dt>Memory available</dt><dd data-pipeline-memory>Unavailable</dd></div>
                 </dl>
@@ -186,12 +190,20 @@
                     <li data-series="extracted"><span aria-hidden="true"></span>Extractor outputs/min</li>
                     <li data-series="written"><span aria-hidden="true"></span>Durable publications/min</li>
                     <li data-series="completed"><span aria-hidden="true"></span>Total completions/min</li>
-                    <li data-series="backlog"><span aria-hidden="true"></span>Backpressure depth (jobs)</li>
-                    <li data-series="threshold"><span aria-hidden="true"></span>Backpressure threshold (jobs)</li>
+                    <li data-series="backlog"><span aria-hidden="true"></span>Staged job depth (legacy)</li>
+                    <li data-series="threshold"><span aria-hidden="true"></span>Legacy warning guide (jobs)</li>
                 </ul>
                 <dl class="bb-pipeline-panel__facts">
                     <div><dt>Pages/min</dt><dd data-pipeline-pages-rate>Unavailable</dd></div>
+                    <div><dt>Extracted pages/min</dt><dd data-pipeline-extracted-pages-rate>Unavailable</dd></div>
                     <div><dt>Staged bytes</dt><dd data-pipeline-staged-bytes>—</dd></div>
+                    <div><dt>Current JSONL</dt><dd data-pipeline-current-jsonl>—</dd></div>
+                    <div><dt>Sealed queue</dt><dd data-pipeline-jsonl-queue>—</dd></div>
+                    <div><dt>SQLite writer</dt><dd data-pipeline-jsonl-writer>—</dd></div>
+                    <div><dt>Flow diagnosis</dt><dd data-pipeline-flow-diagnosis>—</dd></div>
+                    <div><dt>PDFs indexed</dt><dd data-pipeline-pdfs-written>—</dd></div>
+                    <div><dt>Retained JSONL</dt><dd data-pipeline-jsonl-retained>—</dd></div>
+                    <div><dt>Next cleanup</dt><dd data-pipeline-jsonl-cleanup>—</dd></div>
                     <div><dt>Oldest staged</dt><dd data-pipeline-oldest-staged>—</dd></div>
                     <div><dt>Disk available</dt><dd data-pipeline-disk>Unavailable</dd></div>
                     <div><dt>Cache reuse</dt><dd data-pipeline-cache-reuse>—</dd></div>
@@ -300,7 +312,7 @@
                 <p>Equivalent numeric values for both graphs. Units and unavailable samples remain explicit.</p>
                 <div class="bb-pipeline-table-wrap" tabindex="0" role="region" aria-label="Pipeline timeline values">
                     <table class="bb-pipeline-table bb-pipeline-table--timeline">
-                        <thead><tr><th scope="col">Time</th><th scope="col">Capacity: active / free / waiting / backpressured / paused / unavailable</th><th scope="col">Publisher</th><th scope="col">Extracted / written / completed per min</th><th scope="col">Backlog / threshold</th><th scope="col">Staged bytes</th></tr></thead>
+                        <thead><tr><th scope="col">Time</th><th scope="col">Capacity: active / free / waiting / legacy backpressure / paused / unavailable</th><th scope="col">Publisher</th><th scope="col">Extracted / written / completed per min</th><th scope="col">Staged jobs / legacy guide</th><th scope="col">Staged bytes</th></tr></thead>
                         <tbody data-pipeline-sample-rows><tr><td colspan="6">No timeline samples available.</td></tr></tbody>
                     </table>
                 </div>

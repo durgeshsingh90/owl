@@ -32,8 +32,8 @@ def _plan(**overrides) -> pdf_pipeline.BenchmarkPlan:
 def test_plan_enforces_current_tested_bounds_and_repeatable_workload():
     assert pdf_pipeline.validate_plan(_plan()).worker_targets == (1,)
 
-    with pytest.raises(ValueError, match="between 1 and 8"):
-        pdf_pipeline.validate_plan(_plan(worker_targets=(9,)))
+    with pytest.raises(ValueError, match="between 1 and 16"):
+        pdf_pipeline.validate_plan(_plan(worker_targets=(17,)))
     with pytest.raises(ValueError, match="must not contain duplicates"):
         pdf_pipeline.validate_plan(_plan(worker_targets=(2, 2)))
     with pytest.raises(ValueError, match="between 1 and the document count"):

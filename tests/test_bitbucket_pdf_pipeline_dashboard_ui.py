@@ -83,8 +83,8 @@ def test_repository_logs_render_detailed_accessible_pipeline_dashboard(loopback_
     for unit_label in (
         "Extractor outputs/min",
         "Durable publications/min",
-        "Backpressure depth (jobs)",
-        "Backpressure threshold (jobs)",
+        "Staged job depth (legacy)",
+        "Legacy warning guide (jobs)",
     ):
         assert unit_label in html
 

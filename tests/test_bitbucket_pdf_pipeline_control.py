@@ -16,7 +16,7 @@ def _recovery(scope: str, state: str) -> PDFPipelineRecovery:
 
 @pytest.mark.parametrize(
     "scope",
-    ("pipeline", "supervisor", "controller", "extraction_pool", "publisher"),
+    ("pipeline", "supervisor", "controller", "extraction_pool"),
 )
 def test_unsafe_shared_scope_blocks_new_extraction_claims(scope, settings):
     settings.PDF_PIPELINE_RECOVERY_ENABLED = True
@@ -45,12 +45,12 @@ def test_active_recovery_probe_can_publish_but_retry_wait_cannot(scope, settings
     assert pdf_pipeline_control.publication_admission_allowed() is False
 
 
-def test_publisher_probe_drains_staging_without_admitting_new_extraction(settings):
+def test_publisher_probe_drains_jsonl_without_throttling_extraction(settings):
     settings.PDF_PIPELINE_RECOVERY_ENABLED = True
     _recovery("publisher", PDFPipelineRecoveryState.RECOVERING)
 
     assert pdf_pipeline_control.publication_admission_allowed() is True
-    assert pdf_pipeline_control.extraction_admission_allowed() is False
+    assert pdf_pipeline_control.extraction_admission_allowed() is True
 
 
 def test_individual_paused_slot_does_not_stop_healthy_slots(settings):

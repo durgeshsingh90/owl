@@ -147,6 +147,7 @@ def test_throughput_includes_once_only_bytes_pages_characters_and_latencies(
     throughput = metrics._throughput_snapshot(now)
 
     assert throughput["pagesPersistedPerSecond"] == pytest.approx(2 / 60, abs=1e-6)
+    assert throughput["pagesExtractedPerSecond"] == pytest.approx(2 / 60, abs=1e-6)
     assert throughput["charactersExtractedPerSecond"] == pytest.approx(1_200 / 60, abs=1e-6)
     assert throughput["charactersPersistedPerSecond"] == pytest.approx(1_200 / 60, abs=1e-6)
     assert throughput["sourceBytesProcessedPerSecond"] == pytest.approx(4_096 / 60, abs=1e-6)
@@ -264,6 +265,7 @@ def test_classifier_safety_precedence_is_fail_closed():
         "backpressureDepthJobs": 4,
         "backpressureThresholdJobs": 4,
         "inputQueuedJobs": 1,
+        "jsonl": {"queuedChunks": 1},
     }
 
     publisher_failure = metrics._state_snapshot(
@@ -310,7 +312,11 @@ def test_classifier_safety_precedence_is_fail_closed():
         (
             "publication_limited",
             "extracting",
-            {"backpressureDepthJobs": 1, "backpressureDepthGrowthPerSecond": 0.5},
+            {
+                "backpressureDepthJobs": 1,
+                "backpressureDepthGrowthPerSecond": 0.5,
+                "jsonl": {"queuedChunks": 1},
+            },
             {},
             {"state": "busy"},
             {},
@@ -324,7 +330,7 @@ def test_classifier_safety_precedence_is_fail_closed():
             {},
         ),
         (
-            "backpressure",
+            "balanced",
             "extracting",
             {"backpressureDepthJobs": 4},
             {},

@@ -31,6 +31,8 @@ evidence, and rollback steps are documented in
 [PDF pipeline operations](PDF_PIPELINE_OPERATIONS.md). The current benchmark evidence is in
 [PDF pipeline benchmark record](PDF_PIPELINE_BENCHMARKS.md), and the final Phase 8 evidence and
 release decision are in [PDF pipeline validation report](PDF_PIPELINE_VALIDATION_REPORT.md).
+The extraction-to-JSONL-to-SQLite delivery has its own
+[JSONL pipeline validation report](PDF_JSONL_PIPELINE_VALIDATION_REPORT.md).
 
 ## What the OWL apps do
 
@@ -368,14 +370,15 @@ The address and port default come from `run_owl`, not the launcher. Normally ope
 Direct `python manage.py run_owl` remains available when you manage database updates yourself.
 
 `run_owl` starts the local website, its resident weekly Confluence scheduler, a bounded parallel
-Bitbucket repository-worker pool, four isolated PDF extraction workers, and one dedicated database
-writer. The Bitbucket supervisor queues every enabled repository at 11:00 in `OWL_TIME_ZONE`
+Bitbucket repository-worker pool, 16 isolated PDF extraction workers, one JSONL staging writer,
+and one dedicated SQLite writer. The Bitbucket supervisor queues every enabled repository at 11:00 in `OWL_TIME_ZONE`
 (Europe/Dublin by default). Each failed
 daily attempt waits two hours before retrying, with one initial attempt and at most three retries
 during that day's cycle. Worker limits are configured in `owl/settings.py`.
-PDF extraction is configured for one repository and up to four PDFs at a time. Each extractor hands
-its validated result to a durable staging file and can then read the next PDF while the dedicated
-writer serializes pages and search-index updates into SQLite. Other repositories remain queued until
+PDF extraction is configured for one repository and up to 16 PDFs at a time. Each extractor hands
+its validated result to a durable per-PDF spool. The sole staging writer appends complete UTF-8
+records to `current.jsonl`, seals size-only 50 MB chunks, and lets extraction continue while the
+dedicated SQLite writer imports pages and search-index updates. Other repositories remain queued until
 the active repository's PDF run completes. Git downloads can continue independently.
 The Repository logs page shows the configured limit, active workers, every durable PDF
 attempt, and the retained redacted Git clone/refresh output. Select a repository there and use
@@ -383,8 +386,10 @@ attempt, and the retained redacted Git clone/refresh output. Select a repository
 isolated parser is terminated when its next one-second heartbeat observes the revoked lease.
 The same repository-scoped action is available from the sidebar selection toolbar.
 The sidebar and top status panel show the number of PDFs remaining in the current run. Extraction
-results waiting for the writer survive an OWL restart and resume from their durable staging files.
-OWL also keeps a durable recovery circuit for the supervisor, controller, publisher, extraction
+results waiting for either writer survive an OWL restart in the spool, `current.jsonl`, or sealed
+chunks. Imported chunks are retained for seven days from successful import, while current, queued,
+importing, failed, and uncommitted chunks are never automatically deleted. OWL also keeps a durable
+recovery circuit for the supervisor, controller, JSONL stager, publisher, extraction
 pool, and individual extraction slots. Transient component failures retry with bounded backoff and
 pause after 25 consecutive failed probes by default; permanent problems with one PDF remain within
 that PDF's existing retry policy. Equivalent slot failures observed within 10 seconds are moved to

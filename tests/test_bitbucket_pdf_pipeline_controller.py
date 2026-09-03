@@ -299,7 +299,7 @@ def test_adaptive_applies_only_after_gate_and_cooldown_prevents_oscillation(
     assert PDFPipelineTuningEvent.objects.get().action == PDFPipelineTuningAction.APPLY
 
 
-def test_ordinary_pressure_decrease_is_bounded_and_critical_pressure_is_immediate(
+def test_sqlite_backlog_never_reduces_extractors_and_critical_pressure_is_immediate(
     settings,
     tmp_path,
 ):
@@ -318,7 +318,8 @@ def test_ordinary_pressure_decrease_is_bounded_and_critical_pressure_is_immediat
         current_target=6,
     )
 
-    assert (ordinary.action, ordinary.proposed_target) == ("decrease", 4)
+    assert (ordinary.action, ordinary.proposed_target) == ("hold", 6)
+    assert ordinary.reason_code == "sqlite_backlog_allowed"
     assert ordinary.safety is False
     assert (critical.action, critical.proposed_target) == ("pause", 0)
     assert critical.safety is True

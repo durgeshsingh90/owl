@@ -32,6 +32,7 @@ from bitbucket_search.models import (
     RepositorySyncState,
 )
 from bitbucket_search.services import pdf_indexing
+from bitbucket_search.services import pdf_jsonl_staging as pdf_jsonl
 from bitbucket_search.services.git_sync import managed_repository_path
 from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 from bitbucket_search.services.pdf_indexing import (
@@ -49,9 +50,19 @@ from bitbucket_search.services.pdf_indexing import (
     run_isolated_pdf_extractor,
     sweep_pdf_extraction_queue,
     work_one_publication_job,
+    work_one_staging_job,
 )
 
 pytestmark = pytest.mark.django_db
+
+
+def _seal_staged_records() -> pdf_jsonl.JSONLChunk:
+    stager = pdf_jsonl.JSONLStager()
+    staged = work_one_staging_job(stager)
+    assert staged is not None
+    sealed = getattr(staged, "sealed_chunk", None) or stager.seal_current()
+    assert sealed is not None
+    return sealed
 
 
 def test_extractor_keeps_python_user_site_visible_for_windows_user_installs(monkeypatch):
@@ -192,6 +203,7 @@ def test_extractor_stages_then_dedicated_writer_publishes(indexed_pdf_target):
     assert staged_job.worker_pid is None
     assert document.index_state == PDFIndexState.PENDING
 
+    _seal_staged_records()
     published = work_one_publication_job()
 
     document.refresh_from_db()
@@ -222,6 +234,7 @@ def test_staged_publication_survives_supervisor_restart(indexed_pdf_target):
     assert staged_job.status == PDFExtractionJobStatus.RUNNING
     assert staged_job.phase == PDFExtractionJobPhase.PUBLISHING
     assert staged_job.worker_pid is None
+    _seal_staged_records()
     published = work_one_publication_job()
     document.refresh_from_db()
     assert published.status == PDFExtractionJobStatus.SUCCEEDED
@@ -286,6 +299,8 @@ def test_publication_deferred_by_git_sync_releases_writer_lease_immediately(
         worker_pid=13579,
     )
 
+    _seal_staged_records()
+
     assert work_one_publication_job() is None
 
     staged_job.refresh_from_db()
@@ -326,7 +341,8 @@ def test_cancelling_repository_discards_durable_staged_publication(indexed_pdf_t
     assert work_one_publication_job() is None
 
 
-def test_parser_continues_while_writer_has_previous_result(indexed_pdf_target):
+def test_parser_continues_while_jsonl_or_sqlite_backlog_exists(indexed_pdf_target, settings):
+    settings.PDF_MAX_STAGED_PUBLICATIONS = 1
     repository, _document, first_path = indexed_pdf_target
     second_path = first_path.with_name("Second.pdf")
     second_path.write_bytes(b"%PDF second queued target")
