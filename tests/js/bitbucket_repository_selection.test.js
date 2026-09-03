@@ -196,7 +196,7 @@ function boot({
     });
     let connection = null;
     if (connectionResponse) {
-        connection = element("data-repository-connection-result", { "data-state": "checking" }, "button");
+        connection = element("data-repository-connection-result", { "data-state": "idle" }, "button");
         connection.appendChild(element("data-repository-connection-message"));
         workspace.appendChild(connection);
     }
@@ -219,6 +219,7 @@ function boot({
         const timer = element("data-repository-run-timer", { hidden: "" });
         const stateIcon = element("data-repository-state-icon");
         const workLabel = element("data-repository-work-label", { hidden: "" });
+        const health = element("data-repository-health", { hidden: "" }, "small");
         const progressContainer = element("data-repository-progress", { hidden: "" });
         const progressBar = element("data-repository-progress-bar", { max: "100" }, "progress");
         const progressLabel = element("data-repository-progress-label", {}, "small");
@@ -228,6 +229,7 @@ function boot({
         card.appendChild(timer);
         card.appendChild(stateIcon);
         card.appendChild(workLabel);
+        card.appendChild(health);
         card.appendChild(progressContainer);
         card.appendChild(element("data-repository-documents"));
         const remaining = element("data-repository-remaining", { hidden: "" }, "small");
@@ -235,7 +237,7 @@ function boot({
         card.appendChild(element("data-repository-exclusion"));
         workspace.appendChild(card);
         return {
-            card, checkbox, timer, stateIcon, workLabel,
+            card, checkbox, timer, stateIcon, workLabel, health,
             progressContainer, progressBar, progressLabel, remaining,
         };
     });
@@ -366,19 +368,31 @@ test("stopping repository work blocks the page with a focused loading screen", (
     assert.equal(page.controls.remove.disabled, true);
 });
 
-test("connection test runs on load and runs again when its top-bar icon is clicked", async () => {
+test("connection test stays idle on load and runs only when its top-bar icon is clicked", async () => {
     const page = boot({
         repositories: [{ id: 1 }],
         connectionResponse: { state: "connected", label: "Git connection passed", detail: "Verified" },
     });
-    assert.equal(page.connection.dataset.state, "checking");
-    assert.equal(page.connection.disabled, true);
+    assert.equal(page.connection.dataset.state, "idle");
+    assert.equal(page.connection.disabled, false);
     await page.settle();
-    assert.equal(page.fetchCount(), 1, "page initialization performs the first connection test");
+    assert.equal(page.fetchCount(), 0, "page initialization performs no live Git request");
+
+    page.connection.dispatch("click");
+    page.connection.dispatch("click");
+    assert.equal(page.connection.dataset.state, "checking", "click immediately shows checking state");
+    assert.equal(page.connection.disabled, true, "parallel clicks are blocked while testing");
+    await page.settle();
+    assert.equal(page.fetchCount(), 1, "one explicit click starts one connection test");
     assert.equal(page.connection.dataset.state, "connected");
     assert.equal(page.connection.disabled, false);
 
-    page.queueResponse({ state: "failed", label: "Git connection failed", detail: "Unavailable" });
+    page.queueResponse({
+        state: "failed",
+        label: "Git connection failed",
+        detail: "1 of 1 repository connection failed.",
+        repositories: [{ id: 1, connected: false, detail: "Check the network or VPN." }],
+    });
     page.connection.dispatch("click");
     assert.equal(page.connection.dataset.state, "checking", "click immediately restores connecting state");
     assert.equal(page.connection.disabled, true, "parallel clicks are blocked while testing");
@@ -386,6 +400,8 @@ test("connection test runs on load and runs again when its top-bar icon is click
     assert.equal(page.fetchCount(), 2, "clicking the indicator performs a fresh connection test");
     assert.equal(page.connection.dataset.state, "failed");
     assert.equal(page.connection.disabled, false);
+    assert.equal(page.cards[0].stateIcon.title, "Check the network or VPN.");
+    assert.equal(page.cards[0].stateIcon.getAttribute("aria-label"), "Check the network or VPN.");
 });
 
 test("selection enables a single locked delete control that arms on its first click", () => {
@@ -894,6 +910,50 @@ test("repository polling selects clone, pull and indexing states with determinat
     assert.match(card.stateIcon.className, /bb-repository-state--ready/);
     assert.equal(card.progressContainer.hidden, true);
     assert.equal(card.progressBar.hasAttribute("value"), false);
+});
+
+test("repository polling updates the separate worker heartbeat health signal", async () => {
+    const page = boot({ repositories: [{ id: 1 }] });
+    const card = page.cards[0];
+    const activity = {
+        active: true, operation: "indexing", phase: "extracting", progress: 45,
+        label: "Extracting PDF text", detail: "2 PDFs extracting",
+        queuedPdfs: 3, runningPdfs: 2,
+    };
+
+    await page.poll({ overrides: { 1: {
+        hasActiveWork: true,
+        activity: {
+            ...activity, healthState: "healthy", healthLabel: "Worker responding",
+            heartbeatAt: "2026-09-02T10:00:00+00:00",
+        },
+    } } });
+    assert.equal(card.workLabel.textContent, "2 PDFs extracting");
+    assert.equal(card.health.hidden, false);
+    assert.equal(card.health.textContent, "Worker responding");
+    assert.equal(card.health.dataset.healthState, "healthy");
+    assert.equal(card.health.dataset.heartbeatAt, "2026-09-02T10:00:00+00:00");
+    assert.equal(card.card.dataset.repositoryHealthState, "healthy");
+
+    await page.poll({ overrides: { 1: {
+        hasActiveWork: true,
+        activity: {
+            ...activity, healthState: "stalled",
+            healthLabel: "Worker stalled · restarting automatically",
+            heartbeatAt: "2026-09-02T09:49:00+00:00",
+        },
+    } } });
+    assert.equal(card.workLabel.textContent, "2 PDFs extracting", "health never rewrites activity detail");
+    assert.equal(card.health.textContent, "Worker stalled · restarting automatically");
+    assert.equal(card.health.dataset.healthState, "stalled");
+
+    await page.poll({ overrides: { 1: {
+        hasActiveWork: false,
+        activity: { active: false, healthState: null, healthLabel: "", heartbeatAt: null },
+    } } });
+    assert.equal(card.health.hidden, true);
+    assert.equal(card.health.textContent, "");
+    assert.equal(card.card.dataset.repositoryHealthState, "");
 });
 
 test("ready Git repositories display their queued and running PDF work instead of a green tick", async () => {

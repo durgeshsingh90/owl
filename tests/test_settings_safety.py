@@ -65,10 +65,10 @@ def test_daily_repository_refresh_hour_above_twenty_three_is_rejected(tmp_path):
     assert "BITBUCKET_DAILY_REFRESH_LOCAL_HOUR must be between 0 and 23" in result.stderr
 
 
-def test_bitbucket_inventory_and_search_page_sizes_are_capped_at_one_hundred(tmp_path):
+def test_bitbucket_inventory_is_capped_at_five_hundred_and_search_at_one_hundred(tmp_path):
     environment = _isolated_subprocess_environment(tmp_path)
-    environment["BITBUCKET_PDF_PAGE_SIZE"] = "500"
-    environment["BITBUCKET_SEARCH_PAGE_SIZE"] = "500"
+    environment["BITBUCKET_PDF_PAGE_SIZE"] = "999"
+    environment["BITBUCKET_SEARCH_PAGE_SIZE"] = "999"
 
     result = subprocess.run(
         [
@@ -87,7 +87,7 @@ def test_bitbucket_inventory_and_search_page_sizes_are_capped_at_one_hundred(tmp
     )
 
     assert result.returncode == 0
-    assert result.stdout.strip() == "100 100"
+    assert result.stdout.strip() == "500 100"
 
 
 @pytest.mark.parametrize(

@@ -31,7 +31,7 @@ def _repository(name: str = "networking") -> BitbucketRepository:
     )
 
 
-def test_inventory_pages_contain_at_most_one_hundred_pdfs_without_auto_loading(client):
+def test_inventory_pages_contain_at_most_five_hundred_pdfs_without_auto_loading(client):
     repository = _repository()
     PDFDocument.objects.bulk_create(
         [
@@ -40,26 +40,26 @@ def test_inventory_pages_contain_at_most_one_hundred_pdfs_without_auto_loading(c
                 filename=f"Plan {number}.pdf",
                 relative_path=f"docs/Plan {number}.pdf",
             )
-            for number in range(101)
+            for number in range(501)
         ]
     )
     first = client.get(reverse("bitbucket_search:index"))
     first_html = first.content.decode()
-    assert first_html.count("data-pdf-row") == 100
-    assert "100 PDFs per page" in first_html
+    assert first_html.count("data-pdf-row") == 500
+    assert "500 PDFs per page" in first_html
     assert "data-load-older" not in first_html
-    assert "data-pdf-visible-end>100</b> of 101 PDFs" in first_html
+    assert "data-pdf-visible-end>500</b> of 501 PDFs" in first_html
     next_url = reverse("bitbucket_search:document_page") + "?page=2"
     assert f'href="{next_url}" rel="next"' in first_html
     second = client.get(next_url)
     second_html = second.content.decode()
     assert second_html.count("data-pdf-row") == 1
-    assert "data-pdf-visible-start>101</b>" in second_html
+    assert "data-pdf-visible-start>501</b>" in second_html
     assert 'rel="prev"' in second_html
     first_ids = {document.pk for document in first.context["pdf_page"]}
     second_ids = {document.pk for document in second.context["pdf_page"]}
     assert not first_ids.intersection(second_ids)
-    assert len(first_ids | second_ids) == 101
+    assert len(first_ids | second_ids) == 501
 
 
 @pytest.mark.parametrize(
@@ -68,13 +68,26 @@ def test_inventory_pages_contain_at_most_one_hundred_pdfs_without_auto_loading(c
         (date(2026, 8, 30), "future", "Future Git date"),
         (date(2026, 8, 29), "today", "Today"),
         (date(2026, 8, 28), "yesterday", "Yesterday"),
+        (date(2026, 8, 27), "day-before-yesterday", "Day Before Yesterday"),
+        (date(2026, 8, 26), "week", "This Week"),
         (date(2026, 8, 24), "week", "This Week"),
+        (date(2026, 8, 23), "last-week", "Last Week"),
+        (date(2026, 8, 17), "last-week", "Last Week"),
+        (date(2026, 8, 16), "month", "This Month"),
         (date(2026, 8, 1), "month", "This Month"),
+        (date(2026, 7, 31), "last-month", "Last Month"),
+        (date(2026, 7, 1), "last-month", "Last Month"),
+        (date(2026, 6, 30), "three-months", "Last 3 Months"),
         (date(2026, 5, 29), "three-months", "Last 3 Months"),
+        (date(2026, 5, 28), "six-months", "Last 6 Months"),
         (date(2026, 2, 28), "six-months", "Last 6 Months"),
+        (date(2026, 2, 27), "year", "This Year"),
         (date(2026, 1, 1), "year", "This Year"),
         (date(2025, 12, 31), "last-year", "Last Year"),
-        (date(2024, 12, 31), "year-2024", "2024"),
+        (date(2025, 1, 1), "last-year", "Last Year"),
+        (date(2024, 12, 31), "last-two-years", "Last 2 Years"),
+        (date(2024, 8, 29), "last-two-years", "Last 2 Years"),
+        (date(2024, 8, 28), "year-2024", "2024"),
     ),
 )
 def test_timeline_buckets_are_exclusive_and_newest_first(value, expected_key, expected_label):
@@ -84,7 +97,33 @@ def test_timeline_buckets_are_exclusive_and_newest_first(value, expected_key, ex
     assert label == expected_label
 
 
-def test_timeline_row_labels_git_author_without_claiming_push_or_project_evidence(
+@override_settings(TIME_ZONE="Europe/Dublin")
+def test_timeline_groups_git_timestamp_by_owl_local_date(monkeypatch):
+    repository = _repository()
+    committed_at = datetime(2026, 8, 28, 23, 30, tzinfo=UTC)
+    commit = GitCommit.objects.create(
+        repository=repository,
+        commit_hash="f" * 40,
+        authored_at=committed_at,
+        committed_at=committed_at,
+    )
+    document = PDFDocument.objects.create(
+        repository=repository,
+        filename="Local date.pdf",
+        relative_path="Local date.pdf",
+        added_evidence=PDFDocumentAddedEvidence.CONFIRMED,
+        added_commit=commit,
+    )
+    monkeypatch.setattr(views.timezone, "localdate", lambda: date(2026, 8, 29))
+
+    with timezone.override("Europe/Dublin"):
+        page, groups = views._pdf_timeline_page(1)
+
+    assert [item.pk for item in page] == [document.pk]
+    assert [group.key for group in groups] == ["today"]
+
+
+def test_timeline_row_labels_author_without_claiming_push_or_project_evidence(
     tmp_path,
     settings,
 ):
@@ -113,7 +152,11 @@ def test_timeline_row_labels_git_author_without_claiming_push_or_project_evidenc
 
     row = views._timeline_row(document)
 
-    assert row.added_by_label == "A. Architect · Git author"
+    assert row.added_by_label == "A. Architect"
+    assert row.commit_hash == "a" * 40
+    assert row.short_commit_hash == "a" * 12
+    assert row.commit_copy_available is True
+    assert row.commit_detail == "Original Git addition commit"
     assert row.added_date_label == "20 Aug 2026"
     assert row.added_date_source_label == "Git addition"
     assert "Original Git addition" in row.added_date_detail
@@ -143,6 +186,10 @@ def test_unknown_git_addition_never_displays_owl_discovery_as_a_git_date(tmp_pat
     row = views._timeline_row(document)
 
     assert row.added_by_label == "Unavailable in available Git history"
+    assert row.commit_hash == ""
+    assert row.short_commit_hash == ""
+    assert row.commit_copy_available is False
+    assert row.commit_detail == ""
     assert row.added_date_label == "Unavailable"
     assert row.added_date_source_label == "Git date unavailable"
     assert "No Git commit timestamp is available" in row.added_date_detail
@@ -195,6 +242,10 @@ def test_list_and_search_show_original_repo_addition_not_discovery_or_latest_cha
     assert "00:30" in row_html
     assert "Git addition" in row_html
     assert "Original Author" in row_html
+    assert f'data-commit-id="{"b" * 40}"' in row_html
+    assert "<code>bbbbbbbbbbbb</code>" in row_html
+    assert f'data-commit-id="{"c" * 40}"' not in row_html
+    assert "Git author" not in row_html
     assert "2023" not in row_html
     assert "2026" not in row_html
     assert "OWL discovery" not in html
@@ -242,9 +293,12 @@ def test_unknown_addition_uses_latest_available_git_commit_and_never_owl_discove
     if with_commit:
         assert "2 Jan 2024" in row_html
         assert "Git commit" in row_html
+        assert f'data-commit-id="{"d" * 40}"' in row_html
+        assert "<code>dddddddddddd</code>" in row_html
     else:
         assert "Git date unavailable" in row_html
         assert "Unavailable" in row_html
+        assert "data-copy-commit-id" not in row_html
     if not search:
         expected_key, _label, _detail = views._timeline_bucket(
             timezone.localtime(commit.committed_at if commit else document.discovered_at).date(),

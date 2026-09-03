@@ -23,11 +23,13 @@ from bitbucket_search.services.pdf_search_query import (
     PDFSearchScope,
     PDFSearchSort,
 )
+from bitbucket_search.services.repository_lock import pdf_search_index_repair_lock
 from semantic_search.models import SemanticSourceType
 from semantic_search.services.search import semantic_search
 
 METADATA_FTS_TABLE = "bitbucket_search_pdf_metadata_fts"
 PAGE_FTS_TABLE = "bitbucket_search_pdf_page_fts"
+SEARCH_INDEX_SCHEMA_OBJECT_COUNT = 9
 SEARCH_INDEX_VERSION = 1
 MAX_SNIPPET_CHARACTERS = 240
 MAX_SNIPPET_SOURCE_CHARACTERS = MAX_SNIPPET_CHARACTERS * 2
@@ -117,8 +119,8 @@ class _BoundedPageText:
     has_source_suffix: bool
 
 
-def search_index_available() -> bool:
-    """Return whether both derived FTS tables are present in this database."""
+def _search_index_available(*, log_missing: bool) -> bool:
+    """Return whether all derived FTS tables and maintenance triggers exist."""
 
     try:
         with connection.cursor() as cursor:
@@ -126,9 +128,25 @@ def search_index_available() -> bool:
                 """
                 SELECT COUNT(*)
                 FROM sqlite_master
-                WHERE type = 'table' AND name IN (%s, %s)
+                WHERE (
+                    type = 'table'
+                    AND name IN (%s, %s)
+                ) OR (
+                    type = 'trigger'
+                    AND name IN (%s, %s, %s, %s, %s, %s, %s)
+                )
                 """,
-                (METADATA_FTS_TABLE, PAGE_FTS_TABLE),
+                (
+                    METADATA_FTS_TABLE,
+                    PAGE_FTS_TABLE,
+                    "bitbucket_search_pdf_metadata_fts_insert",
+                    "bitbucket_search_pdf_metadata_fts_delete",
+                    "bitbucket_search_pdf_metadata_fts_update",
+                    "bitbucket_search_pdf_repository_fts_update",
+                    "bitbucket_search_pdf_page_fts_insert",
+                    "bitbucket_search_pdf_page_fts_delete",
+                    "bitbucket_search_pdf_page_fts_update",
+                ),
             )
             row = cursor.fetchone()
     except DatabaseError as error:
@@ -140,16 +158,23 @@ def search_index_available() -> bool:
             stage="index_validation",
         )
         return False
-    available = bool(row and row[0] == 2)
-    if not available:
+    available = bool(row and row[0] == SEARCH_INDEX_SCHEMA_OBJECT_COUNT)
+    if not available and log_missing:
         log_event(
             logger,
             logging.ERROR,
             "pdf_search_index_missing",
             stage="index_validation",
-            reason="missing_fts_tables",
+            reason="missing_fts_schema_objects",
+            count=max(0, SEARCH_INDEX_SCHEMA_OBJECT_COUNT - int(row[0] if row else 0)),
         )
     return available
+
+
+def search_index_available() -> bool:
+    """Return whether the complete derived PDF FTS schema is available."""
+
+    return _search_index_available(log_missing=True)
 
 
 def rebuild_search_index() -> None:
@@ -171,26 +196,37 @@ def rebuild_search_index() -> None:
 
 
 def ensure_search_index_available() -> bool:
-    """Recreate missing derived FTS tables from canonical records when possible."""
+    """Recreate an incomplete derived FTS schema from canonical records."""
 
-    if search_index_available():
+    if _search_index_available(log_missing=False):
         return True
     migration = import_module("bitbucket_search.migrations.0004_pdf_fts_indexes")
     started = perf_counter()
     try:
-        with transaction.atomic(), connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (%s, %s)",
-                (METADATA_FTS_TABLE, PAGE_FTS_TABLE),
+        with pdf_search_index_repair_lock():
+            # Another OWL process may have repaired the same database while
+            # this process waited for the cross-platform service lock.
+            if _search_index_available(log_missing=False):
+                return True
+            log_event(
+                logger,
+                logging.WARNING,
+                "pdf_search_index_auto_repair_started",
+                stage="index_repair",
             )
-            existing = {row[0] for row in cursor.fetchall()}
-            if METADATA_FTS_TABLE not in existing:
+            with transaction.atomic(), connection.cursor() as cursor:
+                # These are disposable derived objects. Drop all expected
+                # triggers first so partial loss cannot leave orphan triggers
+                # that make CREATE TRIGGER fail with "already exists".
+                for statement in (*migration.DROP_PAGE_FTS, *migration.DROP_METADATA_FTS):
+                    cursor.execute(statement)
                 for statement in migration.CREATE_METADATA_FTS:
                     cursor.execute(statement)
-            if PAGE_FTS_TABLE not in existing:
                 for statement in migration.CREATE_PAGE_FTS:
                     cursor.execute(statement)
-    except DatabaseError as error:
+                if not _search_index_available(log_missing=False):
+                    raise DatabaseError("The rebuilt PDF search schema did not validate.")
+    except Exception as error:
         log_event(
             logger,
             logging.ERROR,
@@ -205,7 +241,7 @@ def ensure_search_index_available() -> bool:
         "pdf_search_index_auto_repaired",
         elapsed_ms=round((perf_counter() - started) * 1000),
     )
-    return search_index_available()
+    return _search_index_available(log_missing=False)
 
 
 @transaction.atomic

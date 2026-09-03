@@ -10,6 +10,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import OperationalError, close_old_connections
 
+from core.process_supervision import resident_supervisor_is_alive
 from semantic_search.services.jobs import sweep_semantic_index_queue, work_one_semantic_job
 from semantic_search.services.logging_events import get_logger, log_event
 
@@ -89,6 +90,15 @@ class Command(BaseCommand):
                 close_old_connections()
 
         while True:
+            if not resident_supervisor_is_alive():
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "resident_worker_parent_stopped",
+                    worker_pid=os.getpid(),
+                    parent_pid=os.getppid(),
+                )
+                return
             close_old_connections()
             try:
                 completed = work_one_semantic_job()

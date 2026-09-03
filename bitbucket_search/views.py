@@ -19,7 +19,14 @@ from django.contrib import messages
 from django.core.paginator import EmptyPage, Page, PageNotAnInteger, Paginator
 from django.db import OperationalError
 from django.db.models import Case, Count, DateTimeField, F, When
-from django.http import Http404, HttpRequest, HttpResponse, HttpResponseForbidden, JsonResponse
+from django.http import (
+    FileResponse,
+    Http404,
+    HttpRequest,
+    HttpResponse,
+    HttpResponseForbidden,
+    JsonResponse,
+)
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
@@ -32,6 +39,7 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 from bitbucket_search.models import (
     BitbucketPeopleGroup,
     BitbucketRepository,
+    GitCommit,
     PDFDocument,
     PDFDocumentAddedEvidence,
     PDFDocumentLifecycle,
@@ -50,6 +58,7 @@ from bitbucket_search.services.document_actions import (
     DocumentActionError,
     open_registered_pdf,
     open_registered_pdfs,
+    preview_registered_pdf,
     reveal_registered_pdf,
 )
 from bitbucket_search.services.git_output import bounded_git_output, sanitize_git_output
@@ -57,7 +66,6 @@ from bitbucket_search.services.git_sync import (
     GitHTTPSCredential,
     RepositorySyncError,
     managed_repository_path,
-    probe_bitbucket_ssh_connection,
     test_repository_connection,
 )
 from bitbucket_search.services.https_credentials import (
@@ -75,8 +83,8 @@ from bitbucket_search.services.pdf_local_policy import frozen_pdf_path
 from bitbucket_search.services.pdf_search import (
     PDFSearchHit,
     PDFSearchPage,
+    ensure_search_index_available,
     search_documents,
-    search_index_available,
 )
 from bitbucket_search.services.pdf_search_query import (
     MAX_COMMITTER_FILTERS,
@@ -132,6 +140,10 @@ class PDFTimelineRow:
     path_copy_available: bool
     project_label: str
     added_by_label: str
+    commit_hash: str
+    short_commit_hash: str
+    commit_copy_available: bool
+    commit_detail: str
     added_date_label: str
     added_date_source_label: str
     added_date_detail: str
@@ -275,6 +287,14 @@ def _timeline_bucket(value: date, *, today: date) -> tuple[str, str, str]:
     if value == yesterday:
         return "yesterday", "Yesterday", _display_date(yesterday)
 
+    day_before_yesterday = today - timedelta(days=2)
+    if value == day_before_yesterday:
+        return (
+            "day-before-yesterday",
+            "Day Before Yesterday",
+            _display_date(day_before_yesterday),
+        )
+
     week_start = today - timedelta(days=today.weekday())
     if value >= week_start:
         return (
@@ -283,9 +303,22 @@ def _timeline_bucket(value: date, *, today: date) -> tuple[str, str, str]:
             f"{_display_date(week_start)} – {_display_date(today)}",
         )
 
+    last_week_start = week_start - timedelta(days=7)
+    if value >= last_week_start:
+        last_week_end = week_start - timedelta(days=1)
+        return (
+            "last-week",
+            "Last Week",
+            f"{_display_date(last_week_start)} – {_display_date(last_week_end)}",
+        )
+
     month_start = today.replace(day=1)
     if value >= month_start:
         return "month", "This Month", date_format(today, "F Y")
+
+    last_month_start = _subtract_calendar_months(month_start, 1)
+    if value >= last_month_start:
+        return "last-month", "Last Month", date_format(last_month_start, "F Y")
 
     three_month_start = _subtract_calendar_months(today, 3)
     if value >= three_month_start:
@@ -300,6 +333,14 @@ def _timeline_bucket(value: date, *, today: date) -> tuple[str, str, str]:
 
     if value.year == today.year - 1:
         return "last-year", "Last Year", str(today.year - 1)
+
+    two_year_start = _subtract_calendar_months(today, 24)
+    if value >= two_year_start:
+        return (
+            "last-two-years",
+            "Last 2 Years",
+            f"Since {_display_date(two_year_start)}",
+        )
 
     year = str(value.year)
     return f"year-{year}", year, "Older PDFs"
@@ -373,17 +414,22 @@ def _display_full_path(document: PDFDocument) -> str:
     return str(candidate)
 
 
-def _repository_added_at(document: PDFDocument) -> datetime | None:
-    """Use the best available real Git timestamp, never OWL discovery time."""
+def _repository_commit(document: PDFDocument) -> GitCommit | None:
+    """Return the Git commit that supports the PDF's displayed provenance."""
 
     if (
         document.added_evidence == PDFDocumentAddedEvidence.CONFIRMED
         and document.added_commit is not None
     ):
-        return document.added_commit.committed_at
-    if document.last_commit is not None:
-        return document.last_commit.committed_at
-    return None
+        return document.added_commit
+    return document.last_commit
+
+
+def _repository_added_at(document: PDFDocument) -> datetime | None:
+    """Use the best available real Git timestamp, never OWL discovery time."""
+
+    commit = _repository_commit(document)
+    return commit.committed_at if commit is not None else None
 
 
 def _timeline_display_at(document: PDFDocument) -> datetime:
@@ -397,27 +443,33 @@ def _timeline_row(
     *,
     search_hit: PDFSearchHit | None = None,
 ) -> PDFTimelineRow:
-    added_at = _repository_added_at(document)
-    displayed_at = _timeline_display_at(document)
+    repository_commit = _repository_commit(document)
+    added_at = repository_commit.committed_at if repository_commit is not None else None
     original_addition = (
         document.added_evidence == PDFDocumentAddedEvidence.CONFIRMED
         and document.added_commit is not None
     )
     if original_addition:
-        added_by = f"{document.added_commit.author_name} · Git author"
+        added_by = repository_commit.author_name
         added_source = "Git addition"
         added_detail = f"Original Git addition · {_display_datetime(added_at)}"
-    elif added_at is not None:
-        added_by = f"{document.last_commit.author_name} · Git author"
+        commit_detail = "Original Git addition commit"
+    elif repository_commit is not None:
+        added_by = repository_commit.author_name
         added_source = "Git commit"
         added_detail = (
             f"Latest available Git commit · {_display_datetime(added_at)}. "
             "The original addition commit is outside the available history."
         )
+        commit_detail = "Latest available Git commit"
     else:
         added_by = "Unavailable in available Git history"
         added_source = "Git date unavailable"
         added_detail = "No Git commit timestamp is available in the synchronized history."
+        commit_detail = ""
+
+    if added_by == "Unknown Git author":
+        added_by = "Unknown author"
 
     history_label = (
         "Available history" if document.repository.history_is_shallow else "Full reachable history"
@@ -427,6 +479,7 @@ def _timeline_row(
 
     full_path = _display_full_path(document)
     path_copy_available = not full_path.startswith("Unavailable:")
+    commit_hash = repository_commit.commit_hash if repository_commit is not None else ""
     local_policy = getattr(document, "local_policy", None)
     return PDFTimelineRow(
         document=document,
@@ -439,6 +492,10 @@ def _timeline_row(
         path_copy_available=path_copy_available,
         project_label=_project_label(document.repository),
         added_by_label=added_by,
+        commit_hash=commit_hash,
+        short_commit_hash=commit_hash[:12],
+        commit_copy_available=bool(commit_hash),
+        commit_detail=commit_detail,
         added_date_label=(
             _display_date(timezone.localtime(added_at).date())
             if added_at is not None
@@ -1245,7 +1302,7 @@ def _index_context(
         "open_all_confirm_threshold": settings.OPEN_ALL_CONFIRM_THRESHOLD,
         "next_search_page_url": next_search_page_url,
         "previous_search_page_url": previous_search_page_url,
-        "search_index_available": search_index_available(),
+        "search_index_available": ensure_search_index_available(),
         "extraction_status": extraction_status,
         "extraction_payload": extraction_payload,
         "vsdx_count": vsdx_count,
@@ -1391,17 +1448,11 @@ def repositories(request: HttpRequest) -> HttpResponse:
 @never_cache
 @_logged_web_action("repository_connection_test")
 def repository_connection_test(request: HttpRequest) -> JsonResponse:
-    """Run SSH-key authentication, then read-only repository checks."""
+    """Run one explicit, read-only check against each enabled repository."""
 
     local_error = _require_local_action(request)
     if local_error:
         return local_error
-    try:
-        probe_bitbucket_ssh_connection()
-    except RepositorySyncError:
-        ssh_connected = False
-    else:
-        ssh_connected = True
     results = []
     for repository in BitbucketRepository.objects.filter(enabled=True).order_by("display_name"):
         try:
@@ -1410,29 +1461,67 @@ def repository_connection_test(request: HttpRequest) -> JsonResponse:
                 GitHTTPSCredential(username=saved.username, token=saved.token) if saved else None
             )
             test_repository_connection(repository, https_credential=credential)
-        except (RepositorySyncError, HTTPSCredentialUnavailable):
-            results.append({"id": repository.pk, "name": repository.display_name, "connected": False})
+        except RepositorySyncError as error:
+            results.append(
+                {
+                    "id": repository.pk,
+                    "name": repository.display_name,
+                    "connected": False,
+                    "errorCode": error.code,
+                    "detail": error.summary,
+                }
+            )
+        except HTTPSCredentialUnavailable:
+            results.append(
+                {
+                    "id": repository.pk,
+                    "name": repository.display_name,
+                    "connected": False,
+                    "errorCode": "https_credential_unavailable",
+                    "detail": (
+                        "The saved HTTPS credential is unavailable. "
+                        "Replace it in Settings, then test again."
+                    ),
+                }
+            )
         else:
-            results.append({"id": repository.pk, "name": repository.display_name, "connected": True})
+            results.append(
+                {
+                    "id": repository.pk,
+                    "name": repository.display_name,
+                    "connected": True,
+                    "errorCode": "",
+                    "detail": "Repository connection passed.",
+                }
+            )
     failed = sum(not item["connected"] for item in results)
-    connection_failed = not ssh_connected or bool(failed)
+    connection_failed = bool(failed)
+    repository_count = len(results)
+    if not repository_count:
+        state = "idle"
+        label = "No repository connections to test"
+        detail = "Add or enable a repository, then test again."
+    elif connection_failed:
+        state = "failed"
+        label = "Git connection failed"
+        detail = (
+            f"{failed} of {repository_count} repository "
+            f"connection{'s' if repository_count != 1 else ''} failed."
+        )
+    else:
+        state = "connected"
+        label = "Git connection passed"
+        detail = (
+            f"{repository_count} repository "
+            f"connection{'s' if repository_count != 1 else ''} passed."
+        )
     return JsonResponse(
         {
-            "state": "failed" if connection_failed else "connected",
-            "label": "Git connection failed" if connection_failed else "Git connection passed",
-            "detail": (
-                f"SSH key authentication and {len(results)} repository connections passed."
-                if not connection_failed
-                else (
-                    "Bitbucket SSH key authentication failed."
-                    if not ssh_connected
-                    else f"{failed} of {len(results)} repository connection tests failed."
-                )
-            ),
-            "ssh": {"host": "bitbucket.org", "connected": ssh_connected},
+            "state": state,
+            "label": label,
+            "detail": detail,
             "repositories": results,
-        },
-        status=400 if connection_failed else 200,
+        }
     )
 
 
@@ -1668,6 +1757,38 @@ def _bulk_open_payload(result: BulkDocumentOpenResult) -> dict[str, object]:
             for failure in result.usage_failures
         ],
     }
+
+
+@require_POST
+@csrf_protect
+@never_cache
+@_logged_web_action("pdf_preview")
+def preview_document(request: HttpRequest, document_id: int) -> HttpResponse:
+    """Stream one registered local PDF inline to a new browser tab."""
+
+    local_error = _require_strict_loopback_action(request)
+    if local_error:
+        return local_error
+    try:
+        document, stream = preview_registered_pdf(document_id)
+    except DocumentActionError as exc:
+        return _document_action_failure(request, exc, document_id=document_id)
+
+    try:
+        response = FileResponse(
+            stream,
+            as_attachment=False,
+            filename=document.filename,
+            content_type="application/pdf",
+        )
+    except Exception:
+        stream.close()
+        raise
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    return response
 
 
 @require_POST
@@ -1933,8 +2054,7 @@ def add_repository(request: HttpRequest) -> HttpResponse:
                         "state": "worker_unavailable",
                         "detail": detail,
                         "repositories": [
-                            _repository_payload(result.repository)
-                            for result in queued_results
+                            _repository_payload(result.repository) for result in queued_results
                         ],
                     },
                     status=503,
@@ -1972,8 +2092,7 @@ def add_repository(request: HttpRequest) -> HttpResponse:
                     "queued": queued_count,
                     "alreadyRunning": active_count,
                     "repositories": [
-                        _repository_payload(result.repository)
-                        for result in queued_results
+                        _repository_payload(result.repository) for result in queued_results
                     ],
                 },
                 status=202,
@@ -2717,9 +2836,7 @@ def repository_status(request: HttpRequest) -> JsonResponse:
                 "indexing": settings.PDF_MAX_EXTRACTION_WORKERS,
                 "publication": 1,
                 "total": (
-                    settings.BITBUCKET_MAX_REPO_WORKERS
-                    + settings.PDF_MAX_EXTRACTION_WORKERS
-                    + 1
+                    settings.BITBUCKET_MAX_REPO_WORKERS + settings.PDF_MAX_EXTRACTION_WORKERS + 1
                 ),
             },
             "totals": {

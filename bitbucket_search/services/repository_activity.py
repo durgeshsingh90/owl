@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from django.db.models import Avg, Count, Max, Min, Q
+from django.db.models import Avg, Count, Min, Q
 from django.utils import timezone
 
 from bitbucket_search.models import (
@@ -20,6 +20,8 @@ from bitbucket_search.models import (
     RepositorySyncOperation,
     RepositorySyncPhase,
 )
+from bitbucket_search.services.pdf_indexing import STALE_EXTRACTION_AFTER
+from bitbucket_search.services.repository_sync import STALE_JOB_AFTER
 from bitbucket_search.services.repository_worker_timing import (
     current_pdf_extraction_jobs,
     latest_repository_pdf_run_jobs,
@@ -31,6 +33,8 @@ _OPERATION_LABELS = {
     "pull": "Git pull",
     "indexing": "PDF indexing",
 }
+_HEARTBEAT_DELAY_AFTER = timedelta(seconds=30)
+_HEALTH_PRIORITY = {"healthy": 0, "delayed": 1, "stalled": 2}
 
 
 def _sync_stage(operation: str, phase: str) -> tuple[str, str]:
@@ -62,6 +66,63 @@ def _iso_start(started_at: object, observed_at: datetime) -> str | None:
     ):
         return None
     return started_at.isoformat()
+
+
+def _running_worker_health(
+    samples: Iterable[tuple[object, object, timedelta]],
+    *,
+    observed_at: datetime,
+) -> tuple[str | None, str, str | None]:
+    """Describe durable worker liveness without treating a long job as a stalled job."""
+
+    states = []
+    heartbeats = []
+    waiting_for_first_heartbeat = False
+    for heartbeat_at, started_at, stale_after in samples:
+        heartbeat = (
+            heartbeat_at
+            if isinstance(heartbeat_at, datetime)
+            and not timezone.is_naive(heartbeat_at)
+            and heartbeat_at <= observed_at
+            else None
+        )
+        started = (
+            started_at
+            if isinstance(started_at, datetime)
+            and not timezone.is_naive(started_at)
+            and started_at <= observed_at
+            else None
+        )
+        if heartbeat is not None:
+            heartbeats.append(heartbeat)
+            age = observed_at - heartbeat
+            states.append(
+                "stalled"
+                if age >= stale_after
+                else "delayed"
+                if age >= _HEARTBEAT_DELAY_AFTER
+                else "healthy"
+            )
+            continue
+        waiting_for_first_heartbeat = True
+        states.append(
+            "stalled" if started is not None and observed_at - started >= stale_after else "delayed"
+        )
+    if not states:
+        return None, "", None
+    state = max(states, key=_HEALTH_PRIORITY.__getitem__)
+    if state == "stalled":
+        label = "Worker stalled · restarting automatically"
+    elif state == "delayed":
+        label = (
+            "Waiting for worker heartbeat"
+            if waiting_for_first_heartbeat and not heartbeats
+            else "Worker response delayed"
+        )
+    else:
+        label = "Worker responding"
+    heartbeat = min(heartbeats).isoformat() if heartbeats else None
+    return state, label, heartbeat
 
 
 def _operation_activity(
@@ -198,7 +259,8 @@ def with_repository_activity(
     }
     pdf_attempt_counts: dict[int, Counter] = defaultdict(Counter)
     for row in (
-        latest_repository_pdf_run_jobs().filter(document__repository_id__in=repository_ids)
+        latest_repository_pdf_run_jobs()
+        .filter(document__repository_id__in=repository_ids)
         .values("document__repository_id", "status")
         .annotate(total=Count("id"))
         .order_by()
@@ -207,6 +269,7 @@ def with_repository_activity(
         pdf_attempt_counts[repository_id][row["status"]] = row["total"]
     sync_counts: dict[int, Counter] = defaultdict(Counter)
     sync_jobs: dict[int, dict[str, dict[str, object]]] = defaultdict(dict)
+    sync_health_samples: dict[int, list[tuple[object, object, timedelta]]] = defaultdict(list)
     for row in (
         RepositorySyncJob.objects.filter(
             repository_id__in=repository_ids,
@@ -226,6 +289,10 @@ def with_repository_activity(
     ):
         sync_counts[row["repository_id"]][row["status"]] += 1
         sync_jobs[row["repository_id"]][row["status"]] = row
+        if row["status"] == RepositorySyncJobStatus.RUNNING:
+            sync_health_samples[row["repository_id"]].append(
+                (row["heartbeat_at"], row["started_at"], STALE_JOB_AFTER)
+            )
 
     pdf_counts: dict[int, Counter] = defaultdict(Counter)
     current_pdf_counts: dict[int, Counter] = defaultdict(Counter)
@@ -247,7 +314,11 @@ def with_repository_activity(
             current=Count("id", filter=Q(pk__in=current_job_ids)),
             current_progress=Avg("progress", filter=current_running),
             current_started_at=Min("started_at", filter=current_running),
-            current_heartbeat_at=Max("heartbeat_at", filter=current_running),
+            oldest_running_heartbeat_at=Min("heartbeat_at"),
+            oldest_missing_heartbeat_started_at=Min(
+                "started_at", filter=Q(heartbeat_at__isnull=True)
+            ),
+            missing_heartbeat_count=Count("id", filter=Q(heartbeat_at__isnull=True)),
         )
         .order_by()
     ):
@@ -281,6 +352,24 @@ def with_repository_activity(
         running_pdfs = pdfs[PDFExtractionJobStatus.RUNNING]
         running_sync_job = sync_jobs[repository.pk].get(RepositorySyncJobStatus.RUNNING)
         queued_sync_job = sync_jobs[repository.pk].get(RepositorySyncJobStatus.QUEUED)
+        running_health_samples = list(sync_health_samples[repository.pk])
+        running_pdf_metrics = pdf_metrics[repository.pk].get(PDFExtractionJobStatus.RUNNING, {})
+        if running_pdfs:
+            oldest_pdf_heartbeat = running_pdf_metrics.get("oldest_running_heartbeat_at")
+            if oldest_pdf_heartbeat is not None:
+                running_health_samples.append((oldest_pdf_heartbeat, None, STALE_EXTRACTION_AFTER))
+            if running_pdf_metrics.get("missing_heartbeat_count"):
+                running_health_samples.append(
+                    (
+                        None,
+                        running_pdf_metrics.get("oldest_missing_heartbeat_started_at"),
+                        STALE_EXTRACTION_AFTER,
+                    )
+                )
+        health_state, health_label, heartbeat_at = _running_worker_health(
+            running_health_samples,
+            observed_at=observed_at,
+        )
         repository.has_active_work = bool(
             repository.has_active_sync or queued_sync or running_sync or queued_pdfs or running_pdfs
         )
@@ -392,6 +481,9 @@ def with_repository_activity(
             "progressScope": primary_activity["progressScope"] if primary_activity else None,
             "startedAt": primary_activity["startedAt"] if primary_activity else None,
             "observedAt": primary_activity["observedAt"] if primary_activity else None,
+            "heartbeatAt": heartbeat_at,
+            "healthState": health_state,
+            "healthLabel": health_label,
             "operations": operations,
             "queuedPdfs": queued_pdfs,
             "runningPdfs": running_pdfs,
@@ -403,7 +495,9 @@ def with_repository_activity(
                 "running": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.RUNNING],
                 "passed": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.SUCCEEDED],
                 "failed": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.FAILED],
-                "interrupted": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.INTERRUPTED],
+                "interrupted": pdf_attempt_counts[repository.pk][
+                    PDFExtractionJobStatus.INTERRUPTED
+                ],
                 "cancelled": pdf_attempt_counts[repository.pk][PDFExtractionJobStatus.CANCELLED],
             },
         }

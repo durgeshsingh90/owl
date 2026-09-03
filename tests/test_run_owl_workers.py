@@ -2,25 +2,540 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import threading
 from unittest.mock import Mock
 
 import pytest
 from django.core.management import call_command
 
-from bitbucket_search.management.commands import bitbucket_index_worker, bitbucket_sync_worker
+from bitbucket_search.management.commands import (
+    bitbucket_index_worker,
+    bitbucket_pdf_writer,
+    bitbucket_sync_worker,
+)
+from bitbucket_search.models import (
+    BitbucketRepository,
+    PDFDocument,
+    PDFExtractionJob,
+    PDFExtractionJobStatus,
+    RepositorySyncJob,
+    RepositorySyncJobStatus,
+    RepositorySyncOperation,
+)
 from bookmark_manager.management.commands import run_owl
+from bookmark_manager.models import Bookmark, ConfluencePageNode
+from core.process_supervision import RESIDENT_SUPERVISOR_PID_ENV
+from semantic_search.management.commands import semantic_index_worker
+from semantic_search.models import (
+    SemanticIndexJob,
+    SemanticIndexJobStatus,
+    SemanticSourceType,
+)
 
 pytestmark = pytest.mark.django_db
 
 
 class _ResidentProcess:
-    def __init__(self, role: str) -> None:
+    def __init__(self, role: str, pid: int | None = None) -> None:
         self.role = role
+        self.pid = pid
         self.returncode = None
 
     def poll(self):
         return self.returncode
+
+
+def _repository() -> BitbucketRepository:
+    return BitbucketRepository.objects.create(
+        display_name="Synthetic repository",
+        canonical_remote_key="example.invalid/team/keep-awake",
+        remote_url="https://example.invalid/team/keep-awake.git",
+    )
+
+
+def _pdf_job(*, status: str) -> PDFExtractionJob:
+    repository = _repository()
+    document = PDFDocument.objects.create(
+        repository=repository,
+        filename="Synthetic.pdf",
+        relative_path="docs/Synthetic.pdf",
+        git_blob_id="a" * 40,
+        last_seen_commit="b" * 40,
+        file_size=128,
+    )
+    return PDFExtractionJob.objects.create(
+        document=document,
+        target_git_blob_id=document.git_blob_id,
+        target_source_commit=document.last_seen_commit,
+        target_relative_path=document.relative_path,
+        target_file_size=document.file_size,
+        target_extractor_version="synthetic-v1",
+        status=status,
+    )
+
+
+def _semantic_job(*, status: str) -> SemanticIndexJob:
+    node = ConfluencePageNode.objects.create(
+        page_id="keep-awake-page",
+        title="Synthetic page",
+        url="https://example.invalid/pages/keep-awake",
+    )
+    bookmark = Bookmark.objects.create(
+        page_id=node.page_id,
+        tree_node=node,
+        title=node.title,
+        url=node.url,
+    )
+    return SemanticIndexJob.objects.create(
+        source_type=SemanticSourceType.BOOKMARK,
+        bookmark=bookmark,
+        target_content_hash="c" * 64,
+        target_model_version="synthetic-model-v1",
+        target_chunker_version="synthetic-chunker-v1",
+        status=status,
+    )
+
+
+@pytest.mark.parametrize(
+    ("queue_name", "status"),
+    (
+        ("repository", RepositorySyncJobStatus.QUEUED),
+        ("repository", RepositorySyncJobStatus.RUNNING),
+        ("pdf", PDFExtractionJobStatus.QUEUED),
+        ("pdf", PDFExtractionJobStatus.RUNNING),
+        ("semantic", SemanticIndexJobStatus.QUEUED),
+        ("semantic", SemanticIndexJobStatus.RUNNING),
+    ),
+)
+def test_background_work_active_for_every_durable_queue(settings, queue_name, status):
+    settings.SEMANTIC_SEARCH_ENABLED = True
+    if queue_name == "repository":
+        RepositorySyncJob.objects.create(
+            repository=_repository(),
+            operation=RepositorySyncOperation.CLONE,
+            status=status,
+        )
+    elif queue_name == "pdf":
+        _pdf_job(status=status)
+    else:
+        _semantic_job(status=status)
+
+    assert run_owl._background_work_active() is True
+
+
+def test_background_work_active_ignores_terminal_jobs(settings):
+    settings.SEMANTIC_SEARCH_ENABLED = True
+    repository = _repository()
+    RepositorySyncJob.objects.create(
+        repository=repository,
+        operation=RepositorySyncOperation.CLONE,
+        status=RepositorySyncJobStatus.SUCCEEDED,
+    )
+    document = PDFDocument.objects.create(
+        repository=repository,
+        filename="Terminal.pdf",
+        relative_path="docs/Terminal.pdf",
+    )
+    PDFExtractionJob.objects.create(
+        document=document,
+        target_git_blob_id="a" * 40,
+        target_source_commit="b" * 40,
+        target_relative_path=document.relative_path,
+        target_extractor_version="synthetic-v1",
+        status=PDFExtractionJobStatus.SUCCEEDED,
+    )
+    _semantic_job(status=SemanticIndexJobStatus.SUCCEEDED)
+
+    assert run_owl._background_work_active() is False
+
+
+def test_background_work_active_ignores_semantic_queue_when_disabled(settings):
+    settings.SEMANTIC_SEARCH_ENABLED = False
+    _semantic_job(status=SemanticIndexJobStatus.RUNNING)
+
+    assert run_owl._background_work_active() is False
+
+
+def test_display_awake_launch_uses_mac_display_and_idle_assertions(
+    monkeypatch,
+    settings,
+    tmp_path,
+):
+    settings.OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK = True
+    executable = tmp_path / "caffeinate"
+    executable.touch()
+    process = Mock(pid=321)
+    popen = Mock(return_value=process)
+    monkeypatch.setattr(run_owl, "CAFFEINATE_PATH", executable)
+    monkeypatch.setattr(run_owl.sys, "platform", "darwin")
+    monkeypatch.setattr(run_owl.subprocess, "Popen", popen)
+
+    assertion = run_owl._launch_display_awake_assertion()
+
+    assert assertion is not None
+    assert assertion.backend == "macos"
+    assert assertion.owner_thread_id == threading.get_ident()
+    assert assertion.process is process
+    assert popen.call_args.args[0] == [
+        str(executable),
+        "-di",
+        "-w",
+        str(os.getpid()),
+    ]
+    assert popen.call_args.kwargs == {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+        "start_new_session": True,
+    }
+
+
+def test_display_awake_reconcile_starts_once_and_releases_when_idle(
+    monkeypatch,
+    settings,
+):
+    settings.OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK = True
+    monkeypatch.setattr(run_owl.sys, "platform", "darwin")
+    process = Mock(pid=321)
+    process.poll.return_value = None
+    assertion = run_owl._DisplayAwakeAssertion(
+        backend="macos",
+        owner_thread_id=threading.get_ident(),
+        process=process,
+    )
+    launch = Mock(return_value=assertion)
+    stop = Mock(return_value=True)
+    monkeypatch.setattr(run_owl, "_launch_display_awake_assertion", launch)
+    monkeypatch.setattr(run_owl, "_stop_display_awake_assertion", stop)
+
+    active = run_owl._reconcile_display_awake_assertion(None, work_active=True)
+    retained = run_owl._reconcile_display_awake_assertion(active, work_active=True)
+    released = run_owl._reconcile_display_awake_assertion(retained, work_active=False)
+
+    assert active is assertion
+    assert retained is assertion
+    assert released is None
+    launch.assert_called_once_with()
+    stop.assert_called_once_with(assertion)
+
+
+def test_display_awake_reconcile_relaunches_an_exited_helper(
+    monkeypatch,
+    settings,
+):
+    settings.OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK = True
+    monkeypatch.setattr(run_owl.sys, "platform", "darwin")
+    exited = Mock(pid=321)
+    exited.poll.return_value = 9
+    exited_assertion = run_owl._DisplayAwakeAssertion(
+        backend="macos",
+        owner_thread_id=threading.get_ident(),
+        process=exited,
+    )
+    replacement = run_owl._DisplayAwakeAssertion(
+        backend="macos",
+        owner_thread_id=threading.get_ident(),
+        process=Mock(pid=654),
+    )
+    launch = Mock(return_value=replacement)
+    monkeypatch.setattr(run_owl, "_launch_display_awake_assertion", launch)
+
+    result = run_owl._reconcile_display_awake_assertion(exited_assertion, work_active=True)
+
+    assert result is replacement
+    launch.assert_called_once_with()
+
+
+def test_display_awake_launch_failure_is_nonfatal_and_retryable(
+    monkeypatch,
+    settings,
+    tmp_path,
+):
+    settings.OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK = True
+    executable = tmp_path / "caffeinate"
+    executable.touch()
+    process = Mock(pid=321)
+    popen = Mock(side_effect=[OSError("synthetic launch failure"), process])
+    monkeypatch.setattr(run_owl, "CAFFEINATE_PATH", executable)
+    monkeypatch.setattr(run_owl.sys, "platform", "darwin")
+    monkeypatch.setattr(run_owl.subprocess, "Popen", popen)
+
+    assert run_owl._reconcile_display_awake_assertion(None, work_active=True) is None
+    assertion = run_owl._reconcile_display_awake_assertion(None, work_active=True)
+
+    assert assertion is not None
+    assert assertion.backend == "macos"
+    assert assertion.process is process
+    assert popen.call_count == 2
+
+
+def test_display_awake_is_a_noop_on_unsupported_platform(monkeypatch, settings):
+    settings.OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK = True
+    popen = Mock()
+    monkeypatch.setattr(run_owl.sys, "platform", "linux")
+    monkeypatch.setattr(run_owl.subprocess, "Popen", popen)
+
+    assert run_owl._reconcile_display_awake_assertion(None, work_active=True) is None
+    popen.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("feature_enabled", "platform"),
+    ((False, "darwin"), (True, "linux")),
+)
+def test_display_awake_skips_queue_queries_when_unsupported(
+    monkeypatch,
+    settings,
+    feature_enabled,
+    platform,
+):
+    settings.OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK = feature_enabled
+    queue_check = Mock()
+    monkeypatch.setattr(run_owl.sys, "platform", platform)
+    monkeypatch.setattr(run_owl, "_background_work_active", queue_check)
+
+    assert run_owl._reconcile_display_awake_for_current_queues(None) is None
+    queue_check.assert_not_called()
+
+
+def test_display_awake_does_not_spawn_when_caffeinate_is_missing(
+    monkeypatch,
+    settings,
+    tmp_path,
+):
+    settings.OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK = True
+    popen = Mock()
+    monkeypatch.setattr(run_owl.sys, "platform", "darwin")
+    monkeypatch.setattr(run_owl, "CAFFEINATE_PATH", tmp_path / "missing-caffeinate")
+    monkeypatch.setattr(run_owl.subprocess, "Popen", popen)
+
+    assert run_owl._launch_display_awake_assertion() is None
+    popen.assert_not_called()
+
+
+def test_windows_execution_state_wrapper_uses_kernel32_and_32_bit_flags(monkeypatch):
+    import ctypes
+
+    calls: list[int] = []
+
+    class Operation:
+        argtypes = None
+        restype = None
+
+        def __call__(self, flags):
+            calls.append(flags)
+            return run_owl.WINDOWS_ES_CONTINUOUS
+
+    operation = Operation()
+    kernel = type("Kernel", (), {"SetThreadExecutionState": operation})()
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel, raising=False)
+
+    run_owl._set_windows_execution_state(run_owl.WINDOWS_AWAKE_EXECUTION_STATE)
+
+    assert calls == [0x80000003]
+    assert operation.argtypes == (ctypes.c_uint32,)
+    assert operation.restype is ctypes.c_uint32
+
+
+def test_windows_execution_state_wrapper_reports_native_failure(monkeypatch):
+    import ctypes
+
+    class Operation:
+        def __call__(self, _flags):
+            return 0
+
+    kernel = type("Kernel", (), {"SetThreadExecutionState": Operation()})()
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)
+
+    with pytest.raises(OSError) as error:
+        run_owl._set_windows_execution_state(run_owl.WINDOWS_AWAKE_EXECUTION_STATE)
+
+    assert error.value.errno == 5
+
+
+def test_windows_display_awake_sets_once_and_clears_on_idle(monkeypatch, settings):
+    settings.OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK = True
+    native_call = Mock()
+    monkeypatch.setattr(run_owl.sys, "platform", "win32")
+    monkeypatch.setattr(run_owl, "_set_windows_execution_state", native_call)
+
+    active = run_owl._reconcile_display_awake_assertion(None, work_active=True)
+    retained = run_owl._reconcile_display_awake_assertion(active, work_active=True)
+    released = run_owl._reconcile_display_awake_assertion(retained, work_active=False)
+
+    assert active is not None
+    assert active.backend == "windows"
+    assert active.owner_thread_id == threading.get_ident()
+    assert active.process is None
+    assert retained is active
+    assert released is None
+    assert [item.args[0] for item in native_call.call_args_list] == [
+        run_owl.WINDOWS_AWAKE_EXECUTION_STATE,
+        run_owl.WINDOWS_ES_CONTINUOUS,
+    ]
+    assert run_owl.WINDOWS_AWAKE_EXECUTION_STATE == 0x80000003
+
+
+def test_windows_display_awake_activation_failure_is_retried(monkeypatch, settings):
+    settings.OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK = True
+    native_call = Mock(side_effect=[OSError("synthetic activation failure"), None])
+    monkeypatch.setattr(run_owl.sys, "platform", "win32")
+    monkeypatch.setattr(run_owl, "_set_windows_execution_state", native_call)
+
+    first = run_owl._reconcile_display_awake_assertion(None, work_active=True)
+    second = run_owl._reconcile_display_awake_assertion(first, work_active=True)
+
+    assert first is None
+    assert second is not None
+    assert second.backend == "windows"
+    assert [item.args[0] for item in native_call.call_args_list] == [
+        run_owl.WINDOWS_AWAKE_EXECUTION_STATE,
+        run_owl.WINDOWS_AWAKE_EXECUTION_STATE,
+    ]
+
+
+def test_windows_display_awake_release_failure_is_retried(monkeypatch, settings):
+    settings.OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK = True
+    native_call = Mock(side_effect=[None, OSError("synthetic release failure"), None])
+    monkeypatch.setattr(run_owl.sys, "platform", "win32")
+    monkeypatch.setattr(run_owl, "_set_windows_execution_state", native_call)
+
+    active = run_owl._reconcile_display_awake_assertion(None, work_active=True)
+    retained = run_owl._reconcile_display_awake_assertion(active, work_active=False)
+    released = run_owl._reconcile_display_awake_assertion(retained, work_active=False)
+
+    assert active is not None
+    assert retained is active
+    assert released is None
+    assert [item.args[0] for item in native_call.call_args_list] == [
+        run_owl.WINDOWS_AWAKE_EXECUTION_STATE,
+        run_owl.WINDOWS_ES_CONTINUOUS,
+        run_owl.WINDOWS_ES_CONTINUOUS,
+    ]
+
+
+def test_windows_display_awake_refuses_release_from_another_thread(
+    monkeypatch,
+    settings,
+):
+    settings.OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK = True
+    native_call = Mock()
+    launch = Mock()
+    monkeypatch.setattr(run_owl.sys, "platform", "win32")
+    monkeypatch.setattr(run_owl, "_set_windows_execution_state", native_call)
+    monkeypatch.setattr(run_owl, "_launch_display_awake_assertion", launch)
+    assertion = run_owl._DisplayAwakeAssertion(
+        backend="windows",
+        owner_thread_id=threading.get_ident() + 1,
+    )
+
+    assert run_owl._stop_display_awake_assertion(assertion) is False
+    assert run_owl._reconcile_display_awake_assertion(assertion, work_active=True) is assertion
+    native_call.assert_not_called()
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("platform", "backend"),
+    (("darwin", "macos"), ("win32", "windows")),
+)
+def test_display_awake_starts_conservatively_when_queue_state_is_unavailable(
+    monkeypatch,
+    settings,
+    platform,
+    backend,
+):
+    settings.OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK = True
+    monkeypatch.setattr(run_owl.sys, "platform", platform)
+    monkeypatch.setattr(
+        run_owl,
+        "_background_work_active",
+        Mock(side_effect=RuntimeError("synthetic database failure")),
+    )
+    assertion = run_owl._DisplayAwakeAssertion(
+        backend=backend,
+        owner_thread_id=threading.get_ident(),
+        process=Mock(pid=321) if backend == "macos" else None,
+    )
+    launch = Mock(return_value=assertion)
+    monkeypatch.setattr(run_owl, "_launch_display_awake_assertion", launch)
+
+    assert run_owl._reconcile_display_awake_for_current_queues(None) is assertion
+    launch.assert_called_once_with()
+
+
+def test_display_awake_stop_kills_only_helper_that_will_not_terminate():
+    process = Mock(pid=321)
+    process.poll.return_value = None
+    process.wait.side_effect = [subprocess.TimeoutExpired("caffeinate", 2), 0]
+    assertion = run_owl._DisplayAwakeAssertion(
+        backend="macos",
+        owner_thread_id=threading.get_ident(),
+        process=process,
+    )
+
+    assert run_owl._stop_display_awake_assertion(assertion) is True
+
+    process.terminate.assert_called_once_with()
+    process.kill.assert_called_once_with()
+    assert process.wait.call_count == 2
+
+
+def test_supervisor_releases_display_assertion_even_when_worker_shutdown_fails(
+    monkeypatch,
+    settings,
+):
+    settings.SEMANTIC_SEARCH_ENABLED = False
+    stop_event = threading.Event()
+    worker = _ResidentProcess("bitbucket_sync_worker", pid=123)
+    awake = Mock(pid=321)
+    reconcile_awake = Mock(return_value=awake)
+    stop_awake = Mock()
+
+    monkeypatch.setattr(run_owl, "resident_repository_workers_active", Mock(return_value=False))
+    monkeypatch.setattr(run_owl, "set_resident_repository_workers_active", Mock())
+    monkeypatch.setattr(
+        run_owl,
+        "_resident_worker_specs",
+        Mock(return_value=(("repository-sync-1", "bitbucket_sync_worker"),)),
+    )
+    monkeypatch.setattr(run_owl, "queue_due_daily_repository_refreshes", Mock())
+    monkeypatch.setattr(run_owl, "repository_status_snapshot", Mock())
+    monkeypatch.setattr(run_owl, "stale_repository_worker_pids", Mock(return_value=()))
+    monkeypatch.setattr(run_owl, "stale_extraction_worker_pids", Mock(return_value=()))
+    monkeypatch.setattr(run_owl, "stale_semantic_worker_pids", Mock(return_value=()))
+    monkeypatch.setattr(
+        run_owl,
+        "sweep_pdf_extraction_queue",
+        Mock(return_value=type("Recovery", (), {"interrupted_worker_pids": ()})()),
+    )
+    monkeypatch.setattr(run_owl, "sweep_semantic_index_queue", Mock())
+
+    def launch(_command):
+        stop_event.set()
+        return worker
+
+    monkeypatch.setattr(run_owl, "_launch_resident_bitbucket_worker", launch)
+    monkeypatch.setattr(
+        run_owl,
+        "_stop_resident_bitbucket_worker",
+        Mock(side_effect=RuntimeError("synthetic worker shutdown failure")),
+    )
+    monkeypatch.setattr(
+        run_owl,
+        "_reconcile_display_awake_for_current_queues",
+        reconcile_awake,
+    )
+    monkeypatch.setattr(run_owl, "_stop_display_awake_assertion", stop_awake)
+
+    with pytest.raises(RuntimeError, match="synthetic worker shutdown failure"):
+        run_owl._run_bitbucket_queue_loop(stop_event, poll_seconds=0)
+
+    assert reconcile_awake.call_count == 2
+    stop_awake.assert_called_once_with(awake)
 
 
 def test_resident_worker_specs_preserve_configured_pdf_concurrency(settings):
@@ -39,16 +554,18 @@ def test_resident_worker_specs_preserve_configured_pdf_concurrency(settings):
     )
 
 
-def test_default_pdf_pipeline_uses_one_extractor_and_one_writer(settings):
+def test_default_pdf_pipeline_uses_four_extractors_and_one_writer(settings):
     specs = run_owl._resident_bitbucket_worker_specs()
     repository_specs = [spec for spec in specs if spec[1] == "bitbucket_sync_worker"]
     pdf_specs = [spec for spec in specs if spec[1] == "bitbucket_index_worker"]
 
     assert settings.BITBUCKET_MAX_REPO_WORKERS == 4
     assert len(repository_specs) == 4
-    assert settings.PDF_MAX_EXTRACTION_WORKERS == 1
-    assert settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY == 1
-    assert pdf_specs == [("pdf-index-1", "bitbucket_index_worker")]
+    assert settings.PDF_MAX_EXTRACTION_WORKERS == 4
+    assert settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY == 4
+    assert pdf_specs == [
+        (f"pdf-index-{worker_number}", "bitbucket_index_worker") for worker_number in range(1, 5)
+    ]
     assert ("pdf-writer-1", "bitbucket_pdf_writer") in specs
 
 
@@ -180,7 +697,7 @@ def test_resident_supervisor_clears_stale_marker_when_sweep_fails_before_launch(
 
     run_owl._bitbucket_queue_loop(stop_event, poll_seconds=0)
 
-    assert resident_states == [False]
+    assert resident_states == [False, True, False]
     launch.assert_not_called()
 
 
@@ -330,6 +847,145 @@ def test_resident_launcher_disables_detached_helpers_only_for_sync_worker(
     assert "--no-spawn-index-workers" not in index_arguments
     assert popen.call_args.kwargs["cwd"] == settings.BASE_DIR
     assert popen.call_args.kwargs["start_new_session"] is (os.name != "nt")
+    assert popen.call_args.kwargs["env"][RESIDENT_SUPERVISOR_PID_ENV] == str(os.getpid())
+
+
+def test_orphaned_resident_workers_exit_before_claiming(monkeypatch):
+    index_work = Mock()
+    writer_work = Mock()
+    repository_work = Mock()
+    semantic_work = Mock()
+    monkeypatch.setattr(
+        bitbucket_index_worker, "resident_supervisor_is_alive", Mock(return_value=False)
+    )
+    monkeypatch.setattr(
+        bitbucket_pdf_writer, "resident_supervisor_is_alive", Mock(return_value=False)
+    )
+    monkeypatch.setattr(
+        bitbucket_sync_worker, "resident_supervisor_is_alive", Mock(return_value=False)
+    )
+    monkeypatch.setattr(
+        semantic_index_worker, "resident_supervisor_is_alive", Mock(return_value=False)
+    )
+    monkeypatch.setattr(bitbucket_index_worker, "work_one_extraction_job", index_work)
+    monkeypatch.setattr(bitbucket_pdf_writer, "work_one_publication_job", writer_work)
+    monkeypatch.setattr(bitbucket_sync_worker, "work_one_job", repository_work)
+    monkeypatch.setattr(semantic_index_worker, "work_one_semantic_job", semantic_work)
+
+    call_command("bitbucket_index_worker", "--once", "--no-startup-sweep")
+    call_command("bitbucket_pdf_writer", "--once")
+    call_command("bitbucket_sync_worker", "--once", "--repository-only")
+    call_command("semantic_index_worker", "--once", "--no-startup-sweep")
+
+    index_work.assert_not_called()
+    writer_work.assert_not_called()
+    repository_work.assert_not_called()
+    semantic_work.assert_not_called()
+
+
+def test_supervisor_stops_only_tracked_stale_children(monkeypatch):
+    healthy = Mock(pid=101)
+    healthy.poll.return_value = None
+    stale = Mock(pid=202)
+    stale.poll.return_value = None
+    stopped = Mock()
+    monkeypatch.setattr(run_owl, "_stop_resident_bitbucket_worker", stopped)
+
+    run_owl._stop_stale_owned_workers(
+        {"healthy": healthy, "stale": stale},
+        {202, 303},
+    )
+
+    stopped.assert_called_once_with(stale)
+
+
+def test_supervisor_watchdog_restarts_an_escaped_controller(monkeypatch):
+    stop_event = threading.Event()
+    calls = 0
+
+    def controller(_stop_event, *, poll_seconds):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("synthetic controller escape")
+        stop_event.set()
+
+    waits: list[float] = []
+
+    def immediate_wait(delay):
+        waits.append(delay)
+        return stop_event.is_set()
+
+    monkeypatch.setattr(run_owl, "_bitbucket_queue_loop", controller)
+    monkeypatch.setattr(stop_event, "wait", immediate_wait)
+
+    run_owl._bitbucket_supervisor_watchdog_loop(stop_event, poll_seconds=5)
+
+    assert calls == 2
+    assert waits == [5.0]
+
+
+def test_exited_pdf_controller_lease_is_recovered_before_replacement(
+    monkeypatch,
+    settings,
+):
+    settings.BITBUCKET_MAX_REPO_WORKERS = 1
+    settings.PDF_MAX_EXTRACTION_WORKERS = 1
+    settings.SEMANTIC_SEARCH_ENABLED = False
+    stop_event = threading.Event()
+    launched: list[_ResidentProcess] = []
+    sweep_options: list[dict[str, object]] = []
+    interrupted_repository_pids: list[tuple[int, ...]] = []
+    schedule_pass = 0
+
+    def schedule():
+        nonlocal schedule_pass
+        schedule_pass += 1
+        if schedule_pass == 2:
+            pdf_worker = next(
+                worker for worker in launched if worker.role == "bitbucket_index_worker"
+            )
+            pdf_worker.returncode = 9
+
+    def launch(command):
+        process = _ResidentProcess(command, 1000 + len(launched))
+        launched.append(process)
+        if (
+            command == "bitbucket_index_worker"
+            and sum(worker.role == command for worker in launched) == 2
+        ):
+            stop_event.set()
+        return process
+
+    def sweep(**options):
+        sweep_options.append(options)
+        interrupted = tuple(options.get("interrupt_worker_pids", ()))
+        return type("Recovery", (), {"interrupted_worker_pids": interrupted})()
+
+    monkeypatch.setattr(run_owl, "queue_due_daily_repository_refreshes", schedule)
+    monkeypatch.setattr(run_owl, "repository_status_snapshot", Mock())
+    monkeypatch.setattr(run_owl, "stale_repository_worker_pids", Mock(return_value=()))
+    monkeypatch.setattr(run_owl, "stale_extraction_worker_pids", Mock(return_value=()))
+    monkeypatch.setattr(
+        run_owl,
+        "interrupt_repository_worker_leases",
+        lambda pids: interrupted_repository_pids.append(pids),
+    )
+    monkeypatch.setattr(run_owl, "sweep_pdf_extraction_queue", sweep)
+    monkeypatch.setattr(run_owl, "_launch_resident_bitbucket_worker", launch)
+    monkeypatch.setattr(run_owl, "_stop_resident_bitbucket_worker", Mock())
+
+    run_owl._bitbucket_queue_loop(stop_event, poll_seconds=0)
+
+    first_pdf_pid = next(
+        worker.pid for worker in launched if worker.role == "bitbucket_index_worker"
+    )
+    assert interrupted_repository_pids == [(first_pdf_pid,)]
+    assert sweep_options == [
+        {"interrupt_running": True},
+        {"interrupt_running": False, "interrupt_worker_pids": (first_pdf_pid,)},
+    ]
+    assert sum(worker.role == "bitbucket_index_worker" for worker in launched) == 2
 
 
 def test_standalone_index_worker_reconciles_once_before_cheap_claims(monkeypatch):

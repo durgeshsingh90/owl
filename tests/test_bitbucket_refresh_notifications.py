@@ -46,8 +46,10 @@ def _automatic_job(
     repository: BitbucketRepository,
     *,
     retry_number: int = 0,
+    worker_retry_number: int = 0,
     status: str = RepositorySyncJobStatus.RUNNING,
     heartbeat_at=None,
+    worker_pid: int | None = None,
 ) -> RepositorySyncJob:
     return RepositorySyncJob.objects.create(
         repository=repository,
@@ -55,9 +57,11 @@ def _automatic_job(
         trigger=(RepositorySyncTrigger.DAILY if retry_number == 0 else RepositorySyncTrigger.RETRY),
         scheduled_day=SCHEDULED_DAY,
         automatic_retry_number=retry_number,
+        worker_retry_number=worker_retry_number,
         status=status,
         started_at=timezone.now() if status == RepositorySyncJobStatus.RUNNING else None,
         heartbeat_at=heartbeat_at,
+        worker_pid=worker_pid,
     )
 
 
@@ -202,6 +206,46 @@ def test_automatic_launch_failure_and_stale_worker_interruption_publish_cards():
     )
     assert stale_notification.state == NotificationState.WARNING
     assert "stopped before this sync completed" in stale_notification.message
+
+
+def test_verified_worker_crash_retry_preserves_daily_attempt_and_is_bounded(settings):
+    settings.BITBUCKET_REPOSITORY_WORKER_MAX_RETRIES = 1
+    repository = _repository("worker-crash")
+    interrupted = _automatic_job(
+        repository,
+        retry_number=2,
+        heartbeat_at=timezone.now(),
+        worker_pid=24680,
+    )
+
+    repository_sync.interrupt_repository_worker_leases((24680,))
+
+    interrupted.refresh_from_db()
+    retry = repository.sync_jobs.get(status=RepositorySyncJobStatus.QUEUED)
+    assert interrupted.status == RepositorySyncJobStatus.INTERRUPTED
+    assert retry.pk != interrupted.pk
+    assert retry.operation == interrupted.operation
+    assert retry.trigger == RepositorySyncTrigger.RETRY
+    assert retry.scheduled_day == SCHEDULED_DAY
+    assert retry.automatic_retry_number == 2
+    assert retry.worker_retry_number == 1
+    assert Notification.objects.count() == 0
+
+    RepositorySyncJob.objects.filter(pk=retry.pk).update(
+        status=RepositorySyncJobStatus.RUNNING,
+        started_at=timezone.now(),
+        heartbeat_at=timezone.now(),
+        worker_pid=24681,
+    )
+    repository_sync.interrupt_repository_worker_leases((24681,))
+
+    retry.refresh_from_db()
+    assert retry.status == RepositorySyncJobStatus.INTERRUPTED
+    assert repository.sync_jobs.count() == 2
+    assert not repository.sync_jobs.filter(status__in=repository_sync.ACTIVE_JOB_STATUSES).exists()
+    notification = Notification.objects.get()
+    assert notification.state == NotificationState.WARNING
+    assert "1 automatic retry remains" in notification.message
 
 
 def test_notification_empty_state_mentions_bitbucket_refreshes(client):

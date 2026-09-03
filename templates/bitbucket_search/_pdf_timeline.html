@@ -2,7 +2,7 @@
 {% if group.rows %}
 <tbody class="bb-pdf-group" data-pdf-group data-timeline-group-key="{{ group.key }}">
     <tr class="bb-period-row" data-pdf-group-heading>
-        <th colspan="10" scope="rowgroup" id="bb-pdf-period-{{ group.rows.0.document.pk }}">
+        <th colspan="11" scope="rowgroup" id="bb-pdf-period-{{ group.rows.0.document.pk }}">
             <span class="bb-period-heading__dot" aria-hidden="true"></span>
             <span class="bb-period-heading">
                 <strong>{{ group.label }}</strong>
@@ -21,7 +21,13 @@
             <span class="bb-document-name">
                 <span class="bb-document-name__icon" aria-hidden="true">PDF</span>
                 <span>
-                    <strong data-pdf-filename title="{{ document.filename }}">{{ document.filename }}</strong>
+                    {% url 'bitbucket_search:document_preview' document.pk as document_preview_url %}
+                    <form class="bb-document-preview-form" method="post" action="{{ document_preview_url }}" target="_blank" rel="noopener noreferrer">
+                        {% csrf_token %}
+                        <button class="bb-document-preview-button" type="submit" title="Open in a new tab: {{ document.filename }}" aria-label="Open {{ document.filename }} in a new tab">
+                            <strong data-pdf-filename>{{ document.filename }}</strong>
+                        </button>
+                    </form>
                 </span>
             </span>
         </td>
@@ -55,9 +61,20 @@
             </span>
         </td>
         <td class="bb-document-cell bb-document-cell--author" headers="bb-pdf-column-author">
-            <span class="bb-cell-label" aria-hidden="true">Added by (Git author)</span>
+            <span class="bb-cell-label" aria-hidden="true">Added by</span>
             {% if row.added_by_label %}
             <span>{{ row.added_by_label }}</span>
+            {% else %}
+            <span class="bb-metadata-unavailable">Unavailable</span>
+            {% endif %}
+        </td>
+        <td class="bb-document-cell bb-document-cell--commit" headers="bb-pdf-column-commit">
+            <span class="bb-cell-label" aria-hidden="true">Commit ID</span>
+            {% if row.commit_copy_available %}
+            <button type="button" class="bb-commit-copy" title="{{ row.commit_detail }}: {{ row.commit_hash }}. Copy full commit ID." aria-label="Copy full commit ID {{ row.commit_hash }} for {{ document.filename }}" data-copy-commit-id data-commit-id="{{ row.commit_hash }}">
+                <code>{{ row.short_commit_hash }}</code>
+                <small data-commit-copy-status role="status" aria-live="polite" aria-atomic="true"></small>
+            </button>
             {% else %}
             <span class="bb-metadata-unavailable">Unavailable</span>
             {% endif %}
@@ -120,7 +137,7 @@
     </tr>
     {% if row.search_hit %}
     <tr class="bb-search-context-row">
-        <td colspan="10">
+        <td colspan="11">
             <div class="bb-search-context">
                 <div class="bb-search-explanations" aria-label="Why this PDF matched">
                     {% for explanation in row.search_hit.explanations %}

@@ -293,6 +293,16 @@ BITBUCKET_CONNECTION_TIMEOUT_SECONDS = min(
     _env_int("BITBUCKET_CONNECTION_TIMEOUT_SECONDS", 20, minimum=1), 120
 )
 BITBUCKET_WORKER_IDLE_SECONDS = _env_int("BITBUCKET_WORKER_IDLE_SECONDS", 15, minimum=1)
+BITBUCKET_REPOSITORY_JOB_LEASE_SECONDS = _env_int(
+    "BITBUCKET_REPOSITORY_JOB_LEASE_SECONDS",
+    90,
+    minimum=60,
+)
+BITBUCKET_REPOSITORY_WORKER_MAX_RETRIES = _env_int(
+    "BITBUCKET_REPOSITORY_WORKER_MAX_RETRIES",
+    1,
+    minimum=0,
+)
 # Repository deletion may need to wait for an isolated PDF parser to observe
 # cancellation and release its shared checkout lock. Keep this as a Django
 # setting so local installations can tune it without an environment file.
@@ -316,32 +326,54 @@ BITBUCKET_DAILY_REFRESH_MAX_RETRIES = _env_int(
     minimum=0,
 )
 BITBUCKET_PDF_PAGE_SIZE = min(
-    _env_int("BITBUCKET_PDF_PAGE_SIZE", 100, minimum=10),
-    100,
+    _env_int("BITBUCKET_PDF_PAGE_SIZE", 500, minimum=10),
+    500,
 )
 BITBUCKET_SEARCH_PAGE_SIZE = min(
     _env_int("BITBUCKET_SEARCH_PAGE_SIZE", 100, minimum=10),
     100,
 )
-# One parser feeds one dedicated SQLite publisher. This intentionally favours
-# predictable local performance over CPU saturation.
-PDF_MAX_EXTRACTION_WORKERS = 1
-# Keep the extractor at most two PDFs ahead of the database publisher.
-PDF_MAX_STAGED_PUBLICATIONS = 2
-# Process one repository's PDF queue at a time. Its single parser can begin the
-# next PDF after handing the previous result to the publisher; every other
-# repository remains queued until the active repository has no running work.
-PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES = 1
-PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY = 1
+# Four isolated parsers feed one dedicated SQLite publisher. This workstation
+# has ample CPU and memory for parallel text extraction while the sole writer
+# keeps database publication deterministic. Local installs can tune the pool
+# without changing source; cap it so one accidental value cannot exhaust RAM.
+PDF_MAX_EXTRACTION_WORKERS = min(
+    _env_int("PDF_MAX_EXTRACTION_WORKERS", 4, minimum=1),
+    8,
+)
+PDF_MAX_STAGED_PUBLICATIONS = min(
+    _env_int("PDF_MAX_STAGED_PUBLICATIONS", 4, minimum=1),
+    16,
+)
+# Preserve repository locality, but let the selected repository use the full
+# parser pool before work advances to the next repository.
+PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES = _env_int(
+    "PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES",
+    1,
+    minimum=1,
+)
+PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY = _env_int(
+    "PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY",
+    PDF_MAX_EXTRACTION_WORKERS,
+    minimum=1,
+)
+if PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES > PDF_MAX_EXTRACTION_WORKERS:
+    raise ImproperlyConfigured(
+        "PDF_MAX_ACTIVE_EXTRACTION_REPOSITORIES cannot exceed PDF_MAX_EXTRACTION_WORKERS."
+    )
 if PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY > PDF_MAX_EXTRACTION_WORKERS:
     raise ImproperlyConfigured(
-        "PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY cannot exceed "
-        "PDF_MAX_EXTRACTION_WORKERS."
+        "PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY cannot exceed PDF_MAX_EXTRACTION_WORKERS."
     )
 PDF_EXTRACTION_TIMEOUT_SECONDS = _env_int(
     "PDF_EXTRACTION_TIMEOUT_SECONDS",
     600,
     minimum=10,
+)
+PDF_EXTRACTION_JOB_LEASE_SECONDS = _env_int(
+    "PDF_EXTRACTION_JOB_LEASE_SECONDS",
+    90,
+    minimum=60,
 )
 PDF_EXTRACTION_WORKER_IDLE_SECONDS = _env_int(
     "PDF_EXTRACTION_WORKER_IDLE_SECONDS",
@@ -357,6 +389,10 @@ BITBUCKET_SUPERVISOR_POLL_SECONDS = _env_int(
     "BITBUCKET_SUPERVISOR_POLL_SECONDS",
     5,
     minimum=1,
+)
+OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK = _env_bool(
+    "OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK",
+    True,
 )
 PDF_MAX_FILE_BYTES = _env_int(
     "PDF_MAX_FILE_BYTES",

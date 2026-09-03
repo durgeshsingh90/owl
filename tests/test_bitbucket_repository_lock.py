@@ -9,8 +9,10 @@ import pytest
 from bitbucket_search.services import git_sync
 from bitbucket_search.services.repository_lock import (
     RepositoryCheckoutBusy,
+    pdf_search_index_repair_lock,
     repository_checkout_lock,
     repository_worker_wakeup_lock,
+    resident_worker_supervisor_lock,
 )
 
 
@@ -40,6 +42,41 @@ def test_worker_wakeup_lock_serializes_callers(settings, tmp_path):
 
     contender = threading.Thread(target=contend_for_lock, daemon=True)
     with repository_worker_wakeup_lock():
+        contender.start()
+        assert contender_started.wait(timeout=1)
+        assert not contender_acquired.wait(timeout=0.1)
+
+    contender.join(timeout=1)
+    assert not contender.is_alive()
+    assert contender_acquired.is_set()
+
+
+def test_only_one_resident_supervisor_can_own_a_data_root(settings, tmp_path):
+    settings.BITBUCKET_TEMP_ROOT = tmp_path / "bitbucket" / "tmp"
+
+    with (
+        resident_worker_supervisor_lock(),
+        pytest.raises(RepositoryCheckoutBusy),
+        resident_worker_supervisor_lock(),
+    ):
+        pass
+
+    with resident_worker_supervisor_lock():
+        pass
+
+
+def test_pdf_search_index_repair_lock_serializes_callers(settings, tmp_path):
+    settings.BITBUCKET_TEMP_ROOT = tmp_path / "bitbucket" / "tmp"
+    contender_started = threading.Event()
+    contender_acquired = threading.Event()
+
+    def contend_for_lock():
+        contender_started.set()
+        with pdf_search_index_repair_lock():
+            contender_acquired.set()
+
+    contender = threading.Thread(target=contend_for_lock, daemon=True)
+    with pdf_search_index_repair_lock():
         contender.start()
         assert contender_started.wait(timeout=1)
         assert not contender_acquired.wait(timeout=0.1)

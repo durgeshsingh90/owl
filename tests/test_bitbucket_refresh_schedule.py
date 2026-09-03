@@ -68,6 +68,7 @@ def _completed_job(
     trigger: str = RepositorySyncTrigger.MANUAL,
     scheduled_day: date | None = None,
     retry_number: int = 0,
+    worker_retry_number: int = 0,
 ) -> RepositorySyncJob:
     job = RepositorySyncJob.objects.create(
         repository=repository,
@@ -75,6 +76,7 @@ def _completed_job(
         trigger=trigger,
         scheduled_day=scheduled_day,
         automatic_retry_number=retry_number,
+        worker_retry_number=worker_retry_number,
         status=status,
         started_at=completed_at - timedelta(minutes=1),
         heartbeat_at=completed_at,
@@ -396,6 +398,16 @@ def test_scheduled_attempt_identity_is_database_deduplicated():
         trigger=RepositorySyncTrigger.DAILY,
         scheduled_day=scheduled_day,
     )
+    worker_retry = _completed_job(
+        repository,
+        status=RepositorySyncJobStatus.FAILED,
+        completed_at=datetime(2026, 8, 29, 7, 30, tzinfo=UTC),
+        trigger=RepositorySyncTrigger.DAILY,
+        scheduled_day=scheduled_day,
+        worker_retry_number=1,
+    )
+
+    assert worker_retry.worker_retry_number == 1
 
     with pytest.raises(IntegrityError), transaction.atomic():
         _completed_job(

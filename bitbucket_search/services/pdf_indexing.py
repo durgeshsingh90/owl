@@ -20,7 +20,7 @@ from functools import wraps
 from pathlib import Path
 
 from django.conf import settings
-from django.db import IntegrityError, OperationalError, connection, transaction
+from django.db import DatabaseError, IntegrityError, OperationalError, connection, transaction
 from django.db.models import (
     Case,
     Count,
@@ -82,7 +82,7 @@ _PROGRESS_LOG_STATE: ContextVar[dict[int, tuple[str, int]] | None] = ContextVar(
 _INDEX_LOG_JOB: ContextVar[tuple[int, int, int | None, int | None] | None] = ContextVar(
     "pdf_index_log_job", default=None
 )
-STALE_EXTRACTION_AFTER = timedelta(minutes=10)
+STALE_EXTRACTION_AFTER = timedelta(seconds=settings.PDF_EXTRACTION_JOB_LEASE_SECONDS)
 _HASH_CHUNK_BYTES = 1024 * 1024
 _HEARTBEAT_SECONDS = 1.0
 _QUEUE_WRITE_BATCH_SIZE = 400
@@ -213,6 +213,7 @@ class ExtractionQueueResult:
     queued_job_ids: tuple[int, ...]
     cancelled_job_ids: tuple[int, ...]
     skipped_document_ids: tuple[int, ...]
+    interrupted_worker_pids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -981,25 +982,72 @@ def extraction_status_snapshot() -> ExtractionStatusSnapshot:
     )
 
 
-@_logged_indexing_errors("extraction_lease_recovery")
-def _interrupt_stale_extraction_jobs(*, observed_at=None, force: bool = False) -> None:
+def stale_extraction_worker_pids(*, observed_at=None) -> tuple[int, ...]:
+    """Return stale lease owners without entering the potentially held claim lock."""
+
     now = observed_at or timezone.now()
     cutoff = now - STALE_EXTRACTION_AFTER
+    return tuple(
+        dict.fromkeys(
+            PDFExtractionJob.objects.exclude(document__repository_id__in=_removal_repository_ids())
+            .filter(status=PDFExtractionJobStatus.RUNNING, worker_pid__isnull=False)
+            .filter(
+                Q(heartbeat_at__lt=cutoff) | Q(heartbeat_at__isnull=True, started_at__lt=cutoff)
+            )
+            .order_by("worker_pid")
+            .values_list("worker_pid", flat=True)
+        )
+    )
+
+
+def _normalized_worker_pids(worker_pids: Sequence[int]) -> tuple[int, ...]:
+    return tuple(
+        dict.fromkeys(
+            worker_pid
+            for worker_pid in worker_pids
+            if isinstance(worker_pid, int) and not isinstance(worker_pid, bool) and worker_pid > 0
+        )
+    )
+
+
+@_logged_indexing_errors("extraction_lease_recovery")
+def _interrupt_stale_extraction_jobs(
+    *,
+    observed_at=None,
+    force: bool = False,
+    worker_pids: Sequence[int] = (),
+) -> tuple[int, ...]:
+    now = observed_at or timezone.now()
+    cutoff = now - STALE_EXTRACTION_AFTER
+    exact_worker_pids = _normalized_worker_pids(worker_pids)
     candidates = PDFExtractionJob.objects.exclude(
         document__repository_id__in=_removal_repository_ids()
     ).filter(status=PDFExtractionJobStatus.RUNNING)
     if not force:
-        candidates = candidates.filter(
-            Q(heartbeat_at__lt=cutoff) | Q(heartbeat_at__isnull=True, started_at__lt=cutoff)
+        stale = Q(heartbeat_at__lt=cutoff) | Q(
+            heartbeat_at__isnull=True,
+            started_at__lt=cutoff,
         )
+        candidates = candidates.filter(stale | Q(worker_pid__in=exact_worker_pids))
     candidate_ids = tuple(candidates.values_list("id", flat=True))
+    interrupted_worker_pids: list[int] = []
     for job_id in candidate_ids:
         with pdf_extraction_claim_lock(), transaction.atomic():
-            phase = (
-                PDFExtractionJob.objects.filter(pk=job_id)
-                .values_list("phase", flat=True)
-                .first()
+            lease = PDFExtractionJob.objects.filter(pk=job_id).values("phase", "worker_pid").first()
+            if lease is None:
+                continue
+            phase = lease["phase"]
+            worker_pid = lease["worker_pid"]
+            eligible = PDFExtractionJob.objects.filter(
+                pk=job_id,
+                status=PDFExtractionJobStatus.RUNNING,
             )
+            if not force:
+                stale = Q(heartbeat_at__lt=cutoff) | Q(
+                    heartbeat_at__isnull=True,
+                    started_at__lt=cutoff,
+                )
+                eligible = eligible.filter(stale | Q(worker_pid__in=exact_worker_pids))
             if (
                 phase == PDFExtractionJobPhase.PUBLISHING
                 and _publication_staging_path(job_id).is_file()
@@ -1007,20 +1055,12 @@ def _interrupt_stale_extraction_jobs(*, observed_at=None, force: bool = False) -
                 # Parser output is durable already. A restarted supervisor only
                 # needs to release the previous publisher lease. Keep the check
                 # and lease release behind the same gate used by the writer.
-                PDFExtractionJob.objects.filter(
-                    pk=job_id,
-                    status=PDFExtractionJobStatus.RUNNING,
+                released = eligible.filter(
                     phase=PDFExtractionJobPhase.PUBLISHING,
                 ).update(worker_pid=None, heartbeat_at=now)
+                if released == 1 and worker_pid:
+                    interrupted_worker_pids.append(worker_pid)
                 continue
-            eligible = PDFExtractionJob.objects.filter(
-                pk=job_id,
-                status=PDFExtractionJobStatus.RUNNING,
-            )
-            if not force:
-                eligible = eligible.filter(
-                    Q(heartbeat_at__lt=cutoff) | Q(heartbeat_at__isnull=True, started_at__lt=cutoff)
-                )
             interrupted = eligible.update(
                 status=PDFExtractionJobStatus.INTERRUPTED,
                 completed_at=now,
@@ -1029,6 +1069,8 @@ def _interrupt_stale_extraction_jobs(*, observed_at=None, force: bool = False) -
             )
             if interrupted != 1:
                 continue
+            if worker_pid:
+                interrupted_worker_pids.append(worker_pid)
             log_event(
                 logger,
                 logging.ERROR,
@@ -1065,17 +1107,22 @@ def _interrupt_stale_extraction_jobs(*, observed_at=None, force: bool = False) -
                 severity=RepositoryOperationLogSeverity.ERROR,
                 job=job,
             )
+    return tuple(dict.fromkeys(interrupted_worker_pids))
 
 
 @_logged_indexing_errors("extraction_queue_recovery")
 def sweep_pdf_extraction_queue(
     *,
     interrupt_running: bool = False,
+    interrupt_worker_pids: Sequence[int] = (),
 ) -> ExtractionQueueResult:
     """Recover stale leases and queue every stranded current PDF revision."""
 
     started = time.monotonic()
-    _interrupt_stale_extraction_jobs(force=interrupt_running)
+    interrupted_worker_pids = _interrupt_stale_extraction_jobs(
+        force=interrupt_running,
+        worker_pids=interrupt_worker_pids,
+    )
 
     observed_at = timezone.now()
     unavailable_candidate_ids = tuple(
@@ -1183,6 +1230,7 @@ def sweep_pdf_extraction_queue(
         tuple(queued),
         tuple(dict.fromkeys(cancelled)),
         tuple(skipped),
+        interrupted_worker_pids,
     )
 
 
@@ -1217,10 +1265,13 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
             >= settings.PDF_MAX_EXTRACTION_WORKERS
         ):
             return None
-        if PDFExtractionJob.objects.filter(
-            status=PDFExtractionJobStatus.RUNNING,
-            phase=PDFExtractionJobPhase.PUBLISHING,
-        ).count() >= settings.PDF_MAX_STAGED_PUBLICATIONS:
+        if (
+            PDFExtractionJob.objects.filter(
+                status=PDFExtractionJobStatus.RUNNING,
+                phase=PDFExtractionJobPhase.PUBLISHING,
+            ).count()
+            >= settings.PDF_MAX_STAGED_PUBLICATIONS
+        ):
             return None
         active_repository_ids = tuple(
             row["document__repository_id"] for row in active_by_repository
@@ -1267,9 +1318,7 @@ def claim_next_extraction_job() -> PDFExtractionJob | None:
                 ]
             )
         candidate_id = (
-            candidates.order_by("requested_at", "id")
-            .values_list("id", flat=True)
-            .first()
+            candidates.order_by("requested_at", "id").values_list("id", flat=True).first()
         )
         if candidate_id is None:
             return None
@@ -1415,6 +1464,17 @@ def _stage_extraction_for_publication(
         raise
 
 
+def _release_publication_lease(job_id: int) -> None:
+    """Make durable staged output immediately claimable by another writer."""
+
+    PDFExtractionJob.objects.filter(
+        pk=job_id,
+        status=PDFExtractionJobStatus.RUNNING,
+        phase=PDFExtractionJobPhase.PUBLISHING,
+        worker_pid=os.getpid(),
+    ).update(worker_pid=None, heartbeat_at=timezone.now())
+
+
 def work_one_publication_job() -> PDFExtractionJob | None:
     """Publish one durably staged extraction through the single SQLite writer."""
 
@@ -1452,27 +1512,46 @@ def work_one_publication_job() -> PDFExtractionJob | None:
         if not _SHA256.fullmatch(content_sha256):
             raise PDFIndexingError("invalid_staged_extraction", "Staged PDF hash is invalid.")
         _attach_revision(job.pk, content_sha256=content_sha256, staged=staged)
-    except (OperationalError, IntegrityError):
-        PDFExtractionJob.objects.filter(
-            pk=job.pk,
-            status=PDFExtractionJobStatus.RUNNING,
-            phase=PDFExtractionJobPhase.PUBLISHING,
-            worker_pid=os.getpid(),
-        ).update(worker_pid=None, heartbeat_at=timezone.now())
+    except PDFExtractionDeferred:
+        _release_publication_lease(job.pk)
+        log_event(
+            logger,
+            logging.INFO,
+            "pdf_publication_deferred",
+            repository_id=job.document.repository_id,
+            document_id=job.document_id,
+            job_id=job.pk,
+            reason="repository_sync",
+        )
+        return None
+    except DatabaseError:
+        _release_publication_lease(job.pk)
         raise
     except PDFExtractionTargetChanged as exc:
         _fail_job(job.pk, exc)
         _queue_current_target_after_obsolete_job(job.pk)
     except (OSError, UnicodeError, json.JSONDecodeError, PDFIndexingError) as exc:
-        error = exc if isinstance(exc, PDFIndexingError) else PDFIndexingError(
-            "staged_extraction_unavailable",
-            "The extracted PDF result could not be loaded for publication.",
+        error = (
+            exc
+            if isinstance(exc, PDFIndexingError)
+            else PDFIndexingError(
+                "staged_extraction_unavailable",
+                "The extracted PDF result could not be loaded for publication.",
+            )
         )
         _fail_job(job.pk, error)
+    except Exception:
+        # Preserve valid staged data across an unexpected writer failure. The
+        # worker command may exit, but the replacement can claim immediately
+        # instead of waiting for the stale-lease timeout.
+        _release_publication_lease(job.pk)
+        raise
     finally:
-        if PDFExtractionJob.objects.filter(pk=job.pk).exclude(
-            status=PDFExtractionJobStatus.RUNNING
-        ).exists():
+        if (
+            PDFExtractionJob.objects.filter(pk=job.pk)
+            .exclude(status=PDFExtractionJobStatus.RUNNING)
+            .exists()
+        ):
             target.unlink(missing_ok=True)
     return PDFExtractionJob.objects.select_related("document__repository").get(pk=job.pk)
 

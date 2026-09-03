@@ -744,6 +744,7 @@ class RepositorySyncJob(models.Model):
     )
     scheduled_day = models.DateField(null=True, blank=True, db_index=True)
     automatic_retry_number = models.PositiveSmallIntegerField(default=0)
+    worker_retry_number = models.PositiveSmallIntegerField(default=0)
     status = models.CharField(
         max_length=16,
         choices=RepositorySyncJobStatus,
@@ -784,7 +785,12 @@ class RepositorySyncJob(models.Model):
                 name="bitbucket_one_active_job_per_repository",
             ),
             models.UniqueConstraint(
-                fields=("repository", "scheduled_day", "automatic_retry_number"),
+                fields=(
+                    "repository",
+                    "scheduled_day",
+                    "automatic_retry_number",
+                    "worker_retry_number",
+                ),
                 condition=models.Q(scheduled_day__isnull=False),
                 name="bitbucket_unique_scheduled_repository_attempt",
             ),

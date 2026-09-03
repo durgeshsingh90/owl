@@ -18,6 +18,7 @@ from bitbucket_search.services.pdf_indexing import (
     work_one_extraction_job,
 )
 from bitbucket_search.services.repository_sync import work_one_job
+from core.process_supervision import resident_supervisor_is_alive
 
 logger = get_logger("worker")
 
@@ -92,6 +93,15 @@ class Command(BaseCommand):
         next_index_reconciliation_at = 0.0
 
         while True:
+            if not resident_supervisor_is_alive():
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "resident_worker_parent_stopped",
+                    worker_pid=os.getpid(),
+                    parent_pid=os.getppid(),
+                )
+                return
             if reconcile_index_queue and time.monotonic() >= next_index_reconciliation_at:
                 close_old_connections()
                 try:

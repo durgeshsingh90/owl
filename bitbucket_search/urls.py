@@ -11,6 +11,11 @@ urlpatterns = [
     path("people/groups/add/", views.add_people_group, name="people_group_create"),
     path("documents/page/", views.document_page, name="document_page"),
     path(
+        "documents/<int:document_id>/preview/",
+        views.preview_document,
+        name="document_preview",
+    ),
+    path(
         "documents/<int:document_id>/open/",
         views.open_document,
         name="document_open",
@@ -69,7 +74,11 @@ urlpatterns = [
         name="repository_schedule_tick",
     ),
     path("repositories/status/", views.repository_status, name="repository_status"),
-    path("repositories/connection/test/", views.repository_connection_test, name="repository_connection_test"),
+    path(
+        "repositories/connection/test/",
+        views.repository_connection_test,
+        name="repository_connection_test",
+    ),
     path("repositories/<int:repository_id>/logs/", views.repository_logs, name="repository_logs"),
     path(
         "repositories/<int:repository_id>/indexing/cancel/",

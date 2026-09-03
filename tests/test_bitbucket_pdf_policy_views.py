@@ -299,5 +299,5 @@ def test_loaded_timeline_rows_expose_only_read_only_file_controls(local_client, 
     html = response.json()["html"]
     assert f'method="post" action="/pdfs/documents/{document.pk}/exclude/"' not in html
     assert f'method="get" action="/pdfs/documents/{document.pk}/delete/"' not in html
-    assert html.count('name="csrfmiddlewaretoken"') == 2
+    assert html.count('name="csrfmiddlewaretoken"') == 3
     assert html.count('name="return_page" value="1"') == 2

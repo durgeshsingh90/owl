@@ -6,6 +6,7 @@ import hashlib
 import logging
 import math
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from time import perf_counter
@@ -172,12 +173,19 @@ def queue_semantic_source(
     return job.pk
 
 
-def sweep_semantic_index_queue(*, interrupt_running: bool = False) -> tuple[int, ...]:
+def sweep_semantic_index_queue(
+    *,
+    interrupt_running: bool = False,
+    interrupt_worker_pids: Sequence[int] = (),
+) -> tuple[int, ...]:
     """Deep-reconcile stored sources without issuing queries for every source."""
 
     if not settings.SEMANTIC_SEARCH_ENABLED:
         return ()
-    _recover_stale_jobs(force=interrupt_running)
+    _recover_stale_jobs(
+        force=interrupt_running,
+        worker_pids=interrupt_worker_pids,
+    )
     limit = int(settings.SEMANTIC_SWEEP_BATCH_SIZE)
     queued: list[int] = []
 
@@ -402,16 +410,56 @@ def _reserve_sqlite_write() -> None:
         SemanticIndexJob.objects.filter(pk=-1).update(status=F("status"))
 
 
-def _recover_stale_jobs(*, force: bool = False) -> None:
+def _normalized_worker_pids(worker_pids: Sequence[int]) -> tuple[int, ...]:
+    return tuple(
+        dict.fromkeys(
+            worker_pid
+            for worker_pid in worker_pids
+            if isinstance(worker_pid, int) and not isinstance(worker_pid, bool) and worker_pid > 0
+        )
+    )
+
+
+def stale_semantic_worker_pids(*, observed_at=None) -> tuple[int, ...]:
+    """Return semantic lease owners whose durable heartbeat expired."""
+
+    now = observed_at or timezone.now()
+    stale_before = now - timedelta(seconds=settings.SEMANTIC_JOB_LEASE_SECONDS)
+    return tuple(
+        dict.fromkeys(
+            SemanticIndexJob.objects.filter(
+                status=SemanticIndexJobStatus.RUNNING,
+                worker_pid__isnull=False,
+            )
+            .filter(Q(heartbeat_at__isnull=True) | Q(heartbeat_at__lt=stale_before))
+            .order_by("worker_pid")
+            .values_list("worker_pid", flat=True)
+        )
+    )
+
+
+def _recover_stale_jobs(
+    *,
+    force: bool = False,
+    worker_pids: Sequence[int] = (),
+) -> tuple[int, ...]:
     now = timezone.now()
     stale_before = now - timedelta(seconds=settings.SEMANTIC_JOB_LEASE_SECONDS)
+    exact_worker_pids = _normalized_worker_pids(worker_pids)
     query = Q(status=SemanticIndexJobStatus.RUNNING)
     if not force:
-        query &= Q(heartbeat_at__isnull=True) | Q(heartbeat_at__lt=stale_before)
+        query &= (
+            Q(heartbeat_at__isnull=True)
+            | Q(heartbeat_at__lt=stale_before)
+            | Q(worker_pid__in=exact_worker_pids)
+        )
+    recovered_worker_pids: list[int] = []
     with transaction.atomic():
         _reserve_sqlite_write()
         stale_jobs = tuple(SemanticIndexJob.objects.select_for_update().filter(query))
         for job in stale_jobs:
+            if job.worker_pid:
+                recovered_worker_pids.append(job.worker_pid)
             if job.retry_count < settings.SEMANTIC_JOB_MAX_AUTOMATIC_RETRIES:
                 job.status = SemanticIndexJobStatus.QUEUED
                 job.retry_count += 1
@@ -450,6 +498,7 @@ def _recover_stale_jobs(*, force: bool = False) -> None:
                         "error_summary",
                     )
                 )
+    return tuple(dict.fromkeys(recovered_worker_pids))
 
 
 def claim_next_semantic_job() -> SemanticIndexJob | None:

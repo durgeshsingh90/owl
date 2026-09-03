@@ -15,6 +15,7 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]"})
 _LOCAL_BITBUCKET_MUTATIONS = frozenset(
     {
         "bitbucket_search:people_group_create",
+        "bitbucket_search:document_preview",
         "bitbucket_search:document_open",
         "bitbucket_search:documents_open_all",
         "bitbucket_search:document_reveal",

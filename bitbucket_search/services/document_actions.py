@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from time import perf_counter
+from typing import BinaryIO
 
 from django.conf import settings
 from django.db import models, transaction
@@ -337,10 +338,15 @@ def reveal_pdf_in_folder(path: Path) -> None:
     if sys.platform == "darwin":
         _run_native_action(["/usr/bin/open", "-R", str(path)], action="reveal")
         # NSWorkspace can reveal the item in an existing background Finder
-        # window without activating it. Ask LaunchServices to bring Finder
-        # forward after the selection has been made.
+        # window without activating it. Explicitly activate Finder after the
+        # selection has been made; reopening its bundle is not sufficient when
+        # Finder is already running behind the browser.
         _run_native_action(
-            ["/usr/bin/open", "-b", "com.apple.finder"],
+            [
+                "/usr/bin/osascript",
+                "-e",
+                'tell application "Finder" to activate',
+            ],
             action="reveal",
         )
     elif sys.platform == "win32":
@@ -466,6 +472,32 @@ def open_registered_pdf(document_id: int) -> PDFDocument:
             open_pdf_native(path)
             context["stage"] = "usage"
             return record_successful_open(document.pk)
+
+
+def preview_registered_pdf(document_id: int) -> tuple[PDFDocument, BinaryIO]:
+    """Open a validated PDF stream for an inline browser response."""
+
+    with _logged_action("preview", document_id=document_id) as context:
+        registered = _registered_document(document_id)
+        context["repository_id"] = registered.repository_id
+        with _locked_documents((registered,)) as documents:
+            document = documents[0]
+            path = validated_pdf_path(document)
+            context["stage"] = "stream"
+            try:
+                stream = path.open("rb")
+            except OSError as exc:
+                raise DocumentActionError(
+                    "document_unavailable",
+                    "This PDF could not be opened from the managed repository.",
+                ) from exc
+            context["stage"] = "usage"
+            try:
+                updated = record_successful_open(document.pk)
+            except Exception:
+                stream.close()
+                raise
+            return updated, stream
 
 
 def open_registered_pdfs(document_ids: Sequence[int]) -> BulkDocumentOpenResult:

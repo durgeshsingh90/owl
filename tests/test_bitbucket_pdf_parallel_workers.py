@@ -125,9 +125,7 @@ def _run_with_file_backed_database(node_id):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_single_controller_claims_only_one_pdf(
-    parallel_targets, request
-):
+def test_configured_controllers_claim_one_repository_in_parallel(parallel_targets, request):
     # Shared-cache in-memory SQLite immediately raises SQLITE_LOCKED (262)
     # when a final SELECT overlaps a writer. OWL uses an ordinary SQLite file,
     # whose busy timeout permits those short overlaps. Run this same test body
@@ -137,11 +135,10 @@ def test_single_controller_claims_only_one_pdf(
     first_repository, first_documents = parallel_targets("first", 3)
     second_repository, second_documents = parallel_targets("second", 1)
     claims = [pdf_indexing.claim_next_extraction_job() for _ in range(3)]
-    assert claims[0] is not None
-    assert claims[0].document.repository_id == first_repository.pk
-    assert claims[1:] == [None, None]
+    assert all(job is not None for job in claims)
+    assert [job.document.repository_id for job in claims] == [first_repository.pk] * 3
     assert pdf_indexing.claim_next_extraction_job() is None
-    parsing_together = Barrier(1)
+    parsing_together = Barrier(3)
 
     def execute(job_id, repository_id):
         close_old_connections()
@@ -170,18 +167,20 @@ def test_single_controller_claims_only_one_pdf(
             close_old_connections()
 
     claimed_jobs = [job for job in claims if job is not None]
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        futures = [executor.submit(execute, job.pk, job.document.repository_id) for job in claimed_jobs]
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [
+            executor.submit(execute, job.pk, job.document.repository_id) for job in claimed_jobs
+        ]
         results = [future.result(timeout=20) for future in futures]
 
-    assert len({connection_id for connection_id, _status in results}) == 1
+    assert len({connection_id for connection_id, _status in results}) == 3
     assert {status for _connection_id, status in results} == {PDFExtractionJobStatus.SUCCEEDED}
     assert (
         PDFDocument.objects.filter(
             pk__in=[document.pk for document in first_documents],
             index_state=PDFIndexState.READY,
         ).count()
-        == 1
+        == 3
     )
     assert PDFExtractionJob.objects.get(document=second_documents[0]).status == "queued"
     assert PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING).count() == 0
@@ -205,6 +204,7 @@ def test_single_controller_claims_only_one_pdf(
 def test_simultaneous_claims_never_exceed_the_global_capacity(parallel_targets, settings):
     parallel_targets("capacity", 8)
     settings.PDF_MAX_EXTRACTION_WORKERS = 2
+    settings.PDF_MAX_EXTRACTION_WORKERS_PER_REPOSITORY = 2
     callers_ready = Barrier(6)
 
     def claim():
@@ -221,8 +221,8 @@ def test_simultaneous_claims_never_exceed_the_global_capacity(parallel_targets, 
         claimed = list(executor.map(lambda _number: claim(), range(6)))
 
     claimed_ids = [job_id for job_id in claimed if job_id is not None]
-    assert len(claimed_ids) == len(set(claimed_ids)) == 1
-    assert PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING).count() == 1
+    assert len(claimed_ids) == len(set(claimed_ids)) == 2
+    assert PDFExtractionJob.objects.filter(status=PDFExtractionJobStatus.RUNNING).count() == 2
 
 
 @pytest.mark.django_db

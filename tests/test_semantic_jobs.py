@@ -25,6 +25,7 @@ from semantic_search.services.jobs import (
     claim_next_semantic_job,
     execute_semantic_job,
     queue_semantic_source,
+    sweep_semantic_index_queue,
 )
 from semantic_search.services.provider import (
     EmbeddingProviderError,
@@ -418,6 +419,23 @@ def test_provider_failure_retries_then_fails_without_replacing_old_index(setting
     assert (
         tuple(current_index.chunks.values_list("ordinal", "chunk_text", "vector")) == old_chunk_rows
     )
+
+
+def test_known_exited_semantic_worker_is_requeued_before_lease_expiry(settings):
+    settings.SEMANTIC_JOB_MAX_AUTOMATIC_RETRIES = 2
+    bookmark = _bookmark("exited-worker", page_text="alpha queued body")
+    job_id = queue_semantic_source(SemanticSourceType.BOOKMARK, bookmark.pk)
+    claimed = claim_next_semantic_job()
+    assert claimed.pk == job_id
+    SemanticIndexJob.objects.filter(pk=job_id).update(worker_pid=24680)
+
+    sweep_semantic_index_queue(interrupt_worker_pids=(24680,))
+
+    claimed.refresh_from_db()
+    assert claimed.status == SemanticIndexJobStatus.QUEUED
+    assert claimed.retry_count == 1
+    assert claimed.worker_pid is None
+    assert claimed.error_code == "worker_interrupted"
 
 
 def test_stale_source_publication_is_cancelled_and_current_revision_is_requeued(

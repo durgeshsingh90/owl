@@ -215,6 +215,66 @@ def test_sync_and_pdf_jobs_report_all_work_even_when_one_stage_has_precedence():
     assert repository.activity["detail"] == "1 PDF extracting · Git sync queued"
 
 
+def test_long_running_pdf_uses_oldest_heartbeat_to_distinguish_health_from_stall():
+    observed_at = timezone.now()
+    repository = _repository()
+    first = _pdf_job(repository, PDFExtractionJobStatus.RUNNING)
+    PDFExtractionJob.objects.filter(pk=first.pk).update(
+        started_at=observed_at - timedelta(hours=2),
+        heartbeat_at=observed_at - timedelta(seconds=5),
+    )
+
+    with_repository_activity((repository,), at=observed_at)
+
+    assert repository.activity["healthState"] == "healthy"
+    assert repository.activity["healthLabel"] == "Worker responding"
+    assert repository.activity["heartbeatAt"] == (observed_at - timedelta(seconds=5)).isoformat()
+    assert repository.activity["detail"] == "1 PDF extracting"
+
+    second = _pdf_job(repository, PDFExtractionJobStatus.RUNNING)
+    PDFExtractionJob.objects.filter(pk=second.pk).update(
+        started_at=observed_at - timedelta(minutes=2),
+        heartbeat_at=observed_at - timedelta(seconds=45),
+    )
+    with_repository_activity((repository,), at=observed_at)
+
+    assert repository.activity["healthState"] == "delayed"
+    assert repository.activity["healthLabel"] == "Worker response delayed"
+    assert repository.activity["heartbeatAt"] == (observed_at - timedelta(seconds=45)).isoformat()
+    assert repository.activity["detail"] == "2 PDFs extracting"
+
+    PDFExtractionJob.objects.filter(pk=second.pk).update(
+        heartbeat_at=observed_at - timedelta(minutes=11)
+    )
+    with_repository_activity((repository,), at=observed_at)
+
+    assert repository.activity["healthState"] == "stalled"
+    assert repository.activity["healthLabel"] == "Worker stalled · restarting automatically"
+    assert repository.activity["heartbeatAt"] == (observed_at - timedelta(minutes=11)).isoformat()
+    assert repository.activity["detail"] == "2 PDFs extracting"
+
+
+def test_running_git_and_queued_only_work_have_truthful_health_states():
+    observed_at = timezone.now()
+    running = _repository("Running Git")
+    sync_job = _sync_job(running)
+    RepositorySyncJob.objects.filter(pk=sync_job.pk).update(
+        started_at=observed_at - timedelta(hours=1),
+        heartbeat_at=observed_at - timedelta(seconds=2),
+    )
+    queued = _repository("Queued PDF")
+    _pdf_job(queued)
+
+    with_repository_activity((running, queued), at=observed_at)
+
+    assert running.activity["healthState"] == "healthy"
+    assert running.activity["healthLabel"] == "Worker responding"
+    assert running.activity["heartbeatAt"] == (observed_at - timedelta(seconds=2)).isoformat()
+    assert queued.activity["healthState"] is None
+    assert queued.activity["healthLabel"] == ""
+    assert queued.activity["heartbeatAt"] is None
+
+
 def test_running_git_stage_remains_visible_beside_pdf_counts_without_duplicate_summary_label():
     repository = _repository()
     _sync_job(repository, phase=RepositorySyncPhase.FINALIZING)

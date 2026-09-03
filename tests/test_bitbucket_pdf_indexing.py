@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import Mock
@@ -34,10 +35,10 @@ from bitbucket_search.services.git_sync import managed_repository_path
 from bitbucket_search.services.pdf_extractor import PDF_EXTRACTOR_VERSION
 from bitbucket_search.services.pdf_indexing import (
     PDF_INDEX_VERSION,
-    cancel_repository_pdf_extractions,
-    _extractor_environment,
     StagedPDFExtraction,
     StagedPDFPage,
+    _extractor_environment,
+    cancel_repository_pdf_extractions,
     claim_next_extraction_job,
     execute_claimed_extraction_job,
     extraction_status_snapshot,
@@ -216,6 +217,7 @@ def test_staged_publication_survives_supervisor_restart(indexed_pdf_target):
 
     staged_job.refresh_from_db()
     assert recovered.queued_job_ids == ()
+    assert recovered.interrupted_worker_pids == (987654,)
     assert staged_job.status == PDFExtractionJobStatus.RUNNING
     assert staged_job.phase == PDFExtractionJobPhase.PUBLISHING
     assert staged_job.worker_pid is None
@@ -223,6 +225,81 @@ def test_staged_publication_survives_supervisor_restart(indexed_pdf_target):
     document.refresh_from_db()
     assert published.status == PDFExtractionJobStatus.SUCCEEDED
     assert document.indexed_revision.pages.get().extracted_text == "Restart-safe text"
+
+
+def test_fresh_publishing_heartbeat_wins_stale_candidate_race(
+    indexed_pdf_target,
+    monkeypatch,
+):
+    repository, _document, pdf_path = indexed_pdf_target
+    queue_repository_pdf_extractions(repository)
+    claimed = claim_next_extraction_job()
+    staged_job = execute_claimed_extraction_job(
+        claimed.pk,
+        extraction_runner=lambda _path, _heartbeat: _ready_stage(pdf_path, "Race-safe text"),
+        defer_publication=True,
+    )
+    stale_at = timezone.now() - timedelta(minutes=11)
+    PDFExtractionJob.objects.filter(pk=staged_job.pk).update(
+        worker_pid=24680,
+        heartbeat_at=stale_at,
+    )
+
+    @contextmanager
+    def worker_heartbeats_before_compare_and_swap():
+        PDFExtractionJob.objects.filter(pk=staged_job.pk).update(heartbeat_at=timezone.now())
+        yield
+
+    monkeypatch.setattr(
+        "bitbucket_search.services.pdf_indexing.pdf_extraction_claim_lock",
+        worker_heartbeats_before_compare_and_swap,
+    )
+
+    recovered = sweep_pdf_extraction_queue()
+
+    staged_job.refresh_from_db()
+    assert recovered.interrupted_worker_pids == ()
+    assert staged_job.status == PDFExtractionJobStatus.RUNNING
+    assert staged_job.phase == PDFExtractionJobPhase.PUBLISHING
+    assert staged_job.worker_pid == 24680
+    assert staged_job.heartbeat_at > stale_at
+
+
+def test_publication_deferred_by_git_sync_releases_writer_lease_immediately(
+    indexed_pdf_target,
+):
+    repository, document, pdf_path = indexed_pdf_target
+    queue_repository_pdf_extractions(repository)
+    claimed = claim_next_extraction_job()
+    staged_job = execute_claimed_extraction_job(
+        claimed.pk,
+        extraction_runner=lambda _path, _heartbeat: _ready_stage(pdf_path, "Deferred text"),
+        defer_publication=True,
+    )
+    sync_job = RepositorySyncJob.objects.create(
+        repository=repository,
+        operation=RepositorySyncOperation.REFRESH,
+        status=RepositorySyncJobStatus.RUNNING,
+        started_at=timezone.now(),
+        heartbeat_at=timezone.now(),
+        worker_pid=13579,
+    )
+
+    assert work_one_publication_job() is None
+
+    staged_job.refresh_from_db()
+    assert staged_job.status == PDFExtractionJobStatus.RUNNING
+    assert staged_job.phase == PDFExtractionJobPhase.PUBLISHING
+    assert staged_job.worker_pid is None
+
+    sync_job.status = RepositorySyncJobStatus.SUCCEEDED
+    sync_job.completed_at = timezone.now()
+    sync_job.save(update_fields=("status", "completed_at"))
+    published = work_one_publication_job()
+
+    document.refresh_from_db()
+    assert published.status == PDFExtractionJobStatus.SUCCEEDED
+    assert document.indexed_revision.pages.get().extracted_text == "Deferred text"
 
 
 def test_cancelling_repository_discards_durable_staged_publication(indexed_pdf_target, settings):
@@ -234,7 +311,9 @@ def test_cancelling_repository_discards_durable_staged_publication(indexed_pdf_t
         extraction_runner=lambda _path, _heartbeat: _ready_stage(pdf_path, "Cancelled text"),
         defer_publication=True,
     )
-    staged_path = Path(settings.BITBUCKET_TEMP_ROOT) / "pdf-publication" / f"job-{staged_job.pk}.json"
+    staged_path = (
+        Path(settings.BITBUCKET_TEMP_ROOT) / "pdf-publication" / f"job-{staged_job.pk}.json"
+    )
     assert staged_path.is_file()
 
     result = cancel_repository_pdf_extractions(repository)
@@ -481,7 +560,29 @@ def test_startup_sweep_immediately_retires_running_lease_and_queues_retry(
     document.refresh_from_db()
     assert claimed.status == PDFExtractionJobStatus.INTERRUPTED
     assert claimed.error_code == "extraction_worker_interrupted"
+    assert result.interrupted_worker_pids == (os.getpid(),)
     assert document.index_state == PDFIndexState.PENDING
+    retry = PDFExtractionJob.objects.get(pk=result.queued_job_ids[0])
+    assert retry.document_id == document.pk
+    assert retry.status == PDFExtractionJobStatus.QUEUED
+    assert retry.retry_count == 1
+
+
+def test_known_exited_pdf_worker_is_recovered_before_heartbeat_expiry(
+    indexed_pdf_target,
+    settings,
+):
+    repository, document, _pdf_path = indexed_pdf_target
+    settings.PDF_EXTRACTION_MAX_AUTOMATIC_RETRIES = 2
+    queue_repository_pdf_extractions(repository)
+    claimed = claim_next_extraction_job()
+    PDFExtractionJob.objects.filter(pk=claimed.pk).update(worker_pid=24680)
+
+    result = sweep_pdf_extraction_queue(interrupt_worker_pids=(24680,))
+
+    claimed.refresh_from_db()
+    assert claimed.status == PDFExtractionJobStatus.INTERRUPTED
+    assert result.interrupted_worker_pids == (24680,)
     retry = PDFExtractionJob.objects.get(pk=result.queued_job_ids[0])
     assert retry.document_id == document.pk
     assert retry.status == PDFExtractionJobStatus.QUEUED

@@ -18,6 +18,7 @@ from bitbucket_search.services.document_actions import (
     DocumentActionError,
     open_registered_pdf,
     open_registered_pdfs,
+    preview_registered_pdf,
     record_successful_open,
     reveal_registered_pdf,
     validated_pdf_path,
@@ -223,7 +224,14 @@ def test_macos_open_reveal_and_finder_activation_use_bounded_argument_arrays(
     assert run.call_args_list == [
         call(["/usr/bin/open", str(pdf_path)], **common),
         call(["/usr/bin/open", "-R", str(pdf_path)], **common),
-        call(["/usr/bin/open", "-b", "com.apple.finder"], **common),
+        call(
+            [
+                "/usr/bin/osascript",
+                "-e",
+                'tell application "Finder" to activate',
+            ],
+            **common,
+        ),
     ]
 
 
@@ -305,6 +313,20 @@ def test_open_registered_pdf_validates_dispatches_then_counts(registered_pdf, mo
     updated = open_registered_pdf(document.pk)
 
     assert observed_counts == [0]
+    assert updated.open_count == 1
+    assert updated.first_opened_at is not None
+    assert updated.last_opened_at is not None
+
+
+def test_preview_registered_pdf_opens_stream_then_counts(registered_pdf):
+    document, pdf_path = registered_pdf
+
+    updated, stream = preview_registered_pdf(document.pk)
+    try:
+        assert stream.read() == pdf_path.read_bytes()
+    finally:
+        stream.close()
+
     assert updated.open_count == 1
     assert updated.first_opened_at is not None
     assert updated.last_opened_at is not None

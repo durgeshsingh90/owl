@@ -11,6 +11,7 @@ from django.db import DatabaseError, close_old_connections
 
 from bitbucket_search.services.logging_events import get_logger, log_event
 from bitbucket_search.services.pdf_indexing import work_one_publication_job
+from core.process_supervision import resident_supervisor_is_alive
 
 logger = get_logger("writer")
 
@@ -43,6 +44,15 @@ class Command(BaseCommand):
         poll_interval = min(max(options["poll_interval"], 0.1), 10.0)
         idle_since = time.monotonic()
         while True:
+            if not resident_supervisor_is_alive():
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "resident_worker_parent_stopped",
+                    worker_pid=os.getpid(),
+                    parent_pid=os.getppid(),
+                )
+                return
             close_old_connections()
             try:
                 completed = work_one_publication_job()

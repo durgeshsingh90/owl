@@ -53,7 +53,9 @@
             (payload.repositories || []).filter(item => !item.connected).forEach((item) => {
                 document.querySelectorAll(`[data-repository-id="${item.id}"] [data-repository-state-icon]`).forEach((icon) => {
                     icon.className = "bb-repository-state bb-repository-state--git-failed";
-                    icon.title = "Git connection test failed";
+                    const detail = item.detail || "Git connection test failed";
+                    icon.setAttribute("aria-label", detail);
+                    icon.title = detail;
                 });
             });
         } catch (_error) {
@@ -69,7 +71,6 @@
     };
     if (connectionResult && connectionTestUrl) {
         connectionResult.addEventListener("click", testRepositoryConnection);
-        testRepositoryConnection();
     }
     let extractionWorkActive = workspace.dataset.extractionActive === "true";
     let workSummary = {
@@ -540,9 +541,15 @@
             && repository.activity?.progress !== undefined && Number.isFinite(suppliedProgress);
         const progressValue = hasProgress
             ? Math.round(Math.min(100, Math.max(0, suppliedProgress))) : null;
+        const healthState = ["healthy", "delayed", "stalled"].includes(
+            repository.activity?.healthState,
+        ) ? repository.activity.healthState : "";
+        const healthLabel = healthState ? String(repository.activity?.healthLabel || "") : "";
+        const heartbeatAt = healthState ? String(repository.activity?.heartbeatAt || "") : "";
         cardsFor(repository.id).forEach((card) => {
             card.dataset.repositoryState = repository.state;
             card.dataset.repositoryOperation = operation;
+            card.dataset.repositoryHealthState = healthState;
             card.dataset.repositoryActiveWork = String(working);
             card.dataset.repositoryActiveSync = String(Boolean(repository.active));
             card.dataset.repositoryPdfIndexingActive = String(Boolean(
@@ -577,6 +584,14 @@
                 workStatus.textContent = visiblyRunning ? workDetail : "";
                 workStatus.title = visiblyRunning ? workDetail : "";
                 workStatus.hidden = !visiblyRunning;
+            }
+            const healthStatus = card.querySelector("[data-repository-health]");
+            if (healthStatus) {
+                healthStatus.dataset.healthState = healthState;
+                healthStatus.dataset.heartbeatAt = heartbeatAt;
+                healthStatus.textContent = healthLabel;
+                healthStatus.title = healthLabel;
+                healthStatus.hidden = !healthLabel;
             }
             const progressContainer = card.querySelector("[data-repository-progress]");
             const progressBar = card.querySelector("[data-repository-progress-bar]");
@@ -818,6 +833,12 @@
                     workStatus.textContent = "Status unavailable";
                     workStatus.title = "Cannot confirm current work; retrying the status check";
                     workStatus.hidden = false;
+                }
+                const healthStatus = card.querySelector("[data-repository-health]");
+                if (healthStatus && !healthStatus.hidden) {
+                    healthStatus.dataset.healthState = "unknown";
+                    healthStatus.textContent = "Worker health unavailable";
+                    healthStatus.title = "Cannot confirm the latest worker heartbeat";
                 }
             });
             // An active or scheduled refresh remains recoverable. Use the same
@@ -1286,6 +1307,49 @@
                     button.classList.remove("is-copy-error");
                     button.title = initialTitle;
                     pathCopyTimers.delete(button);
+                }, copied ? 2000 : 4000),
+            );
+        }
+    });
+
+    const commitCopyTimers = new WeakMap();
+    const pendingCommitCopies = new WeakSet();
+    workspace.addEventListener("click", async (event) => {
+        const button = event.target.closest?.("[data-copy-commit-id]");
+        if (!button || button.disabled || pendingCommitCopies.has(button)) {
+            return;
+        }
+        const commitId = button.dataset.commitId;
+        const status = button.querySelector("[data-commit-copy-status]");
+        const initialTitle = button.title;
+        window.clearTimeout(commitCopyTimers.get(button));
+        pendingCommitCopies.add(button);
+        button.setAttribute("aria-busy", "true");
+        button.classList.remove("is-copy-error");
+        if (status) status.textContent = "";
+        let copied = false;
+        try {
+            if (!commitId) {
+                throw new Error("Commit ID unavailable");
+            }
+            await copyText(commitId);
+            copied = true;
+            if (status) status.textContent = "Copied";
+            button.title = "Full commit ID copied";
+        } catch (_error) {
+            if (status) status.textContent = "Copy failed";
+            button.classList.add("is-copy-error");
+            button.title = "Could not copy the commit ID. Check this browser's clipboard permission.";
+        } finally {
+            pendingCommitCopies.delete(button);
+            button.removeAttribute("aria-busy");
+            commitCopyTimers.set(
+                button,
+                window.setTimeout(() => {
+                    if (status) status.textContent = "";
+                    button.classList.remove("is-copy-error");
+                    button.title = initialTitle;
+                    commitCopyTimers.delete(button);
                 }, copied ? 2000 : 4000),
             );
         }

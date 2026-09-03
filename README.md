@@ -157,12 +157,13 @@ Bitbucket Search now provides repository registration and durable background syn
 - search locally with removable exact-phrase chips, ALL/ANY matching across repository, path,
   filename, and separate PDF pages, plus repository/index-state filters, relevance sorts, matched
   page explanations, and bounded highlighted snippets;
-- keep the existing newest-first Today, Yesterday, week, month, six-month, current-year, last-year,
-  and older-year timeline when no search is active, using the original Git addition's commit
-  date, not the date OWL discovered the PDF. The column is labelled "Date added to repo";
+- keep a newest-first Today, Yesterday, Day Before Yesterday, This Week, Last Week, This Month,
+  Last Month, Last 3 Months, Last 6 Months, This Year, Last Year, Last 2 Years, and older-year
+  timeline when no search is active, using the original Git addition's commit date, not the date
+  OWL discovered the PDF. The column is labelled "Date added to repo";
   PDFs whose original addition is outside available history show their OWL discovery date with
   the visible source **First seen by OWL**, while confirmed dates show **Git addition**;
-- display 100 PDFs per page by default (also capped at 100 for legacy larger page-size links).
+- display 500 PDFs per inventory page by default (also capped at 500 for larger configured values).
   Use the page-navigation links to browse older results; scrolling does not append more rows;
 - keep the current page and saved theme stable during background work. Status updates live,
   and one reload shows the final changes after all repository/PDF jobs settle. An open status
@@ -361,14 +362,15 @@ The address and port default come from `run_owl`, not the launcher. Normally ope
 Direct `python manage.py run_owl` remains available when you manage database updates yourself.
 
 `run_owl` starts the local website, its resident weekly Confluence scheduler, a bounded parallel
-Bitbucket repository-worker pool, one PDF extraction worker, and one dedicated database writer. The Bitbucket supervisor
-queues every enabled repository at 11:00 in `OWL_TIME_ZONE` (Europe/Dublin by default). Each failed
+Bitbucket repository-worker pool, four isolated PDF extraction workers, and one dedicated database
+writer. The Bitbucket supervisor queues every enabled repository at 11:00 in `OWL_TIME_ZONE`
+(Europe/Dublin by default). Each failed
 daily attempt waits two hours before retrying, with one initial attempt and at most three retries
 during that day's cycle. Worker limits are configured in `owl/settings.py`.
-PDF extraction is intentionally configured for one repository and one PDF at a time. The extractor
-hands each validated result to a durable staging file and can then read the next PDF while the
-dedicated writer saves the previous PDF's pages and search index to SQLite. Other repositories remain
-queued until the active repository's PDF run completes. Git downloads can continue independently.
+PDF extraction is configured for one repository and up to four PDFs at a time. Each extractor hands
+its validated result to a durable staging file and can then read the next PDF while the dedicated
+writer serializes pages and search-index updates into SQLite. Other repositories remain queued until
+the active repository's PDF run completes. Git downloads can continue independently.
 The Repository logs page shows the configured limit, active workers, every durable PDF
 attempt, and the retained redacted Git clone/refresh output. Select a repository there and use
 **Stop indexing now** to cancel its queued attempts and revoke active parser leases; an active
@@ -385,6 +387,18 @@ Git while the application is stopped, but its schedule and jobs are durable: aft
 replaying a backlog of older daily slots or duplicating active repository jobs. On startup the
 supervisor also retires inherited PDF worker leases, applies bounded PDF retries, and queues active
 PDFs from an upgraded database that have not been indexed yet.
+Resident workers exit when their owning supervisor disappears, and a replacement supervisor stops
+and relaunches any owned controller whose durable heartbeat is silent for 90 seconds. Only one
+`run_owl` process owns the worker pool for a given OWL data directory, preventing duplicate
+background pools. A stopped Git controller's job is fenced and retried once as a distinct attempt;
+PDF and semantic jobs use their own bounded retry counts. An individual parser that remains alive
+but never finishes is stopped by its separate ten-minute extraction timeout so the queue can
+continue.
+
+On macOS and Windows, OWL also keeps the display and computer awake while a Git, PDF extraction,
+or semantic indexing job is queued or running, then releases that temporary assertion automatically
+when every queue becomes idle or `run_owl` exits. Set
+`OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK=false` to disable this behavior.
 
 The Bookmark Manager's global refresh button and every due Confluence schedule start a separate
 local worker process automatically. That worker retrieves saved Confluence pages with up to five

@@ -5,7 +5,7 @@
 {% block theme_default %}dark{% endblock %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=wide-workspace-v1">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=connection-idle-v1">
 {% endblock %}
 
 {% block app_header %}{% endblock %}
@@ -116,11 +116,11 @@
             </a>
 
             <div class="bb-topbar__actions">
-                <button class="bb-connection-test" type="button" aria-live="polite" data-repository-connection-result data-state="checking" aria-label="Testing stored credentials and Git connections" title="Testing stored credentials and Git connections">
+                <button class="bb-connection-test" type="button" aria-live="polite" data-repository-connection-result data-state="idle" aria-label="Test repository connections" title="Test repository connections">
                     <img class="bb-connection-test__icon bb-connection-test__icon--checking" src="{% static 'bitbucket_search/icons/no-connection.gif' %}" alt="" aria-hidden="true">
                     <img class="bb-connection-test__icon bb-connection-test__icon--connected" src="{% static 'bitbucket_search/icons/connection-connected.png' %}" alt="" aria-hidden="true">
                     <img class="bb-connection-test__icon bb-connection-test__icon--disconnected" src="{% static 'bitbucket_search/icons/connection-disconnected.png' %}" alt="" aria-hidden="true">
-                    <span class="visually-hidden" data-repository-connection-message>Testing stored credentials and Git connections…</span>
+                    <span class="visually-hidden" data-repository-connection-message>Test repository connections.</span>
                 </button>
                 <form
                     class="bb-refresh-all bb-refresh-all--desktop{% if refresh_all_active_count %} bb-refresh-all--active{% elif not repository_count or not refresh_all_enabled_count or not repositories_refresh_all_url %} bb-refresh-all--disabled{% endif %}"
@@ -452,6 +452,7 @@
                             <col class="bb-column-repository">
                             <col class="bb-column-added">
                             <col class="bb-column-author">
+                            <col class="bb-column-commit">
                             <col class="bb-column-status">
                             <col class="bb-column-opens">
                             <col class="bb-column-actions">
@@ -464,7 +465,8 @@
                                 <th scope="col" id="bb-pdf-column-project">Project</th>
                                 <th scope="col" id="bb-pdf-column-repository">Repository</th>
                                 <th scope="col" id="bb-pdf-column-added">Date added to repo</th>
-                                <th scope="col" id="bb-pdf-column-author">Added by (Git author)</th>
+                                <th scope="col" id="bb-pdf-column-author">Added by</th>
+                                <th scope="col" id="bb-pdf-column-commit">Commit ID</th>
                                 <th scope="col" id="bb-pdf-column-status">Status</th>
                                 <th scope="col" id="bb-pdf-column-opens">Opens</th>
                                 <th scope="col" id="bb-pdf-column-actions">Actions</th>
@@ -475,7 +477,7 @@
                         {% else %}
                         <tbody>
                             <tr class="bb-period-row">
-                                <th colspan="10" scope="rowgroup">
+                                <th colspan="11" scope="rowgroup">
                                     <span class="bb-period-heading__dot" aria-hidden="true"></span>
                                     <span class="bb-period-heading">
                                         <strong id="bb-empty-period-heading">{% if search_active %}Search results{% else %}PDF inventory{% endif %}</strong>
@@ -484,7 +486,7 @@
                                 </th>
                             </tr>
                             <tr class="bb-empty-row">
-                                <td colspan="10">
+                                <td colspan="11">
                                     <div class="bb-empty-state" aria-labelledby="bb-empty-period-heading">
                                         <div class="bb-empty-state__lead">
                                             <span class="bb-empty-state__icon" aria-hidden="true">
@@ -593,6 +595,6 @@
 {% block global_status %}{% endblock %}
 
 {% block scripts %}
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=blocking-repository-actions-v1" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=connection-diagnostic-v1" defer></script>
 <script src="{% static 'bitbucket_search/people_sort.js' %}?v=people-sort-v1" defer></script>
 {% endblock %}

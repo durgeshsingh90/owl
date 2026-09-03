@@ -475,7 +475,9 @@ def test_search_rebuild_configuration_and_runtime_failures_are_errors(
     monkeypatch, captured_logs, available
 ):
     monkeypatch.setattr(
-        bitbucket_rebuild_search_index, "search_index_available", Mock(return_value=available)
+        bitbucket_rebuild_search_index,
+        "ensure_search_index_available",
+        Mock(return_value=available),
     )
     monkeypatch.setattr(
         bitbucket_rebuild_search_index,

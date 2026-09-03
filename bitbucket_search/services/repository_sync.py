@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from datetime import time as datetime_time
@@ -58,6 +59,7 @@ from bitbucket_search.services.repository_worker_timing import (
 )
 from bookmark_manager.models import Notification, NotificationKind, NotificationState
 from bookmark_manager.services.notifications import publish_notification
+from core.process_supervision import RESIDENT_SUPERVISOR_PID_ENV
 
 logger = get_logger("sync")
 
@@ -67,7 +69,7 @@ AUTOMATIC_RETRYABLE_STATUSES = (
     RepositorySyncJobStatus.FAILED,
     RepositorySyncJobStatus.INTERRUPTED,
 )
-STALE_JOB_AFTER = timedelta(minutes=10)
+STALE_JOB_AFTER = timedelta(seconds=settings.BITBUCKET_REPOSITORY_JOB_LEASE_SECONDS)
 WORKER_WAKE_RESERVATION_AFTER = timedelta(seconds=30)
 _RESIDENT_REPOSITORY_WORKERS_ACTIVE = threading.Event()
 
@@ -176,6 +178,10 @@ def _daily_refresh_max_retries() -> int:
     return max(0, int(settings.BITBUCKET_DAILY_REFRESH_MAX_RETRIES))
 
 
+def _repository_worker_max_retries() -> int:
+    return max(0, int(settings.BITBUCKET_REPOSITORY_WORKER_MAX_RETRIES))
+
+
 def _daily_refresh_retry_delay_label() -> str:
     seconds = max(0, int(_daily_refresh_retry_delay().total_seconds()))
     if seconds % 86_400 == 0:
@@ -236,9 +242,10 @@ def _publish_automatic_refresh_failure(
     if retries_remaining:
         state = NotificationState.WARNING
         retry_word = "retry" if retries_remaining == 1 else "retries"
+        retry_verb = "remains" if retries_remaining == 1 else "remain"
         next_step = (
             f"OWL will retry automatically after {_daily_refresh_retry_delay_label()}; "
-            f"{retries_remaining} automatic {retry_word} remain in this daily cycle."
+            f"{retries_remaining} automatic {retry_word} {retry_verb} in this daily cycle."
         )
     else:
         state = NotificationState.ERROR
@@ -386,6 +393,12 @@ def set_resident_repository_workers_active(active: bool) -> None:
 
 def resident_repository_workers_active() -> bool:
     return _RESIDENT_REPOSITORY_WORKERS_ACTIVE.is_set()
+
+
+def _resident_supervisor_manages_stale_leases() -> bool:
+    """Keep polling/read paths from racing the owning supervisor's recovery pass."""
+
+    return resident_repository_workers_active() or RESIDENT_SUPERVISOR_PID_ENV in os.environ
 
 
 def _daily_refresh_local_time_label() -> str:
@@ -719,24 +732,66 @@ def _stale_running_job_ids(cutoff) -> tuple[int, ...]:
     )
 
 
-def _interrupt_stale_jobs(*, at=None) -> None:
+def _normalized_worker_pids(worker_pids: Sequence[int]) -> tuple[int, ...]:
+    return tuple(
+        dict.fromkeys(
+            worker_pid
+            for worker_pid in worker_pids
+            if isinstance(worker_pid, int) and not isinstance(worker_pid, bool) and worker_pid > 0
+        )
+    )
+
+
+def stale_repository_worker_pids(*, at=None) -> tuple[int, ...]:
+    """Return stale Git lease owners so the supervisor can stop only its children."""
+
     observed_at = at or timezone.now()
     cutoff = observed_at - STALE_JOB_AFTER
-    candidate_ids = _stale_running_job_ids(cutoff)
+    return tuple(
+        dict.fromkeys(
+            RepositorySyncJob.objects.filter(
+                status=RepositorySyncJobStatus.RUNNING,
+                heartbeat_at__lt=cutoff,
+                worker_pid__isnull=False,
+            )
+            .order_by("worker_pid")
+            .values_list("worker_pid", flat=True)
+        )
+    )
+
+
+def _interrupt_stale_jobs(*, at=None, worker_pids: Sequence[int] = ()) -> tuple[int, ...]:
+    observed_at = at or timezone.now()
+    cutoff = observed_at - STALE_JOB_AFTER
+    exact_worker_pids = _normalized_worker_pids(worker_pids)
+    exact_worker_pid_set = frozenset(exact_worker_pids)
+    candidate_ids = tuple(
+        dict.fromkeys(
+            (
+                *_stale_running_job_ids(cutoff),
+                *RepositorySyncJob.objects.filter(
+                    status=RepositorySyncJobStatus.RUNNING,
+                    worker_pid__in=exact_worker_pids,
+                ).values_list("id", flat=True),
+            )
+        )
+    )
     if not candidate_ids:
-        return
+        return ()
 
     interrupted_ids: list[int] = []
+    worker_retry_job_ids: dict[int, int] = {}
     with transaction.atomic():
+        reserve_repository_write()
         for job_id in candidate_ids:
             # The worker may have refreshed its heartbeat after the candidate
             # query. Repeat every stale predicate in this compare-and-swap so a
             # healthy long-running Git process is never interrupted by that race.
-            updated = RepositorySyncJob.objects.filter(
+            eligible = RepositorySyncJob.objects.filter(
                 pk=job_id,
                 status=RepositorySyncJobStatus.RUNNING,
-                heartbeat_at__lt=cutoff,
-            ).update(
+            ).filter(Q(heartbeat_at__lt=cutoff) | Q(worker_pid__in=exact_worker_pids))
+            updated = eligible.update(
                 status=RepositorySyncJobStatus.INTERRUPTED,
                 completed_at=observed_at,
                 error_code="worker_interrupted",
@@ -747,10 +802,44 @@ def _interrupt_stale_jobs(*, at=None) -> None:
             if updated == 1:
                 interrupted_ids.append(job_id)
 
-        if interrupted_ids:
+                interrupted_job = RepositorySyncJob.objects.select_related("repository").get(
+                    pk=job_id
+                )
+                worker_retry_limit = _repository_worker_max_retries()
+                verified_worker_exit = interrupted_job.worker_pid in exact_worker_pid_set
+                if (
+                    verified_worker_exit
+                    and interrupted_job.worker_retry_number < worker_retry_limit
+                ):
+                    repository = (
+                        BitbucketRepository.objects.select_for_update()
+                        .filter(pk=interrupted_job.repository_id, enabled=True)
+                        .exclude(pk__in=RepositoryRemovalRecovery.objects.values("repository_id"))
+                        .first()
+                    )
+                    retry_allowed = repository is not None and (
+                        interrupted_job.trigger == RepositorySyncTrigger.MANUAL
+                        or not repository.exclude_from_refresh
+                    )
+                    if retry_allowed:
+                        retry_job, _created = _queue_job(
+                            repository,
+                            operation=interrupted_job.operation,
+                            trigger=interrupted_job.trigger,
+                            scheduled_day=interrupted_job.scheduled_day,
+                            automatic_retry_number=interrupted_job.automatic_retry_number,
+                            worker_retry_number=interrupted_job.worker_retry_number + 1,
+                        )
+                        if retry_job.status in ACTIVE_JOB_STATUSES:
+                            worker_retry_job_ids[interrupted_job.pk] = retry_job.pk
+
+        unrecovered_ids = tuple(
+            job_id for job_id in interrupted_ids if job_id not in worker_retry_job_ids
+        )
+        if unrecovered_ids:
             # Do not overwrite repository progress for a candidate whose worker
-            # won the heartbeat race; only jobs transitioned above belong here.
-            BitbucketRepository.objects.filter(sync_jobs__id__in=interrupted_ids).update(
+            # won the heartbeat race or a newly queued crash retry.
+            BitbucketRepository.objects.filter(sync_jobs__id__in=unrecovered_ids).update(
                 sync_state=RepositorySyncState.INTERRUPTED,
                 status_message="Background sync was interrupted. Select Refresh to retry.",
                 last_error_code="worker_interrupted",
@@ -759,11 +848,14 @@ def _interrupt_stale_jobs(*, at=None) -> None:
                 ),
                 last_sync_completed_at=observed_at,
             )
+    interrupted_worker_pids: list[int] = []
     if interrupted_ids:
         interrupted_jobs = RepositorySyncJob.objects.select_related("repository").filter(
             pk__in=interrupted_ids,
         )
         for interrupted_job in interrupted_jobs:
+            if interrupted_job.worker_pid:
+                interrupted_worker_pids.append(interrupted_job.worker_pid)
             log_event(
                 logger,
                 logging.ERROR,
@@ -774,11 +866,34 @@ def _interrupt_stale_jobs(*, at=None) -> None:
                 error_code="worker_interrupted",
                 worker_pid=interrupted_job.worker_pid,
             )
-            _publish_automatic_refresh_failure(
-                interrupted_job,
-                summary=interrupted_job.error_summary,
-                occurred_at=observed_at,
-            )
+            retry_job_id = worker_retry_job_ids.get(interrupted_job.pk)
+            if retry_job_id is not None:
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "repository_worker_retry_queued",
+                    repository_id=interrupted_job.repository_id,
+                    interrupted_job_id=interrupted_job.pk,
+                    job_id=retry_job_id,
+                    worker_retry_number=interrupted_job.worker_retry_number + 1,
+                )
+            else:
+                _publish_automatic_refresh_failure(
+                    interrupted_job,
+                    summary=interrupted_job.error_summary,
+                    occurred_at=observed_at,
+                )
+    return tuple(dict.fromkeys(interrupted_worker_pids))
+
+
+def interrupt_repository_worker_leases(
+    worker_pids: Sequence[int],
+    *,
+    at=None,
+) -> tuple[int, ...]:
+    """Immediately retire leases owned by resident controllers known to have exited."""
+
+    return _interrupt_stale_jobs(at=at, worker_pids=worker_pids)
 
 
 def _operation_for(repository: BitbucketRepository) -> str:
@@ -796,6 +911,8 @@ def _queue_job(
     trigger: str = RepositorySyncTrigger.MANUAL,
     scheduled_day: date | None = None,
     automatic_retry_number: int = 0,
+    worker_retry_number: int = 0,
+    operation: str | None = None,
 ) -> tuple[RepositorySyncJob, bool]:
     if RepositoryRemovalRecovery.objects.filter(repository_id=repository.pk).exists():
         raise RepositorySyncError(
@@ -813,8 +930,13 @@ def _queue_job(
             status=active.status,
         )
         return active, False
-    operation = _operation_for(repository)
-    if trigger == RepositorySyncTrigger.RETRY:
+    operation = operation or _operation_for(repository)
+    if worker_retry_number:
+        waiting_message = (
+            "Restarting after the background repository worker stopped "
+            f"(attempt {worker_retry_number} of {_repository_worker_max_retries()})…"
+        )
+    elif trigger == RepositorySyncTrigger.RETRY:
         waiting_message = (
             f"Waiting for automatic retry {automatic_retry_number} of "
             f"{_daily_refresh_max_retries()}…"
@@ -835,6 +957,7 @@ def _queue_job(
                 trigger=trigger,
                 scheduled_day=scheduled_day,
                 automatic_retry_number=automatic_retry_number,
+                worker_retry_number=worker_retry_number,
                 status_message=waiting_message,
             )
     except IntegrityError as exc:
@@ -845,6 +968,7 @@ def _queue_job(
             scheduled = repository.sync_jobs.filter(
                 scheduled_day=scheduled_day,
                 automatic_retry_number=automatic_retry_number,
+                worker_retry_number=worker_retry_number,
             ).first()
             if scheduled is not None:
                 return scheduled, False
@@ -883,6 +1007,7 @@ def _queue_job(
             operation=operation,
             trigger=trigger,
             retry_number=automatic_retry_number,
+            worker_retry_number=worker_retry_number,
             queued_count=1,
         )
     )
@@ -1025,7 +1150,8 @@ def queue_due_daily_repository_refreshes(*, at=None) -> tuple[QueueResult, ...]:
     scheduled_day, success_boundary, _next_slot = _daily_refresh_window(observed_at)
     retry_delay = _daily_refresh_retry_delay()
     max_retries = _daily_refresh_max_retries()
-    _interrupt_stale_jobs(at=observed_at)
+    if not _resident_supervisor_manages_stale_leases():
+        _interrupt_stale_jobs(at=observed_at)
     active_job = RepositorySyncJob.objects.filter(
         repository_id=OuterRef("pk"),
         status__in=ACTIVE_JOB_STATUSES,
@@ -1414,7 +1540,8 @@ def cancel_repository_sync(repository_id: int) -> CancelRepositorySyncResult:
 def claim_next_job() -> RepositorySyncJob | None:
     """Atomically claim one queued job while respecting the configured worker limit."""
 
-    _interrupt_stale_jobs()
+    if not _resident_supervisor_manages_stale_leases():
+        _interrupt_stale_jobs()
     with transaction.atomic():
         reserve_repository_write()
         if (
@@ -1891,7 +2018,8 @@ def work_one_job() -> RepositorySyncJob | None:
 
 def repository_status_snapshot(*, at=None) -> tuple[BitbucketRepository, ...]:
     observed_at = at or timezone.now()
-    _interrupt_stale_jobs(at=observed_at)
+    if not _resident_supervisor_manages_stale_leases():
+        _interrupt_stale_jobs(at=observed_at)
     scheduled_day, _success_boundary, _next_slot = _daily_refresh_window(observed_at)
     recent_retry_cutoff = observed_at - _daily_refresh_retry_delay()
     relevant_jobs = (

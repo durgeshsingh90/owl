@@ -11,6 +11,7 @@ from bitbucket_search.models import (
     BitbucketRepository,
     RepositorySyncJob,
     RepositorySyncJobStatus,
+    RepositorySyncOperation,
     RepositorySyncPhase,
     RepositorySyncState,
     RepositorySyncTrigger,
@@ -184,6 +185,53 @@ def test_expired_worker_lease_is_error_not_a_warning(events):
     _assert_redacted(events)
 
 
+def test_known_exited_worker_lease_queues_one_distinct_retry(events, settings):
+    settings.BITBUCKET_REPOSITORY_WORKER_MAX_RETRIES = 1
+    repository = _repository()
+    job = _running_job(
+        repository,
+        operation=RepositorySyncOperation.CLONE,
+        worker_pid=24680,
+    )
+
+    interrupted_worker_pids = repository_sync.interrupt_repository_worker_leases((24680,))
+
+    job.refresh_from_db()
+    repository.refresh_from_db()
+    retry = repository.sync_jobs.get(status=RepositorySyncJobStatus.QUEUED)
+    assert interrupted_worker_pids == (24680,)
+    assert job.status == RepositorySyncJobStatus.INTERRUPTED
+    assert job.error_code == "worker_interrupted"
+    assert retry.pk != job.pk
+    assert retry.operation == job.operation
+    assert retry.trigger == job.trigger
+    assert retry.scheduled_day == job.scheduled_day
+    assert retry.automatic_retry_number == job.automatic_retry_number
+    assert retry.worker_retry_number == 1
+    assert repository.sync_state == RepositorySyncState.QUEUED
+    assert repository_sync.interrupt_repository_worker_leases((24680,)) == ()
+    assert repository.sync_jobs.count() == 2
+    assert _event(events, "repository_worker_lease_expired").levelno == logging.ERROR
+    assert _event(events, "repository_worker_retry_queued").levelno == logging.INFO
+    _assert_redacted(events)
+
+
+def test_supervised_status_poll_leaves_stale_lease_for_owning_supervisor(monkeypatch):
+    observed_at = timezone.now()
+    repository = _repository()
+    job = _running_job(repository, worker_pid=24680)
+    RepositorySyncJob.objects.filter(pk=job.pk).update(
+        heartbeat_at=observed_at - repository_sync.STALE_JOB_AFTER - timedelta(seconds=1)
+    )
+    monkeypatch.setenv("OWL_RESIDENT_SUPERVISOR_PID", "13579")
+
+    repository_sync.repository_status_snapshot(at=observed_at)
+
+    job.refresh_from_db()
+    assert job.status == RepositorySyncJobStatus.RUNNING
+    assert job.worker_pid == 24680
+
+
 def test_worker_launch_failure_is_error_with_no_command_or_exception_content(events, monkeypatch):
     monkeypatch.setattr(
         repository_sync.subprocess, "Popen", Mock(side_effect=PermissionError(13, PRIVATE_VALUE))
@@ -280,11 +328,11 @@ def test_filtered_clone_fallback_is_warning_but_final_failure_is_error(
         git_sync,
         "_run_streaming",
         Mock(
-                side_effect=[
-                    RepositorySyncError("clone_failed", PRIVATE_VALUE),
-                    RepositorySyncError("clone_failed", PRIVATE_VALUE),
-                    RepositorySyncError("clone_failed", PRIVATE_VALUE),
-                ]
+            side_effect=[
+                RepositorySyncError("clone_failed", PRIVATE_VALUE),
+                RepositorySyncError("clone_failed", PRIVATE_VALUE),
+                RepositorySyncError("clone_failed", PRIVATE_VALUE),
+            ]
         ),
     )
 

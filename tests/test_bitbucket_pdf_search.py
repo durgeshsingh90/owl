@@ -23,6 +23,7 @@ from bitbucket_search.models import (
 from bitbucket_search.services import pdf_search
 from bitbucket_search.services.pdf_search import (
     MAX_SNIPPET_CHARACTERS,
+    ensure_search_index_available,
     rebuild_search_index,
     search_documents,
     search_index_available,
@@ -158,6 +159,54 @@ def test_search_recreates_missing_derived_fts_tables_from_canonical_records():
     assert search_index_available() is True
     assert result.total == 1
     assert result.results[0].document == document
+
+
+def test_search_repair_handles_a_missing_table_with_orphaned_triggers():
+    repository = _repository("Partially repairable")
+    document = _indexed_document(
+        repository,
+        filename="Recovery plan.pdf",
+        path="operations/Recovery plan.pdf",
+        pages=("Recovery controls remain canonical",),
+        digest="p",
+    )
+    with connection.cursor() as cursor:
+        cursor.execute("DROP TABLE bitbucket_search_pdf_metadata_fts")
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'trigger'
+              AND name LIKE 'bitbucket_search_pdf_metadata_fts_%'
+            """
+        )
+        assert cursor.fetchone()[0] == 3
+
+    assert ensure_search_index_available() is True
+    assert PDFDocument.objects.filter(pk=document.pk).exists()
+    result = search_documents(PDFSearchQuery(chips=("Recovery plan",)))
+    assert [hit.document.pk for hit in result.results] == [document.pk]
+
+
+def test_search_repair_restores_a_missing_maintenance_trigger():
+    repository = _repository("Trigger repair")
+    document = _indexed_document(
+        repository,
+        filename="Trigger health.pdf",
+        path="operations/Trigger health.pdf",
+        pages=("Trigger health controls",),
+        digest="t",
+    )
+    with connection.cursor() as cursor:
+        cursor.execute("DROP TRIGGER bitbucket_search_pdf_page_fts_update")
+
+    assert search_index_available() is False
+    assert ensure_search_index_available() is True
+
+    page = PDFTextPage.objects.get(revision=document.indexed_revision, page_number=1)
+    page.extracted_text = "Updated trigger health controls"
+    page.save(update_fields=("extracted_text",))
+    result = search_documents(PDFSearchQuery(chips=("Updated trigger",)))
+    assert [hit.document.pk for hit in result.results] == [document.pk]
 
 
 def test_metadata_fts_tracks_document_and_repository_renames():

@@ -433,6 +433,12 @@
     display: block;
 }
 
+.bb-connection-test[data-state="idle"] .bb-connection-test__icon--disconnected {
+    display: block;
+    filter: grayscale(1);
+    opacity: 0.66;
+}
+
 .bb-repository-form label {
     color: var(--bb-text-soft);
     font-size: 0.7rem;
@@ -885,6 +891,26 @@
 }
 
 .bb-repository-work-label[hidden] {
+    display: none;
+}
+
+.bb-repository-health {
+    color: var(--bb-success);
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
+.bb-repository-health[data-health-state="delayed"] {
+    color: var(--bb-amber);
+}
+
+.bb-repository-health[data-health-state="stalled"],
+.bb-repository-health[data-health-state="unknown"] {
+    color: var(--bb-danger);
+}
+
+.bb-repository-health[hidden] {
     display: none;
 }
 
@@ -3226,31 +3252,35 @@ html.bb-operation-blocked { cursor: wait; }
 }
 
 .bb-results-table .bb-column-path {
-    width: 19%;
+    width: 16%;
 }
 
 .bb-results-table .bb-column-project {
-    width: 9%;
+    width: 8%;
 }
 
 .bb-results-table .bb-column-repository {
-    width: 10%;
-}
-
-.bb-results-table .bb-column-added {
-    width: 10%;
-}
-
-.bb-results-table .bb-column-author {
-    width: 11%;
-}
-
-.bb-results-table .bb-column-status {
     width: 9%;
 }
 
+.bb-results-table .bb-column-added {
+    width: 9%;
+}
+
+.bb-results-table .bb-column-author {
+    width: 9%;
+}
+
+.bb-results-table .bb-column-commit {
+    width: 10%;
+}
+
+.bb-results-table .bb-column-status {
+    width: 8%;
+}
+
 .bb-results-table .bb-column-opens {
-    width: 5%;
+    width: 4%;
 }
 
 .bb-results-table .bb-column-actions {
@@ -3303,8 +3333,8 @@ html.bb-operation-blocked { cursor: wait; }
     background: var(--bb-stage-bg);
 }
 
-.bb-results-table thead th:nth-child(7),
-.bb-results-table thead th:nth-child(8) {
+.bb-results-table thead th:nth-child(9),
+.bb-results-table thead th:nth-child(10) {
     text-align: center;
 }
 
@@ -3439,6 +3469,92 @@ html.bb-operation-blocked { cursor: wait; }
 
 .bb-document-name > span:last-child {
     min-width: 0;
+}
+
+.bb-document-preview-form,
+.bb-document-preview-button {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+}
+
+.bb-document-preview-button {
+    display: block;
+    padding: 0;
+    border: 0;
+    color: inherit;
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+}
+
+.bb-document-preview-button:hover strong {
+    color: var(--bb-repository-text);
+    text-decoration: underline;
+    text-underline-offset: 0.16em;
+}
+
+.bb-document-preview-button:focus-visible {
+    border-radius: 3px;
+    outline: 2px solid var(--bb-blue);
+    outline-offset: 3px;
+}
+
+.bb-commit-copy {
+    display: inline-grid;
+    max-width: 100%;
+    min-width: 0;
+    gap: 0.08rem;
+    padding: 0.2rem 0.38rem;
+    border: 1px solid var(--bb-line-strong);
+    border-radius: 4px;
+    color: var(--bb-repository-text);
+    background: var(--bb-surface);
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+}
+
+.bb-commit-copy code {
+    min-width: 0;
+    overflow: hidden;
+    color: inherit;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.64rem;
+    font-weight: 680;
+    letter-spacing: 0.015em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.bb-commit-copy small {
+    color: var(--bb-success);
+    font-size: 0.55rem;
+    font-weight: 680;
+}
+
+.bb-commit-copy small:empty {
+    display: none;
+}
+
+.bb-commit-copy:hover {
+    border-color: var(--bb-blue);
+    background: var(--bb-blue-soft);
+}
+
+.bb-commit-copy:focus-visible {
+    outline: 2px solid var(--bb-blue);
+    outline-offset: 2px;
+}
+
+.bb-commit-copy[aria-busy="true"] {
+    cursor: progress;
+}
+
+.bb-commit-copy.is-copy-error {
+    color: var(--bb-danger);
+    border-color: var(--bb-danger);
 }
 
 .bb-document-name strong,
@@ -4006,6 +4122,24 @@ html.bb-operation-blocked { cursor: wait; }
     border-color: var(--bb-line);
 }
 
+@media (min-width: 1800px) {
+    .bb-results-table .bb-column-select { width: 3%; }
+    .bb-results-table .bb-column-name { width: 23%; }
+    .bb-results-table .bb-column-path { width: 13%; }
+    .bb-results-table .bb-column-project { width: 7%; }
+    .bb-results-table .bb-column-repository { width: 8%; }
+    .bb-results-table .bb-column-added { width: 8%; }
+    .bb-results-table .bb-column-author { width: 8%; }
+    .bb-results-table .bb-column-commit { width: 10%; }
+    .bb-results-table .bb-column-status { width: 8%; }
+    .bb-results-table .bb-column-opens { width: 4%; }
+    .bb-results-table .bb-column-actions { width: 8%; }
+
+    .bb-document-name__icon {
+        display: none;
+    }
+}
+
 @media (min-width: 2200px) {
     .bitbucket-workspace {
         grid-template-columns:
@@ -4016,14 +4150,15 @@ html.bb-operation-blocked { cursor: wait; }
 
     .bb-results-table .bb-column-select { width: 3%; }
     .bb-results-table .bb-column-name { width: 20%; }
-    .bb-results-table .bb-column-path { width: 23%; }
-    .bb-results-table .bb-column-project { width: 8%; }
-    .bb-results-table .bb-column-repository { width: 10%; }
-    .bb-results-table .bb-column-added { width: 9%; }
-    .bb-results-table .bb-column-author { width: 10%; }
+    .bb-results-table .bb-column-path { width: 19%; }
+    .bb-results-table .bb-column-project { width: 7%; }
+    .bb-results-table .bb-column-repository { width: 8%; }
+    .bb-results-table .bb-column-added { width: 8%; }
+    .bb-results-table .bb-column-author { width: 8%; }
+    .bb-results-table .bb-column-commit { width: 8%; }
     .bb-results-table .bb-column-status { width: 7%; }
     .bb-results-table .bb-column-opens { width: 4%; }
-    .bb-results-table .bb-column-actions { width: 6%; }
+    .bb-results-table .bb-column-actions { width: 8%; }
 }
 
 @media (max-width: 1280px) {
@@ -4143,13 +4278,11 @@ html.bb-operation-blocked { cursor: wait; }
         padding-inline: 0.55rem;
     }
 
-    .bb-results-table .bb-column-path {
-        width: 19%;
-    }
-
-    .bb-results-table .bb-column-actions {
-        width: 12%;
-    }
+    .bb-results-table .bb-column-name { width: 13%; }
+    .bb-results-table .bb-column-path { width: 15%; }
+    .bb-results-table .bb-column-added { width: 10%; }
+    .bb-results-table .bb-column-commit { width: 10%; }
+    .bb-results-table .bb-column-actions { width: 11%; }
 
 }
 
@@ -4392,7 +4525,8 @@ html.bb-operation-blocked { cursor: wait; }
             "name name actions"
             "path path actions"
             "project repository opens"
-            "added author opens";
+            "added author opens"
+            "commit status opens";
         grid-template-columns: minmax(0, 1.15fr) minmax(10rem, 0.85fr) auto;
         gap: 0.7rem 0.85rem;
         margin: 0.35rem 0 0.6rem 1.25rem;
@@ -4473,6 +4607,14 @@ html.bb-operation-blocked { cursor: wait; }
         grid-area: author;
     }
 
+    .bb-document-cell--commit {
+        grid-area: commit;
+    }
+
+    .bb-document-cell--status {
+        grid-area: status;
+    }
+
     .bb-document-cell--opens {
         grid-area: opens;
     }
@@ -4488,6 +4630,12 @@ html.bb-operation-blocked { cursor: wait; }
 
     .bb-document-cell--name > .bb-cell-label {
         display: none;
+    }
+
+    .bb-commit-copy {
+        min-height: 44px;
+        align-content: center;
+        padding-inline: 0.65rem;
     }
 
     .bb-document-name strong,
@@ -4805,6 +4953,7 @@ html.bb-operation-blocked { cursor: wait; }
             "path path"
             "project repository"
             "added author"
+            "commit status"
             "opens opens";
         grid-template-columns: minmax(0, 1fr) auto;
     }
@@ -4878,6 +5027,8 @@ html.bb-operation-blocked { cursor: wait; }
             "repository repository"
             "added added"
             "author author"
+            "commit commit"
+            "status status"
             "opens opens";
         gap: 0.65rem;
         margin-left: 1.05rem;

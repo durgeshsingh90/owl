@@ -252,6 +252,20 @@ def test_search_bulk_copy_uses_visible_result_paths_and_clipboard_fallback():
     assert "PDF paths could not be copied" in javascript
 
 
+def test_commit_copy_uses_full_id_and_accessible_feedback():
+    javascript = (
+        Path(__file__).parents[1] / "static" / "bitbucket_search" / "bitbucket_search.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'event.target.closest?.("[data-copy-commit-id]")' in javascript
+    assert "button.dataset.commitId" in javascript
+    assert "await copyText(commitId)" in javascript
+    assert 'button.title = "Full commit ID copied"' in javascript
+    assert 'status.textContent = "Copied"' in javascript
+    assert 'status.textContent = "Copy failed"' in javascript
+    assert "pendingCommitCopies" in javascript
+
+
 def test_large_search_page_requires_accessible_open_all_confirmation():
     javascript = (
         Path(__file__).parents[1] / "static" / "bitbucket_search" / "bitbucket_search.js"
@@ -310,11 +324,18 @@ def test_wide_workspace_uses_available_space_for_long_names():
     assert "margin: 0;" in content_rule.group("body")
     assert "1600px" not in content_rule.group("body")
 
-    wide_rule_start = stylesheet.index("@media (min-width: 2200px)")
-    wide_rule_end = stylesheet.index("@media (max-width: 1280px)", wide_rule_start)
-    wide_rule = stylesheet[wide_rule_start:wide_rule_end]
-    assert "clamp(314px, 14vw, 420px)" in wide_rule
-    assert ".bb-results-table .bb-column-name { width: 20%; }" in wide_rule
+    desktop_rule_start = stylesheet.index("@media (min-width: 1800px)")
+    desktop_rule_end = stylesheet.index("@media (min-width: 2200px)", desktop_rule_start)
+    desktop_rule = stylesheet[desktop_rule_start:desktop_rule_end]
+    assert ".bb-results-table .bb-column-name { width: 23%; }" in desktop_rule
+    assert ".bb-results-table .bb-column-path { width: 13%; }" in desktop_rule
+    assert ".bb-document-name__icon {\n        display: none;" in desktop_rule
+
+    ultra_wide_rule_start = desktop_rule_end
+    ultra_wide_rule_end = stylesheet.index("@media (max-width: 1280px)", ultra_wide_rule_start)
+    ultra_wide_rule = stylesheet[ultra_wide_rule_start:ultra_wide_rule_end]
+    assert "clamp(314px, 14vw, 420px)" in ultra_wide_rule
+    assert ".bb-results-table .bb-column-name { width: 20%; }" in ultra_wide_rule
 
 
 @pytest.mark.parametrize(
@@ -385,6 +406,6 @@ def test_repository_status_includes_extraction_counts(client):
         "indexedDocuments": 1,
         "staleDocuments": 0,
         "active": False,
-        "workerLimit": 1,
+        "workerLimit": 4,
         "publicationSignature": "0:1:0:0:0",
     }

@@ -26,6 +26,18 @@ def _worker_wakeup_lock_path() -> Path:
     return lock_root / "repository-worker-wakeup-reservations.lock"
 
 
+def _resident_supervisor_lock_path() -> Path:
+    lock_root = Path(settings.BITBUCKET_TEMP_ROOT) / "service-locks"
+    lock_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return lock_root / "resident-worker-supervisor.lock"
+
+
+def _pdf_search_index_repair_lock_path() -> Path:
+    lock_root = Path(settings.BITBUCKET_TEMP_ROOT) / "service-locks"
+    lock_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return lock_root / "pdf-search-index-repair.lock"
+
+
 def _windows_lock(handle, *, blocking: bool, shared: bool, release: bool = False) -> None:
     """Use real shared byte-range locks; CRT LK_RLCK is still exclusive."""
 
@@ -138,6 +150,22 @@ def repository_worker_wakeup_lock() -> Iterator[None]:
     """Serialize queued-worker launch reservations across OWL web processes."""
 
     with _file_lock(_worker_wakeup_lock_path(), blocking=True):
+        yield
+
+
+@contextmanager
+def resident_worker_supervisor_lock() -> Iterator[None]:
+    """Allow only one ``run_owl`` process to own this data root's worker pool."""
+
+    with _file_lock(_resident_supervisor_lock_path(), blocking=False):
+        yield
+
+
+@contextmanager
+def pdf_search_index_repair_lock() -> Iterator[None]:
+    """Serialize reconstruction of OWL's derived PDF FTS schema."""
+
+    with _file_lock(_pdf_search_index_repair_lock_path(), blocking=True):
         yield
 
 

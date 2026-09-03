@@ -52,6 +52,19 @@ def loopback_client(client):
     return client
 
 
+def test_pdf_workspace_reconciles_the_search_index_before_rendering(
+    loopback_client,
+    monkeypatch,
+):
+    ensure_index = Mock(return_value=True)
+    monkeypatch.setattr(bitbucket_views, "ensure_search_index_available", ensure_index)
+
+    response = loopback_client.get(reverse("bitbucket_search:index"))
+
+    assert response.status_code == 200
+    ensure_index.assert_called_once_with()
+
+
 @override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
 def test_repository_workspace_has_add_control_list_filter_and_background_copy(loopback_client):
     response = loopback_client.get(reverse("bitbucket_search:index"))
@@ -90,8 +103,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=wide-workspace-v1" in html
-    assert "bitbucket_search/bitbucket_search.js?v=blocking-repository-actions-v1" in html
+    assert "bitbucket_search/bitbucket_search.css?v=connection-idle-v1" in html
+    assert "bitbucket_search/bitbucket_search.js?v=connection-diagnostic-v1" in html
     assert "data-repository-operation-overlay" in html
     assert "bitbucket_search/icons/work-in-progress.gif" in html
     assert "bitbucket_search/icons/connection-connected.png" in html
@@ -101,6 +114,8 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
         "data-repository-connection-result"
     )
     assert 'class="bb-connection-test" type="button"' in html
+    assert 'data-repository-connection-result data-state="idle"' in html
+    assert 'aria-label="Test repository connections"' in html
     assert "data-repository-connection-message" in html
     assert 'name="confirmed"' not in html
 
@@ -784,6 +799,10 @@ def test_git_ready_repository_shows_pdf_worker_phase_in_sidebar_and_refresh_tool
         assert label is not None
         assert (" hidden" in label.group()) is (running == 0)
         assert label.group(1).strip() == escape(activity["detail"])
+        health = re.search(r"<small[^>]+data-repository-health[^>]*>(.*?)</small>", card, re.DOTALL)
+        assert health is not None
+        assert (" hidden" in health.group()) is (running == 0)
+        assert health.group(1).strip() == ("Worker responding" if running else "")
         assert "data-repository-run-timer" not in card
         assert "data-repository-success-ticks" in card
     for card in _repository_cards(html, idle.pk):
@@ -891,6 +910,8 @@ def test_responsive_pdf_rows_override_the_generic_block_row_rule():
     assert ".bb-overall-progress" in css
     assert ".bb-results-table tr," in responsive_css
     assert ".bb-results-table .bb-document-row {\n        display: grid;" in responsive_css
+    assert '"commit status opens"' in responsive_css
+    assert ".bb-document-cell--commit {\n        grid-area: commit;" in responsive_css
     assert ".bb-document-row td.bb-document-cell--actions {\n    overflow: visible;" in css
     assert ".bb-document-actions button[data-tooltip]:hover::after," in css
     assert ".bb-document-actions button[data-tooltip]:focus-visible::after" in css
@@ -900,7 +921,10 @@ def test_responsive_pdf_rows_override_the_generic_block_row_rule():
     compact_css = css[compact_start:compact_end]
     mobile_css = css[compact_end : css.index("@media (prefers-reduced-motion", compact_end)]
     assert ".bb-results-table .bb-document-row {\n        grid-template-areas:" in compact_css
+    assert '"commit status"' in compact_css
     assert ".bb-results-table .bb-document-row {\n        grid-template-areas:" in mobile_css
+    assert '"commit commit"' in mobile_css
+    assert '"status status"' in mobile_css
 
 
 def test_background_work_styles_show_an_animated_overall_status_and_progress():
@@ -977,6 +1001,10 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_page_navigation(
                             "path_copy_available": True,
                             "project_label": "Architecture & Design",
                             "added_by_label": "A. Author",
+                            "commit_hash": "0123456789abcdef0123456789abcdef01234567",
+                            "short_commit_hash": "0123456789ab",
+                            "commit_copy_available": True,
+                            "commit_detail": "Original Git addition commit",
                             "added_date_label": "Today",
                             "added_date_source_label": "Git addition",
                             "added_date_detail": "10:24 AM",
@@ -1022,7 +1050,9 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_page_navigation(
     assert "/managed/networking/docs/Network &lt;Plan&gt;.pdf" in html
     assert "Architecture &amp; Design" in html
     assert "A. Author" in html
-    assert "Added by (Git author)" in html
+    assert 'id="bb-pdf-column-author">Added by</th>' in html
+    assert 'id="bb-pdf-column-commit">Commit ID</th>' in html
+    assert "Git author" not in html
     assert 'id="bb-pdf-column-status">Status</th>' in html
     assert html.count('aria-label="Git clone or pull complete"') == 2
     assert 'aria-label="PDF text indexed"' in html
@@ -1034,6 +1064,15 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_page_navigation(
     network_row_start = html.index(f'data-document-id="{network_plan.pk}"')
     network_row = html[network_row_start : html.index("</tr>", network_row_start)]
     assert (
+        f'action="{reverse("bitbucket_search:document_preview", args=(network_plan.pk,))}"'
+        in network_row
+    )
+    assert 'target="_blank" rel="noopener noreferrer"' in network_row
+    assert 'aria-label="Open Network &lt;Plan&gt;.pdf in a new tab"' in network_row
+    assert 'data-commit-id="0123456789abcdef0123456789abcdef01234567"' in network_row
+    assert "<code>0123456789ab</code>" in network_row
+    assert "Copy full commit ID 0123456789abcdef0123456789abcdef01234567" in network_row
+    assert (
         f'action="{reverse("bitbucket_search:document_open", args=(network_plan.pk,))}"'
         in network_row
     )
@@ -1041,14 +1080,14 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_page_navigation(
         f'action="{reverse("bitbucket_search:document_reveal", args=(network_plan.pk,))}"'
         in network_row
     )
-    assert network_row.count('name="csrfmiddlewaretoken"') == 2
+    assert network_row.count('name="csrfmiddlewaretoken"') == 3
     assert network_row.count('name="return_page" value="1"') == 2
     assert 'type="submit" disabled' not in network_row
     assert "bb-index-health" not in network_row
     archived_row_start = html.index(f'data-document-id="{archived_plan.pk}"')
     archived_row = html[archived_row_start : html.index("</tr>", archived_row_start)]
-    assert archived_row.count("Unavailable") == 2
-    assert archived_row.count('method="post"') == 2
+    assert archived_row.count("Unavailable") == 3
+    assert archived_row.count('method="post"') == 3
     assert "bb-index-health" not in archived_row
     assert html.count('data-tooltip="Open file"') == 2
     assert html.count('data-tooltip="Open folder"') == 2
@@ -1056,7 +1095,7 @@ def test_pdf_timeline_renders_grouped_metadata_actions_and_page_navigation(
     assert 'aria-label="Open folder containing Archive.pdf"' in archived_row
     assert f'data-next-page-url="{next_page_url}"' in html
     assert "data-load-older" not in html
-    assert "100 PDFs per page" in html
+    assert "500 PDFs per page" in html
     assert "Page <strong data-pdf-current-page>1</strong> of 1" in html
     assert f'href="{next_page_url}" rel="next" data-pdf-next-page' in html
 
@@ -1413,9 +1452,9 @@ def test_repository_status_is_compact_and_never_returns_the_remote_url(loopback_
     assert payload["automation"]["state"] == "due"
     assert payload["workerLimits"] == {
         "git": 4,
-        "indexing": 1,
+        "indexing": 4,
         "publication": 1,
-        "total": 6,
+        "total": 9,
     }
     assert len(payload["catalog"]["publicationSignature"]) == 64
     assert payload["totals"] == {
@@ -1431,53 +1470,146 @@ def test_repository_status_is_compact_and_never_returns_the_remote_url(loopback_
     assert "/private/synthetic/path" not in serialized
 
 
-def test_topbar_connection_test_runs_ssh_probe_before_repository_checks(
+def test_topbar_connection_test_checks_each_enabled_repository_with_its_actual_credential(
     loopback_client,
     monkeypatch,
 ):
-    BitbucketRepository.objects.create(
-        display_name="architecture",
-        canonical_remote_key="bitbucket.org/workspace/architecture",
-        remote_url="ssh://git@bitbucket.org/workspace/architecture.git",
+    https_repository = BitbucketRepository.objects.create(
+        display_name="architecture-https",
+        canonical_remote_key="scm.mastercard.int/workspace/architecture",
+        remote_url="https://scm.mastercard.int/workspace/architecture.git",
         sync_state=RepositorySyncState.READY,
     )
-    calls = []
-    monkeypatch.setattr(
-        bitbucket_views,
-        "probe_bitbucket_ssh_connection",
-        lambda: calls.append("ssh"),
+    ssh_repository = BitbucketRepository.objects.create(
+        display_name="platform-ssh",
+        canonical_remote_key="github.com/workspace/platform",
+        remote_url="ssh://git@github.com/workspace/platform.git",
+        sync_state=RepositorySyncState.READY,
     )
+    saved_credential = Mock(username="stored-user", token="private-token")
+    resolved_urls = []
+    calls = []
+
+    def resolve_credential(remote_url):
+        resolved_urls.append(remote_url)
+        return saved_credential if remote_url == https_repository.remote_url else None
+
+    def test_connection(repository, *, https_credential):
+        calls.append((repository, https_credential))
+
+    monkeypatch.setattr(bitbucket_views, "resolve_https_credential", resolve_credential)
     monkeypatch.setattr(
         bitbucket_views,
         "test_repository_connection",
-        lambda *_args, **_kwargs: calls.append("repository"),
+        test_connection,
     )
 
     response = loopback_client.post(reverse("bitbucket_search:repository_connection_test"))
 
     assert response.status_code == 200
-    assert calls == ["ssh", "repository"]
-    assert response.json()["ssh"] == {"host": "bitbucket.org", "connected": True}
-    assert response.json()["detail"] == "SSH key authentication and 1 repository connections passed."
+    assert resolved_urls == [https_repository.remote_url, ssh_repository.remote_url]
+    assert [repository for repository, _credential in calls] == [
+        https_repository,
+        ssh_repository,
+    ]
+    assert calls[0][1].username == "stored-user"
+    assert calls[0][1].token == "private-token"
+    assert calls[1][1] is None
+    payload = response.json()
+    assert payload["state"] == "connected"
+    assert payload["detail"] == "2 repository connections passed."
+    assert "ssh" not in payload
+    assert "private-token" not in response.content.decode()
 
 
-def test_topbar_connection_test_reports_ssh_key_failure(loopback_client, monkeypatch):
+def test_topbar_connection_test_returns_safe_failed_result_as_completed_request(
+    loopback_client,
+    monkeypatch,
+):
+    timed_out = BitbucketRepository.objects.create(
+        display_name="architecture",
+        canonical_remote_key="scm.mastercard.int/workspace/architecture",
+        remote_url="ssh://git@scm.mastercard.int/workspace/architecture.git",
+    )
+    missing_credential = BitbucketRepository.objects.create(
+        display_name="payments",
+        canonical_remote_key="scm.mastercard.int/workspace/payments",
+        remote_url="https://scm.mastercard.int/workspace/payments.git",
+    )
+    BitbucketRepository.objects.create(
+        display_name="disabled",
+        canonical_remote_key="bitbucket.org/workspace/disabled",
+        remote_url="ssh://git@bitbucket.org/workspace/disabled.git",
+        enabled=False,
+    )
+
+    def resolve_credential(remote_url):
+        if remote_url == missing_credential.remote_url:
+            raise bitbucket_views.HTTPSCredentialUnavailable("private credential detail")
+        return None
+
+    def test_connection(repository, *, https_credential):
+        assert repository == timed_out
+        assert https_credential is None
+        raise bitbucket_views.RepositorySyncError(
+            "connection_timeout",
+            "The Git repository connection timed out. Check the network or VPN, then retry.",
+        )
+
+    monkeypatch.setattr(bitbucket_views, "resolve_https_credential", resolve_credential)
     monkeypatch.setattr(
         bitbucket_views,
-        "probe_bitbucket_ssh_connection",
-        Mock(
-            side_effect=bitbucket_views.RepositorySyncError(
-                "connection_auth_failed", "safe"
-            )
-        ),
+        "test_repository_connection",
+        test_connection,
     )
 
     response = loopback_client.post(reverse("bitbucket_search:repository_connection_test"))
 
-    assert response.status_code == 400
-    assert response.json()["state"] == "failed"
-    assert response.json()["ssh"] == {"host": "bitbucket.org", "connected": False}
-    assert response.json()["detail"] == "Bitbucket SSH key authentication failed."
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "failed"
+    assert payload["detail"] == "2 of 2 repository connections failed."
+    assert payload["repositories"] == [
+        {
+            "id": timed_out.pk,
+            "name": "architecture",
+            "connected": False,
+            "errorCode": "connection_timeout",
+            "detail": (
+                "The Git repository connection timed out. Check the network or VPN, then retry."
+            ),
+        },
+        {
+            "id": missing_credential.pk,
+            "name": "payments",
+            "connected": False,
+            "errorCode": "https_credential_unavailable",
+            "detail": (
+                "The saved HTTPS credential is unavailable. "
+                "Replace it in Settings, then test again."
+            ),
+        },
+    ]
+    assert "private credential detail" not in response.content.decode()
+
+
+def test_topbar_connection_test_is_neutral_when_no_repositories_are_enabled(loopback_client):
+    response = loopback_client.post(reverse("bitbucket_search:repository_connection_test"))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "state": "idle",
+        "label": "No repository connections to test",
+        "detail": "Add or enable a repository, then test again.",
+        "repositories": [],
+    }
+
+
+def test_topbar_connection_test_reserves_4xx_for_request_errors(client):
+    path = reverse("bitbucket_search:repository_connection_test")
+
+    assert client.get(path, REMOTE_ADDR="127.0.0.1").status_code == 405
+    assert client.post(path, REMOTE_ADDR="192.0.2.10").status_code == 403
 
 
 def test_repository_poller_tracks_daily_idle_and_catalog_publication_contract():
