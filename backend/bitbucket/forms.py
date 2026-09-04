@@ -60,7 +60,7 @@ class RepositoryForm(forms.Form):
 
 
 class ServerSettingsForm(forms.Form):
-    base_url = forms.CharField(max_length=2048, label="Bitbucket REST API base URL")
+    base_url = forms.CharField(max_length=2048, label="Bitbucket base URL")
     username = forms.CharField(max_length=255, required=False, label="Bitbucket username")
     access_token = forms.CharField(max_length=16_384, required=False, label="HTTP access token")
     verify_ssl = forms.BooleanField(required=False, initial=True, label="Verify SSL certificates")

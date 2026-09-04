@@ -87,32 +87,34 @@ def _validated_https_url(raw_value: str, *, label: str) -> tuple[SplitResult, st
 
 
 def parse_api_base_url(raw_value: str) -> ServerURL:
-    """Parse a config.ini-style Bitbucket REST root such as ``.../rest/api/1.0``."""
+    """Parse a Bitbucket web or REST root and normalize it to REST API 1.0."""
 
     parsed, host, port = _validated_https_url(raw_value, label="Bitbucket API base")
-    path = parsed.path.rstrip("/")
-    parts = [part for part in path.split("/") if part]
+    parts = [part for part in parsed.path.rstrip("/").split("/") if part]
     lowered = [part.casefold() for part in parts]
-    try:
-        rest_index = lowered.index("rest")
-    except ValueError as exc:
+    if len(parts) >= 3 and lowered[-3:-1] == ["rest", "api"]:
+        if lowered[-1] not in {"1.0", "latest"}:
+            raise ServerURLValidationError(
+                "Enter the Bitbucket server URL, such as https://server.example/stash."
+            )
+        context_parts = parts[:-3]
+        api_parts = parts
+    elif len(parts) >= 2 and lowered[-2:] == ["rest", "api"]:
+        context_parts = parts[:-2]
+        api_parts = [*parts, "1.0"]
+    elif "rest" in lowered:
         raise ServerURLValidationError(
-            "Enter the REST API base URL ending in /rest/api/1.0 or /rest/api/latest."
-        ) from exc
-    if (
-        rest_index + 2 >= len(parts)
-        or lowered[rest_index + 1] != "api"
-        or lowered[rest_index + 2] not in {"1.0", "latest"}
-        or rest_index + 3 != len(parts)
-    ):
-        raise ServerURLValidationError(
-            "Enter the REST API base URL ending in /rest/api/1.0 or /rest/api/latest."
+            "Enter the Bitbucket server URL, such as https://server.example/stash."
         )
+    else:
+        context_parts = parts
+        api_parts = [*parts, "rest", "api", "1.0"]
     netloc = host if port in {None, 443} else f"{host}:{port}"
     origin = urlunsplit(SplitResult("https", netloc, "", "", ""))
-    context_path = "/" + "/".join(parts[:rest_index]) if rest_index else ""
+    context_path = "/" + "/".join(context_parts) if context_parts else ""
+    api_path = "/" + "/".join(api_parts)
     web_base_url = urlunsplit(SplitResult("https", netloc, context_path, "", ""))
-    api_base_url = urlunsplit(SplitResult("https", netloc, path, "", ""))
+    api_base_url = urlunsplit(SplitResult("https", netloc, api_path, "", ""))
     return ServerURL(
         api_base_url=api_base_url,
         origin=origin,

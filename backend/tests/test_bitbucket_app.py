@@ -14,6 +14,7 @@ from unittest.mock import Mock
 import httpx
 import pymupdf
 import pytest
+import requests
 from django.core.management import get_commands
 from django.urls import reverse
 
@@ -317,7 +318,7 @@ def test_config_ini_settings_save_connection_without_adding_a_repository(loopbac
     response = loopback_client.post(
         reverse("bitbucket:settings_save"),
         {
-            "base_url": "https://private.example.invalid/stash/rest/api/1.0",
+            "base_url": "https://private.example.invalid/stash",
             "username": "api-reader",
             "access_token": token,
             "verify_ssl": "false",
@@ -329,6 +330,7 @@ def test_config_ini_settings_save_connection_without_adding_a_repository(loopbac
     assert credential.api_base_url.endswith("/stash/rest/api/1.0")
     assert credential.username == "api-reader"
     assert credential.verify_ssl is False
+    assert response.json()["configuration"]["baseUrl"] == ("https://private.example.invalid/stash")
     assert token not in response.content.decode()
     assert not Repository.objects.exists()
     assert not SyncJob.objects.exists()
@@ -359,7 +361,7 @@ def test_settings_test_uses_unsaved_values_and_reports_success(loopback_client, 
     response = loopback_client.post(
         reverse("bitbucket:settings_test"),
         {
-            "base_url": "https://private.example.invalid/stash/rest/api/1.0",
+            "base_url": "https://private.example.invalid/stash",
             "username": "api-reader",
             "access_token": "not-a-real-token",
             "verify_ssl": "false",
@@ -427,10 +429,12 @@ def test_new_project_adds_every_returned_repository_to_the_one_worker_queue(
 
 def test_project_and_api_base_urls_match_the_config_ini_shapes():
     server = parse_api_base_url("https://scm.example.invalid/stash/rest/api/1.0")
+    visible_server = parse_api_base_url("https://scm.example.invalid/stash")
     project = parse_project_url("https://scm.example.invalid/stash/projects/ADR")
 
     assert server.origin == project.origin == "https://scm.example.invalid"
     assert server.web_base_url == "https://scm.example.invalid/stash"
+    assert visible_server == server
     assert project.project == "ADR"
     assert server.repository_url("ADR", "designs").endswith("/stash/scm/ADR/designs.git")
 
@@ -507,6 +511,66 @@ def test_server_client_tests_configured_api_root_and_lists_project_repositories(
     assert repositories == ("first-repo", "second-repo")
     assert observed[0].url.path == "/stash/rest/api/1.0/projects"
     assert observed[1].url.path == "/stash/rest/api/1.0/projects/ADR/repos"
+
+
+def test_real_server_client_matches_working_requests_crawler(monkeypatch, settings):
+    observed: dict[str, object] = {}
+    settings.BITBUCKET_APP_API_TIMEOUT_SECONDS = 37
+
+    def get(session, url, **kwargs):
+        observed.update(
+            url=url,
+            auth=session.auth,
+            verify=session.verify,
+            headers=dict(session.headers),
+            kwargs=kwargs,
+        )
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b'{"values": [], "isLastPage": true}'
+        response.headers["Content-Type"] = "application/json"
+        return response
+
+    monkeypatch.setattr(requests.Session, "get", get)
+
+    with BitbucketServerClient(
+        "https://scm.example.invalid/stash",
+        "synthetic-never-valid-http-token",
+        username="api-reader",
+        verify_ssl=False,
+    ) as client:
+        client.test_connection()
+
+    assert observed["url"] == "https://scm.example.invalid/stash/rest/api/1.0/projects"
+    assert observed["auth"] == ("api-reader", "synthetic-never-valid-http-token")
+    assert observed["verify"] is False
+    assert observed["kwargs"] == {
+        "params": None,
+        "headers": None,
+        "timeout": 37.0,
+        "allow_redirects": False,
+    }
+
+
+def test_real_server_client_maps_requests_connection_failure(monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise requests.ConnectionError("synthetic private transport detail")
+
+    monkeypatch.setattr(requests.Session, "get", fail)
+
+    with (
+        BitbucketServerClient(
+            "https://scm.example.invalid/stash",
+            "synthetic-never-valid-http-token",
+            username="api-reader",
+            verify_ssl=False,
+        ) as client,
+        pytest.raises(BitbucketAPIError) as caught,
+    ):
+        client.test_connection()
+
+    assert caught.value.code == "connection_failed"
+    assert "synthetic private transport detail" not in str(caught.value)
 
 
 def test_api_client_retries_rate_limit_and_extracts_downloaded_pdf():

@@ -121,6 +121,7 @@ export interface WorkspacePayload {
     credentials: Array<{
         origin: string;
         configured: boolean;
+        baseUrl: string;
         apiBaseUrl: string;
         username: string;
         verifySsl: boolean;

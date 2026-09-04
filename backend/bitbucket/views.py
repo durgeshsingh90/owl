@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import OrderedDict
 from datetime import date, timedelta
 from pathlib import PurePosixPath
@@ -64,6 +65,7 @@ TIMELINE_LABELS = (
     "Older",
     "Date unavailable",
 )
+logger = logging.getLogger("owl.bitbucket.settings")
 
 
 def _month_start(value: date, months_back: int = 0) -> date:
@@ -439,6 +441,18 @@ def settings_test(request: HttpRequest) -> JsonResponse:
             client.test_connection()
     except (CredentialError, BitbucketAPIError) as exc:
         return JsonResponse({"ok": False, "message": str(exc)}, status=400)
+    except Exception:
+        logger.exception("bitbucket_settings_connection_test_failed")
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": (
+                    "The Bitbucket connection test failed unexpectedly. "
+                    "Check the OWL terminal for the recorded error."
+                ),
+            },
+            status=400,
+        )
     return JsonResponse(
         {
             "ok": True,
@@ -490,7 +504,7 @@ def source_add(request: HttpRequest) -> JsonResponse:
             credential = resolve_origin_credential(parsed_repository.origin)
             if not credential.api_base_url:
                 raise CredentialError(
-                    "Open Bitbucket settings and save the REST API base URL before adding a repository."
+                    "Open Bitbucket settings and save the Bitbucket base URL before adding a repository."
                 )
             with transaction.atomic():
                 _repository, job, created = _queue_repository(parsed_repository.url)
@@ -501,7 +515,7 @@ def source_add(request: HttpRequest) -> JsonResponse:
             credential = resolve_origin_credential(parsed_project.origin)
             if not credential.api_base_url:
                 raise CredentialError(
-                    "Open Bitbucket settings and save the REST API base URL before adding a project."
+                    "Open Bitbucket settings and save the Bitbucket base URL before adding a project."
                 )
             with BitbucketServerClient(
                 credential.api_base_url,

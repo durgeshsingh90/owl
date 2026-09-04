@@ -11,7 +11,13 @@ from django.conf import settings
 from django.db import transaction
 
 from bitbucket.models import HTTPSCredential, Repository
-from bitbucket.services.repository_urls import RepositoryURL, ServerURL, parse_repository_url
+from bitbucket.services.repository_urls import (
+    RepositoryURL,
+    ServerURL,
+    ServerURLValidationError,
+    parse_api_base_url,
+    parse_repository_url,
+)
 
 MAX_TOKEN_CHARACTERS = 16_384
 
@@ -171,14 +177,21 @@ def resolve_credential(repository: Repository) -> ActiveCredential:
 
 
 def credential_summaries() -> tuple[dict[str, object], ...]:
-    return tuple(
-        {
-            "origin": record.origin,
-            "configured": bool(record.token_ciphertext),
-            "apiBaseUrl": record.api_base_url,
-            "username": record.username,
-            "verifySsl": record.verify_ssl,
-            "updatedAt": record.updated_at.isoformat(),
-        }
-        for record in HTTPSCredential.objects.all()
-    )
+    summaries: list[dict[str, object]] = []
+    for record in HTTPSCredential.objects.all():
+        try:
+            visible_base_url = parse_api_base_url(record.api_base_url).web_base_url
+        except ServerURLValidationError:
+            visible_base_url = record.origin
+        summaries.append(
+            {
+                "origin": record.origin,
+                "configured": bool(record.token_ciphertext),
+                "baseUrl": visible_base_url,
+                "apiBaseUrl": record.api_base_url,
+                "username": record.username,
+                "verifySsl": record.verify_ssl,
+                "updatedAt": record.updated_at.isoformat(),
+            }
+        )
+    return tuple(summaries)

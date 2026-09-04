@@ -684,7 +684,6 @@ td code {
 .bb-secret-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .bb-secret-field button,
 .bb-source-type button,
-.bb-configured-origins button,
 .bb-settings-callout button {
     border: 1px solid var(--control-border);
     border-radius: 8px;
@@ -713,13 +712,6 @@ td code {
     color: var(--blue);
 }
 .bb-settings-dialog__help { margin: 4px 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
-.bb-configured-origins { display: grid; gap: 5px; padding: 11px 12px; border-radius: 9px; background: var(--panel-accent); font-size: 10px; }
-.bb-configured-origins strong { color: var(--panel-accent-ink); font-size: 11px; }
-.bb-configured-origins button {
-    padding: 6px 8px;
-    text-align: left;
-    color: var(--muted);
-}
 .bb-settings-callout {
     margin: 2px 0;
     padding: 10px 12px;

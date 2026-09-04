@@ -78,6 +78,7 @@ const workspace: WorkspacePayload = {
     credentials: [{
         origin: "https://scm.example.test",
         configured: true,
+        baseUrl: "https://scm.example.test/stash",
         apiBaseUrl: "https://scm.example.test/stash/rest/api/1.0",
         username: "api-reader",
         verifySsl: false,
@@ -158,12 +159,12 @@ describe("Bitbucket React workspace", () => {
         fireEvent.click(await screen.findByRole("button", {name: "Bitbucket settings"}));
 
         expect(screen.getByRole("heading", {name: "Bitbucket settings"})).toBeVisible();
-        expect(screen.getByLabelText("REST API base URL")).toHaveValue(
-            "https://scm.example.test/stash/rest/api/1.0",
+        expect(screen.getByLabelText("Bitbucket base URL")).toHaveValue(
+            "https://scm.example.test/stash",
         );
         expect(screen.getByLabelText("HTTP access token")).toHaveValue("");
         expect(screen.getByLabelText("Verify SSL certificates")).not.toBeChecked();
-        expect(screen.getByText(/https:\/\/scm\.example\.test/)).toBeVisible();
+        expect(screen.queryByText("Configured servers")).not.toBeInTheDocument();
 
         fireEvent.click(screen.getByRole("button", {name: "Test connection"}));
         expect(await screen.findByText(/Connection successful/)).toBeVisible();

@@ -3,6 +3,7 @@ import {useEffect, useRef, useState, type FormEvent} from "react";
 interface CredentialSummary {
     origin: string;
     configured: boolean;
+    baseUrl: string;
     apiBaseUrl: string;
     username: string;
     verifySsl: boolean;
@@ -49,7 +50,7 @@ export function BitbucketSettingsDialog({
         if (open && !dialog.open) {
             const selected = credentials.find((item) => item.origin === initialOrigin)
                 ?? credentials[0];
-            setBaseUrl(selected?.apiBaseUrl ?? "");
+            setBaseUrl(selected?.baseUrl ?? "");
             setUsername(selected?.username ?? "");
             setVerifySsl(selected?.verifySsl ?? true);
             setAccessToken("");
@@ -116,19 +117,19 @@ export function BitbucketSettingsDialog({
             <form onSubmit={submit}>
                 <div className="bb-settings-dialog__header">
                     <div>
-                        <p className="bb-eyebrow">config.ini connection</p>
+                        <p className="bb-eyebrow">Connection settings</p>
                         <h2 id="bitbucket-settings-heading">Bitbucket settings</h2>
                     </div>
                     <button type="button" aria-label="Close settings" disabled={busy} onClick={onClose}>×</button>
                 </div>
-                <label htmlFor="bitbucket-base-url">REST API base URL</label>
+                <label htmlFor="bitbucket-base-url">Bitbucket base URL</label>
                 <input
                     id="bitbucket-base-url"
                     type="url"
                     required
                     autoComplete="off"
                     spellCheck={false}
-                    placeholder="https://server.example/stash/rest/api/1.0"
+                    placeholder="https://server.example/stash"
                     value={baseUrl}
                     onChange={(event) => {setBaseUrl(event.target.value); changed();}}
                 />
@@ -167,30 +168,11 @@ export function BitbucketSettingsDialog({
                     Verify SSL certificates
                 </label>
                 <p className="bb-settings-dialog__help">
-                    These match the crawler’s base_url, username, token, and verify_ssl values. Turn SSL
-                    verification off only when your internal Bitbucket uses a certificate your computer cannot
-                    validate. The token is encrypted locally and is always blank after reload.
+                    Enter the server address, username, token, and SSL choice from your crawler settings.
+                    OWL adds the REST endpoint internally. Turn SSL verification off only when your internal
+                    Bitbucket certificate cannot be validated. The token is encrypted locally and always blank
+                    after reload.
                 </p>
-                {credentials.length > 0 && (
-                    <div className="bb-configured-origins" aria-label="Configured Bitbucket servers">
-                        <strong>Configured servers</strong>
-                        {credentials.map((credential) => (
-                            <button
-                                type="button"
-                                key={credential.origin}
-                                onClick={() => {
-                                    setBaseUrl(credential.apiBaseUrl);
-                                    setUsername(credential.username);
-                                    setVerifySsl(credential.verifySsl);
-                                    setAccessToken("");
-                                    changed();
-                                }}
-                            >
-                                ✓ {credential.origin}
-                            </button>
-                        ))}
-                    </div>
-                )}
                 {testResult && <p className="bb-test-success" role="status">{testResult}</p>}
                 <p className="bb-form-error" role="alert">{error}</p>
                 <div className="bb-settings-dialog__actions">

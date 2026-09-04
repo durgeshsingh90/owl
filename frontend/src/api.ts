@@ -25,7 +25,10 @@ export async function requestJson<T>(
     });
     const data = (await response.json().catch(() => ({}))) as T & ErrorResponse;
     if (!response.ok) {
-        throw new ApiError(data.message ?? data.detail ?? "The request could not be completed.", data);
+        const fallback = response.status >= 500
+            ? `The OWL server returned HTTP ${response.status}. Check the OWL terminal for the error.`
+            : `The OWL server rejected the request with HTTP ${response.status}. Refresh and try again.`;
+        throw new ApiError(data.message ?? data.detail ?? fallback, data);
     }
     return data;
 }

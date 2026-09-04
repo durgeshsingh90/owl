@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import warnings
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,7 +12,9 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+import requests
 from django.conf import settings
+from urllib3.exceptions import InsecureRequestWarning
 
 from bitbucket.models import Repository
 from bitbucket.services.repository_urls import ServerURL, parse_api_base_url, parse_repository_url
@@ -72,25 +75,61 @@ def _http_client(
     username: str,
     verify_ssl: bool,
     transport: httpx.BaseTransport | None,
-) -> httpx.Client:
+) -> httpx.Client | requests.Session:
     headers = {
         "Accept": "application/json",
         "User-Agent": "OWL-Bitbucket-pdf-crawler/1",
     }
-    auth = httpx.BasicAuth(username, token) if username else None
-    if auth is None:
-        headers["Authorization"] = f"Bearer {token}"
-    return httpx.Client(
-        headers=headers,
-        auth=auth,
-        timeout=float(getattr(settings, "BITBUCKET_APP_API_TIMEOUT_SECONDS", 30)),
-        follow_redirects=False,
-        verify=verify_ssl,
-        transport=transport,
-    )
+    if transport is not None:
+        auth = httpx.BasicAuth(username, token) if username else None
+        if auth is None:
+            headers["Authorization"] = f"Bearer {token}"
+        return httpx.Client(
+            headers=headers,
+            auth=auth,
+            timeout=float(getattr(settings, "BITBUCKET_APP_API_TIMEOUT_SECONDS", 30)),
+            follow_redirects=False,
+            verify=verify_ssl,
+            transport=transport,
+        )
+
+    # Match the proven standalone crawler on real machines. Requests uses the
+    # operating environment's proxy settings and sends (username, token) as
+    # HTTP Basic auth, which is required by some Bitbucket Data Center setups.
+    client = requests.Session()
+    client.headers.update(headers)
+    if username:
+        client.auth = (username, token)
+    else:
+        client.headers["Authorization"] = f"Bearer {token}"
+    client.verify = verify_ssl
+    return client
 
 
-def _raise_for_response(response: httpx.Response) -> None:
+def _client_get(
+    client: httpx.Client | requests.Session,
+    url: str,
+    *,
+    params: dict[str, object] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float | None = None,
+) -> httpx.Response | requests.Response:
+    request_timeout = timeout or float(getattr(settings, "BITBUCKET_APP_API_TIMEOUT_SECONDS", 30))
+    if isinstance(client, requests.Session):
+        with warnings.catch_warnings():
+            if client.verify is False:
+                warnings.simplefilter("ignore", InsecureRequestWarning)
+            return client.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=request_timeout,
+                allow_redirects=False,
+            )
+    return client.get(url, params=params, headers=headers, timeout=request_timeout)
+
+
+def _raise_for_response(response: httpx.Response | requests.Response) -> None:
     if response.status_code in {401, 403}:
         raise BitbucketAPIError(
             "The HTTP access token is invalid or lacks repository-read permission.",
@@ -106,7 +145,7 @@ def _raise_for_response(response: httpx.Response) -> None:
             "The Bitbucket project, repository, or REST API endpoint was not found.",
             code="repository_not_found",
         )
-    if response.is_error:
+    if response.status_code >= 400:
         raise BitbucketAPIError(
             f"The Bitbucket API returned HTTP {response.status_code}.",
             code="api_response_error",
@@ -114,21 +153,21 @@ def _raise_for_response(response: httpx.Response) -> None:
 
 
 def _get_json_url(
-    client: httpx.Client,
+    client: httpx.Client | requests.Session,
     url: str,
     *,
     params: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     try:
-        response = client.get(url, params=params)
-    except httpx.TimeoutException as exc:
+        response = _client_get(client, url, params=params)
+    except (httpx.TimeoutException, requests.Timeout) as exc:
         raise BitbucketAPIError("The Bitbucket API request timed out.", code="api_timeout") from exc
-    except httpx.ConnectError as exc:
+    except (httpx.ConnectError, requests.ConnectionError) as exc:
         raise BitbucketAPIError(
             "The Bitbucket API could not be reached. Check the URL, VPN, and SSL verification setting.",
             code="connection_failed",
         ) from exc
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, requests.RequestException) as exc:
         raise BitbucketAPIError("The Bitbucket API could not be reached.") from exc
     _raise_for_response(response)
     try:
@@ -141,7 +180,7 @@ def _get_json_url(
 
 
 def _pages_from_url(
-    client: httpx.Client,
+    client: httpx.Client | requests.Session,
     url: str,
     *,
     params: dict[str, object] | None = None,
@@ -194,7 +233,7 @@ class BitbucketServerClient:
         self._client.close()
 
     def test_connection(self) -> None:
-        _get_json_url(self._client, f"{self.server.api_base_url}/projects", params={"limit": 1})
+        _get_json_url(self._client, f"{self.server.api_base_url}/projects")
 
     def repositories(self, project: str) -> tuple[str, ...]:
         encoded_project = quote(project, safe="")
@@ -263,7 +302,7 @@ class BitbucketAPIClient:
         self._client.close()
 
     @staticmethod
-    def _raise_for_response(response: httpx.Response) -> None:
+    def _raise_for_response(response: httpx.Response | requests.Response) -> None:
         _raise_for_response(response)
 
     def _get_json(
@@ -367,19 +406,20 @@ class BitbucketAPIClient:
 
         for attempt in range(retries + 1):
             try:
-                response = self._client.get(
+                response = _client_get(
+                    self._client,
                     url,
                     headers={"Accept": "application/pdf"},
                     timeout=timeout,
                 )
-            except httpx.TimeoutException as exc:
+            except (httpx.TimeoutException, requests.Timeout) as exc:
                 if attempt < retries:
                     self._sleep(min(max_wait, base_wait * (attempt + 1)))
                     continue
                 raise BitbucketAPIError(
                     "The PDF download timed out.", code="pdf_download_timeout"
                 ) from exc
-            except httpx.HTTPError as exc:
+            except (httpx.HTTPError, requests.RequestException) as exc:
                 raise BitbucketAPIError(
                     "The PDF could not be downloaded.", code="pdf_download_failed"
                 ) from exc
