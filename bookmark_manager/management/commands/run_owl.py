@@ -21,24 +21,10 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections, connection, connections
 from django.utils import timezone
 
-from bitbucket.models import (
-    PDFExtractionJob as BitbucketAppPDFExtractionJob,
-)
-from bitbucket.models import (
-    PDFExtractionJobStatus as BitbucketAppPDFExtractionJobStatus,
-)
-from bitbucket.models import (
-    RepositorySyncJob as BitbucketAppRepositorySyncJob,
-)
-from bitbucket.models import (
-    RepositorySyncJobStatus as BitbucketAppRepositorySyncJobStatus,
-)
-from bitbucket.services.repository_sync import (
-    launch_sync_worker as launch_bitbucket_app_sync_worker,
-)
-from bitbucket.services.repository_sync import (
-    queue_due_daily_repository_refreshes as queue_due_daily_bitbucket_app_refreshes,
-)
+from bitbucket.models import SyncJob as BitbucketAppSyncJob
+from bitbucket.models import SyncJobStatus as BitbucketAppSyncJobStatus
+from bitbucket.services.git_sync import wake_sync_worker as wake_bitbucket_app_sync_worker
+from bitbucket.services.scheduler import queue_due_daily_pulls
 from bitbucket_search.models import (
     PDFExtractionJob,
     PDFExtractionJobPhase,
@@ -705,18 +691,8 @@ def _background_work_active() -> bool:
         status__in=(PDFExtractionJobStatus.QUEUED, PDFExtractionJobStatus.RUNNING)
     ).exists():
         return True
-    if BitbucketAppRepositorySyncJob.objects.filter(
-        status__in=(
-            BitbucketAppRepositorySyncJobStatus.QUEUED,
-            BitbucketAppRepositorySyncJobStatus.RUNNING,
-        )
-    ).exists():
-        return True
-    if BitbucketAppPDFExtractionJob.objects.filter(
-        status__in=(
-            BitbucketAppPDFExtractionJobStatus.QUEUED,
-            BitbucketAppPDFExtractionJobStatus.RUNNING,
-        )
+    if BitbucketAppSyncJob.objects.filter(
+        status__in=(BitbucketAppSyncJobStatus.QUEUED, BitbucketAppSyncJobStatus.RUNNING)
     ).exists():
         return True
     return bool(
@@ -1363,9 +1339,8 @@ def _run_bitbucket_queue_loop(
                 # normal heartbeat timeout and bounded retry policy.
                 stage = "daily_schedule"
                 queue_due_daily_repository_refreshes()
-                bitbucket_app_daily_jobs = queue_due_daily_bitbucket_app_refreshes()
-                if bitbucket_app_daily_jobs:
-                    launch_bitbucket_app_sync_worker()
+                if queue_due_daily_pulls():
+                    wake_bitbucket_app_sync_worker()
                 exited_worker_pids = set(_owned_worker_pids(workers, exited=True))
                 stale_worker_pids = (
                     set(stale_repository_worker_pids())

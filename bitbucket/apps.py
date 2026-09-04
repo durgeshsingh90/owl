@@ -1,5 +1,3 @@
-"""Application configuration for Bitbucket."""
-
 from django.apps import AppConfig
 
 

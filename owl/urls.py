@@ -22,9 +22,6 @@ urlpatterns = [
     ),
     path(
         "bitbucket/",
-        include(
-            ("bitbucket.urls", "bitbucket"),
-            namespace="bitbucket",
-        ),
+        include(("bitbucket.urls", "bitbucket"), namespace="bitbucket"),
     ),
 ]

@@ -13,12 +13,7 @@
         {% csrf_token %}
     </form>
     <iframe name="owl-bitbucket-schedule-tick" title="Bitbucket schedule check" tabindex="-1" hidden aria-hidden="true"></iframe>
-    {% if active_app == "bitbucket_app" %}
-        {% url 'bitbucket:repository_schedule_tick' as repository_schedule_tick_url %}
-    {% else %}
-        {% url 'bitbucket_search:repository_schedule_tick' as repository_schedule_tick_url %}
-    {% endif %}
-    <form method="post" action="{{ repository_schedule_tick_url }}" target="owl-bitbucket-schedule-tick" hidden aria-hidden="true" data-bitbucket-schedule-tick-form>
+    <form method="post" action="{% url 'bitbucket_search:repository_schedule_tick' %}" target="owl-bitbucket-schedule-tick" hidden aria-hidden="true" data-bitbucket-schedule-tick-form>
         {% csrf_token %}
     </form>
     <button

@@ -1,1 +1,1 @@
-"""Bitbucket PDF discovery and search application."""
+"""Independent HTTPS Git document browser."""

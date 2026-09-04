@@ -23,9 +23,7 @@ def loopback_client(client):
         ("/pdfs/", "Bitbucket Search"),
         ("/pdfs/repositories/", "Bitbucket Search"),
         ("/pdfs/status/", "Repository logs"),
-        ("/bitbucket/", "Bitbucket"),
-        ("/bitbucket/repositories/", "Bitbucket"),
-        ("/bitbucket/status/", "Repository logs"),
+        ("/bitbucket/", "Your repositories"),
         ("/system-status/", "System Status"),
     ],
 )
@@ -82,12 +80,12 @@ def test_home_lists_every_available_app(loopback_client):
         'aria-describedby="bitbucket-card-summary"' in html
     )
     assert (
-        'class="knowledge-app-card knowledge-app-card--bitbucket-app" href="/bitbucket/" '
-        'aria-describedby="bitbucket-app-card-summary"' in html
-    )
-    assert (
         'class="knowledge-app-card knowledge-app-card--bookmarks" href="/bookmarks/" '
         'aria-describedby="bookmark-card-summary"' in html
+    )
+    assert (
+        'class="knowledge-app-card knowledge-app-card--bitbucket-browser" href="/bitbucket/" '
+        'aria-describedby="bitbucket-browser-card-summary"' in html
     )
     assert html.count('class="knowledge-app-card ') == 3
     assert "data-theme-toggle" in html
@@ -99,7 +97,6 @@ def test_home_lists_every_available_app(loopback_client):
         ("/", "knowledge-brand__mark"),
         ("/bookmarks/", "bookmark-brand__mark"),
         ("/pdfs/", "bb-brand__mark"),
-        ("/bitbucket/", "bb-brand__mark"),
     ],
 )
 def test_primary_app_surfaces_use_the_supplied_owl_artwork(

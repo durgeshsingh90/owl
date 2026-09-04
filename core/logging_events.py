@@ -105,7 +105,7 @@ def get_logger(component: str, *, namespace: str) -> logging.Logger:
     """Select one application hierarchy without accepting arbitrary logger names."""
 
     if (
-        namespace not in {"owl.bitbucket", "owl.bitbucket_app", "owl.bookmarks", "owl.semantic"}
+        namespace not in {"owl.bitbucket", "owl.bookmarks", "owl.semantic"}
         or not isinstance(component, str)
         or not _TOKEN.fullmatch(component)
     ):

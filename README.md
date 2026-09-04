@@ -188,11 +188,11 @@ to match terms across different fields or pages, or use **Search in** filters to
 Repository URLs are canonicalized and deduplicated. Credentials embedded in URLs are rejected.
 New repository registration is HTTPS-only. HTTPS repositories can use an exact-host credential
 saved in OWL Settings, with an external credential manager still available when OWL has no saved
-credential for that origin. Django's `owl/settings.py` approves `bitbucket.org` and `github.com`
-by default. Leave `BITBUCKET_ALLOWED_HOSTS` unset to use those defaults, or set it in your local
-`.env` to replace them with a comma-separated list of exact hostnames. An explicitly blank value
-disables repository additions. When overriding, keep all hosts you want to use in the list, for
-example:
+credential for that origin. Django's `owl/settings.py`
+approves `bitbucket.org` and `github.com` by default. Leave
+`BITBUCKET_ALLOWED_HOSTS` unset to use those defaults, or set it in your local `.env` to replace
+them with a comma-separated list of exact hostnames. An explicitly blank value disables
+repository additions. When overriding, keep all hosts you want to use in the list, for example:
 
 ```dotenv
 BITBUCKET_ALLOWED_HOSTS=bitbucket.org,github.com,scm.example.invalid
@@ -206,17 +206,15 @@ Bitbucket Server/Data Center clone URLs with context paths are supported, such a
 clone path. Internal servers still require network/VPN access and working Git credentials
 on the computer running OWL. Keep additional private host overrides in the ignored `.env`.
 
-### Bitbucket app
+### Independent Bitbucket document desk
 
-OWL also contains a separate Django app named `bitbucket`, mounted at `/bitbucket/` alongside
-Bitbucket Search. It has independent database tables, migrations, repository checkouts, routes,
-templates, static assets, and background command names. Its local Add Repository form accepts
-credential-free HTTPS clone URLs and automatically approves the exact submitted HTTPS origin
-before `git ls-remote`, clone, or pull can run. This app does not use or require
-`BITBUCKET_ALLOWED_HOSTS`. The app clones a repository once, schedules at most one successful pull per day,
-catalogues PDF and VSDX totals, shows PDF metadata in 500-row pages and timeline groups, records
-PDF opens, supports multi-select open/path-copy actions, reveals containing folders, and derives
-the People rail from Git commit evidence.
+The separate `bitbucket` Django app is mounted at `/bitbucket/`. It accepts only
+credential-free HTTPS repository URLs and intentionally does not read
+`BITBUCKET_ALLOWED_HOSTS`. Before every first clone and daily pull it runs
+`git ls-remote --symref -- <url> HEAD`; a failed preflight opens the UI recovery dialog for
+firewall/VPN authentication, Retry, or Cancel. Each repository is cloned once and receives at
+most one scheduled pull per local calendar day. The app stores only its repository, PDF/VSDX
+inventory, Git addition metadata, open counts, sync jobs, and PDF-contributor totals.
 
 VSDX extraction and OCR remain out of scope. Image-only PDFs are catalogued and reported as having
 no machine-readable text; OWL does not invent text that the parser cannot read.
@@ -478,7 +476,7 @@ worker automatically; no second terminal is required. The worker stays alive whi
 available, then exits after a short idle period. For diagnostics, process one queued job directly:
 
 ```bash
-python manage.py bitbucket_sync_worker --once
+python manage.py bitbucket_document_worker --once
 ```
 
 Running `python manage.py bitbucket_sync_worker` without `--once` keeps a resident hybrid worker

@@ -1,1 +1,1 @@
-"""Management command package for Bitbucket."""
+"""Management commands for the Bitbucket app."""

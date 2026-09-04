@@ -1,1 +1,1 @@
-"""Service boundaries for repository registration and synchronization."""
+"""Service layer for the Bitbucket app."""
