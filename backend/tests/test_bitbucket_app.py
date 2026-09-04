@@ -35,12 +35,15 @@ from bitbucket.services.api import (
     AddedMetadata,
     BitbucketAPIClient,
     BitbucketAPIError,
+    BitbucketServerClient,
     CommitMetadata,
 )
 from bitbucket.services.catalog import CatalogStats, refresh_catalog
-from bitbucket.services.credentials import CredentialError, resolve_credential
+from bitbucket.services.credentials import CredentialError, resolve_credential, save_credential
 from bitbucket.services.repository_urls import (
     RepositoryURLValidationError,
+    parse_api_base_url,
+    parse_project_url,
     parse_repository_url,
 )
 from bitbucket.services.scheduler import queue_due_daily_refreshes
@@ -308,6 +311,130 @@ def test_settings_saves_encrypted_origin_token_and_queues_api_fetch(loopback_cli
     wake.assert_called_once_with()
 
 
+def test_config_ini_settings_save_connection_without_adding_a_repository(loopback_client):
+    token = "not-a-real-token"
+
+    response = loopback_client.post(
+        reverse("bitbucket:settings_save"),
+        {
+            "base_url": "https://private.example.invalid/stash/rest/api/1.0",
+            "username": "api-reader",
+            "access_token": token,
+            "verify_ssl": "false",
+        },
+    )
+
+    assert response.status_code == 200
+    credential = HTTPSCredential.objects.get()
+    assert credential.api_base_url.endswith("/stash/rest/api/1.0")
+    assert credential.username == "api-reader"
+    assert credential.verify_ssl is False
+    assert token not in response.content.decode()
+    assert not Repository.objects.exists()
+    assert not SyncJob.objects.exists()
+
+
+def test_settings_test_uses_unsaved_values_and_reports_success(loopback_client, monkeypatch):
+    observed = {}
+
+    class FakeServerClient:
+        def __init__(self, api_base_url, token, *, username, verify_ssl):
+            observed.update(
+                api_base_url=api_base_url,
+                token=token,
+                username=username,
+                verify_ssl=verify_ssl,
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def test_connection(self):
+            observed["tested"] = True
+
+    monkeypatch.setattr(views, "BitbucketServerClient", FakeServerClient)
+    response = loopback_client.post(
+        reverse("bitbucket:settings_test"),
+        {
+            "base_url": "https://private.example.invalid/stash/rest/api/1.0",
+            "username": "api-reader",
+            "access_token": "not-a-real-token",
+            "verify_ssl": "false",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["message"].startswith("Connection successful")
+    assert observed == {
+        "api_base_url": "https://private.example.invalid/stash/rest/api/1.0",
+        "token": "not-a-real-token",
+        "username": "api-reader",
+        "verify_ssl": False,
+        "tested": True,
+    }
+    assert not HTTPSCredential.objects.exists()
+
+
+def test_new_project_adds_every_returned_repository_to_the_one_worker_queue(
+    loopback_client, monkeypatch
+):
+    server = parse_api_base_url("https://private.example.invalid/stash/rest/api/1.0")
+    save_credential(
+        server,
+        "not-a-real-token",
+        username="api-reader",
+        api_base_url=server.api_base_url,
+        verify_ssl=False,
+    )
+    wake = Mock(return_value=True)
+    monkeypatch.setattr(views, "wake_sync_worker", wake)
+
+    class FakeServerClient:
+        def __init__(self, *_args, **_kwargs):
+            self.server = server
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def repositories(self, project):
+            assert project == "ADR"
+            return ("first-repo", "second-repo")
+
+    monkeypatch.setattr(views, "BitbucketServerClient", FakeServerClient)
+    response = loopback_client.post(
+        reverse("bitbucket:source_add"),
+        {
+            "source_type": "project",
+            "source_url": "https://private.example.invalid/stash/projects/ADR",
+        },
+    )
+
+    assert response.status_code == 202
+    assert response.json()["repositoryCount"] == 2
+    assert list(Repository.objects.values_list("project", "slug")) == [
+        ("ADR", "first-repo"),
+        ("ADR", "second-repo"),
+    ]
+    assert SyncJob.objects.filter(status=SyncJobStatus.QUEUED).count() == 2
+    wake.assert_called_once_with()
+
+
+def test_project_and_api_base_urls_match_the_config_ini_shapes():
+    server = parse_api_base_url("https://scm.example.invalid/stash/rest/api/1.0")
+    project = parse_project_url("https://scm.example.invalid/stash/projects/ADR")
+
+    assert server.origin == project.origin == "https://scm.example.invalid"
+    assert server.web_base_url == "https://scm.example.invalid/stash"
+    assert project.project == "ADR"
+    assert server.repository_url("ADR", "designs").endswith("/stash/scm/ADR/designs.git")
+
+
 def test_api_client_uses_bearer_auth_on_the_exact_data_center_endpoint():
     item = repository()
     observed: list[httpx.Request] = []
@@ -350,6 +477,36 @@ def test_api_client_uses_username_and_token_basic_auth_when_username_is_configur
     scheme, encoded = observed[0].headers["Authorization"].split(" ", 1)
     assert scheme == "Basic"
     assert base64.b64decode(encoded).decode() == ("api-reader:synthetic-never-valid-http-token")
+
+
+def test_server_client_tests_configured_api_root_and_lists_project_repositories():
+    observed: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        observed.append(request)
+        if request.url.path.endswith("/projects/ADR/repos"):
+            return httpx.Response(
+                200,
+                json={
+                    "values": [{"slug": "first-repo"}, {"slug": "second-repo"}],
+                    "isLastPage": True,
+                },
+            )
+        return httpx.Response(200, json={"values": [], "isLastPage": True})
+
+    with BitbucketServerClient(
+        "https://scm.example.invalid/stash/rest/api/1.0",
+        "synthetic-never-valid-http-token",
+        username="api-reader",
+        verify_ssl=False,
+        transport=httpx.MockTransport(respond),
+    ) as client:
+        client.test_connection()
+        repositories = client.repositories("ADR")
+
+    assert repositories == ("first-repo", "second-repo")
+    assert observed[0].url.path == "/stash/rest/api/1.0/projects"
+    assert observed[1].url.path == "/stash/rest/api/1.0/projects/ADR/repos"
 
 
 def test_api_client_retries_rate_limit_and_extracts_downloaded_pdf():

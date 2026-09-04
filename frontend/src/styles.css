@@ -236,6 +236,29 @@ button { cursor: pointer; }
     font-weight: 850;
 }
 .bb-add-repository button[disabled] { opacity: .55; cursor: wait; }
+.bb-new-source-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 14px;
+}
+.bb-new-source-actions button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    min-height: 38px;
+    padding: 7px 8px;
+    border: 1px solid #526b93;
+    background: #1d3761;
+    color: #f5f8ff;
+    font-size: 10px;
+}
+.bb-new-source-actions button:first-child {
+    border-color: var(--lime);
+    background: var(--lime);
+    color: #142137;
+}
 .bb-repository-list { display: grid; gap: 10px; }
 .bb-repository-card {
     position: relative;
@@ -296,6 +319,16 @@ button { cursor: pointer; }
 .bb-repository-card > button {
     margin-top: 9px;
     padding: 6px 9px;
+    border: 1px solid #41577d;
+    border-radius: 7px;
+    background: transparent;
+    color: #dce6f8;
+    font-size: 10px;
+}
+.bb-repository-card__actions { display: flex; gap: 7px; margin-top: 9px; }
+.bb-repository-card__actions button {
+    flex: 1;
+    padding: 6px 8px;
     border: 1px solid #41577d;
     border-radius: 7px;
     background: transparent;
@@ -648,10 +681,63 @@ td code {
     color: var(--ink);
 }
 .bb-settings-dialog input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+.bb-secret-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.bb-secret-field button,
+.bb-source-type button,
+.bb-configured-origins button,
+.bb-settings-callout button {
+    border: 1px solid var(--control-border);
+    border-radius: 8px;
+    background: var(--surface-soft);
+    color: var(--control-text);
+    font-weight: 750;
+}
+.bb-secret-field button { min-width: 64px; }
+.bb-checkbox-field {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    cursor: pointer;
+}
+.bb-settings-dialog .bb-checkbox-field input {
+    width: 17px;
+    min-height: 17px;
+    margin: 0;
+    accent-color: var(--blue);
+}
+.bb-source-type { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.bb-source-type button { min-height: 41px; }
+.bb-source-type button.is-selected {
+    border-color: var(--blue);
+    background: var(--blue-soft);
+    color: var(--blue);
+}
 .bb-settings-dialog__help { margin: 4px 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .bb-configured-origins { display: grid; gap: 5px; padding: 11px 12px; border-radius: 9px; background: var(--panel-accent); font-size: 10px; }
 .bb-configured-origins strong { color: var(--panel-accent-ink); font-size: 11px; }
-.bb-configured-origins span { color: var(--muted); }
+.bb-configured-origins button {
+    padding: 6px 8px;
+    text-align: left;
+    color: var(--muted);
+}
+.bb-settings-callout {
+    margin: 2px 0;
+    padding: 10px 12px;
+    border-radius: 9px;
+    background: var(--dialog-warning);
+    color: var(--dialog-warning-ink);
+    font-size: 11px;
+}
+.bb-settings-callout button { margin-left: 4px; padding: 4px 7px; }
+.bb-test-success {
+    margin: 2px 0;
+    padding: 10px 12px;
+    border-radius: 9px;
+    background: var(--success-soft);
+    color: var(--success);
+    font-size: 11px;
+    font-weight: 750;
+}
 .bb-settings-dialog .bb-form-error { min-height: 17px; color: var(--danger); }
 .bb-settings-dialog__actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 2px; }
 .bb-settings-dialog__actions button {

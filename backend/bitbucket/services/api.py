@@ -14,7 +14,7 @@ import httpx
 from django.conf import settings
 
 from bitbucket.models import Repository
-from bitbucket.services.repository_urls import parse_repository_url
+from bitbucket.services.repository_urls import ServerURL, parse_api_base_url, parse_repository_url
 
 
 class BitbucketAPIError(RuntimeError):
@@ -66,6 +66,153 @@ def _commit_metadata(value: object) -> CommitMetadata | None:
     )
 
 
+def _http_client(
+    token: str,
+    *,
+    username: str,
+    verify_ssl: bool,
+    transport: httpx.BaseTransport | None,
+) -> httpx.Client:
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "OWL-Bitbucket-pdf-crawler/1",
+    }
+    auth = httpx.BasicAuth(username, token) if username else None
+    if auth is None:
+        headers["Authorization"] = f"Bearer {token}"
+    return httpx.Client(
+        headers=headers,
+        auth=auth,
+        timeout=float(getattr(settings, "BITBUCKET_APP_API_TIMEOUT_SECONDS", 30)),
+        follow_redirects=False,
+        verify=verify_ssl,
+        transport=transport,
+    )
+
+
+def _raise_for_response(response: httpx.Response) -> None:
+    if response.status_code in {401, 403}:
+        raise BitbucketAPIError(
+            "The HTTP access token is invalid or lacks repository-read permission.",
+            code="authentication_required",
+        )
+    if 300 <= response.status_code < 400:
+        raise BitbucketAPIError(
+            "The Bitbucket API redirected the request; check the API base URL.",
+            code="unsafe_redirect",
+        )
+    if response.status_code == 404:
+        raise BitbucketAPIError(
+            "The Bitbucket project, repository, or REST API endpoint was not found.",
+            code="repository_not_found",
+        )
+    if response.is_error:
+        raise BitbucketAPIError(
+            f"The Bitbucket API returned HTTP {response.status_code}.",
+            code="api_response_error",
+        )
+
+
+def _get_json_url(
+    client: httpx.Client,
+    url: str,
+    *,
+    params: dict[str, object] | None = None,
+) -> dict[str, Any]:
+    try:
+        response = client.get(url, params=params)
+    except httpx.TimeoutException as exc:
+        raise BitbucketAPIError("The Bitbucket API request timed out.", code="api_timeout") from exc
+    except httpx.ConnectError as exc:
+        raise BitbucketAPIError(
+            "The Bitbucket API could not be reached. Check the URL, VPN, and SSL verification setting.",
+            code="connection_failed",
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise BitbucketAPIError("The Bitbucket API could not be reached.") from exc
+    _raise_for_response(response)
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise BitbucketAPIError("The Bitbucket API returned invalid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise BitbucketAPIError("The Bitbucket API returned an unexpected response.")
+    return payload
+
+
+def _pages_from_url(
+    client: httpx.Client,
+    url: str,
+    *,
+    params: dict[str, object] | None = None,
+) -> Iterator[dict[str, Any]]:
+    request_params = dict(params or {})
+    request_params.setdefault("limit", int(getattr(settings, "BITBUCKET_APP_API_PAGE_SIZE", 1000)))
+    seen_starts: set[int] = set()
+    while True:
+        page = _get_json_url(client, url, params=request_params)
+        yield page
+        if bool(page.get("isLastPage", True)):
+            return
+        try:
+            next_start = int(page["nextPageStart"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BitbucketAPIError("Bitbucket returned invalid pagination metadata.") from exc
+        if next_start in seen_starts:
+            raise BitbucketAPIError("Bitbucket returned a repeating pagination cursor.")
+        seen_starts.add(next_start)
+        request_params["start"] = next_start
+
+
+class BitbucketServerClient:
+    """Authenticated client for testing a server and expanding a project into repositories."""
+
+    def __init__(
+        self,
+        api_base_url: str,
+        token: str,
+        *,
+        username: str = "",
+        verify_ssl: bool = True,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        self.server: ServerURL = parse_api_base_url(api_base_url)
+        self._client = _http_client(
+            token,
+            username=username,
+            verify_ssl=verify_ssl,
+            transport=transport,
+        )
+
+    def __enter__(self) -> BitbucketServerClient:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._client.close()
+
+    def test_connection(self) -> None:
+        _get_json_url(self._client, f"{self.server.api_base_url}/projects", params={"limit": 1})
+
+    def repositories(self, project: str) -> tuple[str, ...]:
+        encoded_project = quote(project, safe="")
+        url = f"{self.server.api_base_url}/projects/{encoded_project}/repos"
+        slugs: list[str] = []
+        for page in _pages_from_url(self._client, url):
+            values = page.get("values", ())
+            if not isinstance(values, list):
+                raise BitbucketAPIError("Bitbucket returned an invalid repository listing.")
+            for value in values:
+                if not isinstance(value, dict):
+                    continue
+                slug = str(value.get("slug") or value.get("name") or "").strip()
+                if slug:
+                    slugs.append(slug)
+        return tuple(dict.fromkeys(slugs))
+
+
 class BitbucketAPIClient:
     """An exact-origin Bitbucket client using Bearer or username/token auth."""
 
@@ -75,26 +222,34 @@ class BitbucketAPIClient:
         token: str,
         *,
         username: str = "",
+        api_base_url: str = "",
+        verify_ssl: bool | None = None,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.repository = repository
         self.parsed = parse_repository_url(repository.url)
-        timeout = float(getattr(settings, "BITBUCKET_APP_API_TIMEOUT_SECONDS", 30))
         self._sleep = sleep
-        headers = {
-            "Accept": "application/json",
-            "User-Agent": "OWL-Bitbucket-pdf-crawler/1",
-        }
-        auth = httpx.BasicAuth(username, token) if username else None
-        if auth is None:
-            headers["Authorization"] = f"Bearer {token}"
-        self._client = httpx.Client(
-            headers=headers,
-            auth=auth,
-            timeout=timeout,
-            follow_redirects=False,
-            verify=bool(getattr(settings, "BITBUCKET_APP_VERIFY_SSL", True)),
+        configured_server = parse_api_base_url(api_base_url) if api_base_url else None
+        if configured_server is not None and configured_server.origin != self.parsed.origin:
+            raise BitbucketAPIError(
+                "The saved Bitbucket API base URL does not match the repository server.",
+                code="configuration_mismatch",
+            )
+        self.api_repository_url = (
+            f"{configured_server.api_base_url}/projects/{quote(self.parsed.project, safe='')}"
+            f"/repos/{quote(self.parsed.slug, safe='')}"
+            if configured_server is not None
+            else self.parsed.api_repository_url
+        )
+        self._client = _http_client(
+            token,
+            username=username,
+            verify_ssl=(
+                bool(getattr(settings, "BITBUCKET_APP_VERIFY_SSL", True))
+                if verify_ssl is None
+                else verify_ssl
+            ),
             transport=transport,
         )
 
@@ -109,26 +264,7 @@ class BitbucketAPIClient:
 
     @staticmethod
     def _raise_for_response(response: httpx.Response) -> None:
-        if response.status_code in {401, 403}:
-            raise BitbucketAPIError(
-                "The HTTP access token is invalid or lacks repository-read permission.",
-                code="authentication_required",
-            )
-        if 300 <= response.status_code < 400:
-            raise BitbucketAPIError(
-                "The Bitbucket API redirected the request; check the repository URL.",
-                code="unsafe_redirect",
-            )
-        if response.status_code == 404:
-            raise BitbucketAPIError(
-                "The Bitbucket repository or REST API endpoint was not found.",
-                code="repository_not_found",
-            )
-        if response.is_error:
-            raise BitbucketAPIError(
-                f"The Bitbucket API returned HTTP {response.status_code}.",
-                code="api_response_error",
-            )
+        _raise_for_response(response)
 
     def _get_json(
         self,
@@ -136,25 +272,10 @@ class BitbucketAPIClient:
         *,
         params: dict[str, object] | None = None,
     ) -> dict[str, Any]:
-        url = self.parsed.api_repository_url
+        url = self.api_repository_url
         if relative_path:
             url = f"{url}/{relative_path.lstrip('/')}"
-        try:
-            response = self._client.get(url, params=params)
-        except httpx.TimeoutException as exc:
-            raise BitbucketAPIError(
-                "The Bitbucket API request timed out.", code="api_timeout"
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise BitbucketAPIError("The Bitbucket API could not be reached.") from exc
-        self._raise_for_response(response)
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise BitbucketAPIError("The Bitbucket API returned invalid JSON.") from exc
-        if not isinstance(payload, dict):
-            raise BitbucketAPIError("The Bitbucket API returned an unexpected response.")
-        return payload
+        return _get_json_url(self._client, url, params=params)
 
     def _pages(
         self,
@@ -162,24 +283,10 @@ class BitbucketAPIClient:
         *,
         params: dict[str, object] | None = None,
     ) -> Iterator[dict[str, Any]]:
-        request_params = dict(params or {})
-        request_params.setdefault(
-            "limit", int(getattr(settings, "BITBUCKET_APP_API_PAGE_SIZE", 1000))
-        )
-        seen_starts: set[int] = set()
-        while True:
-            page = self._get_json(relative_path, params=request_params)
-            yield page
-            if bool(page.get("isLastPage", True)):
-                return
-            try:
-                next_start = int(page["nextPageStart"])
-            except (KeyError, TypeError, ValueError) as exc:
-                raise BitbucketAPIError("Bitbucket returned invalid pagination metadata.") from exc
-            if next_start in seen_starts:
-                raise BitbucketAPIError("Bitbucket returned a repeating pagination cursor.")
-            seen_starts.add(next_start)
-            request_params["start"] = next_start
+        url = self.api_repository_url
+        if relative_path:
+            url = f"{url}/{relative_path.lstrip('/')}"
+        yield from _pages_from_url(self._client, url, params=params)
 
     def test_connection(self) -> None:
         self._get_json()
@@ -251,7 +358,7 @@ class BitbucketAPIClient:
         """Download one PDF from Bitbucket's raw endpoint with bounded retries."""
 
         encoded_path = quote(path, safe="/")
-        url = f"{self.parsed.api_repository_url}/raw/{encoded_path}"
+        url = f"{self.api_repository_url}/raw/{encoded_path}"
         retries = int(getattr(settings, "BITBUCKET_APP_PDF_DOWNLOAD_RETRIES", 4))
         timeout = float(getattr(settings, "BITBUCKET_APP_PDF_DOWNLOAD_TIMEOUT_SECONDS", 120))
         base_wait = float(getattr(settings, "BITBUCKET_APP_PDF_RETRY_BASE_SECONDS", 10))

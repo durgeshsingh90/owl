@@ -9,7 +9,9 @@ const workspace: WorkspacePayload = {
     csrfToken: "test-csrf",
     homeUrl: "/",
     addRepositoryUrl: "/bitbucket/repositories/add/",
+    addSourceUrl: "/bitbucket/sources/add/",
     settingsSaveUrl: "/bitbucket/settings/save/",
+    settingsTestUrl: "/bitbucket/settings/test/",
     statusUrl: "/bitbucket/sync/status/",
     scheduleUrl: "/bitbucket/schedule/",
     repositories: [{
@@ -76,7 +78,9 @@ const workspace: WorkspacePayload = {
     credentials: [{
         origin: "https://scm.example.test",
         configured: true,
+        apiBaseUrl: "https://scm.example.test/stash/rest/api/1.0",
         username: "api-reader",
+        verifySsl: false,
         updatedAt: "2026-09-04T09:00:00Z",
     }],
     jobs: [],
@@ -101,31 +105,14 @@ describe("Bitbucket React workspace", () => {
             if (url.includes("/sync/status/")) return json({ok: true, jobs: []});
             if (url.includes("/schedule/")) return json({ok: true, queued: 0});
             if (url.includes("/documents/11/open/")) return json({ok: true, openCount: 3});
+            if (url.includes("/settings/test/")) return json({
+                ok: true,
+                message: "Connection successful. Bitbucket accepted the credentials.",
+            });
             if (url.includes("/settings/save/")) return json({
                 ok: true,
-                job: {
-                    id: "00000000-0000-0000-0000-000000000001",
-                    status: "queued",
-                    operation: "refresh",
-                    errorCode: "",
-                    errorMessage: "",
-                    repository: {
-                        id: 1,
-                        project: "adr",
-                        name: "engineering-sign-off.git",
-                        state: "queued",
-                        statusMessage: "API metadata refresh queued.",
-                        pdfCount: 1,
-                        indexedPdfCount: 1,
-                        failedPdfCount: 0,
-                        vsdxCount: 2,
-                        url: "https://scm.example.test/stash/scm/adr/engineering-sign-off.git",
-                    },
-                    authenticationUrl: "https://scm.example.test/stash/",
-                    retryUrl: "/retry/",
-                    cancelUrl: "/cancel/",
-                },
-            }, 202);
+                message: "Bitbucket API settings saved.",
+            });
             return json({ok: false, message: `Unexpected URL: ${url}`}, 404);
         }));
         Object.defineProperty(navigator, "clipboard", {
@@ -171,8 +158,28 @@ describe("Bitbucket React workspace", () => {
         fireEvent.click(await screen.findByRole("button", {name: "Bitbucket settings"}));
 
         expect(screen.getByRole("heading", {name: "Bitbucket settings"})).toBeVisible();
+        expect(screen.getByLabelText("REST API base URL")).toHaveValue(
+            "https://scm.example.test/stash/rest/api/1.0",
+        );
         expect(screen.getByLabelText("HTTP access token")).toHaveValue("");
+        expect(screen.getByLabelText("Verify SSL certificates")).not.toBeChecked();
         expect(screen.getByText(/https:\/\/scm\.example\.test/)).toBeVisible();
+
+        fireEvent.click(screen.getByRole("button", {name: "Test connection"}));
+        expect(await screen.findByText(/Connection successful/)).toBeVisible();
+    });
+
+    it("offers separate new project and new repository flows", async () => {
+        render(<App />, {container: document.getElementById("bitbucket-root")!});
+
+        fireEvent.click(await screen.findByRole("button", {name: /New project/}));
+        expect(screen.getByRole("heading", {name: "New project"})).toBeVisible();
+        expect(screen.getByLabelText("Project HTTPS URL")).toBeVisible();
+        fireEvent.click(screen.getByRole("button", {name: "Close add source"}));
+
+        fireEvent.click(screen.getByRole("button", {name: /New repository/}));
+        expect(screen.getByRole("heading", {name: "New repository"})).toBeVisible();
+        expect(screen.getByLabelText("Repository HTTPS clone URL")).toBeVisible();
     });
 
     it("searches the saved database without reloading the application", async () => {

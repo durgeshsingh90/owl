@@ -92,6 +92,12 @@ def process_job(job: SyncJob) -> SyncJob:
             repository,
             credential.token,
             username=credential.username,
+            api_base_url=getattr(credential, "api_base_url", ""),
+            verify_ssl=getattr(
+                credential,
+                "verify_ssl",
+                bool(getattr(settings, "BITBUCKET_APP_VERIFY_SSL", True)),
+            ),
         ) as client:
             client.test_connection()
             Repository.objects.filter(pk=repository.pk).update(

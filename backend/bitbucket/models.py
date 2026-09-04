@@ -152,8 +152,10 @@ class HTTPSCredential(models.Model):
     """One encrypted Bitbucket Data Center HTTP credential per exact HTTPS origin."""
 
     origin = models.URLField(max_length=2048, unique=True)
+    api_base_url = models.URLField(max_length=2048, blank=True)
     username = models.CharField(max_length=255, blank=True)
     token_ciphertext = models.TextField(editable=False)
+    verify_ssl = models.BooleanField(default=True)
     configured_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -1,9 +1,12 @@
 import {appHref} from "../routing";
+import type {BitbucketSourceType} from "./AddBitbucketSourceDialog";
 import type {Repository} from "../types";
 
 interface RepositorySidebarProps {
     homeUrl: string;
+    onAddSource: (sourceType: BitbucketSourceType) => void;
     onOpenSettings: (repositoryUrl?: string) => void;
+    onRefresh: (repository: Repository) => Promise<void>;
     repositories: Repository[];
     repositoryCount: number;
     scheduleHour: number;
@@ -26,7 +29,9 @@ function formatUpdated(value: string | null): string | null {
 
 export function RepositorySidebar({
     homeUrl,
+    onAddSource,
     onOpenSettings,
+    onRefresh,
     repositories,
     repositoryCount,
     scheduleHour,
@@ -55,6 +60,14 @@ export function RepositorySidebar({
                     </button>
                 </div>
                 <p className="bb-form-help">Metadata is read directly from Bitbucket. No repository is cloned.</p>
+                <div className="bb-new-source-actions">
+                    <button type="button" onClick={() => onAddSource("project")}>
+                        <span aria-hidden="true">＋</span> New project
+                    </button>
+                    <button type="button" onClick={() => onAddSource("repository")}>
+                        <span aria-hidden="true">＋</span> New repository
+                    </button>
+                </div>
             </section>
 
             <nav className="bb-repository-list" aria-label="Repositories">
@@ -89,9 +102,10 @@ export function RepositorySidebar({
                             {repository.indexedPdfCount} indexed · {repository.failedPdfCount} failed
                         </small>
                         <p>{repository.statusMessage}</p>
-                        <button type="button" onClick={() => onOpenSettings(repository.url)}>
-                            Update token or refresh
-                        </button>
+                        <div className="bb-repository-card__actions">
+                            <button type="button" onClick={() => void onRefresh(repository)}>Refresh</button>
+                            <button type="button" onClick={() => onOpenSettings(repository.url)}>Connection</button>
+                        </div>
                         {formatUpdated(repository.lastSuccessfulSyncAt) && (
                             <time dateTime={repository.lastSuccessfulSyncAt ?? undefined}>
                                 {formatUpdated(repository.lastSuccessfulSyncAt)}
@@ -103,8 +117,8 @@ export function RepositorySidebar({
                 {repositories.length === 0 && (
                     <div className="bb-repository-empty">
                         <span aria-hidden="true">↳</span>
-                        <strong>Add your first repository</strong>
-                        <p>Open settings to enter its HTTPS URL and repository-read access token.</p>
+                        <strong>Add your first project or repository</strong>
+                        <p>Configure the API connection, then choose one of the options above.</p>
                     </div>
                 )}
             </nav>

@@ -15,7 +15,9 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]"})
 _LOCAL_MUTATIONS = frozenset(
     {
         "bitbucket:repository_add",
+        "bitbucket:source_add",
         "bitbucket:settings_save",
+        "bitbucket:settings_test",
         "bitbucket:schedule_tick",
         "bitbucket:sync_retry",
         "bitbucket:sync_cancel",

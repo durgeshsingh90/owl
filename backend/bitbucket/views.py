@@ -19,7 +19,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
-from bitbucket.forms import RepositoryForm
+from bitbucket.forms import RepositoryForm, ServerSettingsForm, SourceForm
 from bitbucket.models import (
     Document,
     DocumentKind,
@@ -29,11 +29,15 @@ from bitbucket.models import (
     SyncJobStatus,
     SyncOperation,
 )
+from bitbucket.services.api import BitbucketAPIError, BitbucketServerClient
 from bitbucket.services.credentials import (
     CredentialError,
+    credential_for_connection,
     credential_summaries,
     has_credential,
+    resolve_origin_credential,
     save_credential,
+    update_server_credential,
 )
 from bitbucket.services.document_search import search_documents
 from bitbucket.services.remote_sync import wake_sync_worker
@@ -148,6 +152,51 @@ def _repository_payload(repository: Repository) -> dict[str, object]:
         ),
         "selectUrl": f"?{urlencode({'repository': repository.pk})}",
     }
+
+
+def _queue_repository(repository_url: str) -> tuple[Repository, SyncJob, bool]:
+    parsed = parse_repository_url(repository_url)
+    repository, created = Repository.objects.get_or_create(
+        canonical_url=parsed.url,
+        defaults={
+            "url": parsed.url,
+            "host": parsed.host,
+            "project": parsed.project,
+            "slug": parsed.slug,
+            "state": RepositoryState.QUEUED,
+            "status_message": "Initial API metadata fetch queued.",
+        },
+    )
+    active_job = (
+        SyncJob.objects.filter(
+            repository=repository,
+            status__in=(SyncJobStatus.QUEUED, SyncJobStatus.RUNNING),
+        )
+        .order_by("created_at")
+        .first()
+    )
+    if active_job is not None:
+        return repository, active_job, created
+    if not created:
+        Repository.objects.filter(pk=repository.pk).update(
+            url=parsed.url,
+            host=parsed.host,
+            project=parsed.project,
+            slug=parsed.slug,
+            state=RepositoryState.QUEUED,
+            status_message="API metadata refresh queued.",
+            error_message="",
+        )
+        SyncJob.objects.filter(
+            repository=repository,
+            status=SyncJobStatus.AUTH_REQUIRED,
+        ).update(status=SyncJobStatus.CANCELLED, finished_at=timezone.now())
+    job = SyncJob.objects.create(
+        repository=repository,
+        operation=SyncOperation.INITIAL if created else SyncOperation.REFRESH,
+    )
+    repository.refresh_from_db()
+    return repository, job, created
 
 
 def _file_size_label(value: int) -> str:
@@ -276,7 +325,9 @@ def workspace(request: HttpRequest) -> JsonResponse:
             "csrfToken": get_token(request),
             "homeUrl": reverse("core:dashboard"),
             "addRepositoryUrl": reverse("bitbucket:repository_add"),
+            "addSourceUrl": reverse("bitbucket:source_add"),
             "settingsSaveUrl": reverse("bitbucket:settings_save"),
+            "settingsTestUrl": reverse("bitbucket:settings_test"),
             "statusUrl": reverse("bitbucket:sync_status"),
             "scheduleUrl": reverse("bitbucket:schedule_tick"),
             "repositories": [_repository_payload(repository) for repository in all_repositories],
@@ -340,6 +391,63 @@ def workspace(request: HttpRequest) -> JsonResponse:
 
 @require_POST
 def settings_save(request: HttpRequest) -> JsonResponse:
+    # Keep the former repository-settings payload working for saved bookmarks and
+    # older clients while the visible settings screen now saves server configuration only.
+    if request.POST.get("repository_url"):
+        return _legacy_repository_save(request)
+    form = ServerSettingsForm(request.POST)
+    if not form.is_valid() or form.parsed_url is None:
+        return JsonResponse({"ok": False, "errors": form.errors.get_json_data()}, status=400)
+    try:
+        update_server_credential(
+            form.parsed_url,
+            username=form.cleaned_data.get("username", ""),
+            token_value=form.cleaned_data.get("access_token", ""),
+            verify_ssl=form.cleaned_data.get("verify_ssl", False),
+        )
+    except CredentialError as exc:
+        return JsonResponse({"ok": False, "message": str(exc)}, status=400)
+    return JsonResponse(
+        {
+            "ok": True,
+            "message": "Bitbucket API settings saved.",
+            "configuration": next(
+                item for item in credential_summaries() if item["origin"] == form.parsed_url.origin
+            ),
+        }
+    )
+
+
+@require_POST
+def settings_test(request: HttpRequest) -> JsonResponse:
+    form = ServerSettingsForm(request.POST)
+    if not form.is_valid() or form.parsed_url is None:
+        return JsonResponse({"ok": False, "errors": form.errors.get_json_data()}, status=400)
+    try:
+        credential = credential_for_connection(
+            form.parsed_url,
+            username=form.cleaned_data.get("username", ""),
+            token_value=form.cleaned_data.get("access_token", ""),
+            verify_ssl=form.cleaned_data.get("verify_ssl", False),
+        )
+        with BitbucketServerClient(
+            credential.api_base_url,
+            credential.token,
+            username=credential.username,
+            verify_ssl=credential.verify_ssl,
+        ) as client:
+            client.test_connection()
+    except (CredentialError, BitbucketAPIError) as exc:
+        return JsonResponse({"ok": False, "message": str(exc)}, status=400)
+    return JsonResponse(
+        {
+            "ok": True,
+            "message": "Connection successful. Bitbucket accepted the credentials.",
+        }
+    )
+
+
+def _legacy_repository_save(request: HttpRequest) -> JsonResponse:
     form = RepositoryForm(request.POST)
     if not form.is_valid() or form.parsed_url is None:
         return JsonResponse({"ok": False, "errors": form.errors.get_json_data()}, status=400)
@@ -354,43 +462,92 @@ def settings_save(request: HttpRequest) -> JsonResponse:
     try:
         with transaction.atomic():
             if token:
-                save_credential(parsed, token, username=username)
-            repository, created = Repository.objects.get_or_create(
-                canonical_url=parsed.url,
-                defaults={
-                    "url": parsed.url,
-                    "host": parsed.host,
-                    "project": parsed.project,
-                    "slug": parsed.slug,
-                    "state": RepositoryState.QUEUED,
-                    "status_message": "Initial API metadata fetch queued.",
-                },
-            )
-            if not created:
-                Repository.objects.filter(pk=repository.pk).update(
-                    url=parsed.url,
-                    host=parsed.host,
-                    project=parsed.project,
-                    slug=parsed.slug,
-                    state=RepositoryState.QUEUED,
-                    status_message="API metadata refresh queued.",
-                    error_message="",
+                save_credential(
+                    parsed,
+                    token,
+                    username=username,
+                    api_base_url=f"{parsed.base_url}/rest/api/latest",
+                    verify_ssl=bool(getattr(settings, "BITBUCKET_APP_VERIFY_SSL", True)),
                 )
-                SyncJob.objects.filter(
-                    repository=repository,
-                    status=SyncJobStatus.AUTH_REQUIRED,
-                ).update(status=SyncJobStatus.CANCELLED, finished_at=timezone.now())
-            job = SyncJob.objects.create(
-                repository=repository,
-                operation=SyncOperation.INITIAL if created else SyncOperation.REFRESH,
-            )
+            repository, job, _created = _queue_repository(parsed.url)
     except CredentialError as exc:
         return JsonResponse({"ok": False, "message": str(exc)}, status=400)
     wake_sync_worker()
     return JsonResponse({"ok": True, "job": _job_payload(job)}, status=202)
 
 
-repository_add = settings_save
+@require_POST
+def source_add(request: HttpRequest) -> JsonResponse:
+    form = SourceForm(request.POST)
+    if not form.is_valid():
+        return JsonResponse({"ok": False, "errors": form.errors.get_json_data()}, status=400)
+    jobs: list[SyncJob] = []
+    created_count = 0
+    source_type = form.cleaned_data["source_type"]
+    try:
+        if source_type == "repository" and form.parsed_repository is not None:
+            parsed_repository = form.parsed_repository
+            credential = resolve_origin_credential(parsed_repository.origin)
+            if not credential.api_base_url:
+                raise CredentialError(
+                    "Open Bitbucket settings and save the REST API base URL before adding a repository."
+                )
+            with transaction.atomic():
+                _repository, job, created = _queue_repository(parsed_repository.url)
+                jobs.append(job)
+                created_count += int(created)
+        elif source_type == "project" and form.parsed_project is not None:
+            parsed_project = form.parsed_project
+            credential = resolve_origin_credential(parsed_project.origin)
+            if not credential.api_base_url:
+                raise CredentialError(
+                    "Open Bitbucket settings and save the REST API base URL before adding a project."
+                )
+            with BitbucketServerClient(
+                credential.api_base_url,
+                credential.token,
+                username=credential.username,
+                verify_ssl=credential.verify_ssl,
+            ) as client:
+                slugs = client.repositories(parsed_project.project)
+                server = client.server
+            if not slugs:
+                return JsonResponse(
+                    {"ok": False, "message": "No repositories were found in that project."},
+                    status=404,
+                )
+            with transaction.atomic():
+                for slug in slugs:
+                    _repository, job, created = _queue_repository(
+                        server.repository_url(parsed_project.project, slug)
+                    )
+                    jobs.append(job)
+                    created_count += int(created)
+        else:
+            return JsonResponse(
+                {"ok": False, "message": "Choose a project or repository."}, status=400
+            )
+    except (CredentialError, BitbucketAPIError) as exc:
+        return JsonResponse({"ok": False, "message": str(exc)}, status=400)
+    if jobs:
+        wake_sync_worker()
+    return JsonResponse(
+        {
+            "ok": True,
+            "sourceType": source_type,
+            "repositoryCount": len(jobs),
+            "createdCount": created_count,
+            "jobs": [_job_payload(job) for job in jobs],
+        },
+        status=202,
+    )
+
+
+@require_POST
+def repository_add(request: HttpRequest) -> JsonResponse:
+    if request.POST.get("source_type"):
+        return source_add(request)
+    return _legacy_repository_save(request)
 
 
 @require_POST

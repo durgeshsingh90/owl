@@ -1,15 +1,23 @@
 import {useCallback, useEffect, useRef, useState} from "react";
 
 import {ApiError, requestJson} from "./api";
-import {BitbucketSettingsDialog} from "./components/BitbucketSettingsDialog";
+import {
+    AddBitbucketSourceDialog,
+    type BitbucketSourceType,
+} from "./components/AddBitbucketSourceDialog";
+import {
+    BitbucketSettingsDialog,
+    type BitbucketSettingsValues,
+} from "./components/BitbucketSettingsDialog";
 import {DocumentLibrary} from "./components/DocumentLibrary";
 import {RepositorySidebar} from "./components/RepositorySidebar";
 import {useTheme} from "./hooks/useTheme";
 import type {
     DocumentItem,
-    JobResponse,
+    JobsResponse,
     OpenDocumentResponse,
     Repository,
+    SettingsResponse,
     SyncJob,
     WorkspacePayload,
 } from "./types";
@@ -65,7 +73,9 @@ export default function App() {
     const [loadingError, setLoadingError] = useState("");
     const [toast, setToast] = useState("");
     const [settingsOpen, setSettingsOpen] = useState(false);
-    const [settingsRepositoryUrl, setSettingsRepositoryUrl] = useState("");
+    const [settingsOrigin, setSettingsOrigin] = useState("");
+    const [sourceOpen, setSourceOpen] = useState(false);
+    const [sourceType, setSourceType] = useState<BitbucketSourceType>("project");
     const csrfTokenRef = useRef("");
     const activeJobIdsRef = useRef<Set<string>>(new Set());
     const completedJobIdsRef = useRef<Set<string>>(new Set());
@@ -88,7 +98,11 @@ export default function App() {
         );
         const authenticationJob = data.jobs.find((job) => job.status === "auth_required");
         if (authenticationJob) {
-            setSettingsRepositoryUrl(authenticationJob.repository.url);
+            try {
+                setSettingsOrigin(new URL(authenticationJob.repository.url).origin);
+            } catch {
+                setSettingsOrigin("");
+            }
             setSettingsOpen(true);
         }
         setWorkspace(data);
@@ -113,7 +127,11 @@ export default function App() {
         else activeJobIdsRef.current.delete(job.id);
 
         if (job.status === "auth_required") {
-            setSettingsRepositoryUrl(job.repository.url);
+            try {
+                setSettingsOrigin(new URL(job.repository.url).origin);
+            } catch {
+                setSettingsOrigin("");
+            }
             setSettingsOpen(true);
             return;
         }
@@ -168,26 +186,62 @@ export default function App() {
         return () => window.clearInterval(timer);
     }, [workspace?.scheduleUrl]);
 
-    const saveSettings = async (
-        repositoryUrl: string,
-        username: string,
-        accessToken: string,
-    ) => {
+    const settingsBody = (values: BitbucketSettingsValues) => {
+        const body = new FormData();
+        body.set("base_url", values.baseUrl);
+        body.set("username", values.username);
+        body.set("access_token", values.accessToken);
+        body.set("verify_ssl", values.verifySsl ? "true" : "false");
+        return body;
+    };
+
+    const saveSettings = async (values: BitbucketSettingsValues) => {
+        if (!workspace) return;
+        try {
+            const data = await requestJson<SettingsResponse>(
+                workspace.settingsSaveUrl,
+                csrfTokenRef.current,
+                {method: "POST", body: settingsBody(values)},
+            );
+            await loadWorkspace();
+            showToast(data.message);
+        } catch (error) {
+            throw new Error(errorMessage(error));
+        }
+    };
+
+    const testSettings = async (values: BitbucketSettingsValues): Promise<string> => {
+        if (!workspace) throw new Error("The Bitbucket workspace is not ready.");
+        try {
+            const data = await requestJson<SettingsResponse>(
+                workspace.settingsTestUrl,
+                csrfTokenRef.current,
+                {method: "POST", body: settingsBody(values)},
+            );
+            return data.message;
+        } catch (error) {
+            throw new Error(errorMessage(error));
+        }
+    };
+
+    const addSource = async (kind: BitbucketSourceType, sourceUrl: string) => {
         if (!workspace) return;
         const body = new FormData();
-        body.set("repository_url", repositoryUrl);
-        body.set("username", username);
-        body.set("access_token", accessToken);
+        body.set("source_type", kind);
+        body.set("source_url", sourceUrl);
         try {
-            const data = await requestJson<JobResponse>(
-                workspace.settingsSaveUrl,
+            const data = await requestJson<JobsResponse>(
+                workspace.addSourceUrl,
                 csrfTokenRef.current,
                 {method: "POST", body},
             );
-            activeJobIdsRef.current.add(data.job.id);
-            handleJob(data.job);
+            for (const job of data.jobs) {
+                activeJobIdsRef.current.add(job.id);
+                handleJob(job);
+            }
             await loadWorkspace();
-            showToast(`${data.job.repository.name} was saved. Fetching metadata through the API…`);
+            const label = data.repositoryCount === 1 ? "repository" : "repositories";
+            showToast(data.repositoryCount + " " + label + " added to the metadata queue.");
         } catch (error) {
             throw new Error(errorMessage(error));
         }
@@ -253,10 +307,19 @@ export default function App() {
             <div className="bb-workspace">
                 <RepositorySidebar
                     homeUrl={workspace.homeUrl}
+                    onAddSource={(kind) => {
+                        setSourceType(kind);
+                        setSourceOpen(true);
+                    }}
                     onOpenSettings={(url = "") => {
-                        setSettingsRepositoryUrl(url);
+                        try {
+                            setSettingsOrigin(url ? new URL(url).origin : "");
+                        } catch {
+                            setSettingsOrigin("");
+                        }
                         setSettingsOpen(true);
                     }}
+                    onRefresh={(repository) => addSource("repository", repository.url)}
                     repositories={workspace.repositories}
                     repositoryCount={workspace.repositoryCount}
                     scheduleHour={workspace.scheduleHour}
@@ -273,10 +336,22 @@ export default function App() {
                 />
                 <BitbucketSettingsDialog
                     credentials={workspace.credentials}
-                    initialRepositoryUrl={settingsRepositoryUrl}
+                    initialOrigin={settingsOrigin}
                     open={settingsOpen}
                     onClose={() => setSettingsOpen(false)}
                     onSave={saveSettings}
+                    onTest={testSettings}
+                />
+                <AddBitbucketSourceDialog
+                    configured={workspace.credentials.some((credential) => credential.configured)}
+                    initialType={sourceType}
+                    open={sourceOpen}
+                    onAdd={addSource}
+                    onClose={() => setSourceOpen(false)}
+                    onOpenSettings={() => {
+                        setSettingsOrigin("");
+                        setSettingsOpen(true);
+                    }}
                 />
                 <div className="bb-toast" role="status" aria-live="polite" hidden={!toast}>{toast}</div>
             </div>

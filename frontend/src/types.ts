@@ -91,7 +91,9 @@ export interface WorkspacePayload {
     csrfToken: string;
     homeUrl: string;
     addRepositoryUrl: string;
+    addSourceUrl: string;
     settingsSaveUrl: string;
+    settingsTestUrl: string;
     statusUrl: string;
     scheduleUrl: string;
     repositories: Repository[];
@@ -119,7 +121,9 @@ export interface WorkspacePayload {
     credentials: Array<{
         origin: string;
         configured: boolean;
+        apiBaseUrl: string;
         username: string;
+        verifySsl: boolean;
         updatedAt: string;
     }>;
     jobs: SyncJob[];
@@ -134,6 +138,19 @@ export interface OpenDocumentResponse {
 export interface JobResponse {
     ok: true;
     job: SyncJob;
+}
+
+export interface JobsResponse {
+    ok: true;
+    sourceType: "project" | "repository";
+    repositoryCount: number;
+    createdCount: number;
+    jobs: SyncJob[];
+}
+
+export interface SettingsResponse {
+    ok: true;
+    message: string;
 }
 
 export interface ErrorResponse {
