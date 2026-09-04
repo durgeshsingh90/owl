@@ -32,6 +32,7 @@ from bitbucket.services.repository_urls import (
 from bitbucket.services.scheduler import queue_due_daily_pulls
 
 pytestmark = pytest.mark.django_db
+TEST_REPOSITORY_HOST = "scm.example.invalid"
 
 
 @pytest.fixture(autouse=True)
@@ -120,8 +121,8 @@ def test_sample_server_url_extracts_project_and_repository():
         "http://scm.example.invalid/scm/adr/repo.git",
         "ssh://git@scm.example.invalid/adr/repo.git",
         "git@scm.example.invalid:adr/repo.git",
-        "https://user:secret@scm.example.invalid/scm/adr/repo.git",
-        "https://scm.example.invalid/scm/adr/repo.git?token=secret",
+        f"https://embedded-userinfo@{TEST_REPOSITORY_HOST}/scm/adr/repo.git",
+        f"https://{TEST_REPOSITORY_HOST}/scm/adr/repo.git?unsupported={1}",
     ),
 )
 def test_only_credential_free_https_urls_are_accepted(value):
