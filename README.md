@@ -344,6 +344,11 @@ git pull
 python start.py
 ```
 
+If a directly launched development server reports
+`no such table: bitbucket_repository`, stop it with `Ctrl+C` and run `python start.py` from the
+OWL folder. The launcher backs up the SQLite database, repairs the earlier Bitbucket draft's
+migration history, applies the current schema, and then starts the website and workers.
+
 The first start creates a strong machine-local Django key under `var/secrets/` when
 `DJANGO_SECRET_KEY` is blank. The key and the entire `var/` directory are ignored by Git.
 

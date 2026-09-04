@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
+import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, call
@@ -76,6 +78,74 @@ def test_document_worker_has_an_app_specific_management_command():
 
     assert commands["bitbucket_document_worker"] == "bitbucket"
     assert commands["bitbucket_sync_worker"] == "bitbucket_search"
+
+
+def test_upgrade_repairs_database_with_removed_draft_migration_history(tmp_path):
+    data_root = tmp_path / "legacy-data"
+    database = data_root / "database" / "owl.sqlite3"
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE django_migrations ("
+            "id integer PRIMARY KEY AUTOINCREMENT, app varchar(255) NOT NULL, "
+            "name varchar(255) NOT NULL, applied datetime NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE bitbucket_bitbucketrepository "
+            "(id integer PRIMARY KEY, display_name varchar(200) NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO django_migrations (app, name, applied) "
+            "VALUES ('bitbucket', '0001_initial', CURRENT_TIMESTAMP)"
+        )
+        for number in range(2, 22):
+            connection.execute(
+                "INSERT INTO django_migrations (app, name, applied) "
+                "VALUES ('bitbucket', ?, CURRENT_TIMESTAMP)",
+                (f"{number:04d}_removed_draft_migration",),
+            )
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "OWL_DATA_ROOT": str(data_root),
+            "DJANGO_SETTINGS_MODULE": "owl.settings",
+            "DJANGO_SECRET_KEY": "migration-test-only-synthetic-key-0123456789-abcdefghij",
+        }
+    )
+    completed = subprocess.run(
+        (
+            sys.executable,
+            str(Path(__file__).resolve().parents[1] / "manage.py"),
+            "migrate",
+            "bitbucket",
+            "--noinput",
+        ),
+        cwd=Path(__file__).resolve().parents[1],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    with sqlite3.connect(database) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        applied = connection.execute(
+            "SELECT COUNT(*) FROM django_migrations "
+            "WHERE app = 'bitbucket' AND name = '0022_ensure_independent_document_schema'"
+        ).fetchone()[0]
+    assert {
+        "bitbucket_repository",
+        "bitbucket_document",
+        "bitbucket_contributor",
+        "bitbucket_syncjob",
+    } <= tables
+    assert "bitbucket_bitbucketrepository" in tables
+    assert applied == 1
 
 
 def test_workspace_has_requested_columns_actions_and_independent_design(loopback_client):
