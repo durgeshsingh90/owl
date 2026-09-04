@@ -11,6 +11,9 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+!frontend/dist/
+!frontend/dist/**
+*.tsbuildinfo
 downloads/
 eggs/
 .eggs/
@@ -153,6 +156,7 @@ activemq-data/
 !.env.example
 .envrc
 .venv
+frontend/node_modules/
 env/
 venv/
 ENV/
@@ -212,6 +216,7 @@ tempCodeRunnerFile.py
 .DS_Store
 /media/
 /var/
+/backend/var/
 /data/
 /repositories/
 /indexes/

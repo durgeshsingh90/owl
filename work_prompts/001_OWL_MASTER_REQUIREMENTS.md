@@ -113,55 +113,40 @@ The implementation may refine this structure while preserving clear responsibili
 
 ~~~text
 owl/
-├── manage.py
 ├── README.md
-├── requirements.txt or pyproject.toml
-├── .env.example
 ├── .gitignore
-├── owl/
-│   ├── settings.py
-│   ├── urls.py
-│   ├── asgi.py
-│   └── wsgi.py
-├── templates/
-│   └── owl/
-├── static/
-│   └── owl/
-├── bookmark_manager/
-│   ├── migrations/
-│   ├── services/
-│   │   ├── confluence.py
-│   │   ├── configuration.py
-│   │   ├── secret_store.py
-│   │   ├── hierarchy.py
-│   │   ├── import_export.py
-│   │   └── refresh.py
-│   ├── templates/bookmark_manager/
-│   ├── static/bookmark_manager/
-│   ├── models.py
-│   ├── forms.py
-│   ├── views.py
-│   ├── urls.py
-│   └── tests/
-├── bitbucket_search/
-│   ├── migrations/
-│   ├── services/
-│   │   ├── git.py
-│   │   ├── discovery.py
-│   │   ├── extraction.py
-│   │   ├── indexing.py
-│   │   ├── search.py
-│   │   └── opening.py
-│   ├── templates/bitbucket_search/
-│   ├── static/bitbucket_search/
-│   ├── management/commands/
-│   ├── models.py
-│   ├── forms.py
-│   ├── views.py
-│   ├── urls.py
-│   └── tests/
-├── media/
-│   └── bitbucket/              local runtime data; ignored by Git
+├── frontend/
+│   ├── src/
+│   └── package.json
+├── backend/
+│   ├── manage.py
+│   ├── requirements.txt or pyproject.toml
+│   ├── .env.example
+│   ├── owl/
+│   │   ├── settings.py
+│   │   ├── urls.py
+│   │   ├── asgi.py
+│   │   └── wsgi.py
+│   ├── templates/
+│   │   └── owl/
+│   ├── static/
+│   │   └── owl/
+│   ├── bookmark_manager/
+│   │   ├── migrations/
+│   │   ├── services/
+│   │   ├── models.py
+│   │   ├── forms.py
+│   │   ├── views.py
+│   │   └── urls.py
+│   ├── bitbucket_search/
+│   │   ├── migrations/
+│   │   ├── services/
+│   │   ├── management/commands/
+│   │   ├── models.py
+│   │   ├── forms.py
+│   │   ├── views.py
+│   │   └── urls.py
+│   └── var/                    local runtime data; ignored by Git
 └── work_prompts/
 ~~~
 

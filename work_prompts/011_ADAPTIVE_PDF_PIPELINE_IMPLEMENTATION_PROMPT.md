@@ -2751,7 +2751,7 @@ For each phase:
    public-repository/safety checks.
 4. Run the complete project gate using:
 
-       PATH="$PWD/.venv/bin:$PATH" ./scripts/check.sh
+       cd backend && PATH="$PWD/.venv/bin:$PATH" ./scripts/check.sh
 
 5. Use an isolated data root and synthetic corpus for destructive/repeatable benchmark
    trials, and clean it up safely afterward.

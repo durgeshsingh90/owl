@@ -1,0 +1,17 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <meta name="color-scheme" content="light dark">
+    <title>Bitbucket · OWL</title>
+    <link rel="stylesheet" href="{% static 'owl-frontend.css' %}">
+</head>
+<body>
+    <div id="bitbucket-root" data-workspace-url="{% url 'bitbucket:workspace' %}"></div>
+    <noscript>Bitbucket needs JavaScript enabled to display the document desk.</noscript>
+    <script type="module" src="{% static 'owl-frontend.js' %}"></script>
+</body>
+</html>

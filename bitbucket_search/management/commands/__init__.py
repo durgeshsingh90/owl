@@ -1,1 +1,0 @@
-"""Bitbucket Search management commands."""

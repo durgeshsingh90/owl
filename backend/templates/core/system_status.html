@@ -1,0 +1,56 @@
+{% extends "owl/base.html" %}
+
+{% block content %}
+<div class="page-stack">
+    <header class="page-heading page-heading--status">
+        <div>
+            <p class="eyebrow">Shared utility · Local diagnostics</p>
+            <h1>System Status</h1>
+            <p class="lede">A live, redacted view of the local services used by Bookmark Manager and Bitbucket on this Mac.</p>
+        </div>
+        <div class="overall-status overall-status--{{ system_status.overall_state }}">
+            <span class="overall-status__dot" aria-hidden="true"></span>
+            <span>
+                <small>Overall status</small>
+                <strong>{{ overall_label }}</strong>
+            </span>
+        </div>
+    </header>
+
+    <section aria-labelledby="component-status-heading">
+        <div class="section-heading section-heading--compact">
+            <h2 id="component-status-heading">Shared dependency checks</h2>
+            <p>Checked <time datetime="{{ system_status.generated_at|date:'c' }}">{{ system_status.generated_at|date:"j M Y, H:i:s T" }}</time></p>
+        </div>
+
+        <div class="status-grid">
+            {% for component in system_status.components %}
+                <article class="status-card status-card--{{ component.state }}">
+                    <div class="status-card__heading">
+                        <div class="status-symbol" aria-hidden="true">
+                            {% if component.state == "ready" %}✓{% elif component.state == "planned" %}○{% else %}!{% endif %}
+                        </div>
+                        <div>
+                            <h3>{{ component.label }}</h3>
+                            <p class="state-label state-label--{{ component.state }}">{{ component.summary }}</p>
+                        </div>
+                    </div>
+                    {% if component.detail %}<p>{{ component.detail }}</p>{% endif %}
+                </article>
+            {% empty %}
+                <div class="empty-inline">
+                    <p>No system checks were returned.</p>
+                </div>
+            {% endfor %}
+        </div>
+    </section>
+
+    <aside class="privacy-note">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 10V7a5 5 0 0 1 10 0v3M5 10h14v11H5V10Z"/></svg>
+        <div>
+            <h2>Diagnostics stay private</h2>
+            <p>This shared utility reports safe summaries only. It does not retrieve or display personal access tokens, authorization headers, private document content, or credentials.</p>
+        </div>
+    </aside>
+</div>
+{% endblock %}

@@ -1,0 +1,17 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <meta name="color-scheme" content="light dark">
+    <title>Home · OWL</title>
+    <link rel="stylesheet" href="{% static 'owl-frontend.css' %}">
+</head>
+<body>
+    <div id="home-root" data-workspace-url="{% url 'core:dashboard_workspace' %}"></div>
+    <noscript>OWL Home needs JavaScript enabled.</noscript>
+    <script type="module" src="{% static 'owl-frontend.js' %}"></script>
+</body>
+</html>
