@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import errno
 import json
 from collections import deque
 from datetime import timedelta
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from django.utils import timezone
@@ -578,6 +580,58 @@ def test_stale_snapshot_removes_nonterminal_eta_and_running_evidence(settings, t
     assert payload["run"]["totalEta"]["state"] == "stale"
     assert payload["run"]["totalEta"]["etaSeconds"] is None
     assert payload["run"]["repositoryProgress"][0]["eta"]["etaSeconds"] is None
+
+
+def test_metrics_snapshot_retries_transient_windows_access_denied(
+    settings,
+    monkeypatch,
+    tmp_path,
+):
+    settings.PDF_PIPELINE_STATE_ROOT = tmp_path / "pipeline-state"
+    real_replace = metrics.os.replace
+    replace_attempts = []
+    retry_delays = []
+
+    def intermittently_denied_replace(source, target):
+        replace_attempts.append((source, target))
+        if len(replace_attempts) < 3:
+            error = PermissionError(errno.EACCES, "snapshot is briefly open")
+            error.winerror = 5
+            raise error
+        real_replace(source, target)
+
+    monkeypatch.setattr(metrics.sys, "platform", "win32")
+    monkeypatch.setattr(metrics.os, "replace", intermittently_denied_replace)
+    monkeypatch.setattr(metrics.time, "sleep", retry_delays.append)
+
+    target = metrics.write_metrics_snapshot(
+        {"schemaVersion": metrics.SCHEMA_VERSION, "state": "healthy"}
+    )
+
+    assert len(replace_attempts) == 3
+    assert retry_delays == [0.025, 0.05]
+    assert json.loads(target.read_text(encoding="utf-8"))["state"] == "healthy"
+    assert not tuple(target.parent.glob(".*.tmp"))
+
+
+def test_metrics_snapshot_does_not_retry_access_denied_off_windows(
+    settings,
+    monkeypatch,
+    tmp_path,
+):
+    settings.PDF_PIPELINE_STATE_ROOT = tmp_path / "pipeline-state"
+    replace = Mock(side_effect=PermissionError(errno.EACCES, "not transient here"))
+    sleep = Mock()
+    monkeypatch.setattr(metrics.sys, "platform", "linux")
+    monkeypatch.setattr(metrics.os, "replace", replace)
+    monkeypatch.setattr(metrics.time, "sleep", sleep)
+
+    with pytest.raises(PermissionError):
+        metrics.write_metrics_snapshot({"schemaVersion": metrics.SCHEMA_VERSION})
+
+    replace.assert_called_once()
+    sleep.assert_not_called()
+    assert not tuple(settings.PDF_PIPELINE_STATE_ROOT.glob(".*.tmp"))
 
 
 def test_payload_omits_repository_and_document_secrets_and_sanitizes_tuning(settings, tmp_path):

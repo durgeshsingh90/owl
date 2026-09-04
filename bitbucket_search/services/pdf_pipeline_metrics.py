@@ -8,6 +8,7 @@ per-second time-series database.
 
 from __future__ import annotations
 
+import errno
 import json
 import math
 import os
@@ -67,9 +68,13 @@ SNAPSHOT_FILENAME = "metrics-v1.json"
 _SERIES_ID = uuid.uuid4().hex
 _SERIES_STARTED_AT = timezone.now()
 _RING_LOCK = threading.RLock()
+_SNAPSHOT_IO_LOCK = threading.RLock()
 _MAX_RING_SAMPLES = 2_048
 _SAMPLES: deque[dict[str, Any]] = deque()
 _HISTORY_TRUNCATED = False
+_WINDOWS_REPLACE_ATTEMPTS = 6
+_WINDOWS_REPLACE_BASE_DELAY_SECONDS = 0.025
+_WINDOWS_REPLACE_MAX_DELAY_SECONDS = 0.25
 _DARWIN_MEMORY_CACHE_LOCK = threading.Lock()
 _DARWIN_MEMORY_CACHE: tuple[float, int | None] | None = None
 
@@ -2242,6 +2247,28 @@ def _snapshot_path() -> Path:
     return Path(settings.PDF_PIPELINE_STATE_ROOT).resolve() / SNAPSHOT_FILENAME
 
 
+def _replace_metrics_snapshot(temporary: Path, target: Path) -> None:
+    """Retry only Windows sharing/access races while preserving atomic replace."""
+
+    for attempt in range(_WINDOWS_REPLACE_ATTEMPTS):
+        try:
+            os.replace(temporary, target)
+            return
+        except PermissionError as error:
+            retryable = sys.platform == "win32" and (
+                error.errno in {errno.EACCES, errno.EPERM}
+                or getattr(error, "winerror", None) in {5, 32, 33}
+            )
+            if not retryable or attempt + 1 >= _WINDOWS_REPLACE_ATTEMPTS:
+                raise
+            time.sleep(
+                min(
+                    _WINDOWS_REPLACE_BASE_DELAY_SECONDS * 2**attempt,
+                    _WINDOWS_REPLACE_MAX_DELAY_SECONDS,
+                )
+            )
+
+
 def write_metrics_snapshot(payload: Mapping[str, Any]) -> Path:
     """Atomically persist a bounded 0600 snapshot for other local processes."""
 
@@ -2257,8 +2284,12 @@ def write_metrics_snapshot(payload: Mapping[str, Any]) -> Path:
             stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, target)
-        os.chmod(target, 0o600)
+        # Windows cannot replace a file while a reader has it open without
+        # delete sharing. Coordinate OWL's own request threads and tolerate a
+        # brief external scanner/indexer sharing window.
+        with _SNAPSHOT_IO_LOCK:
+            _replace_metrics_snapshot(temporary, target)
+            os.chmod(target, 0o600)
         try:
             directory_fd = os.open(target.parent, os.O_RDONLY)
         except OSError:
@@ -2278,12 +2309,13 @@ def read_metrics_snapshot(*, at: datetime | None = None) -> dict[str, Any] | Non
 
     now = at or timezone.now()
     target = _snapshot_path()
-    try:
-        if target.stat().st_size > 4 * 1024 * 1024:
+    with _SNAPSHOT_IO_LOCK:
+        try:
+            if target.stat().st_size > 4 * 1024 * 1024:
+                return None
+            payload = json.loads(target.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
             return None
-        payload = json.loads(target.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-        return None
     if not isinstance(payload, dict) or payload.get("schemaVersion") != SCHEMA_VERSION:
         return None
     try:
