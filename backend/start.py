@@ -104,6 +104,9 @@ def run(args: argparse.Namespace) -> int:
         print(f"Applying {len(pending)} database updates before starting workers...", flush=True)
         call_command("migrate", interactive=False)
     connection.close()
+    if getattr(args, "prepare", False):
+        print("OWL database is ready. No database updates pending.", flush=True)
+        return 0
     print(
         "Starting OWL and its background refresh, Bitbucket, and bookmark search workers. "
         "Press Ctrl+C to stop.",
@@ -121,10 +124,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "addrport", nargs="?", help="Optional port or address:port; otherwise use OWL's default."
     )
-    parser.add_argument(
+    preparation_mode = parser.add_mutually_exclusive_group()
+    preparation_mode.add_argument(
         "--check",
         action="store_true",
         help="Check setup without applying updates or starting workers.",
+    )
+    preparation_mode.add_argument(
+        "--prepare",
+        action="store_true",
+        help="Apply pending database updates and exit without starting workers.",
     )
     args = parser.parse_args(arguments)
     root = project_root()

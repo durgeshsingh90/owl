@@ -113,6 +113,67 @@ def test_missing_frontend_packages_fail_before_starting_services(launcher, tmp_p
         launcher.services(tmp_path)
 
 
+def test_backend_is_prepared_with_selected_python_before_services_start(
+    launcher, tmp_path, monkeypatch
+):
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    launcher_script = backend / "start.py"
+    launcher_script.touch()
+    python = tmp_path / "backend" / ".venv" / "Scripts" / "python.exe"
+    completed = SimpleNamespace(returncode=0)
+    run = Mock(return_value=completed)
+    monkeypatch.setattr(launcher, "find_backend_python", Mock(return_value=python))
+    monkeypatch.setattr(launcher.subprocess, "run", run)
+
+    launcher.prepare_backend(tmp_path)
+
+    run.assert_called_once_with(
+        (str(python), str(launcher_script), "--prepare"),
+        cwd=backend,
+        check=False,
+    )
+
+
+def test_backend_preparation_reports_nonzero_exit(launcher, tmp_path, monkeypatch):
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / "start.py").touch()
+    monkeypatch.setattr(
+        launcher.subprocess,
+        "run",
+        Mock(return_value=SimpleNamespace(returncode=1)),
+    )
+
+    with pytest.raises(launcher.StartupError, match="were not started"):
+        launcher.prepare_backend(tmp_path)
+
+
+def test_backend_preparation_failure_prevents_service_start(launcher, tmp_path, monkeypatch):
+    definitions = (
+        launcher.Service("backend", ("python", "start.py"), tmp_path / "backend"),
+        launcher.Service("frontend", ("npm", "run", "dev"), tmp_path / "frontend"),
+    )
+    monkeypatch.setattr(launcher, "services", Mock(return_value=definitions))
+    monkeypatch.setattr(
+        launcher,
+        "find_available_port",
+        Mock(side_effect=(launcher.DEFAULT_BACKEND_PORT, launcher.DEFAULT_FRONTEND_PORT)),
+    )
+    monkeypatch.setattr(
+        launcher,
+        "prepare_backend",
+        Mock(side_effect=launcher.StartupError("synthetic migration failure")),
+    )
+    popen = Mock()
+    monkeypatch.setattr(launcher.subprocess, "Popen", popen)
+
+    with pytest.raises(launcher.StartupError, match="synthetic migration failure"):
+        launcher.run(tmp_path)
+
+    popen.assert_not_called()
+
+
 def test_start_command_launches_both_and_stops_in_reverse_order(launcher, tmp_path, monkeypatch):
     backend = launcher.Service("backend", ("python", "start.py"), tmp_path / "backend")
     frontend_environment = {"OWL_BACKEND_URL": "http://127.0.0.1:8001"}
@@ -127,6 +188,7 @@ def test_start_command_launches_both_and_stops_in_reverse_order(launcher, tmp_pa
     popen = Mock(side_effect=(backend_process, frontend_process))
     stop = Mock()
     monkeypatch.setattr(launcher, "services", Mock(return_value=(backend, frontend)))
+    monkeypatch.setattr(launcher, "prepare_backend", Mock())
     monkeypatch.setattr(
         launcher,
         "find_available_port",
@@ -161,6 +223,7 @@ def test_keyboard_interrupt_stops_both_services(launcher, tmp_path, monkeypatch)
     )
     stop = Mock()
     monkeypatch.setattr(launcher, "services", Mock(return_value=definitions))
+    monkeypatch.setattr(launcher, "prepare_backend", Mock())
     monkeypatch.setattr(
         launcher,
         "find_available_port",
@@ -188,6 +251,7 @@ def test_busy_ports_are_reported_and_forwarded_to_both_services(
         SimpleNamespace(poll=Mock(return_value=None)),
     )
     monkeypatch.setattr(launcher, "services", definitions)
+    monkeypatch.setattr(launcher, "prepare_backend", Mock())
     monkeypatch.setattr(
         launcher,
         "find_available_port",

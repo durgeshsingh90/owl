@@ -239,7 +239,6 @@ python --version
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 if not exist .env copy .env.example .env
-python manage.py migrate
 cd ..\frontend
 npm ci
 cd ..
@@ -249,13 +248,16 @@ python dev.py
 `python --version` must report Python 3.13.x or 3.14.x. The activated interpreter shown by
 `where python` should be the `.venv\Scripts\python.exe` inside this checkout.
 
-After pulling a newer OWL version on Windows, update the database schema before restarting the
-app. This preserves your bookmarks while adding any columns required by the newer code:
+After pulling a newer OWL version on Windows, restart with the root launcher:
 
 ```bat
 git pull
 python dev.py
 ```
+
+`dev.py` runs Django checks first, backs up the existing SQLite database when updates are pending,
+and applies all migrations before it starts either Django or Vite. This preserves existing data
+while adding columns required by the newer code. If preparation fails, neither service starts.
 
 If a directly launched development server reports
 `no such table: bitbucket_repository`, stop it with `Ctrl+C` and run `python start.py` from the
@@ -280,8 +282,9 @@ On Windows, use `python dev.py` (or `py dev.py`). The launcher runs Django on
 `http://127.0.0.1:8000/` and Vite on `http://127.0.0.1:5173/static/`; open the Vite address for
 frontend hot reload. If either port is occupied, it selects the next available port, points Vite at
 the selected Django port, and prints the actual frontend URL. Both services share the terminal, and
-`Control-C` stops both of them. The launcher prefers `backend/.venv`, accepts the former root
-`.venv`, and reports missing Python or npm setup without installing packages automatically.
+`Control-C` stops both of them. Before starting either service, it completes the safe database
+preparation described below. The launcher prefers `backend/.venv`, accepts the former root `.venv`,
+and reports missing Python or npm setup without installing packages automatically.
 
 To run only Django and its background workers, change to `backend/` and invoke its launcher:
 

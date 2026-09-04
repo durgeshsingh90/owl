@@ -131,6 +131,28 @@ def services(
     )
 
 
+def prepare_backend(root: Path) -> None:
+    """Apply Django database updates before either development service starts."""
+    backend = root / "backend"
+    backend_launcher = backend / "start.py"
+    print("Checking OWL database updates...", flush=True)
+    try:
+        completed = subprocess.run(
+            (str(find_backend_python(root)), str(backend_launcher), "--prepare"),
+            cwd=backend,
+            check=False,
+        )
+    except OSError as error:
+        raise StartupError(
+            f"Django database preparation could not start: {error}"
+        ) from error
+    if completed.returncode:
+        raise StartupError(
+            "Django checks or database updates failed. Review the error above; "
+            "the frontend and backend were not started."
+        )
+
+
 def _process_options() -> dict[str, object]:
     if os.name == "nt":
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
@@ -199,11 +221,13 @@ def run(root: Path) -> int:
                 f"Frontend port {DEFAULT_FRONTEND_PORT} is busy; using {frontend_port}.",
                 flush=True,
             )
-        for service in services(
+        service_definitions = services(
             root,
             backend_port=backend_port,
             frontend_port=frontend_port,
-        ):
+        )
+        prepare_backend(root)
+        for service in service_definitions:
             print(f"Starting OWL {service.name}...", flush=True)
             process_options = _process_options()
             if service.environment is not None:

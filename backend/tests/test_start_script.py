@@ -160,6 +160,16 @@ def test_run_passes_explicit_address_to_supervised_launcher(startup):
     startup.command.assert_any_call("run_owl", "127.0.0.1:9017")
 
 
+def test_prepare_applies_pending_updates_without_starting_workers(startup, capsys):
+    startup.executor.migration_plan.return_value = [object()]
+
+    assert start.run(Namespace(check=False, prepare=True, addrport=None)) == 0
+
+    assert startup.events == ["check", "backup", "migrate", "close"]
+    startup.command.assert_any_call("migrate", interactive=False)
+    assert "database is ready" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("pending", [False, True])
 def test_check_never_migrates_backs_up_or_starts_workers(startup, pending, capsys):
     startup.executor.migration_plan.return_value = [object()] if pending else []
@@ -251,7 +261,7 @@ def test_main_changes_to_its_own_checkout_and_does_not_hardcode_address(
     assert start.main([]) == 0
 
     assert Path.cwd() == launch_location
-    assert runner.call_args.args[0] == Namespace(check=False, addrport=None)
+    assert runner.call_args.args[0] == Namespace(check=False, prepare=False, addrport=None)
 
 
 def test_main_passes_check_mode_without_overriding_default_address(launch_location, monkeypatch):
@@ -260,7 +270,16 @@ def test_main_passes_check_mode_without_overriding_default_address(launch_locati
 
     assert start.main(["--check"]) == 1
 
-    assert runner.call_args.args[0] == Namespace(check=True, addrport=None)
+    assert runner.call_args.args[0] == Namespace(check=True, prepare=False, addrport=None)
+
+
+def test_main_passes_prepare_mode_without_starting_server(launch_location, monkeypatch):
+    runner = Mock(return_value=0)
+    monkeypatch.setattr(start, "run", runner)
+
+    assert start.main(["--prepare"]) == 0
+
+    assert runner.call_args.args[0] == Namespace(check=False, prepare=True, addrport=None)
 
 
 def test_main_preserves_arguments_and_space_containing_paths_when_selecting_venv(
