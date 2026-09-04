@@ -20,6 +20,7 @@
             <a class="knowledge-nav__item" href="#your-apps"><span aria-hidden="true">⊞</span>Apps</a>
             <a class="knowledge-nav__item" href="{% url 'bookmark_manager:index' %}"><span aria-hidden="true">⌑</span>Bookmark Manager</a>
             <a class="knowledge-nav__item" href="{% url 'bitbucket_search:index' %}"><span aria-hidden="true">⌕</span>Bitbucket Search</a>
+            <a class="knowledge-nav__item" href="{% url 'bitbucket:index' %}"><span aria-hidden="true">⇄</span>Bitbucket</a>
             <a class="knowledge-nav__item" href="{% url 'bookmark_manager:settings' %}"><span aria-hidden="true">⚙</span>Settings</a>
             <a class="knowledge-nav__item" href="{% url 'core:system_status' %}"><span aria-hidden="true">◌</span>System status</a>
         </nav>
@@ -33,10 +34,11 @@
         <header class="knowledge-topbar"><p><span class="knowledge-topbar__dot" aria-hidden="true"></span>Local workspace</p><div>{% include "owl/_notification_center.html" %}<a class="knowledge-theme-toggle knowledge-theme-toggle--compact" href="{% url 'bookmark_manager:settings' %}" aria-label="Settings" title="Settings"><span aria-hidden="true">⚙</span><span class="visually-hidden">Settings</span></a><a href="{% url 'core:system_status' %}">System status</a><button class="knowledge-theme-toggle knowledge-theme-toggle--compact" type="button" data-theme-toggle aria-label="Switch to light mode" aria-pressed="true"><span aria-hidden="true">☼</span><span class="visually-hidden" data-theme-toggle-label>Light mode</span></button></div></header>
         <div id="main-content" class="knowledge-content" tabindex="-1">
             <section class="knowledge-apps" id="your-apps" aria-labelledby="all-apps-heading">
-                <div class="knowledge-section-heading"><div><p class="knowledge-kicker">Workspace</p><h1 id="all-apps-heading">Your apps</h1></div><span>2 available</span></div>
+                <div class="knowledge-section-heading"><div><p class="knowledge-kicker">Workspace</p><h1 id="all-apps-heading">Your apps</h1></div><span>3 available</span></div>
                 <div class="knowledge-app-grid">
                     <a class="knowledge-app-card knowledge-app-card--bookmarks" href="{% url 'bookmark_manager:index' %}" aria-describedby="bookmark-card-summary"><span class="knowledge-app-card__top"><span class="knowledge-app-card__icon" aria-hidden="true">⌑</span><span class="knowledge-app-card__status">Ready</span></span><strong>Bookmark Manager</strong><small id="bookmark-card-summary">Save, organise, and revisit important Confluence pages in their real hierarchy.</small><span class="knowledge-app-card__meta">Confluence library</span><span class="knowledge-app-card__open">Open <span aria-hidden="true">→</span></span></a>
                     <a class="knowledge-app-card knowledge-app-card--bitbucket" href="{% url 'bitbucket_search:index' %}" aria-describedby="bitbucket-card-summary"><span class="knowledge-app-card__top"><span class="knowledge-app-card__icon" aria-hidden="true">⌕</span><span class="knowledge-app-card__status">Ready</span></span><strong>Bitbucket Search</strong><small id="bitbucket-card-summary">Sync repositories and search their PDFs locally by filename, metadata, and page text.</small><span class="knowledge-app-card__meta">Repository PDFs &amp; Git activity</span><span class="knowledge-app-card__open">Open <span aria-hidden="true">→</span></span></a>
+                    <a class="knowledge-app-card knowledge-app-card--bitbucket-app" href="{% url 'bitbucket:index' %}" aria-describedby="bitbucket-app-card-summary"><span class="knowledge-app-card__top"><span class="knowledge-app-card__icon" aria-hidden="true">⇄</span><span class="knowledge-app-card__status">Ready</span></span><strong>Bitbucket</strong><small id="bitbucket-app-card-summary">Clone HTTPS repositories, pull them daily, and browse PDF and VSDX activity.</small><span class="knowledge-app-card__meta">Repository document workspace</span><span class="knowledge-app-card__open">Open <span aria-hidden="true">→</span></span></a>
                 </div>
             </section>
 

@@ -170,6 +170,10 @@ REPOSITORIES_ROOT = OWL_DATA_ROOT / "repositories"
 BITBUCKET_MEDIA_ROOT = MEDIA_ROOT / "bitbucket"
 BITBUCKET_REPOSITORIES_ROOT = BITBUCKET_MEDIA_ROOT / "repositories"
 BITBUCKET_TEMP_ROOT = BITBUCKET_MEDIA_ROOT / "tmp"
+BITBUCKET_APP_MEDIA_ROOT = MEDIA_ROOT / "bitbucket-app"
+BITBUCKET_APP_REPOSITORIES_ROOT = BITBUCKET_APP_MEDIA_ROOT / "repositories"
+BITBUCKET_APP_TEMP_ROOT = BITBUCKET_APP_MEDIA_ROOT / "tmp"
+BITBUCKET_APP_PIPELINE_STATE_ROOT = OWL_DATA_ROOT / "bitbucket-app-pdf-pipeline"
 IMPORTS_ROOT = OWL_DATA_ROOT / "imports"
 BACKUPS_ROOT = OWL_DATA_ROOT / "backups"
 INDEXES_ROOT = OWL_DATA_ROOT / "indexes"
@@ -187,6 +191,10 @@ for runtime_directory in (
     BITBUCKET_MEDIA_ROOT,
     BITBUCKET_REPOSITORIES_ROOT,
     BITBUCKET_TEMP_ROOT,
+    BITBUCKET_APP_MEDIA_ROOT,
+    BITBUCKET_APP_REPOSITORIES_ROOT,
+    BITBUCKET_APP_TEMP_ROOT,
+    BITBUCKET_APP_PIPELINE_STATE_ROOT,
     IMPORTS_ROOT,
     BACKUPS_ROOT,
     INDEXES_ROOT,
@@ -364,6 +372,50 @@ BITBUCKET_PDF_PAGE_SIZE = min(
 BITBUCKET_SEARCH_PAGE_SIZE = min(
     _env_int("BITBUCKET_SEARCH_PAGE_SIZE", 100, minimum=10),
     100,
+)
+
+# The separate Bitbucket app owns its scheduling and pagination settings.
+# Defaults retain the established Git safety limits, while every PDF result
+# surface uses the requested 500-row page size.
+BITBUCKET_APP_SECRET_BACKEND = (
+    os.getenv("BITBUCKET_APP_SECRET_BACKEND", BITBUCKET_SECRET_BACKEND).strip().casefold() or "auto"
+)
+BITBUCKET_APP_HISTORY_YEARS = _env_int("BITBUCKET_APP_HISTORY_YEARS", 3, minimum=1)
+BITBUCKET_APP_MAX_REPO_WORKERS = _env_int("BITBUCKET_APP_MAX_REPO_WORKERS", 4, minimum=1)
+BITBUCKET_APP_GIT_TIMEOUT_SECONDS = _env_int("BITBUCKET_APP_GIT_TIMEOUT_SECONDS", 3_600, minimum=60)
+BITBUCKET_APP_CONNECTION_TIMEOUT_SECONDS = min(
+    _env_int("BITBUCKET_APP_CONNECTION_TIMEOUT_SECONDS", 20, minimum=1),
+    120,
+)
+BITBUCKET_APP_WORKER_IDLE_SECONDS = _env_int("BITBUCKET_APP_WORKER_IDLE_SECONDS", 15, minimum=1)
+BITBUCKET_APP_REPOSITORY_JOB_LEASE_SECONDS = _env_int(
+    "BITBUCKET_APP_REPOSITORY_JOB_LEASE_SECONDS", 90, minimum=60
+)
+BITBUCKET_APP_REPOSITORY_WORKER_MAX_RETRIES = _env_int(
+    "BITBUCKET_APP_REPOSITORY_WORKER_MAX_RETRIES", 1, minimum=0
+)
+BITBUCKET_APP_REPOSITORY_REMOVAL_WAIT_SECONDS = _env_int(
+    "BITBUCKET_APP_REPOSITORY_REMOVAL_WAIT_SECONDS", 120, minimum=1
+)
+BITBUCKET_APP_DAILY_REFRESH_ENABLED = _env_bool("BITBUCKET_APP_DAILY_REFRESH_ENABLED", True)
+BITBUCKET_APP_DAILY_REFRESH_LOCAL_HOUR = _env_int(
+    "BITBUCKET_APP_DAILY_REFRESH_LOCAL_HOUR", 11, minimum=0
+)
+if BITBUCKET_APP_DAILY_REFRESH_LOCAL_HOUR > 23:
+    raise ImproperlyConfigured("BITBUCKET_APP_DAILY_REFRESH_LOCAL_HOUR must be between 0 and 23.")
+BITBUCKET_APP_DAILY_REFRESH_RETRY_SECONDS = _env_int(
+    "BITBUCKET_APP_DAILY_REFRESH_RETRY_SECONDS", 7_200, minimum=60
+)
+BITBUCKET_APP_DAILY_REFRESH_MAX_RETRIES = _env_int(
+    "BITBUCKET_APP_DAILY_REFRESH_MAX_RETRIES", 3, minimum=0
+)
+BITBUCKET_APP_PDF_PAGE_SIZE = min(
+    _env_int("BITBUCKET_APP_PDF_PAGE_SIZE", 500, minimum=10),
+    500,
+)
+BITBUCKET_APP_SEARCH_PAGE_SIZE = min(
+    _env_int("BITBUCKET_APP_SEARCH_PAGE_SIZE", 500, minimum=10),
+    500,
 )
 # Sixteen isolated parsers feed one JSONL stager and one dedicated SQLite
 # publisher. Local installs can tune the pool without changing source; retain a
@@ -677,6 +729,11 @@ BITBUCKET_SUPERVISOR_POLL_SECONDS = _env_int(
     5,
     minimum=1,
 )
+BITBUCKET_APP_SUPERVISOR_POLL_SECONDS = _env_int(
+    "BITBUCKET_APP_SUPERVISOR_POLL_SECONDS",
+    BITBUCKET_SUPERVISOR_POLL_SECONDS,
+    minimum=1,
+)
 OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK = _env_bool(
     "OWL_KEEP_DISPLAY_AWAKE_DURING_BACKGROUND_WORK",
     True,
@@ -783,6 +840,7 @@ INSTALLED_APPS = [
     "core.apps.CoreConfig",
     "bookmark_manager.apps.BookmarkManagerConfig",
     "bitbucket_search.apps.BitbucketSearchConfig",
+    "bitbucket.apps.BitbucketConfig",
     "semantic_search.apps.SemanticSearchConfig",
 ]
 
@@ -994,6 +1052,11 @@ LOGGING = {
             "propagate": False,
         },
         "bitbucket_search": {
+            "handlers": ["bitbucket_console", "bitbucket_file", "bitbucket_errors"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+        "owl.bitbucket_app": {
             "handlers": ["bitbucket_console", "bitbucket_file", "bitbucket_errors"],
             "level": "DEBUG",
             "propagate": False,

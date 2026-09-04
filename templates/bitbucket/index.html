@@ -1,0 +1,614 @@
+{% extends "owl/base.html" %}
+{% load static %}
+
+{% block body_class %}bitbucket-shell{% endblock %}
+{% block theme_default %}dark{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'bitbucket/bitbucket.css' %}?v=pdf-selection-actions-v1">
+<link rel="stylesheet" href="{% static 'bitbucket/pdf_pipeline_dashboard.css' %}?v=pipeline-dashboard-v1">
+{% endblock %}
+
+{% block app_header %}{% endblock %}
+
+{% block main_class %}bitbucket-main{% endblock %}
+
+{% block main_wrapper %}
+{% url 'bitbucket:repositories_refresh_all' as repositories_refresh_all_url %}
+{% with refresh_all_enabled_count=enabled_repository_count|default:0 refresh_all_active_count=active_work_repository_count|default:0 %}
+<div
+    class="bitbucket-workspace"
+    data-bitbucket-workspace
+    data-pipeline-dashboard
+    data-pipeline-metrics-url="{% url 'bitbucket:pipeline_metrics' %}"
+    data-pipeline-active-interval="5000"
+    data-pipeline-idle-interval="30000"
+    data-pipeline-state="loading"
+    data-repository-status-url="{% url 'bitbucket:repository_status' %}"
+    data-repository-connection-test-url="{% url 'bitbucket:repository_connection_test' %}"
+    data-extraction-active="{{ extraction_payload.active|yesno:'true,false' }}"
+    data-extraction-publication-signature="{{ extraction_payload.publicationSignature }}"
+    data-catalog-publication-signature="{{ catalog_publication_signature }}"
+    data-daily-refresh-enabled="{{ automation_payload.enabled|yesno:'true,false' }}"
+>
+    <div class="bb-blocking-operation" data-repository-operation-overlay hidden role="alert" aria-live="assertive" aria-busy="true" tabindex="-1">
+        <div class="bb-blocking-operation__card">
+            <span class="bb-blocking-operation__spinner" aria-hidden="true"></span>
+            <strong data-repository-operation-title>Updating repositories…</strong>
+            <span data-repository-operation-detail>Please keep OWL running. This can take a minute.</span>
+        </div>
+    </div>
+    <form id="bb-repository-selection-form" method="post" action="{% url 'bitbucket:repositories_selected' %}" data-repository-selection-form hidden>
+        {% csrf_token %}
+        <input type="hidden" name="excluded" value="yes" data-selected-excluded-value>
+    </form>
+    <form id="bb-people-star-form" method="post" action="{% url 'bitbucket:people_star_toggle' %}" data-people-star-form hidden>
+        {% csrf_token %}
+        <input type="hidden" name="return_to" value="{{ people_group_return_to }}">
+    </form>
+    <form id="bb-pdf-star-form" method="post" data-pdf-star-form hidden>
+        {% csrf_token %}
+        {% if search_return_to %}
+        <input type="hidden" name="return_to" value="{{ search_return_to }}">
+        {% else %}
+        <input type="hidden" name="return_page" value="{{ timeline_page_number }}">
+        {% endif %}
+    </form>
+    <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-people-star-status></span>
+    <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-pdf-star-status></span>
+    <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-repository-delete-status></span>
+    <dialog class="bb-open-all-dialog bb-connection-recovery-dialog" aria-labelledby="bb-connection-recovery-heading" data-connection-recovery-dialog>
+        <form method="post" action="" data-repository-refresh-form data-connection-recovery-form>
+            {% csrf_token %}
+            <h2 id="bb-connection-recovery-heading">Repository connection failed</h2>
+            <p><strong data-connection-recovery-repository>Repository</strong> could not be reached before Git clone or pull.</p>
+            <p data-connection-recovery-detail>Git could not verify HTTPS repository access.</p>
+            <p>Open your firewall authentication page and sign in. If required, also connect your VPN or update the saved HTTPS credential. When authentication is complete, choose Retry.</p>
+            <div>
+                <button type="button" data-connection-recovery-cancel>Cancel</button>
+                <button type="submit" data-connection-recovery-retry disabled>Retry</button>
+            </div>
+        </form>
+    </dialog>
+    {{ repository_copy_urls|json_script:"bb-repository-copy-urls" }}
+    <aside class="bb-repository-rail" aria-labelledby="bb-repositories-heading">
+        <a class="bb-brand" href="{% url 'core:dashboard' %}" aria-label="OWL Home">
+            <span class="bb-brand__mark" aria-hidden="true">
+                <img src="{% static 'owl/owl.png' %}" alt="" width="512" height="512" decoding="async">
+            </span>
+            <span class="bb-brand__copy">
+                <strong>OWL</strong>
+                <small>Bitbucket</small>
+            </span>
+        </a>
+
+        <section class="bb-repositories" aria-labelledby="bb-repositories-heading">
+            <div class="bb-section-heading">
+                <h2 id="bb-repositories-heading">Repositories</h2>
+                <span class="bb-repository-selection-count" data-repository-selection-count aria-live="polite">0 selected</span>
+            </div>
+            <div class="bb-repository-tools">
+                <details class="bb-add-repository-panel" id="bb-add-repository"{% if open_repository_form %} open{% endif %}>
+                    <summary class="bb-add-repository" aria-label="Add a new repository">
+                        <span aria-hidden="true">+</span>
+                        New
+                    </summary>
+                    <div class="bb-add-repository-panel__body">
+                        {% include "bitbucket/_repository_form.html" with form_id="bb-repository-url-desktop" %}
+                    </div>
+                </details>
+                {% include "bitbucket/_repository_selection_toolbar.html" %}
+            </div>
+
+            <label class="bb-repository-search">
+                <span class="visually-hidden">Search repositories</span>
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <circle cx="11" cy="11" r="6.5"/>
+                    <path d="m16 16 4 4"/>
+                </svg>
+                <input type="search" placeholder="Search repositories…"{% if not repositories %} disabled{% endif %} data-repository-filter>
+            </label>
+
+            {% include "bitbucket/_repository_list.html" %}
+            {% if not repositories %}
+            <div class="bb-repository-empty">
+                <span class="bb-repository-empty__icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                        <path d="M3.5 7.5h6l1.7 2h9.3v9.5h-17V7.5Z"/>
+                        <path d="M5 7.5V5h5l1.5 2.5"/>
+                    </svg>
+                </span>
+                <strong>No repositories connected</strong>
+                <p>Add an approved HTTPS Git URL. A worker will test access, then clone it without blocking this page.</p>
+                <a href="{% url 'bitbucket:repositories' %}#bb-add-repository">Add your first repository</a>
+            </div>
+            {% endif %}
+        </section>
+
+        <div class="bb-rail-footer">
+            <dl class="bb-statistics" aria-label="Bitbucket totals">
+                <div><dt>Total repositories</dt><dd data-total-repositories>{{ repository_count }}</dd></div>
+                <div><dt>PDF files</dt><dd data-total-pdfs>{{ pdf_count }}</dd></div>
+                <div><dt>VSDX files</dt><dd data-total-vsdx>{{ vsdx_count }}</dd></div>
+                <div><dt>Downloaded size</dt><dd data-total-bytes>{{ document_bytes_label }}</dd></div>
+            </dl>
+        </div>
+    </aside>
+
+    <header class="bb-topbar">
+            <a class="bb-app-title" href="{% url 'bitbucket:index' %}" aria-label="Bitbucket">
+                <span class="bb-app-title__icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                        <path d="M5 4.5h5.5v6H5zM13.5 4.5H19v6h-5.5zM5 13.5h5.5v6H5zM13.5 13.5H19v6h-5.5z"/>
+                    </svg>
+                </span>
+                <span>
+                    <h1>Bitbucket</h1>
+                    <p>Search and explore PDFs across approved repositories</p>
+                </span>
+            </a>
+
+            <div class="bb-topbar__actions">
+                <button class="bb-connection-test" type="button" aria-live="polite" data-repository-connection-result data-state="idle" aria-label="Test every saved repository URL with Git" title="Test every saved repository URL with Git">
+                    <img class="bb-connection-test__icon bb-connection-test__icon--checking" src="{% static 'bitbucket/icons/no-connection.gif' %}" alt="" aria-hidden="true">
+                    <img class="bb-connection-test__icon bb-connection-test__icon--connected" src="{% static 'bitbucket/icons/connection-connected.png' %}" alt="" aria-hidden="true">
+                    <img class="bb-connection-test__icon bb-connection-test__icon--disconnected" src="{% static 'bitbucket/icons/connection-disconnected.png' %}" alt="" aria-hidden="true">
+                    <span class="visually-hidden" data-repository-connection-message>Test every saved repository URL with Git.</span>
+                </button>
+                <form
+                    class="bb-refresh-all bb-refresh-all--desktop{% if refresh_all_active_count %} bb-refresh-all--unknown{% elif not refresh_all_enabled_count or not repositories_refresh_all_url %} bb-refresh-all--idle_unavailable bb-refresh-all--disabled{% else %} bb-refresh-all--idle_actionable{% endif %}"
+                    method="post"
+                    action="{{ repositories_refresh_all_url }}"
+                    data-repositories-refresh-all
+                    data-pipeline-activity-control
+                    data-pipeline-indicator-state="{% if not repository_count %}hidden{% elif refresh_all_active_count %}unknown{% elif not refresh_all_enabled_count or not repositories_refresh_all_url %}idle_unavailable{% else %}idle_actionable{% endif %}"
+                    data-repository-count="{{ repository_count|default:0 }}"
+                    data-enabled-repository-count="{{ refresh_all_enabled_count }}"
+                    data-active-repository-count="{{ refresh_all_active_count }}"
+                    data-work-label="{{ repository_work_summary.label }}"
+                    data-work-detail="{{ repository_work_summary.detail }}"
+                    aria-label="Repository refresh and background activity"
+                    aria-describedby="bb-refresh-all-description"
+                    {% if not repository_count %}hidden{% endif %}
+                >
+                    {% csrf_token %}
+                    <button
+                        class="bb-icon-button bb-refresh-all__button"
+                        type="submit"
+                        {% if refresh_all_active_count %}
+                        aria-label="Refresh all repositories unavailable until current activity is confirmed"
+                        title="Checking current background activity"
+                        disabled
+                        {% elif not refresh_all_enabled_count %}
+                        aria-label="Refresh all repositories unavailable: no repositories are included"
+                        title="Include at least one repository in refresh before refreshing all"
+                        disabled
+                        {% elif not repositories_refresh_all_url %}
+                        aria-label="Refresh all repositories unavailable"
+                        title="The workspace refresh endpoint is unavailable"
+                        disabled
+                        {% else %}
+                        aria-label="Refresh all repositories"
+                        title="Refresh all repositories"
+                        {% endif %}
+                        data-refresh-all-button
+                    >
+                        <svg class="bb-refresh-all__reload-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-icon{% if refresh_all_active_count or not refresh_all_enabled_count or not repositories_refresh_all_url %} hidden{% endif %}><path d="M19 8a7.5 7.5 0 1 0 1 7"/><path d="M19 3v5h-5"/></svg>
+                        <svg class="bb-refresh-all__waiting-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-waiting hidden><circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/></svg>
+                        <img class="bb-refresh-all__visual bb-refresh-all__visual--running" alt="" aria-hidden="true" data-refresh-all-running-visual data-active-src="{% static 'bitbucket/icons/work-in-progress.gif' %}" hidden>
+                        <svg class="bb-refresh-all__running-static" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-running-static hidden><path d="M4 12a8 8 0 0 1 14-5"/><path d="M18 3v4h-4M20 12a8 8 0 0 1-14 5"/><path d="M6 21v-4h4"/></svg>
+                        <svg class="bb-refresh-all__attention-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-attention{% if not refresh_all_active_count and refresh_all_enabled_count and repositories_refresh_all_url %} hidden{% endif %}><circle cx="12" cy="12" r="8"/><path d="M12 8v5M12 16.5v.5"/></svg>
+                        <svg class="bb-refresh-all__complete-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-refresh-all-complete hidden><path d="m6 12 4 4 8-9"/></svg>
+                        <span class="bb-refresh-all__spinner" aria-hidden="true" data-refresh-all-spinner hidden></span>
+                    </button>
+                    <span class="bb-refresh-all__meta" id="bb-refresh-all-description" role="status" aria-live="polite" aria-atomic="true">
+                        <strong data-refresh-all-label>
+                            {% if refresh_all_active_count %}Checking current activity{% elif not refresh_all_enabled_count or not repositories_refresh_all_url %}Refresh all unavailable{% else %}Refresh all repositories{% endif %}
+                        </strong>
+                        <small data-refresh-all-detail>
+                            {% if refresh_all_active_count %}
+                            Waiting for a fresh pipeline snapshot
+                            {% elif not refresh_all_enabled_count %}
+                            No repositories included in refresh
+                            {% elif not repositories_refresh_all_url %}
+                            Workspace refresh endpoint unavailable
+                            {% else %}
+                            Queue {{ refresh_all_enabled_count }} included repositor{{ refresh_all_enabled_count|pluralize:'y,ies' }} in the background
+                            {% endif %}
+                        </small>
+                    </span>
+                </form>
+                <dl class="bb-pipeline-topbar-status" aria-label="Current PDF pipeline" role="status" aria-live="polite" aria-atomic="true">
+                    <div><dt>Total ETA</dt><dd data-pipeline-total-eta>Waiting for a current run</dd></div>
+                    <div><dt>Extracted</dt><dd data-pipeline-extracted-rate>Warming</dd><small data-pipeline-rate-window>60-second window</small></div>
+                    <div><dt>Written</dt><dd data-pipeline-written-rate>Warming</dd><small data-pipeline-written-window>60-second window</small></div>
+                    <div><dt>Status</dt><dd data-pipeline-activity>Loading pipeline status</dd><small data-pipeline-activity-secondary>No confirmed activity yet</small></div>
+                </dl>
+                <span class="visually-hidden" data-pipeline-live aria-live="polite" aria-atomic="true"></span>
+                {% include "owl/_notification_center.html" %}
+                <details class="bb-app-switcher">
+                    <summary class="bb-icon-button" aria-label="Applications">
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><rect x="14" y="14" width="6" height="6"/></svg>
+                    </summary>
+                    <nav class="primary-nav" aria-label="Applications">
+                        <a class="nav-link" href="{% url 'core:dashboard' %}">Home</a>
+                        <a class="nav-link" href="{% url 'bookmark_manager:index' %}">Bookmark Manager</a>
+                        <a class="nav-link" href="{% url 'bitbucket_search:index' %}">Bitbucket Search</a>
+                        <a class="nav-link is-active" href="{% url 'bitbucket:index' %}" aria-current="true">Bitbucket</a>
+                    </nav>
+                </details>
+                <a class="bb-icon-button" href="{% url 'core:system_status' %}" aria-label="System status">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M9.7 9a2.5 2.5 0 1 1 3.2 2.4c-.8.3-.9.8-.9 1.6M12 17.3v.2"/></svg>
+                </a>
+                <button class="bb-icon-button" type="button" data-theme-toggle aria-label="Switch to light mode" aria-pressed="true">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M19 5.6 17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
+                    <span class="visually-hidden" data-theme-toggle-label>Light mode</span>
+                </button>
+                <span class="bb-local-avatar" aria-label="Local workspace">L</span>
+            </div>
+    </header>
+
+    <section class="bb-stage" aria-label="Bitbucket workspace">
+
+        <details class="bb-mobile-repositories"{% if active_section == "repositories" %} open{% endif %}>
+            <summary>
+                <span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 7.5h6l1.7 2h9.3v9.5h-17V7.5Z"/></svg>
+                    Repositories
+                </span>
+                <span class="bb-mobile-repositories__meta">
+                    <small data-mobile-repository-count>{{ repository_count }} connected{% if active_work_repository_count %} · {{ active_work_repository_count }} working{% elif automation_payload.state == "retry_wait" %} · retry scheduled{% elif automation_payload.state == "exhausted" %} · retries exhausted{% endif %}</small>
+                    <span class="bb-mobile-repositories__indicator" aria-hidden="true"></span>
+                </span>
+            </summary>
+            <div class="bb-mobile-repositories__body">
+                <div class="bb-repository-tools bb-repository-tools--mobile">
+                    <details class="bb-add-repository-panel"{% if open_repository_form or not repositories %} open{% endif %}>
+                        <summary class="bb-add-repository" aria-label="Add a new repository"><span aria-hidden="true">+</span> New</summary>
+                        <div class="bb-add-repository-panel__body">
+                            {% include "bitbucket/_repository_form.html" with form_id="bb-repository-url-mobile" %}
+                        </div>
+                    </details>
+                    {% include "bitbucket/_repository_selection_toolbar.html" %}
+                </div>
+                <span class="bb-repository-selection-count" data-repository-selection-count aria-live="polite">0 selected</span>
+                {% include "bitbucket/_repository_list.html" %}
+                {% if not repositories %}<p>No repositories are connected yet.</p>{% endif %}
+                <nav aria-label="Bitbucket mobile functions">
+                    <a href="{% url 'bitbucket:repositories' %}"{% if active_section == "repositories" %} aria-current="page"{% endif %}>Repositories</a>
+                    <a href="{% url 'bitbucket:index_status' %}">Repository logs</a>
+                </nav>
+            </div>
+        </details>
+
+        <details class="bb-mobile-people"{% if selected_people_count or selected_group_count or open_people_group_form or people_group_error %} open{% endif %}>
+            <summary>
+                <span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="9" cy="8" r="3"/><circle cx="16.5" cy="9.5" r="2.5"/><path d="M3.5 19c.5-4 2.3-6 5.5-6s5 2 5.5 6M14 14c3.4-.3 5.4 1.4 6 5"/></svg>
+                    People
+                </span>
+                <span class="bb-mobile-people__meta">
+                    <small data-people-mobile-summary data-people-total="{{ git_people_total }}">{{ git_people_total }} available{% with selected_total=selected_people_count|add:selected_group_count %}{% if selected_total %} · {{ selected_total }} selected{% endif %}{% endwith %}</small>
+                    <span class="bb-mobile-people__indicator" aria-hidden="true"></span>
+                </span>
+            </summary>
+            <div class="bb-mobile-people__body">
+                {% include "bitbucket/_people_panel.html" with people_panel_id="bb-people-mobile" people_panel_compact=True %}
+            </div>
+        </details>
+
+        {% if messages %}
+        <div class="bb-workspace-feedback" role="status" aria-live="polite" aria-atomic="true">
+            {% for message in messages %}<p class="bb-workspace-feedback--{{ message.tags|default:'info' }}">{{ message }}</p>{% endfor %}
+        </div>
+        {% endif %}
+
+        <div id="main-content" class="bb-content" tabindex="-1">
+            <form class="bb-search-form" method="get" action="{% url 'bitbucket:index' %}" data-pdf-search-form>
+                {% for name, value in people_search_hidden_fields %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+                <section class="bb-search-controls" aria-label="PDF search controls">
+                    <div class="bb-main-search">
+                        <label class="visually-hidden" for="bb-pdf-search-input">Add an exact phrase to PDF search</label>
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4.5 4.5"/></svg>
+                        <span class="bb-search-chip-list" data-pdf-search-chips>
+                            {% for chip in search_query.chips %}
+                            <span class="bb-search-chip" data-pdf-search-chip>
+                                <span>{{ chip.display }}</span>
+                                <input type="hidden" name="chip" value="{{ chip.display }}">
+                                <button type="button" aria-label="Remove phrase {{ chip.display }}" data-remove-pdf-search-chip>×</button>
+                            </span>
+                            {% endfor %}
+                        </span>
+                        <input
+                            type="search"
+                            id="bb-pdf-search-input"
+                            name="q"
+                            value="{{ search_input_value }}"
+                            placeholder="Search extracted text, filenames or repo paths…"
+                            maxlength="4096"
+                            aria-describedby="bb-search-note"
+                            autocomplete="off"
+                            data-pdf-search-input
+                        >
+                    </div>
+                    <div class="bb-search-control-stack">
+                        <details class="bb-search-filter-menu">
+                            <summary class="bb-control-button">
+                                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16l-6 7v5l-4 2v-7L4 6Z"/><path d="M15.5 5v4M13.5 7h4"/></svg>
+                                Filters
+                            </summary>
+                            <div class="bb-search-filter-panel">
+                                <fieldset>
+                                    <legend>Phrase matching</legend>
+                                    {% for option in search_match_options %}
+                                    <label><input type="radio" name="match_mode" value="{{ option.value }}"{% if option.selected %} checked{% endif %}> {{ option.label }}</label>
+                                    {% endfor %}
+                                </fieldset>
+                                <fieldset>
+                                    <legend>Search in</legend>
+                                    <input type="hidden" name="scope_present" value="1">
+                                    {% for option in search_scope_options %}
+                                    <label><input type="checkbox" name="scope" value="{{ option.value }}"{% if option.selected %} checked{% endif %}> {{ option.label }}</label>
+                                    {% endfor %}
+                                </fieldset>
+                                <fieldset>
+                                    <legend>Repositories</legend>
+                                    {% for option in search_repository_options %}
+                                    <label><input type="checkbox" name="repository" value="{{ option.id }}"{% if option.selected %} checked{% endif %}> {{ option.label }}</label>
+                                    {% empty %}
+                                    <p>No repositories are connected.</p>
+                                    {% endfor %}
+                                </fieldset>
+                                <fieldset>
+                                    <legend>Index health</legend>
+                                    {% for option in search_index_state_options %}
+                                    <label><input type="checkbox" name="index_state" value="{{ option.value }}"{% if option.selected %} checked{% endif %}> {{ option.label }}</label>
+                                    {% endfor %}
+                                </fieldset>
+                                <label class="bb-search-sort">Sort by
+                                    <select name="sort">
+                                        {% for option in search_sort_options %}
+                                        <option value="{{ option.value }}"{% if option.selected %} selected{% endif %}>{{ option.label }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </label>
+                                <input type="hidden" name="page_size" value="{{ search_query.page_size }}">
+                                <button class="bb-control-button" type="submit">Apply filters</button>
+                            </div>
+                        </details>
+                        {% if search_active or search_error %}<a class="bb-clear-search" href="{% url 'bitbucket:index' %}">Clear search</a>{% endif %}
+                    </div>
+                </section>
+                {% if search_error %}
+                <p class="bb-search-note bb-search-note--error" id="bb-search-note" role="alert">{{ search_error }}</p>
+                {% elif search_active and search_query.has_query and not search_index_available %}
+                <p class="bb-search-note bb-search-note--error" id="bb-search-note">The local full-text index is unavailable. Your repository inventory is safe; retry after PDF indexing is repaired.</p>
+                {% elif search_active and search_query.has_query %}
+                <p class="bb-search-note" id="bb-search-note">Each chip is an exact phrase. Search uses saved extracted text, filenames and repo paths, subject to your Search in filters.</p>
+                {% elif search_active %}
+                <p class="bb-search-note" id="bb-search-note">Browsing PDFs with the selected repository, People, index-health, or sort controls. Add phrase chips to search within this result set.</p>
+                {% else %}
+                <p class="bb-search-note" id="bb-search-note">Search extracted PDF text, filenames and paths within the repo. Press Enter to add an exact-phrase chip.</p>
+                {% endif %}
+            </form>
+
+            <section class="bb-results" aria-labelledby="bb-results-heading">
+                <div class="bb-results-toolbar">
+                    <p id="bb-results-heading" aria-live="polite">
+                        {% if search_active %}
+                            {% if search_page.total %}
+                            Showing <strong>{{ search_page.start_index }}–{{ search_page.end_index }} of {{ search_page.total }} matching PDFs</strong>
+                            {% if search_page.semantic_fallback_used %}<span>Related extracted-text matches because no exact phrase matched</span>{% endif %}
+                            {% else %}
+                            Showing <strong>0 matching PDFs</strong>
+                            {% endif %}
+                            <span class="bb-search-elapsed">({{ search_page.elapsed_seconds|floatformat:2 }} seconds)</span>
+                        {% elif pdf_document_count %}
+                        Showing <strong><b data-pdf-visible-start>{{ pdf_page.start_index }}</b>–<b data-pdf-visible-end>{{ pdf_page.end_index }}</b> of {{ pdf_document_count }} PDFs</strong>
+                        {% else %}
+                        Showing <strong>{{ pdf_document_count|default:0 }} PDF{{ pdf_document_count|default:0|pluralize }}</strong>
+                        {% endif %}
+                        <span data-extraction-summary>{{ extraction_status.indexed_documents }} indexed · {{ extraction_status.pending_documents }} pending</span>
+                        <a class="bb-results-pipeline-link" href="{% url 'bitbucket:index_status' %}">Pipeline: <span data-pipeline-activity>Loading status</span></a>
+                    </p>
+                    <span class="bb-pdf-selection-count" data-pdf-selection-count hidden>0 PDFs selected</span>
+                    <div class="bb-result-actions" aria-label="Result actions">
+                        <button type="button" data-tooltip="Copy selected paths" aria-label="Copy paths unavailable until PDFs are selected" data-copy-selected-pdf-paths disabled>
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="7" y="7" width="11" height="12" rx="1.5"/><path d="M15 7V5H5v11h2"/></svg>
+                            <span data-copy-selected-pdf-label>Copy selected paths (0)</span>
+                        </button>
+                        <form id="bb-open-selected-pdfs-form" method="post" action="{% url 'bitbucket:documents_open_all' %}" data-open-selected-pdfs-form data-confirm-threshold="{{ open_all_confirm_threshold }}">
+                            {% csrf_token %}
+                            <input type="hidden" name="return_to" value="{{ document_action_return_to }}">
+                            <input type="hidden" name="confirmed" value="0" data-open-selected-confirmed>
+                            <button type="submit" data-tooltip="Open selected PDFs" aria-label="Open unavailable until PDFs are selected" data-open-selected-pdfs-submit disabled>
+                                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 3.5h8l4 4v13H6v-17Z"/><path d="M14 3.5v4h4M9 12h6M12 9v6"/><path d="m18 13 3 2-3 2"/></svg>
+                                <span data-open-selected-pdf-label>Open selected (0)</span>
+                            </button>
+                        </form>
+                        <dialog class="bb-open-all-dialog" aria-labelledby="bb-open-selected-heading" data-open-selected-confirmation>
+                            <form method="dialog">
+                                <h2 id="bb-open-selected-heading" data-open-selected-confirmation-heading>Open selected PDFs?</h2>
+                                <p>This will ask your default PDF reader to open every selected PDF.</p>
+                                <div>
+                                    <button type="submit" value="cancel">Cancel</button>
+                                    <button type="button" data-confirm-open-selected-pdfs>Open selected PDFs</button>
+                                </div>
+                            </form>
+                        </dialog>
+                        <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-selected-pdf-bulk-status></span>
+                        <button type="button" data-tooltip="Export list" aria-label="Export list unavailable" disabled>
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v12M8 11l4 4 4-4M5 18.5h14"/></svg>
+                            Export list
+                        </button>
+                        <span class="bb-view-switch" aria-label="Result view">
+                            <button type="button" data-tooltip="List view" disabled aria-label="List view">
+                                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9 6h11M9 12h11M9 18h11M4 6h1M4 12h1M4 18h1"/></svg>
+                            </button>
+                            <button type="button" data-tooltip="Grid view" disabled aria-label="Grid view">
+                                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="4" width="6" height="6"/><rect x="14" y="4" width="6" height="6"/><rect x="4" y="14" width="6" height="6"/><rect x="14" y="14" width="6" height="6"/></svg>
+                            </button>
+                        </span>
+                    </div>
+                </div>
+
+                <div class="bb-results-table-wrap"{% if not search_active %} data-pdf-timeline data-next-page-url="{{ next_pdf_page_url|default:'' }}"{% endif %}>
+                    <table class="bb-results-table">
+                        <caption class="visually-hidden">{% if search_active %}Bitbucket PDF phrase-search results{% else %}Downloaded Bitbucket PDFs grouped by date added to repo{% endif %}</caption>
+                        <colgroup>
+                            <col class="bb-column-select">
+                            <col class="bb-column-name">
+                            <col class="bb-column-path">
+                            <col class="bb-column-project">
+                            <col class="bb-column-repository">
+                            <col class="bb-column-added">
+                            <col class="bb-column-author">
+                            <col class="bb-column-commit">
+                            <col class="bb-column-status">
+                            <col class="bb-column-opens">
+                            <col class="bb-column-actions">
+                        </colgroup>
+                        <thead>
+                            <tr>
+                                <th scope="col" id="bb-pdf-column-select"><input type="checkbox" data-select-all-pdfs aria-label="Select all PDFs on this page"></th>
+                                <th scope="col" id="bb-pdf-column-name">PDF name</th>
+                                <th scope="col" id="bb-pdf-column-path">Path</th>
+                                <th scope="col" id="bb-pdf-column-project">Project</th>
+                                <th scope="col" id="bb-pdf-column-repository">Repository</th>
+                                <th scope="col" id="bb-pdf-column-added">Date added to repo</th>
+                                <th scope="col" id="bb-pdf-column-author">Added by</th>
+                                <th scope="col" id="bb-pdf-column-commit">Commit ID</th>
+                                <th scope="col" id="bb-pdf-column-status">Status</th>
+                                <th scope="col" id="bb-pdf-column-opens">Opens</th>
+                                <th scope="col" id="bb-pdf-column-actions">Actions</th>
+                            </tr>
+                        </thead>
+                        {% if pdf_timeline_groups %}
+                            {% include "bitbucket/_pdf_timeline.html" %}
+                        {% else %}
+                        <tbody>
+                            <tr class="bb-period-row">
+                                <th colspan="11" scope="rowgroup">
+                                    <span class="bb-period-heading__dot" aria-hidden="true"></span>
+                                    <span class="bb-period-heading">
+                                        <strong id="bb-empty-period-heading">{% if search_active %}Search results{% else %}PDF inventory{% endif %}</strong>
+                                        <span>{% if search_active %}No matching document{% else %}Waiting for repository content{% endif %}</span>
+                                    </span>
+                                </th>
+                            </tr>
+                            <tr class="bb-empty-row">
+                                <td colspan="11">
+                                    <div class="bb-empty-state" aria-labelledby="bb-empty-period-heading">
+                                        <div class="bb-empty-state__lead">
+                                            <span class="bb-empty-state__icon" aria-hidden="true">
+                                                <svg viewBox="0 0 24 24" focusable="false"><path d="M6 2.5h8l4 4v15H6v-19Z"/><path d="M14 2.5v5h4M9 12h6M9 16h4"/></svg>
+                                            </span>
+                                            <div>
+                                                {% if search_active %}
+                                                    {% if search_query.has_query and not search_index_available %}
+                                                    <span class="bb-planned-label">Search index unavailable</span>
+                                                    <h2>PDF search cannot run yet</h2>
+                                                    <p>The repository inventory remains available. Check the repository logs, then retry this bookmarked query.</p>
+                                                    {% elif extraction_payload.active or extraction_status.pending_documents %}
+                                                    <span class="bb-planned-label">Indexing is still publishing text</span>
+                                                    <h2>No published PDF matches yet</h2>
+                                                    <p>Some PDFs are still pending. This exact query may find more results after the background index worker finishes.</p>
+                                                    {% else %}
+                                                    <span class="bb-planned-label">Search completed</span>
+                                                    <h2>No PDFs match these search controls</h2>
+                                                    <p>{% if search_query.has_query %}Try removing a chip, switching from every phrase to any phrase, or selecting more People, search fields, and repositories.{% else %}Try selecting more People, repositories, or index states, or clear search to return to the chronological inventory.{% endif %}</p>
+                                                    {% endif %}
+                                                {% else %}
+                                                <span class="bb-planned-label">Search is ready for available PDFs</span>
+                                                <h2>No PDFs are in the local inventory yet</h2>
+                                                    {% if repositories and extraction_payload.active %}
+                                                    <p>The background workers are downloading repository content and indexing discovered PDFs. This page will update as text is published.</p>
+                                                    {% elif repositories %}
+                                                    <p>No active PDF has been discovered in the connected repositories yet. Refresh a repository or review the repository logs for errors.</p>
+                                                    {% else %}
+                                                    <p>Add an approved repository. Clone, refresh, PDF extraction, and indexing all happen outside this web request.</p>
+                                                    {% endif %}
+                                                {% endif %}
+                                            </div>
+                                        </div>
+
+                                        <div class="bb-empty-state__actions">
+                                            {% if search_active %}
+                                            <a class="bb-primary-link" href="{% url 'bitbucket:index' %}">Clear search</a>
+                                            {% else %}
+                                            <a class="bb-primary-link" href="{% url 'bitbucket:repositories' %}#bb-add-repository">Add Repository</a>
+                                            {% endif %}
+                                            <a href="{% url 'bitbucket:index_status' %}">View repository logs <span aria-hidden="true">→</span></a>
+                                        </div>
+
+                                        <div class="bb-planned-context">
+                                            <article aria-labelledby="search-behaviour-heading">
+                                                <span class="bb-context-icon" aria-hidden="true">
+                                                    <svg viewBox="0 0 24 24" focusable="false"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 4.5 4.5"/></svg>
+                                                </span>
+                                                <div>
+                                                    <h3 id="search-behaviour-heading">Exact phrase search</h3>
+                                                    <p>Each Enter-created chip stays one phrase. Use every phrase for precise matching or any phrase for broader results.</p>
+                                                </div>
+                                            </article>
+                                            <article aria-labelledby="index-health-heading">
+                                                <span class="bb-context-icon" aria-hidden="true">
+                                                    <svg viewBox="0 0 24 24" focusable="false"><path d="M6 2.5h8l4 4v15H6v-19Z"/><path d="M14 2.5v5h4M9 12h6M9 16h4"/></svg>
+                                                </span>
+                                                <div>
+                                                    <h3 id="index-health-heading">Index health</h3>
+                                                    <p>{{ extraction_status.indexed_documents }} published · {{ extraction_status.pending_documents }} pending · {{ extraction_status.stale_documents }} stale searchable.</p>
+                                                </div>
+                                            </article>
+                                        </div>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                        {% endif %}
+                    </table>
+
+                </div>
+
+                {% if search_active and search_page.page_count %}
+                <footer class="bb-pagination" aria-label="Search result pages">
+                    <p>Page <strong>{{ search_page.page }}</strong> of {{ search_page.page_count }} · up to {{ search_page.page_size }} results per page</p>
+                    <nav aria-label="Previous and next search result pages">
+                        {% if previous_search_page_url %}<a href="{{ previous_search_page_url }}" rel="prev">← Previous results</a>{% else %}<span aria-disabled="true">← Previous results</span>{% endif %}
+                        {% if next_search_page_url %}<a href="{{ next_search_page_url }}" rel="next">Next results →</a>{% else %}<span aria-disabled="true">Last result page</span>{% endif %}
+                    </nav>
+                </footer>
+                {% elif pdf_timeline_groups and not search_active %}
+                <footer class="bb-pagination" aria-label="PDF result pages">
+                    <p>Page <strong data-pdf-current-page>{{ pdf_page.number }}</strong> of {{ pdf_page.paginator.num_pages }} · {{ pdf_page.paginator.per_page }} PDFs per page</p>
+                    <nav aria-label="Newer and older PDF pages">
+                        {% if previous_pdf_page_url %}
+                        <a href="{{ previous_pdf_page_url }}" rel="prev">← Newer PDFs</a>
+                        {% else %}
+                        <span aria-disabled="true">← Newer PDFs</span>
+                        {% endif %}
+                        <a href="{{ next_pdf_page_url }}" rel="next" data-pdf-next-page{% if not next_pdf_page_url %} hidden{% endif %}>Older PDFs →</a>
+                        <span data-pdf-next-page-end{% if next_pdf_page_url %} hidden{% endif %}>Oldest page reached</span>
+                    </nav>
+                </footer>
+                {% endif %}
+            </section>
+        </div>
+    </section>
+
+    <aside class="bb-people-rail" aria-labelledby="bb-people-desktop-heading">
+        {% include "bitbucket/_people_panel.html" with people_panel_id="bb-people-desktop" %}
+    </aside>
+</div>
+{% endwith %}
+{% endblock %}
+
+{% block global_status %}{% endblock %}
+
+{% block scripts %}
+<script src="{% static 'bitbucket/pdf_pipeline_dashboard.js' %}?v=pipeline-dashboard-v1" defer></script>
+<script src="{% static 'bitbucket/bitbucket.js' %}?v=pdf-selection-actions-v1" defer></script>
+<script src="{% static 'bitbucket/people_sort.js' %}?v=people-sort-v1" defer></script>
+<script src="{% static 'bitbucket/people_stars.js' %}?v=people-stars-v1" defer></script>
+<script src="{% static 'bitbucket/pdf_stars.js' %}?v=pdf-stars-v1" defer></script>
+{% endblock %}

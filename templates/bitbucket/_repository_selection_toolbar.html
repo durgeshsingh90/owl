@@ -1,0 +1,26 @@
+{% load static %}
+<div class="bb-repository-selection-toolbar" role="group" aria-label="Selected repository actions">
+    <button class="bb-repository-tool" type="button" data-selected-select-all aria-label="Select all repositories" title="Select all repositories" hidden disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="7" y="7" width="12" height="12" rx="2"/><path d="m10 13 2 2 4-5"/><path d="M16 4H5a1 1 0 0 0-1 1v11"/></svg>
+    </button>
+    <button class="bb-repository-tool" type="button" data-copy-repository-urls aria-label="Copy all repository URLs" title="Copy all repository URLs" {% if not repository_copy_urls %}disabled{% endif %}>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="8" y="7" width="11" height="13" rx="1.5"/><path d="M16 7V4H5v12h3"/></svg>
+        <span class="visually-hidden" data-copy-repository-urls-status></span>
+    </button>
+    <button class="bb-repository-tool" type="submit" name="operation" value="refresh" form="bb-repository-selection-form" title="Refresh selected repositories" aria-label="Refresh selected repositories" data-selected-refresh disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" data-selected-refresh-icon><path d="M19 8a7.5 7.5 0 1 0 1 7"/><path d="M19 3v5h-5"/></svg>
+        <span class="bb-refresh-all__spinner" aria-hidden="true" data-selected-refresh-spinner hidden></span>
+    </button>
+    <button class="bb-repository-tool" type="submit" name="operation" value="exclude" form="bb-repository-selection-form" title="Exclude selected repositories from refresh" aria-label="Exclude selected repositories from refresh" data-selected-exclude disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><path d="M9.5 8.5v7M14.5 8.5v7"/></svg>
+    </button>
+    <button class="bb-repository-tool bb-repository-tool--stop" type="submit" name="operation" value="stop_indexing" form="bb-repository-selection-form" title="Select a repository with active Git or PDF work to stop" aria-label="Select a repository with active Git or PDF work to stop" data-selected-stop-indexing disabled>
+        <img class="bb-repository-action-image" src="{% static 'bitbucket/icons/stop.png' %}" alt="" aria-hidden="true">
+    </button>
+    <button class="bb-repository-tool bb-repository-tool--danger" type="submit" name="operation" value="remove" form="bb-repository-selection-form" title="Select repositories to delete" aria-label="Select repositories to delete" data-delete-locked="true" data-selected-remove disabled>
+        <span class="bb-repository-delete-icon" aria-hidden="true" data-selected-delete-icon>
+            <span data-selected-delete-lock>🔒</span>
+            <img class="bb-repository-action-image" src="{% static 'bitbucket/icons/delete.png' %}" alt="" data-selected-delete-image hidden>
+        </span>
+    </button>
+</div>

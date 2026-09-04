@@ -20,4 +20,11 @@ urlpatterns = [
             namespace="bitbucket_search",
         ),
     ),
+    path(
+        "bitbucket/",
+        include(
+            ("bitbucket.urls", "bitbucket"),
+            namespace="bitbucket",
+        ),
+    ),
 ]

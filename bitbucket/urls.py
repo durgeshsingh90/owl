@@ -1,0 +1,111 @@
+"""Routes for PDF discovery and repository status."""
+
+from django.urls import path
+
+from bitbucket import views
+
+app_name = "bitbucket"
+
+urlpatterns = [
+    path("", views.index, name="index"),
+    path("people/groups/add/", views.add_people_group, name="people_group_create"),
+    path("people/star/", views.toggle_people_star, name="people_star_toggle"),
+    path("documents/page/", views.document_page, name="document_page"),
+    path(
+        "documents/<int:document_id>/star/",
+        views.set_document_star_view,
+        name="document_star",
+    ),
+    path(
+        "documents/<int:document_id>/preview/",
+        views.preview_document,
+        name="document_preview",
+    ),
+    path(
+        "documents/<int:document_id>/open/",
+        views.open_document,
+        name="document_open",
+    ),
+    path(
+        "documents/open/",
+        views.open_documents,
+        name="documents_open_all",
+    ),
+    path(
+        "documents/<int:document_id>/reveal/",
+        views.reveal_document,
+        name="document_reveal",
+    ),
+    path(
+        "documents/<int:document_id>/exclude/",
+        views.exclude_document,
+        name="document_exclude",
+    ),
+    path(
+        "documents/<int:document_id>/include/",
+        views.resume_document,
+        name="document_resume",
+    ),
+    path(
+        "documents/<int:document_id>/delete/",
+        views.delete_document,
+        name="document_delete",
+    ),
+    path("repositories/", views.repositories, name="repositories"),
+    path("repositories/add/", views.add_repository, name="repository_add"),
+    path("repositories/selected/", views.selected_repositories, name="repositories_selected"),
+    path(
+        "repositories/<int:repository_id>/exclude/",
+        views.exclude_repository,
+        name="repository_exclude",
+    ),
+    path(
+        "repositories/<int:repository_id>/remove/",
+        views.remove_repository_view,
+        name="repository_remove",
+    ),
+    path(
+        "repositories/refresh/",
+        views.refresh_all_repositories,
+        name="repositories_refresh_all",
+    ),
+    path(
+        "repositories/<int:repository_id>/refresh/",
+        views.refresh_repository,
+        name="repository_refresh",
+    ),
+    path(
+        "repositories/schedule/tick/",
+        views.tick_repository_schedule,
+        name="repository_schedule_tick",
+    ),
+    path("repositories/status/", views.repository_status, name="repository_status"),
+    path("pipeline/metrics/", views.pipeline_metrics, name="pipeline_metrics"),
+    path(
+        "pipeline/recovery/popup/claim/",
+        views.claim_pdf_pipeline_recovery_popup,
+        name="pdf_pipeline_recovery_popup_claim",
+    ),
+    path(
+        "pipeline/recovery/popup/acknowledge/",
+        views.acknowledge_pdf_pipeline_recovery_popup,
+        name="pdf_pipeline_recovery_popup_acknowledge",
+    ),
+    path(
+        "pipeline/recovery/resume/",
+        views.resume_pdf_pipeline_recovery,
+        name="pdf_pipeline_recovery_resume",
+    ),
+    path(
+        "repositories/connection/test/",
+        views.repository_connection_test,
+        name="repository_connection_test",
+    ),
+    path("repositories/<int:repository_id>/logs/", views.repository_logs, name="repository_logs"),
+    path(
+        "repositories/<int:repository_id>/indexing/cancel/",
+        views.cancel_repository_indexing,
+        name="repository_index_cancel",
+    ),
+    path("status/", views.index_status, name="index_status"),
+]

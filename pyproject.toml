@@ -33,7 +33,7 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["owl*", "core*", "bookmark_manager*", "bitbucket_search*", "semantic_search*"]
+include = ["owl*", "core*", "bookmark_manager*", "bitbucket_search*", "bitbucket*", "semantic_search*"]
 
 [tool.uv]
 required-version = "==0.12.5"
@@ -47,7 +47,7 @@ addopts = """
 -m "not live_external"
 """
 python_files = ["tests.py", "test_*.py", "*_tests.py"]
-testpaths = ["tests", "bookmark_manager", "bitbucket_search"]
+testpaths = ["tests", "bookmark_manager", "bitbucket_search", "bitbucket"]
 markers = [
     "browser: visible browser and accessibility journeys",
     "live_external: opt-in checks that use a real external system (excluded by default)",
@@ -82,7 +82,7 @@ line-ending = "lf"
 
 [tool.coverage.run]
 branch = true
-source = ["owl", "core", "bookmark_manager", "bitbucket_search", "semantic_search"]
+source = ["owl", "core", "bookmark_manager", "bitbucket_search", "bitbucket", "semantic_search"]
 omit = [
     "*/migrations/*",
     "*/tests/*",

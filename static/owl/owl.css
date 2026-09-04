@@ -2262,6 +2262,7 @@ svg {
 
 .knowledge-app-card--bookmarks { --app-accent: #e2aa55; }
 .knowledge-app-card--bitbucket { --app-accent: #75abed; }
+.knowledge-app-card--bitbucket-app { --app-accent: #f2b84b; }
 
 .knowledge-app-card__top {
     position: relative;

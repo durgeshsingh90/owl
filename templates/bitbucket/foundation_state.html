@@ -1,0 +1,12 @@
+{% extends "owl/base.html" %}
+
+{% block app_sidebar %}
+    {% include "bitbucket/_app_sidebar.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="page-stack page-stack--centered">
+    {% include "owl/foundation_panel.html" %}
+    <p class="quiet-action"><a href="{% url 'bitbucket:index' %}">Return to Bitbucket</a></p>
+</div>
+{% endblock %}

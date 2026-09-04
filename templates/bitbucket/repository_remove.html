@@ -1,0 +1,42 @@
+{% extends "owl/base.html" %}
+{% load static %}
+
+{% block theme_default %}dark{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'bitbucket/bitbucket.css' %}?v=repository-lifecycle-v1">
+{% endblock %}
+
+{% block main_class %}app-main{% endblock %}
+
+{% block main_wrapper %}
+<div id="main-content" class="app-content" tabindex="-1">
+<section class="surface-panel bb-delete-confirmation" aria-labelledby="bb-remove-repository-heading">
+    <h1 id="bb-remove-repository-heading">{% if removal_incomplete %}Finish removing this repository?{% else %}Remove this repository from OWL?{% endif %}</h1>
+    <p><strong>{{ repository_name }}</strong></p>
+    {% if repository_path %}<p class="bb-delete-confirmation__path"><code>{{ repository_path }}</code></p>{% endif %}
+    {% if removal_incomplete %}
+        {% if removal_database_deleted %}<p>Database removal completed, but some local files could not be deleted. Retry to finish the local cleanup.</p>
+        {% else %}<p>A previous removal was interrupted. Some local files may already be staged for deletion; retry to finish removing this repository and its database records.</p>{% endif %}
+    {% endif %}
+    <p>This will permanently delete from this computer:</p>
+    <ul>
+        <li>This repository's downloaded checkout, including local changes and saved PDF copies.</li>
+        <li>Its PDFs, indexed text not shared with other repositories, commit history records, and background jobs in OWL's database.</li>
+    </ul>
+    <p>The remote repository is not changed. Other repositories and shared indexed text are kept. You can add the repository again later to download a fresh copy.</p>
+    {% if repository_pdf_indexing %}<p role="status">Active PDF indexing will be stopped before this repository is removed.</p>{% endif %}
+    {% if repository_git_busy %}<p role="status">Git work is active. OWL will preserve the repository and ask you to retry if that worker has not finished.</p>{% endif %}
+    {% if confirmation_required %}<p role="alert">Confirm below before removing this repository.</p>{% endif %}
+    {% if removal_error %}<p role="alert">{{ removal_error }}</p>{% endif %}
+    <form method="post" action="{% url 'bitbucket:repository_remove' repository_id %}">
+        {% csrf_token %}
+        <input type="hidden" name="confirmed" value="yes">
+        <div class="bb-delete-confirmation__actions">
+            <a class="button button--secondary" href="{{ cancel_url }}">Cancel</a>
+            <button class="button button--danger" type="submit">{% if removal_incomplete %}Retry local removal{% else %}Remove repository and local data{% endif %}</button>
+        </div>
+    </form>
+</section>
+</div>
+{% endblock %}

@@ -97,6 +97,7 @@
                 <a class="nav-link{% if active_app == 'home' %} is-active{% endif %}" href="{% url 'core:dashboard' %}"{% if active_app == 'home' %} aria-current="true"{% endif %}>Home</a>
                 <a class="nav-link{% if active_app == 'bookmarks' %} is-active{% endif %}" href="{% url 'bookmark_manager:index' %}"{% if active_app == 'bookmarks' %} aria-current="true"{% endif %}>Bookmark Manager</a>
                 <a class="nav-link{% if active_app == 'bitbucket' %} is-active{% endif %}" href="{% url 'bitbucket_search:index' %}"{% if active_app == 'bitbucket' %} aria-current="true"{% endif %}>Bitbucket Search</a>
+                <a class="nav-link{% if active_app == 'bitbucket_app' %} is-active{% endif %}" href="{% url 'bitbucket:index' %}"{% if active_app == 'bitbucket_app' %} aria-current="true"{% endif %}>Bitbucket</a>
             </div>
         </nav>
     </header>
