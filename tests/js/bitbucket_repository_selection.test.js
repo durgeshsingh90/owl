@@ -40,6 +40,7 @@ class Element {
         if (name.startsWith("data-")) {
             this.dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = text;
         }
+        if (name === "class") text.split(/\s+/).filter(Boolean).forEach((className) => this.classes.add(className));
         if (["id", "name", "type", "value", "title"].includes(name)) this[name] = text;
         if (name === "disabled") this.disabled = true;
         if (name === "hidden") this.hidden = true;
@@ -116,6 +117,7 @@ const element = (hook, attributes = {}, tag = "div") =>
 function boot({
     repositories = [{ id: 1 }, { id: 2 }], initiallyExtracting = false,
     duplicateCopies = false, connectionResponse = null, pdfCount = 0,
+    openConfirmThreshold = 10,
 } = {}) {
     const makeControls = () => ({
         selectAll: element("data-selected-select-all", { type: "button", hidden: "", disabled: "" }, "button"),
@@ -187,12 +189,43 @@ function boot({
     const selectAllPdfs = element("data-select-all-pdfs", { type: "checkbox" }, "input");
     workspace.appendChild(pdfSelectionCount);
     workspace.appendChild(selectAllPdfs);
+    const bulkActions = new Element("div", { class: "bb-result-actions" });
+    const copySelectedPdfPaths = element("data-copy-selected-pdf-paths", { type: "button", disabled: "" }, "button");
+    const copySelectedPdfLabel = element("data-copy-selected-pdf-label", {}, "span");
+    copySelectedPdfPaths.appendChild(copySelectedPdfLabel);
+    const openSelectedPdfsForm = element("data-open-selected-pdfs-form", {
+        id: "bb-open-selected-pdfs-form", "data-confirm-threshold": String(openConfirmThreshold),
+    }, "form");
+    const openSelectedConfirmed = element("data-open-selected-confirmed", { type: "hidden", value: "0" }, "input");
+    const openSelectedPdfs = element("data-open-selected-pdfs-submit", { type: "submit", disabled: "" }, "button");
+    const openSelectedPdfLabel = element("data-open-selected-pdf-label", {}, "span");
+    openSelectedPdfs.appendChild(openSelectedPdfLabel);
+    openSelectedPdfsForm.appendChild(openSelectedConfirmed);
+    openSelectedPdfsForm.appendChild(openSelectedPdfs);
+    const openSelectedConfirmation = element("data-open-selected-confirmation", {}, "dialog");
+    const openSelectedConfirmationHeading = element("data-open-selected-confirmation-heading", {}, "h2");
+    const confirmOpenSelectedPdfs = element("data-confirm-open-selected-pdfs", { type: "button" }, "button");
+    openSelectedConfirmation.appendChild(openSelectedConfirmationHeading);
+    openSelectedConfirmation.appendChild(confirmOpenSelectedPdfs);
+    openSelectedConfirmation.showModal = () => { openSelectedConfirmation.open = true; };
+    openSelectedConfirmation.close = () => { openSelectedConfirmation.open = false; };
+    const selectedPdfBulkStatus = element("data-selected-pdf-bulk-status", {}, "span");
+    [copySelectedPdfPaths, openSelectedPdfsForm, openSelectedConfirmation, selectedPdfBulkStatus]
+        .forEach((node) => bulkActions.appendChild(node));
+    workspace.appendChild(bulkActions);
     const pdfs = Array.from({ length: pdfCount }, (_, index) => {
         const row = element("data-pdf-row", { "data-document-id": String(index + 1) }, "tr");
-        const checkbox = element("data-pdf-select", { type: "checkbox", value: String(index + 1) }, "input");
+        const checkbox = element("data-pdf-select", {
+            type: "checkbox", name: "document_id", value: String(index + 1),
+            form: "bb-open-selected-pdfs-form",
+        }, "input");
+        const pathButton = element("data-pdf-local-path", {
+            "data-pdf-local-path": `/repo/docs/${index + 1}.pdf`,
+        }, "button");
         row.appendChild(checkbox);
+        row.appendChild(pathButton);
         workspace.appendChild(row);
-        return { row, checkbox };
+        return { row, checkbox, pathButton };
     });
     let connection = null;
     if (connectionResponse) {
@@ -254,12 +287,19 @@ function boot({
     let timerId = 0;
     let reloads = 0;
     let fetchCount = 0;
+    let copiedText = "";
+    let requestedSubmitEvent = null;
     let now = 100000;
+    openSelectedPdfsForm.requestSubmit = (submitter) => {
+        requestedSubmitEvent = openSelectedPdfsForm.dispatch("submit", { submitter });
+    };
     const window = {
         location: { reload() { reloads += 1; } },
         addEventListener(name, callback) { windows.set(name, callback); },
         setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay, dueAt: now + delay }); return id; },
         clearTimeout(id) { timers.delete(id); },
+        requestAnimationFrame(callback) { callback(); },
+        confirm() { return true; },
         OWLRepositoryTimers: {
             update(timer, timing) { timerUpdates.push({ timer, timing }); timer.textContent = timing?.label || ""; },
             stale(timer) { staleTimers.push(timer); },
@@ -267,6 +307,7 @@ function boot({
     };
     vm.runInNewContext(source, {
         document, window, Date: class extends Date { static now() { return now; } },
+        navigator: { clipboard: { async writeText(text) { copiedText = text; } } },
         fetch: async () => {
             fetchCount += 1;
             return { ok: true, json: async () => {
@@ -279,8 +320,14 @@ function boot({
     return {
         controls, controlCopies, cards, form, global, globalForm, workspace, timerUpdates, staleTimers, deleteStatus,
         connection, pdfs, pdfSelectionCount, selectAllPdfs,
+        bulkActions, copySelectedPdfPaths, copySelectedPdfLabel, openSelectedPdfsForm,
+        openSelectedPdfs, openSelectedPdfLabel, openSelectedConfirmed,
+        openSelectedConfirmation, openSelectedConfirmationHeading, confirmOpenSelectedPdfs,
+        selectedPdfBulkStatus,
         operationOverlay, operationTitle, operationDetail, document,
         settle() { return new Promise((resolve) => setImmediate(resolve)); },
+        copiedText: () => copiedText,
+        requestedSubmitEvent: () => requestedSubmitEvent,
         queueResponse(response) { responses.push(response); },
         reloads: () => reloads,
         fetchCount: () => fetchCount,
@@ -338,6 +385,11 @@ function boot({
 
 test("PDF rows support independent multi-selection and select-all on the visible page", () => {
     const page = boot({ repositories: [{ id: 1 }], pdfCount: 3 });
+    assert.equal(page.copySelectedPdfPaths.disabled, true);
+    assert.equal(page.openSelectedPdfs.disabled, true);
+    assert.equal(page.copySelectedPdfLabel.textContent, "Copy selected paths (0)");
+    assert.equal(page.openSelectedPdfLabel.textContent, "Open selected (0)");
+
     page.pdfs[0].checkbox.checked = true;
     page.pdfs[0].checkbox.dispatch("change");
     page.pdfs[2].checkbox.checked = true;
@@ -345,6 +397,10 @@ test("PDF rows support independent multi-selection and select-all on the visible
     assert.equal(page.pdfSelectionCount.hidden, false);
     assert.equal(page.pdfSelectionCount.textContent, "2 PDFs selected");
     assert.equal(page.selectAllPdfs.indeterminate, true);
+    assert.equal(page.copySelectedPdfPaths.disabled, false);
+    assert.equal(page.openSelectedPdfs.disabled, false);
+    assert.equal(page.copySelectedPdfLabel.textContent, "Copy selected paths (2)");
+    assert.equal(page.openSelectedPdfLabel.textContent, "Open selected (2)");
 
     page.selectAllPdfs.checked = true;
     page.selectAllPdfs.dispatch("change");
@@ -352,6 +408,45 @@ test("PDF rows support independent multi-selection and select-all on the visible
     assert.equal(page.pdfSelectionCount.textContent, "3 PDFs selected");
     assert.equal(page.selectAllPdfs.indeterminate, false);
     assert.equal(page.selectAllPdfs.checked, true);
+});
+
+test("Copy selected paths copies only checked PDF rows", async () => {
+    const page = boot({ repositories: [{ id: 1 }], pdfCount: 3 });
+    page.pdfs[0].checkbox.checked = true;
+    page.pdfs[0].checkbox.dispatch("change");
+    page.pdfs[2].checkbox.checked = true;
+    page.pdfs[2].checkbox.dispatch("change");
+
+    page.copySelectedPdfPaths.dispatch("click");
+    await page.settle();
+
+    assert.equal(page.copiedText(), "/repo/docs/1.pdf\n/repo/docs/3.pdf");
+    assert.equal(page.selectedPdfBulkStatus.textContent, "2 PDF paths copied.");
+    assert.equal(page.copySelectedPdfPaths.disabled, false);
+    assert.equal(page.copySelectedPdfPaths.focused, true);
+});
+
+test("Open selected submits checked PDFs and confirms only a large selection", () => {
+    const page = boot({
+        repositories: [{ id: 1 }], pdfCount: 3, openConfirmThreshold: 1,
+    });
+    page.pdfs[0].checkbox.checked = true;
+    page.pdfs[0].checkbox.dispatch("change");
+    page.pdfs[2].checkbox.checked = true;
+    page.pdfs[2].checkbox.dispatch("change");
+
+    const initialSubmit = page.openSelectedPdfsForm.dispatch("submit", {
+        submitter: page.openSelectedPdfs,
+    });
+    assert.equal(initialSubmit.defaultPrevented, true);
+    assert.equal(page.openSelectedConfirmation.open, true);
+    assert.equal(page.openSelectedConfirmationHeading.textContent, "Open 2 selected PDFs?");
+    assert.equal(page.confirmOpenSelectedPdfs.textContent, "Open 2 PDFs");
+
+    page.confirmOpenSelectedPdfs.dispatch("click");
+    assert.equal(page.openSelectedConfirmed.value, "1");
+    assert.equal(page.openSelectedConfirmation.open, false);
+    assert.equal(page.requestedSubmitEvent().defaultPrevented, false);
 });
 
 test("stopping repository work blocks the page with a focused loading screen", () => {

@@ -56,7 +56,7 @@ def test_bulk_open_is_post_only_csrf_protected_and_strictly_loopback(client):
         ({}, "invalid_document_selection"),
         ({"document_id": "not-an-id"}, "invalid_document_selection"),
         ({"document_id": "0"}, "invalid_document_selection"),
-        ({"document_id": [str(number) for number in range(1, 202)]}, "too_many_documents"),
+        ({"document_id": [str(number) for number in range(1, 502)]}, "too_many_documents"),
     ),
 )
 def test_bulk_open_rejects_invalid_or_oversized_result_page_selections(
@@ -123,6 +123,36 @@ def test_bulk_open_requires_server_enforced_confirmation_above_threshold(
 
     assert confirmed.status_code == 503
     service.assert_called_once_with(tuple(range(1, 12)))
+
+
+def test_bulk_open_accepts_a_full_five_hundred_pdf_inventory_page(client, monkeypatch):
+    service = Mock(
+        return_value=BulkDocumentOpenResult(
+            requested_count=500,
+            opened_documents=(),
+            failures=(
+                BulkDocumentOpenFailure(
+                    document_id=1,
+                    code="native_action_failed",
+                    summary="Could not open the selected PDFs.",
+                ),
+            ),
+        )
+    )
+    monkeypatch.setattr(views, "open_registered_pdfs", service)
+
+    response = client.post(
+        reverse("bitbucket_search:documents_open_all"),
+        {
+            "document_id": [str(number) for number in range(1, 501)],
+            "confirmed": "1",
+        },
+        REMOTE_ADDR="127.0.0.1",
+        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+    )
+
+    assert response.status_code == 503
+    service.assert_called_once_with(tuple(range(1, 501)))
 
 
 def test_bulk_open_deduplicates_ids_and_reports_partial_async_result(client, monkeypatch):

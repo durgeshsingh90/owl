@@ -25,7 +25,10 @@ const snapshot = (overrides = {}) => ({
     ...overrides,
 });
 
-function boot(responses, { initiallyActive = false, initiallyExtracting = false } = {}) {
+function boot(
+    responses,
+    { initiallyActive = false, initiallyExtracting = false, withConnectionDialog = false } = {},
+) {
     const statusPanel = { hidden: true };
     const notificationPanel = { hidden: true };
     const log = { open: true, scrollTop: 25, textContent: "Git output completed.", focusCount: 1 };
@@ -34,6 +37,36 @@ function boot(responses, { initiallyActive = false, initiallyExtracting = false 
     let timerId = 0;
     let reloadCount = 0;
     let lastResponse;
+    const connectionForm = { action: "" };
+    const connectionRepository = { textContent: "" };
+    const connectionDetail = { textContent: "" };
+    const connectionRetry = { disabled: true };
+    let cancelConnection;
+    const connectionCancel = {
+        addEventListener(type, callback) {
+            if (type === "click") cancelConnection = callback;
+        },
+        click() { cancelConnection?.({ preventDefault() {} }); },
+    };
+    const connectionDialogListeners = new Map();
+    const connectionDialog = {
+        open: false,
+        showCount: 0,
+        querySelector(selector) {
+            return {
+                "[data-connection-recovery-form]": connectionForm,
+                "[data-connection-recovery-repository]": connectionRepository,
+                "[data-connection-recovery-detail]": connectionDetail,
+                "[data-connection-recovery-retry]": connectionRetry,
+                "[data-connection-recovery-cancel]": connectionCancel,
+            }[selector] || null;
+        },
+        addEventListener(type, callback) { connectionDialogListeners.set(type, callback); },
+        showModal() { this.open = true; this.showCount += 1; },
+        close() { this.open = false; },
+        removeAttribute(name) { if (name === "open") this.open = false; },
+        setAttribute(name) { if (name === "open") this.open = true; },
+    };
     const workspace = {
         dataset: {
             repositoryStatusUrl: "/pdfs/repositories/status/",
@@ -42,7 +75,12 @@ function boot(responses, { initiallyActive = false, initiallyExtracting = false 
             extractionActive: String(initiallyExtracting),
             dailyRefreshEnabled: "true",
         },
-        querySelector: () => null,
+        querySelector(selector) {
+            if (withConnectionDialog && selector === "[data-connection-recovery-dialog]") {
+                return connectionDialog;
+            }
+            return null;
+        },
         querySelectorAll: () => [],
         addEventListener() {},
     };
@@ -61,6 +99,11 @@ function boot(responses, { initiallyActive = false, initiallyExtracting = false 
     };
     const window = {
         location: { reload() { reloadCount += 1; } },
+        sessionStorage: {
+            values: new Map(),
+            getItem(key) { return this.values.get(key) || null; },
+            setItem(key, value) { this.values.set(key, value); },
+        },
         addEventListener() {},
         setTimeout(callback, delay) {
             const id = ++timerId;
@@ -79,6 +122,14 @@ function boot(responses, { initiallyActive = false, initiallyExtracting = false 
     vm.runInNewContext(source, { document, window, fetch });
     return {
         statusPanel, notificationPanel, log, document, requests,
+        connection: {
+            dialog: connectionDialog,
+            form: connectionForm,
+            repository: connectionRepository,
+            detail: connectionDetail,
+            retry: connectionRetry,
+            cancel: connectionCancel,
+        },
         reloadCount: () => reloadCount,
         pendingPolls: () => timers.size,
         async poll() {
@@ -90,6 +141,64 @@ function boot(responses, { initiallyActive = false, initiallyExtracting = false 
         },
     };
 }
+
+test("connection failures show firewall authentication recovery with retry and cancel", async () => {
+    const failedRepository = repository(false, {
+        state: "failed",
+        stateLabel: "Failed",
+        gitSyncFailed: true,
+        isHTTPS: true,
+        failureCode: "connection_auth_failed",
+        failureDetail: "Git could not access this repository with the available credentials.",
+        lastAttemptAt: "2026-09-04T09:00:00+00:00",
+        refreshUrl: "/pdfs/repositories/1/refresh/",
+    });
+    const nextAttempt = {
+        ...failedRepository,
+        lastAttemptAt: "2026-09-04T10:00:00+00:00",
+    };
+    const page = boot([
+        snapshot({ repositories: [failedRepository] }),
+        snapshot({ repositories: [failedRepository] }),
+        snapshot({ repositories: [nextAttempt] }),
+    ], { withConnectionDialog: true });
+
+    await page.poll();
+    assert.equal(page.connection.dialog.open, true);
+    assert.equal(page.connection.dialog.showCount, 1);
+    assert.equal(page.connection.repository.textContent, "Synthetic repository");
+    assert.equal(
+        page.connection.detail.textContent,
+        "Git could not access this repository with the available credentials.",
+    );
+    assert.equal(page.connection.form.action, "/pdfs/repositories/1/refresh/");
+    assert.equal(page.connection.retry.disabled, false);
+
+    page.connection.cancel.click();
+    assert.equal(page.connection.dialog.open, false);
+    await page.poll();
+    assert.equal(page.connection.dialog.showCount, 1, "Cancel dismisses the same failed attempt");
+
+    await page.poll();
+    assert.equal(page.connection.dialog.open, true);
+    assert.equal(page.connection.dialog.showCount, 2, "A later failed retry is shown again");
+});
+
+test("legacy non-HTTPS failures do not show the HTTPS recovery popup", async () => {
+    const page = boot([snapshot({ repositories: [repository(false, {
+        state: "failed",
+        gitSyncFailed: true,
+        isHTTPS: false,
+        failureCode: "connection_auth_failed",
+        failureDetail: "Git could not access this repository.",
+        lastAttemptAt: "2026-09-04T09:00:00+00:00",
+        refreshUrl: "/pdfs/repositories/1/refresh/",
+    })] })], { withConnectionDialog: true });
+
+    await page.poll();
+    assert.equal(page.connection.dialog.open, false);
+    assert.equal(page.connection.dialog.showCount, 0);
+});
 
 test("terminal transitions and publication changes reload once after two settled snapshots", async () => {
     for (const [response, initiallyActive] of [

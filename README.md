@@ -136,8 +136,10 @@ operation.
 
 Bitbucket Search now provides repository registration and durable background synchronization:
 
-- add an approved SSH or HTTPS repository URL from the left repository rail;
+- add an approved HTTPS repository URL from the left repository rail;
 - clone it once in a detached background worker, then use fetch plus fast-forward refreshes;
+- run `git ls-remote --symref -- <https-url> HEAD` before every clone or pull; a failed HTTPS
+  preflight opens a firewall/VPN/credential prompt with **Retry** and **Cancel**;
 - refresh every enabled repository at 11:00 in `OWL_TIME_ZONE` (Europe/Dublin by default) with a
   bounded parallel repository worker pool. A failed daily attempt retries after two hours, up to
   three retries after the initial attempt during that day's cycle; a success stops that
@@ -166,9 +168,9 @@ Bitbucket Search now provides repository registration and durable background syn
   filename, and separate PDF pages, plus repository/index-state filters, relevance sorts, matched
   page explanations, and bounded highlighted snippets;
 - keep a newest-first Today, Yesterday, Day Before Yesterday, This Week, Last Week, This Month,
-  Last Month, Last 3 Months, Last 6 Months, This Year, Last Year, Last 2 Years, and older-year
-  timeline when no search is active, using the original Git addition's commit date, not the date
-  OWL discovered the PDF. The column is labelled "Date added to repo";
+  Last Month, Last 3 Months, Last 6 Months, This Year, Last Year, Last 2 Years, Last 3 Years, and
+  older-year timeline when no search is active, using the original Git addition's commit date, not
+  the date OWL discovered the PDF. The column is labelled "Date added to repo";
   PDFs whose original addition is outside available history show their OWL discovery date with
   the visible source **First seen by OWL**, while confirmed dates show **Git addition**;
 - display 500 PDFs per inventory page by default (also capped at 500 for larger configured values).
@@ -184,7 +186,7 @@ text in OWL's database; searching does not reopen PDF files or contact Git. Add 
 to match terms across different fields or pages, or use **Search in** filters to narrow the scope.
 
 Repository URLs are canonicalized and deduplicated. Credentials embedded in URLs are rejected.
-SSH repositories use the existing SSH agent; HTTPS repositories can use an exact-host credential
+New repository registration is HTTPS-only. HTTPS repositories can use an exact-host credential
 saved in OWL Settings, with an external credential manager still available when OWL has no saved
 credential for that origin. Django's `owl/settings.py`
 approves `bitbucket.org` and `github.com` by default. Leave

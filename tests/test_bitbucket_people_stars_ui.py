@@ -147,7 +147,9 @@ def test_people_star_controls_are_accessible_external_form_buttons_in_both_panel
         if tag == "link" and "bitbucket_search/bitbucket_search.css" in (attrs.get("href") or "")
     ]
     assert len(stylesheets) == 1
-    assert stylesheets[0]["href"].endswith("bitbucket_search/bitbucket_search.css?v=local-stars-v1")
+    assert stylesheets[0]["href"].endswith(
+        "bitbucket_search/bitbucket_search.css?v=pdf-selection-actions-v1"
+    )
 
 
 def test_people_star_styles_show_state_focus_and_mobile_touch_target():

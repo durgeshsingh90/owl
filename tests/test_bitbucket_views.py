@@ -102,8 +102,14 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert "data-bitbucket-schedule-tick-form" in html
     assert 'action="/pdfs/repositories/schedule/tick/"' in html
     assert 'target="owl-bitbucket-schedule-tick"' in html
-    assert "bitbucket_search/bitbucket_search.css?v=local-stars-v1" in html
-    assert "bitbucket_search/bitbucket_search.js?v=repository-url-connection-v1" in html
+    assert "bitbucket_search/bitbucket_search.css?v=pdf-selection-actions-v1" in html
+    assert "bitbucket_search/bitbucket_search.js?v=pdf-selection-actions-v1" in html
+    assert "HTTPS Git URLs" in html
+    assert "HTTPS only." in html
+    assert "data-connection-recovery-dialog" in html
+    assert "Open your firewall authentication page and sign in." in html
+    assert "data-connection-recovery-retry disabled" in html
+    assert "data-connection-recovery-cancel" in html
     assert "data-repository-operation-overlay" in html
     assert "bitbucket_search/icons/work-in-progress.gif" in html
     assert "bitbucket_search/icons/connection-connected.png" in html
@@ -116,7 +122,9 @@ def test_repository_workspace_has_add_control_list_filter_and_background_copy(lo
     assert 'data-repository-connection-result data-state="idle"' in html
     assert 'aria-label="Test every saved repository URL with Git"' in html
     assert "data-repository-connection-message" in html
-    assert 'name="confirmed"' not in html
+    add_forms = re.findall(r'<form class="bb-repository-form".*?</form>', html, re.DOTALL)
+    assert len(add_forms) == 2
+    assert all('name="confirmed"' not in form for form in add_forms)
 
 
 @pytest.mark.parametrize("view_name", ["bitbucket_search:index", "bitbucket_search:repositories"])
@@ -255,7 +263,6 @@ def test_copy_all_repository_urls_uses_sanitized_one_per_line_source(loopback_cl
     assert 'id="bb-repository-copy-urls"' in html
     assert response.context["repository_copy_urls"] == (
         "https://bitbucket.org/workspace/architecture.git",
-        "ssh://git@bitbucket.org/workspace/security.git",
     )
     assert "data-copy-repository-urls" in html
 
@@ -1174,7 +1181,7 @@ def test_add_repository_returns_immediately_and_deduplicates_active_job_and_page
 ):
     launched = Mock()
     monkeypatch.setattr("bitbucket_search.views.launch_sync_worker", launched)
-    url = "git@bitbucket.org:workspace/architecture.git"
+    url = "https://bitbucket.org/workspace/architecture"
 
     first = loopback_client.post(
         reverse("bitbucket_search:repository_add"),
@@ -1204,7 +1211,7 @@ def test_add_repository_returns_immediately_and_deduplicates_active_job_and_page
     assert RepositorySyncJob.objects.count() == 1
     repository = BitbucketRepository.objects.get()
     assert repository.sync_state == RepositorySyncState.QUEUED
-    assert repository.remote_url == "ssh://git@bitbucket.org/workspace/architecture.git"
+    assert repository.remote_url == "https://bitbucket.org/workspace/architecture.git"
     launched.assert_called_once_with()
 
 
@@ -1219,7 +1226,7 @@ def test_add_repository_accepts_one_repository_url_per_line(loopback_client, mon
         reverse("bitbucket_search:repository_add"),
         {
             "repository_url": (
-                "git@bitbucket.org:workspace/architecture.git\n\n"
+                "https://bitbucket.org/workspace/architecture\n\n"
                 "https://bitbucket.org/workspace/security.git\n"
                 "https://bitbucket.org/workspace/architecture.git"
             )
@@ -1241,12 +1248,30 @@ def test_add_repository_accepts_one_repository_url_per_line(loopback_client, mon
 
 
 @override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
+def test_add_repository_rejects_ssh_before_queuing(loopback_client):
+    response = loopback_client.post(
+        reverse("bitbucket_search:repository_add"),
+        {"repository_url": "git@bitbucket.org:workspace/architecture.git"},
+        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "state": "invalid",
+        "code": "unsupported_repository_protocol",
+        "detail": "Line 1: Repository URLs must use HTTPS.",
+    }
+    assert not BitbucketRepository.objects.exists()
+    assert not RepositorySyncJob.objects.exists()
+
+
+@override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org",))
 def test_add_repository_rejects_invalid_batch_before_queuing_any_repository(loopback_client):
     response = loopback_client.post(
         reverse("bitbucket_search:repository_add"),
         {
             "repository_url": (
-                "git@bitbucket.org:workspace/architecture.git\n"
+                "https://bitbucket.org/workspace/architecture.git\n"
                 "https://example.invalid/workspace/not-allowed.git"
             )
         },
@@ -1270,7 +1295,7 @@ def test_add_repository_reports_confirmed_database_contention_without_debug_page
 
     response = loopback_client.post(
         reverse("bitbucket_search:repository_add"),
-        {"repository_url": "git@bitbucket.org:workspace/database-busy.git"},
+        {"repository_url": "https://bitbucket.org/workspace/database-busy.git"},
         HTTP_X_REQUESTED_WITH="XMLHttpRequest",
     )
 
@@ -1283,7 +1308,7 @@ def test_add_repository_reports_confirmed_database_contention_without_debug_page
             "No repository was added; try again in a moment."
         ),
     }
-    register.assert_called_once_with(["ssh://git@bitbucket.org/workspace/database-busy.git"])
+    register.assert_called_once_with(["https://bitbucket.org/workspace/database-busy.git"])
     assert b"OperationalError" not in response.content
     assert not BitbucketRepository.objects.exists()
 
@@ -1298,7 +1323,7 @@ def test_add_repository_redirects_native_form_when_database_is_busy(
 
     response = loopback_client.post(
         reverse("bitbucket_search:repository_add"),
-        {"repository_url": "git@bitbucket.org:workspace/native-form-busy.git"},
+        {"repository_url": "https://bitbucket.org/workspace/native-form-busy.git"},
         follow=True,
     )
 
@@ -1321,7 +1346,7 @@ def test_add_repository_keeps_durable_job_when_wakeup_reservation_hits_sqlite_lo
 
     response = loopback_client.post(
         reverse("bitbucket_search:repository_add"),
-        {"repository_url": "git@bitbucket.org:workspace/deferred-wakeup.git"},
+        {"repository_url": "https://bitbucket.org/workspace/deferred-wakeup.git"},
         HTTP_X_REQUESTED_WITH="XMLHttpRequest",
     )
 
@@ -1377,7 +1402,7 @@ def test_manual_repository_wakeup_is_left_to_the_run_owl_resident_pool(
 
     response = loopback_client.post(
         reverse("bitbucket_search:repository_add"),
-        {"repository_url": "git@bitbucket.org:workspace/resident.git"},
+        {"repository_url": "https://bitbucket.org/workspace/resident.git"},
         HTTP_X_REQUESTED_WITH="XMLHttpRequest",
     )
     immediate_tick = loopback_client.post(
@@ -1513,6 +1538,9 @@ def test_repository_status_is_compact_and_never_returns_the_remote_url(loopback_
     assert response.status_code == 200
     assert payload["repositories"][0]["id"] == repository.pk
     assert payload["repositories"][0]["state"] == "ready"
+    assert payload["repositories"][0]["failureCode"] == ""
+    assert payload["repositories"][0]["failureDetail"] == ""
+    assert payload["repositories"][0]["isHTTPS"] is False
     assert payload["repositories"][0]["automatic"]["state"] == "due"
     assert payload["repositories"][0]["automatic"]["maxRetries"] == 3
     assert payload["automation"]["enabled"] is True
@@ -1536,6 +1564,42 @@ def test_repository_status_is_compact_and_never_returns_the_remote_url(loopback_
     serialized = response.content.decode()
     assert "ssh://" not in serialized
     assert "/private/synthetic/path" not in serialized
+
+
+def test_connection_failure_is_available_to_the_firewall_retry_popup(loopback_client):
+    completed_at = timezone.now()
+    repository = BitbucketRepository.objects.create(
+        display_name="architecture",
+        canonical_remote_key="bitbucket.org/workspace/architecture",
+        remote_url="https://bitbucket.org/workspace/architecture.git",
+        sync_state=RepositorySyncState.FAILED,
+        status_message="Git could not reach the repository host.",
+        last_error_code="connection_unreachable",
+        last_error_summary="Git could not reach the repository host.",
+        last_sync_completed_at=completed_at,
+    )
+
+    page = loopback_client.get(reverse("bitbucket_search:index"))
+    html = page.content.decode()
+    status = loopback_client.get(reverse("bitbucket_search:repository_status")).json()
+    payload = status["repositories"][0]
+
+    assert page.status_code == 200
+    assert f'data-repository-id="{repository.pk}"' in html
+    assert 'data-repository-failure-code="connection_unreachable"' in html
+    assert 'data-repository-is-https="true"' in html
+    assert 'data-repository-failure-detail="Git could not reach the repository host."' in html
+    assert (
+        f'data-repository-refresh-url="{reverse("bitbucket_search:repository_refresh", args=(repository.pk,))}"'
+        in html
+    )
+    assert payload["gitSyncFailed"] is True
+    assert payload["isHTTPS"] is True
+    assert payload["failureCode"] == "connection_unreachable"
+    assert payload["failureDetail"] == "Git could not reach the repository host."
+    assert payload["refreshUrl"] == reverse(
+        "bitbucket_search:repository_refresh", args=(repository.pk,)
+    )
 
 
 @override_settings(BITBUCKET_ALLOWED_HOSTS=("bitbucket.org", "github.com", "scm.example.invalid"))

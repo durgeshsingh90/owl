@@ -26,13 +26,13 @@ from bitbucket_search.services.filesystem_paths import display_path, filesystem_
 from bitbucket_search.services.git_sync import RepositorySyncError, managed_repository_path
 from bitbucket_search.services.logging_events import get_logger, log_event, logging_context
 from bitbucket_search.services.path_safety import has_disallowed_path_characters
-from bitbucket_search.services.pdf_search_query import MAX_SEARCH_PAGE_SIZE
 from bitbucket_search.services.repository_lock import (
     RepositoryCheckoutBusy,
     repository_checkout_locks,
 )
 
 _NATIVE_ACTION_TIMEOUT_SECONDS = 10
+MAX_BULK_OPEN_DOCUMENTS = 500
 logger = get_logger("actions")
 _EXPECTED_REJECTIONS = {
     "document_not_found",
@@ -407,17 +407,17 @@ def _registered_documents(document_ids: Sequence[int]) -> tuple[PDFDocument, ...
     if isinstance(document_ids, (str, bytes)) or not isinstance(document_ids, Sequence):
         raise DocumentActionError(
             "invalid_document_selection",
-            "Select one or more PDFs from the current results page.",
+            "Select one or more PDFs from the current PDF page.",
         )
     if not document_ids:
         raise DocumentActionError(
             "invalid_document_selection",
-            "Select one or more PDFs from the current results page.",
+            "Select one or more PDFs from the current PDF page.",
         )
-    if len(document_ids) > MAX_SEARCH_PAGE_SIZE:
+    if len(document_ids) > MAX_BULK_OPEN_DOCUMENTS:
         raise DocumentActionError(
             "too_many_documents",
-            f"Open All supports at most {MAX_SEARCH_PAGE_SIZE} PDFs at a time.",
+            f"Open selected supports at most {MAX_BULK_OPEN_DOCUMENTS} PDFs at a time.",
         )
 
     ordered_ids: list[int] = []

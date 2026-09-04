@@ -382,10 +382,14 @@ def test_bitbucket_search_uses_the_repository_workspace_shell(loopback_client):
     assert 'name="page_size" value="100"' in html
     assert '<details class="bb-search-filter-menu">' in html
     assert re.search(
-        r'<button type="button" data-tooltip="Copy paths".*?Copy all \(0\)', html, re.DOTALL
+        r'<button type="button" data-tooltip="Copy selected paths".*?Copy selected paths \(0\)',
+        html,
+        re.DOTALL,
     )
     assert re.search(
-        r'<button type="button" data-tooltip="Open files".*?Open all \(0\)', html, re.DOTALL
+        r'<button type="submit" data-tooltip="Open selected PDFs".*?Open selected \(0\)',
+        html,
+        re.DOTALL,
     )
     assert re.search(
         r'<button type="button" data-tooltip="Export list".*?Export list', html, re.DOTALL

@@ -56,6 +56,7 @@ from bitbucket_search.models import (
     RepositorySyncState,
 )
 from bitbucket_search.services.document_actions import (
+    MAX_BULK_OPEN_DOCUMENTS,
     BulkDocumentOpenResult,
     DocumentActionError,
     open_registered_pdf,
@@ -91,7 +92,6 @@ from bitbucket_search.services.pdf_search import (
 )
 from bitbucket_search.services.pdf_search_query import (
     MAX_COMMITTER_FILTERS,
-    MAX_SEARCH_PAGE_SIZE,
     InvalidPDFSearchQuery,
     PDFSearchMatchMode,
     PDFSearchQuery,
@@ -390,6 +390,14 @@ def _timeline_bucket(value: date, *, today: date) -> tuple[str, str, str]:
             "last-two-years",
             "Last 2 Years",
             f"Since {_display_date(two_year_start)}",
+        )
+
+    three_year_start = _subtract_calendar_months(today, 36)
+    if value >= three_year_start:
+        return (
+            "last-three-years",
+            "Last 3 Years",
+            f"Since {_display_date(three_year_start)}",
         )
 
     year = str(value.year)
@@ -1194,7 +1202,7 @@ def _index_context(
         or search_query.sort is not PDFSearchSort.RELEVANCE
     )
     search_page: PDFSearchPage | None = None
-    search_return_to = ""
+    document_action_return_to = request.get_full_path() if request is not None else ""
     if search_active:
         search_page = search_documents(search_query)
         search_rows = tuple(
@@ -1217,7 +1225,6 @@ def _index_context(
         )
         pdf_document_count = search_page.total
         timeline_page_number = search_page.page
-        search_return_to = request.get_full_path() if request is not None else ""
         next_search_page_url = (
             _search_page_url(
                 search_query,
@@ -1299,13 +1306,12 @@ def _index_context(
         try:
             parsed_remote = urlsplit(repository.remote_url)
             if (
-                parsed_remote.scheme not in {"https", "ssh"}
+                parsed_remote.scheme != "https"
                 or parsed_remote.password is not None
                 or parsed_remote.query
                 or parsed_remote.fragment
                 or not parsed_remote.hostname
-                or (parsed_remote.scheme == "https" and parsed_remote.username is not None)
-                or (parsed_remote.scheme == "ssh" and parsed_remote.username != "git")
+                or parsed_remote.username is not None
             ):
                 continue
             repository_copy_urls.append(repository.remote_url)
@@ -1352,7 +1358,8 @@ def _index_context(
         "search_query": search_query,
         "requested_search_query": requested_search_query,
         "search_page": search_page,
-        "search_return_to": search_return_to,
+        "search_return_to": document_action_return_to if search_active else "",
+        "document_action_return_to": document_action_return_to,
         "open_all_confirm_threshold": settings.OPEN_ALL_CONFIRM_THRESHOLD,
         "next_search_page_url": next_search_page_url,
         "previous_search_page_url": previous_search_page_url,
@@ -1447,6 +1454,9 @@ def _repository_payload(repository: BitbucketRepository) -> dict[str, object]:
         "indexWorkerLimit": settings.PDF_MAX_EXTRACTION_WORKERS,
         "pdfIndexFailedCount": getattr(repository, "pdf_index_failed_count", 0),
         "gitSyncFailed": getattr(repository, "git_sync_failed", False),
+        "isHTTPS": repository.remote_url.startswith("https://"),
+        "failureCode": repository.last_error_code,
+        "failureDetail": repository.last_error_summary,
         "gitSucceeded": getattr(repository, "git_succeeded", False),
         "indexSucceeded": getattr(repository, "index_succeeded", False),
         "hasRemovalPending": repository.has_removal_pending,
@@ -1788,7 +1798,7 @@ def document_page(request: HttpRequest) -> HttpResponse:
     page_number = request.GET.get("page")
     if not _is_async_request(request):
         try:
-            context = _index_context(pdf_page_number=page_number)
+            context = _index_context(request=request, pdf_page_number=page_number)
         except (PageNotAnInteger, EmptyPage):
             return HttpResponse("That PDF timeline page is not available.", status=404)
         return render(request, "bitbucket_search/index.html", context)
@@ -1904,12 +1914,12 @@ def _bulk_document_ids(request: HttpRequest) -> tuple[int, ...]:
     if not raw_document_ids:
         raise DocumentActionError(
             "invalid_document_selection",
-            "Select one or more PDFs from the current results page.",
+            "Select one or more PDFs from the current PDF page.",
         )
-    if len(raw_document_ids) > MAX_SEARCH_PAGE_SIZE:
+    if len(raw_document_ids) > MAX_BULK_OPEN_DOCUMENTS:
         raise DocumentActionError(
             "too_many_documents",
-            f"Open All supports at most {MAX_SEARCH_PAGE_SIZE} PDFs at a time.",
+            f"Open selected supports at most {MAX_BULK_OPEN_DOCUMENTS} PDFs at a time.",
         )
 
     document_ids: list[int] = []
@@ -2056,7 +2066,7 @@ def open_documents(request: HttpRequest) -> HttpResponse:
         ):
             raise DocumentActionError(
                 "confirmation_required",
-                f"Confirm before opening {len(document_ids)} PDFs from this result page.",
+                f"Confirm before opening {len(document_ids)} selected PDFs.",
             )
         result = open_registered_pdfs(document_ids)
     except DocumentActionError as exc:
@@ -2204,7 +2214,10 @@ def add_repository(request: HttpRequest) -> HttpResponse:
             if value.strip()
         ]
         if not submitted_lines:
-            normalize_repository_url("")
+            raise RepositoryURLValidationError(
+                "repository_url_required",
+                "Enter one HTTPS Git repository URL.",
+            )
         if len(submitted_lines) > 100:
             raise RepositoryURLValidationError(
                 "too_many_repository_urls",
@@ -2214,6 +2227,15 @@ def add_repository(request: HttpRequest) -> HttpResponse:
         normalized_urls = []
         seen_keys: set[str] = set()
         for line_number, value in submitted_lines:
+            try:
+                submitted_scheme = urlsplit(value).scheme.casefold()
+            except ValueError:
+                submitted_scheme = ""
+            if submitted_scheme != "https":
+                raise RepositoryURLValidationError(
+                    "unsupported_repository_protocol",
+                    f"Line {line_number}: Repository URLs must use HTTPS.",
+                )
             try:
                 normalized = normalize_repository_url(value)
             except RepositoryURLValidationError as exc:

@@ -128,7 +128,7 @@ def test_pdf_star_controls_use_one_external_form_and_preserve_inventory_return(c
     assert html.count(">☆</span>") >= 1
     assert 'role="status" aria-live="polite" aria-atomic="true" data-pdf-star-status' in html
     assert "bitbucket_search/pdf_stars.js?v=pdf-stars-v1" in html
-    assert "bitbucket_search/bitbucket_search.css?v=local-stars-v1" in html
+    assert "bitbucket_search/bitbucket_search.css?v=pdf-selection-actions-v1" in html
 
 
 def test_pdf_star_form_preserves_search_return_and_fragment_buttons(client, pdfs):

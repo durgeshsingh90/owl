@@ -5,7 +5,7 @@
 {% block theme_default %}dark{% endblock %}
 
 {% block extra_head %}
-<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=local-stars-v1">
+<link rel="stylesheet" href="{% static 'bitbucket_search/bitbucket_search.css' %}?v=pdf-selection-actions-v1">
 <link rel="stylesheet" href="{% static 'bitbucket_search/pdf_pipeline_dashboard.css' %}?v=pipeline-dashboard-v1">
 {% endblock %}
 
@@ -57,6 +57,19 @@
     <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-people-star-status></span>
     <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-pdf-star-status></span>
     <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-repository-delete-status></span>
+    <dialog class="bb-open-all-dialog bb-connection-recovery-dialog" aria-labelledby="bb-connection-recovery-heading" data-connection-recovery-dialog>
+        <form method="post" action="" data-repository-refresh-form data-connection-recovery-form>
+            {% csrf_token %}
+            <h2 id="bb-connection-recovery-heading">Repository connection failed</h2>
+            <p><strong data-connection-recovery-repository>Repository</strong> could not be reached before Git clone or pull.</p>
+            <p data-connection-recovery-detail>Git could not verify HTTPS repository access.</p>
+            <p>Open your firewall authentication page and sign in. If required, also connect your VPN or update the saved HTTPS credential. When authentication is complete, choose Retry.</p>
+            <div>
+                <button type="button" data-connection-recovery-cancel>Cancel</button>
+                <button type="submit" data-connection-recovery-retry disabled>Retry</button>
+            </div>
+        </form>
+    </dialog>
     {{ repository_copy_urls|json_script:"bb-repository-copy-urls" }}
     <aside class="bb-repository-rail" aria-labelledby="bb-repositories-heading">
         <a class="bb-brand" href="{% url 'core:dashboard' %}" aria-label="OWL Home">
@@ -106,7 +119,7 @@
                     </svg>
                 </span>
                 <strong>No repositories connected</strong>
-                <p>Add an approved SSH or HTTPS Git URL. A worker will clone it without blocking this page.</p>
+                <p>Add an approved HTTPS Git URL. A worker will test access, then clone it without blocking this page.</p>
                 <a href="{% url 'bitbucket_search:repositories' %}#bb-add-repository">Add your first repository</a>
             </div>
             {% endif %}
@@ -399,46 +412,30 @@
                     </p>
                     <span class="bb-pdf-selection-count" data-pdf-selection-count hidden>0 PDFs selected</span>
                     <div class="bb-result-actions" aria-label="Result actions">
-                        {% if search_active and search_page.results %}
-                        <button type="button" data-tooltip="Copy paths" aria-label="Copy paths for {{ search_page.results|length }} PDFs on this page" data-copy-search-result-paths>
+                        <button type="button" data-tooltip="Copy selected paths" aria-label="Copy paths unavailable until PDFs are selected" data-copy-selected-pdf-paths disabled>
                             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="7" y="7" width="11" height="12" rx="1.5"/><path d="M15 7V5H5v11h2"/></svg>
-                            Copy page paths ({{ search_page.results|length }})
+                            <span data-copy-selected-pdf-label>Copy selected paths (0)</span>
                         </button>
-                        <form method="post" action="{% url 'bitbucket_search:documents_open_all' %}" data-open-search-results-form data-result-count="{{ search_page.results|length }}" data-confirm-threshold="{{ open_all_confirm_threshold }}">
+                        <form id="bb-open-selected-pdfs-form" method="post" action="{% url 'bitbucket_search:documents_open_all' %}" data-open-selected-pdfs-form data-confirm-threshold="{{ open_all_confirm_threshold }}">
                             {% csrf_token %}
-                            <input type="hidden" name="return_to" value="{{ search_return_to }}">
-                            <input type="hidden" name="confirmed" value="0" data-open-all-confirmed>
-                            {% for hit in search_page.results %}
-                            <input type="hidden" name="document_id" value="{{ hit.document.pk }}">
-                            {% endfor %}
-                            <button type="submit" data-tooltip="Open files" aria-label="Open {{ search_page.results|length }} PDFs on this page" data-open-search-results-submit>
+                            <input type="hidden" name="return_to" value="{{ document_action_return_to }}">
+                            <input type="hidden" name="confirmed" value="0" data-open-selected-confirmed>
+                            <button type="submit" data-tooltip="Open selected PDFs" aria-label="Open unavailable until PDFs are selected" data-open-selected-pdfs-submit disabled>
                                 <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 3.5h8l4 4v13H6v-17Z"/><path d="M14 3.5v4h4M9 12h6M12 9v6"/><path d="m18 13 3 2-3 2"/></svg>
-                                Open page PDFs ({{ search_page.results|length }})
+                                <span data-open-selected-pdf-label>Open selected (0)</span>
                             </button>
                         </form>
-                        {% if search_page.results|length > open_all_confirm_threshold %}
-                        <dialog class="bb-open-all-dialog" aria-labelledby="bb-open-all-heading" data-open-all-confirmation>
+                        <dialog class="bb-open-all-dialog" aria-labelledby="bb-open-selected-heading" data-open-selected-confirmation>
                             <form method="dialog">
-                                <h2 id="bb-open-all-heading">Open {{ search_page.results|length }} PDFs?</h2>
-                                <p>This will ask your default PDF reader to open every PDF on the current result page.</p>
+                                <h2 id="bb-open-selected-heading" data-open-selected-confirmation-heading>Open selected PDFs?</h2>
+                                <p>This will ask your default PDF reader to open every selected PDF.</p>
                                 <div>
                                     <button type="submit" value="cancel">Cancel</button>
-                                    <button type="button" data-confirm-open-search-results>Open {{ search_page.results|length }} PDFs</button>
+                                    <button type="button" data-confirm-open-selected-pdfs>Open selected PDFs</button>
                                 </div>
                             </form>
                         </dialog>
-                        {% endif %}
-                        <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-search-bulk-status></span>
-                        {% else %}
-                        <button type="button" data-tooltip="Copy paths" aria-label="Copy paths unavailable" disabled>
-                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="7" y="7" width="11" height="12" rx="1.5"/><path d="M15 7V5H5v11h2"/></svg>
-                            Copy all (0)
-                        </button>
-                        <button type="button" data-tooltip="Open files" aria-label="Open files unavailable" disabled>
-                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 3.5h8l4 4v13H6v-17Z"/><path d="M14 3.5v4h4M9 12h6M12 9v6"/><path d="m18 13 3 2-3 2"/></svg>
-                            Open all (0)
-                        </button>
-                        {% endif %}
+                        <span class="visually-hidden" role="status" aria-live="polite" aria-atomic="true" data-selected-pdf-bulk-status></span>
                         <button type="button" data-tooltip="Export list" aria-label="Export list unavailable" disabled>
                             <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v12M8 11l4 4 4-4M5 18.5h14"/></svg>
                             Export list
@@ -609,7 +606,7 @@
 
 {% block scripts %}
 <script src="{% static 'bitbucket_search/pdf_pipeline_dashboard.js' %}?v=pipeline-dashboard-v1" defer></script>
-<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=repository-url-connection-v1" defer></script>
+<script src="{% static 'bitbucket_search/bitbucket_search.js' %}?v=pdf-selection-actions-v1" defer></script>
 <script src="{% static 'bitbucket_search/people_sort.js' %}?v=people-sort-v1" defer></script>
 <script src="{% static 'bitbucket_search/people_stars.js' %}?v=people-stars-v1" defer></script>
 <script src="{% static 'bitbucket_search/pdf_stars.js' %}?v=pdf-stars-v1" defer></script>

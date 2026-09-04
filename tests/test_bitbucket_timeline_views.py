@@ -87,7 +87,9 @@ def test_inventory_pages_contain_at_most_five_hundred_pdfs_without_auto_loading(
         (date(2025, 1, 1), "last-year", "Last Year"),
         (date(2024, 12, 31), "last-two-years", "Last 2 Years"),
         (date(2024, 8, 29), "last-two-years", "Last 2 Years"),
-        (date(2024, 8, 28), "year-2024", "2024"),
+        (date(2024, 8, 28), "last-three-years", "Last 3 Years"),
+        (date(2023, 8, 29), "last-three-years", "Last 3 Years"),
+        (date(2023, 8, 28), "year-2023", "2023"),
     ),
 )
 def test_timeline_buckets_are_exclusive_and_newest_first(value, expected_key, expected_label):
@@ -341,10 +343,10 @@ def test_timeline_orders_and_groups_by_the_displayed_date_source(monkeypatch):
 
     page, groups = views._pdf_timeline_page(1)
     assert [document.pk for document in page] == [unknown.pk, *list(reversed(dated_ids[1:]))]
-    assert [group.key for group in groups] == ["today", "year-2024"]
+    assert [group.key for group in groups] == ["today", "last-three-years"]
     page, groups = views._pdf_timeline_page(2)
     assert [document.pk for document in page] == [dated_ids[0]]
-    assert [group.key for group in groups] == ["year-2024"]
+    assert [group.key for group in groups] == ["last-three-years"]
 
 
 @override_settings(BITBUCKET_PDF_PAGE_SIZE=10)

@@ -6,6 +6,125 @@
         return;
     }
 
+    const connectionRecoveryDialog = workspace.querySelector(
+        "[data-connection-recovery-dialog]",
+    );
+    const connectionRecoveryForm = connectionRecoveryDialog?.querySelector(
+        "[data-connection-recovery-form]",
+    );
+    const connectionRecoveryRepository = connectionRecoveryDialog?.querySelector(
+        "[data-connection-recovery-repository]",
+    );
+    const connectionRecoveryDetail = connectionRecoveryDialog?.querySelector(
+        "[data-connection-recovery-detail]",
+    );
+    const connectionRecoveryRetry = connectionRecoveryDialog?.querySelector(
+        "[data-connection-recovery-retry]",
+    );
+    const connectionRecoveryCancel = connectionRecoveryDialog?.querySelector(
+        "[data-connection-recovery-cancel]",
+    );
+    const connectionFailureQueue = new Map();
+    const dismissedConnectionFailures = new Set();
+    const connectionFailureCodes = new Set([
+        "connection_auth_failed",
+        "connection_check_failed",
+        "connection_tls_failed",
+        "connection_timeout",
+        "connection_unreachable",
+        "https_credential_unavailable",
+    ]);
+    let activeConnectionFailure = null;
+
+    const connectionFailureStorageKey = (signature) =>
+        `owl.bitbucket.connectionFailureDismissed.${signature}`;
+    const connectionFailureWasDismissed = (signature) => {
+        if (dismissedConnectionFailures.has(signature)) return true;
+        try {
+            return window.sessionStorage?.getItem(
+                connectionFailureStorageKey(signature),
+            ) === "1";
+        } catch (_error) {
+            return false;
+        }
+    };
+    const rememberDismissedConnectionFailure = (signature) => {
+        dismissedConnectionFailures.add(signature);
+        try {
+            window.sessionStorage?.setItem(connectionFailureStorageKey(signature), "1");
+        } catch (_error) {
+            // A blocked session store must not prevent the user from closing the popup.
+        }
+    };
+    const connectionFailureSignature = (failure) => [
+        failure.id,
+        failure.failureCode,
+        failure.lastAttemptAt || failure.failureDetail,
+    ].join(":");
+    const closeConnectionRecoveryDialog = () => {
+        if (!connectionRecoveryDialog) return;
+        if (typeof connectionRecoveryDialog.close === "function" && connectionRecoveryDialog.open) {
+            connectionRecoveryDialog.close();
+        } else {
+            connectionRecoveryDialog.removeAttribute?.("open");
+        }
+    };
+    const showNextConnectionFailure = () => {
+        if (!connectionRecoveryDialog || activeConnectionFailure) return;
+        const next = connectionFailureQueue.entries().next();
+        if (next.done) return;
+        const [signature, failure] = next.value;
+        connectionFailureQueue.delete(signature);
+        if (connectionFailureWasDismissed(signature)) {
+            showNextConnectionFailure();
+            return;
+        }
+        activeConnectionFailure = { signature, failure };
+        if (connectionRecoveryRepository) {
+            connectionRecoveryRepository.textContent = failure.name || "Repository";
+        }
+        if (connectionRecoveryDetail) {
+            connectionRecoveryDetail.textContent = failure.failureDetail ||
+                "Git could not verify HTTPS repository access.";
+        }
+        if (connectionRecoveryForm) {
+            connectionRecoveryForm.action = failure.refreshUrl || "";
+        }
+        if (connectionRecoveryRetry) {
+            connectionRecoveryRetry.disabled = !failure.refreshUrl;
+        }
+        if (typeof connectionRecoveryDialog.showModal === "function") {
+            connectionRecoveryDialog.showModal();
+        } else {
+            connectionRecoveryDialog.setAttribute?.("open", "");
+        }
+    };
+    const queueConnectionFailure = (failure) => {
+        const failed = failure.gitSyncFailed === true || failure.gitSyncFailed === "true";
+        const isHTTPS = failure.isHTTPS === true || failure.isHTTPS === "true";
+        if (!failed || !isHTTPS || !connectionFailureCodes.has(failure.failureCode)) return;
+        const signature = connectionFailureSignature(failure);
+        if (
+            activeConnectionFailure?.signature === signature ||
+            connectionFailureQueue.has(signature) ||
+            connectionFailureWasDismissed(signature)
+        ) return;
+        connectionFailureQueue.set(signature, failure);
+        showNextConnectionFailure();
+    };
+    const dismissActiveConnectionFailure = () => {
+        if (!activeConnectionFailure) return;
+        rememberDismissedConnectionFailure(activeConnectionFailure.signature);
+        activeConnectionFailure = null;
+        closeConnectionRecoveryDialog();
+        showNextConnectionFailure();
+    };
+    connectionRecoveryCancel?.addEventListener("click", dismissActiveConnectionFailure);
+    connectionRecoveryDialog?.addEventListener("cancel", (event) => {
+        event.preventDefault();
+        dismissActiveConnectionFailure();
+    });
+
     // The durable pipeline snapshot owns activity, ETA and per-run repository
     // lifecycle UI. The older repository-status poll remains responsible for
     // catalogue totals and repository management controls only.
@@ -599,6 +718,11 @@
                 Number(repository.activity?.runningPdfs || 0),
             ));
             card.dataset.repositoryGitSyncFailed = String(Boolean(repository.gitSyncFailed));
+            card.dataset.repositoryIsHttps = String(Boolean(repository.isHTTPS));
+            card.dataset.repositoryFailureCode = repository.failureCode || "";
+            card.dataset.repositoryFailureDetail = repository.failureDetail || "";
+            card.dataset.repositoryLastAttemptAt = repository.lastAttemptAt || "";
+            card.dataset.repositoryRefreshUrl = repository.refreshUrl || "";
             card.dataset.repositoryPdfIndexFailedCount = String(
                 Number(repository.pdfIndexFailedCount || 0),
             );
@@ -686,6 +810,7 @@
                 retryRemoval.hidden = !repository.hasRemovalPending;
             }
         });
+        queueConnectionFailure(repository);
     };
 
     const updateTotals = (totals, repositories, automation) => {
@@ -909,6 +1034,23 @@
         window.clearTimeout(pollTimer);
         void poll();
     });
+
+    const initialConnectionFailures = new Map();
+    document.querySelectorAll("[data-repository-id]").forEach((card) => {
+        const id = card.dataset.repositoryId;
+        if (!id || initialConnectionFailures.has(id)) return;
+        initialConnectionFailures.set(id, {
+            id,
+            name: card.dataset.repositoryName || "Repository",
+            gitSyncFailed: card.dataset.repositoryGitSyncFailed,
+            isHTTPS: card.dataset.repositoryIsHttps,
+            failureCode: card.dataset.repositoryFailureCode || "",
+            failureDetail: card.dataset.repositoryFailureDetail || "",
+            lastAttemptAt: card.dataset.repositoryLastAttemptAt || "",
+            refreshUrl: card.dataset.repositoryRefreshUrl || "",
+        });
+    });
+    initialConnectionFailures.forEach(queueConnectionFailure);
 
     document.querySelectorAll("[data-repository-filter]").forEach((input) => {
         input.addEventListener("input", () => {
@@ -1286,19 +1428,86 @@
 
     const pdfSelectionCount = workspace.querySelector("[data-pdf-selection-count]");
     const selectAllPdfs = workspace.querySelector("[data-select-all-pdfs]");
+    const bulkResultActions = workspace.querySelector(".bb-result-actions");
+    const copySelectedPdfPathsButton = bulkResultActions?.querySelector(
+        "[data-copy-selected-pdf-paths]",
+    );
+    const copySelectedPdfLabel = copySelectedPdfPathsButton?.querySelector(
+        "[data-copy-selected-pdf-label]",
+    );
+    const bulkResultStatus = bulkResultActions?.querySelector(
+        "[data-selected-pdf-bulk-status]",
+    );
+    const openSelectedPdfsForm = bulkResultActions?.querySelector(
+        "[data-open-selected-pdfs-form]",
+    );
+    const openSelectedPdfsButton = openSelectedPdfsForm?.querySelector(
+        "[data-open-selected-pdfs-submit]",
+    );
+    const openSelectedPdfLabel = openSelectedPdfsButton?.querySelector(
+        "[data-open-selected-pdf-label]",
+    );
+    const openSelectedConfirmation = bulkResultActions?.querySelector(
+        "[data-open-selected-confirmation]",
+    );
+    const confirmedSelectedInput = openSelectedPdfsForm?.querySelector(
+        "[data-open-selected-confirmed]",
+    );
+    let copyingSelectedPdfPaths = false;
     const visiblePdfCheckboxes = () => Array.from(
         workspace.querySelectorAll("[data-pdf-select]"),
     ).filter((checkbox) => !checkbox.disabled && !checkbox.closest("[data-pdf-row]")?.hidden);
+    const selectedPdfRows = () => visiblePdfCheckboxes()
+        .filter((checkbox) => checkbox.checked)
+        .map((checkbox) => checkbox.closest("[data-pdf-row]"))
+        .filter(Boolean);
+    const announceBulkResult = (message) => {
+        if (bulkResultStatus) {
+            bulkResultStatus.textContent = "";
+            window.requestAnimationFrame(() => {
+                bulkResultStatus.textContent = message;
+            });
+        }
+    };
     const updatePdfSelection = () => {
         const checkboxes = visiblePdfCheckboxes();
         const selected = checkboxes.filter((checkbox) => checkbox.checked).length;
+        const pdfNoun = selected === 1 ? "PDF" : "PDFs";
         if (pdfSelectionCount) {
             pdfSelectionCount.hidden = selected === 0;
-            pdfSelectionCount.textContent = `${selected} PDF${selected === 1 ? "" : "s"} selected`;
+            pdfSelectionCount.textContent = `${selected} ${pdfNoun} selected`;
         }
         if (selectAllPdfs) {
+            selectAllPdfs.disabled = checkboxes.length === 0;
             selectAllPdfs.checked = checkboxes.length > 0 && selected === checkboxes.length;
             selectAllPdfs.indeterminate = selected > 0 && selected < checkboxes.length;
+        }
+        if (copySelectedPdfPathsButton) {
+            copySelectedPdfPathsButton.disabled = selected === 0 || copyingSelectedPdfPaths;
+            copySelectedPdfPathsButton.setAttribute(
+                "aria-label",
+                selected > 0
+                    ? `Copy paths for ${selected} selected ${pdfNoun}`
+                    : "Copy paths unavailable until PDFs are selected",
+            );
+        }
+        if (copySelectedPdfLabel) {
+            copySelectedPdfLabel.textContent = `Copy selected paths (${selected})`;
+        }
+        if (openSelectedPdfsButton) {
+            openSelectedPdfsButton.disabled = selected === 0;
+            openSelectedPdfsButton.setAttribute(
+                "aria-label",
+                selected > 0
+                    ? `Open ${selected} selected ${pdfNoun}`
+                    : "Open unavailable until PDFs are selected",
+            );
+        }
+        if (openSelectedPdfLabel) {
+            openSelectedPdfLabel.textContent = `Open selected (${selected})`;
+        }
+        if (confirmedSelectedInput) {
+            confirmedSelectedInput.value = "0";
         }
     };
     workspace.addEventListener("change", (event) => {
@@ -1310,6 +1519,7 @@
             updatePdfSelection();
         }
     });
+    updatePdfSelection();
 
     const pathCopyTimers = new WeakMap();
     const pendingPathCopies = new WeakSet();
@@ -1401,102 +1611,85 @@
         }
     });
 
-    const bulkResultActions = workspace.querySelector(".bb-result-actions");
-    const copyResultPathsButton = bulkResultActions?.querySelector(
-        "[data-copy-search-result-paths]",
-    );
-    const bulkResultStatus = bulkResultActions?.querySelector(
-        "[data-search-bulk-status]",
-    );
-    const openSearchResultsForm = bulkResultActions?.querySelector(
-        "[data-open-search-results-form]",
-    );
-    const openAllConfirmation = bulkResultActions?.querySelector(
-        "[data-open-all-confirmation]",
-    );
-
-    if (openSearchResultsForm) {
-        const resultCount = Number(openSearchResultsForm.dataset.resultCount || "0");
+    if (openSelectedPdfsForm) {
         const confirmationThreshold = Number(
-            openSearchResultsForm.dataset.confirmThreshold || "0",
+            openSelectedPdfsForm.dataset.confirmThreshold || "0",
         );
-        const confirmedInput = openSearchResultsForm.querySelector(
-            "[data-open-all-confirmed]",
-        );
-        const submitButton = openSearchResultsForm.querySelector(
-            "[data-open-search-results-submit]",
-        );
-
-        if (resultCount > confirmationThreshold && confirmedInput) {
-            openSearchResultsForm.addEventListener("submit", (event) => {
-                if (confirmedInput.value === "1") {
-                    return;
-                }
+        openSelectedPdfsForm.addEventListener("submit", (event) => {
+            const selectedCount = selectedPdfRows().length;
+            if (selectedCount === 0) {
                 event.preventDefault();
-
-                if (openAllConfirmation?.showModal) {
-                    openAllConfirmation.showModal();
-                    return;
-                }
-
-                if (
-                    window.confirm(
-                        `Open ${resultCount} PDFs from the current result page?`,
-                    )
-                ) {
-                    confirmedInput.value = "1";
-                    openSearchResultsForm.requestSubmit(submitButton || undefined);
-                }
-            });
-
-            openAllConfirmation
-                ?.querySelector("[data-confirm-open-search-results]")
-                ?.addEventListener("click", () => {
-                    confirmedInput.value = "1";
-                    openAllConfirmation.close();
-                    openSearchResultsForm.requestSubmit(submitButton || undefined);
-                });
-        }
-    }
-
-    if (bulkResultActions && copyResultPathsButton) {
-        const currentSearchResultPaths = () =>
-            Array.from(
-                workspace.querySelectorAll(
-                    "[data-search-result-row]:not([hidden]) [data-pdf-local-path]",
-                ),
-                (element) => element.dataset.pdfLocalPath || "",
-            ).filter((path) => path.length > 0);
-
-        const announceBulkResult = (message) => {
-            if (bulkResultStatus) {
-                bulkResultStatus.textContent = "";
-                window.requestAnimationFrame(() => {
-                    bulkResultStatus.textContent = message;
-                });
+                announceBulkResult("Select one or more PDFs first.");
+                updatePdfSelection();
+                return;
             }
-        };
+            if (
+                selectedCount <= confirmationThreshold
+                || confirmedSelectedInput?.value === "1"
+            ) {
+                return;
+            }
+            event.preventDefault();
 
-        copyResultPathsButton.addEventListener("click", async () => {
-            const paths = currentSearchResultPaths();
-            if (!paths.length) {
-                announceBulkResult("No PDF paths are available on this result page.");
+            const heading = openSelectedConfirmation?.querySelector(
+                "[data-open-selected-confirmation-heading]",
+            );
+            const confirmButton = openSelectedConfirmation?.querySelector(
+                "[data-confirm-open-selected-pdfs]",
+            );
+            if (heading) heading.textContent = `Open ${selectedCount} selected PDFs?`;
+            if (confirmButton) confirmButton.textContent = `Open ${selectedCount} PDFs`;
+
+            if (openSelectedConfirmation?.showModal) {
+                openSelectedConfirmation.showModal();
                 return;
             }
 
-            copyResultPathsButton.disabled = true;
+            if (window.confirm(`Open ${selectedCount} selected PDFs?`)) {
+                if (confirmedSelectedInput) confirmedSelectedInput.value = "1";
+                openSelectedPdfsForm.requestSubmit(openSelectedPdfsButton || undefined);
+            }
+        });
+
+        openSelectedConfirmation
+            ?.querySelector("[data-confirm-open-selected-pdfs]")
+            ?.addEventListener("click", () => {
+                if (confirmedSelectedInput) confirmedSelectedInput.value = "1";
+                openSelectedConfirmation.close();
+                openSelectedPdfsForm.requestSubmit(openSelectedPdfsButton || undefined);
+            });
+    }
+
+    if (bulkResultActions && copySelectedPdfPathsButton) {
+        copySelectedPdfPathsButton.addEventListener("click", async () => {
+            const rows = selectedPdfRows();
+            const paths = rows.map((row) => (
+                row.querySelector("[data-pdf-local-path]")?.dataset.pdfLocalPath || ""
+            )).filter((path) => path.length > 0);
+            if (!paths.length) {
+                announceBulkResult("No local paths are available for the selected PDFs.");
+                return;
+            }
+
+            copyingSelectedPdfPaths = true;
+            updatePdfSelection();
             try {
                 await copyText(paths.join("\n"));
+                const unavailableCount = rows.length - paths.length;
                 announceBulkResult(
-                    `${paths.length} PDF path${paths.length === 1 ? "" : "s"} copied.`,
+                    `${paths.length} PDF path${paths.length === 1 ? "" : "s"} copied.`
+                    + (unavailableCount > 0
+                        ? ` ${unavailableCount} selected path${unavailableCount === 1 ? " is" : "s are"} unavailable.`
+                        : ""),
                 );
             } catch (_error) {
                 announceBulkResult(
                     "PDF paths could not be copied. Check this browser's clipboard permission.",
                 );
             } finally {
-                copyResultPathsButton.disabled = false;
-                copyResultPathsButton.focus();
+                copyingSelectedPdfPaths = false;
+                updatePdfSelection();
+                copySelectedPdfPathsButton.focus();
             }
         });
     }

@@ -64,7 +64,7 @@ def test_loopback_repository_add_accepts_opaque_origin_with_valid_csrf_token(
         reverse("bitbucket_search:repository_add"),
         {
             "csrfmiddlewaretoken": token,
-            "repository_url": "git@bitbucket.org:workspace/architecture.git",
+            "repository_url": "https://bitbucket.org/workspace/architecture.git",
         },
         HTTP_ORIGIN="null",
     )
@@ -85,7 +85,7 @@ def test_opaque_origin_does_not_bypass_csrf_token_validation(monkeypatch):
 
     response = client.post(
         reverse("bitbucket_search:repository_add"),
-        {"repository_url": "git@bitbucket.org:workspace/architecture.git"},
+        {"repository_url": "https://bitbucket.org/workspace/architecture.git"},
         HTTP_ORIGIN="null",
     )
 
@@ -167,7 +167,7 @@ def test_opaque_origin_rejects_a_token_from_another_csrf_cookie(monkeypatch):
         reverse("bitbucket_search:repository_add"),
         {
             "csrfmiddlewaretoken": wrong_token,
-            "repository_url": "git@bitbucket.org:workspace/architecture.git",
+            "repository_url": "https://bitbucket.org/workspace/architecture.git",
         },
         HTTP_ORIGIN="null",
     )
@@ -203,7 +203,7 @@ def test_opaque_origin_remains_rejected_outside_loopback_host_and_client(
         reverse("bitbucket_search:repository_add"),
         {
             "csrfmiddlewaretoken": token,
-            "repository_url": "git@bitbucket.org:workspace/architecture.git",
+            "repository_url": "https://bitbucket.org/workspace/architecture.git",
         },
         HTTP_ORIGIN="null",
     )
@@ -224,7 +224,7 @@ def test_forwarded_loopback_address_does_not_replace_remote_address(monkeypatch)
         reverse("bitbucket_search:repository_add"),
         {
             "csrfmiddlewaretoken": token,
-            "repository_url": "git@bitbucket.org:workspace/architecture.git",
+            "repository_url": "https://bitbucket.org/workspace/architecture.git",
         },
         HTTP_ORIGIN="null",
         HTTP_X_FORWARDED_FOR="127.0.0.1",
@@ -254,7 +254,7 @@ def test_only_exact_null_over_loopback_http_receives_the_exception(origin, secur
         reverse("bitbucket_search:repository_add"),
         {
             "csrfmiddlewaretoken": token,
-            "repository_url": "git@bitbucket.org:workspace/architecture.git",
+            "repository_url": "https://bitbucket.org/workspace/architecture.git",
         },
         HTTP_ORIGIN=origin,
         secure=secure,
@@ -276,7 +276,7 @@ def test_non_null_foreign_origin_remains_rejected_on_loopback(monkeypatch):
         reverse("bitbucket_search:repository_add"),
         {
             "csrfmiddlewaretoken": token,
-            "repository_url": "git@bitbucket.org:workspace/architecture.git",
+            "repository_url": "https://bitbucket.org/workspace/architecture.git",
         },
         HTTP_ORIGIN="https://attacker.example",
     )

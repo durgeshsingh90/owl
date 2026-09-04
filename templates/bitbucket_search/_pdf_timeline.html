@@ -14,7 +14,7 @@
     {% with document=row.document %}
     <tr class="bb-document-row" id="pdf-document-{{ document.pk }}" data-pdf-row data-document-id="{{ document.pk }}" data-pdf-starred="{{ document.starred|yesno:'true,false' }}"{% if search_active %} data-search-result-row{% endif %}>
         <td class="bb-document-cell bb-document-cell--select" headers="bb-pdf-column-select">
-            <input type="checkbox" value="{{ document.pk }}" data-pdf-select aria-label="Select {{ document.filename }}">
+            <input type="checkbox" name="document_id" value="{{ document.pk }}" form="bb-open-selected-pdfs-form" data-pdf-select aria-label="Select {{ document.filename }}">
         </td>
         <td class="bb-document-cell bb-document-cell--name" headers="bb-pdf-column-name">
             <span class="bb-cell-label" aria-hidden="true">PDF</span>

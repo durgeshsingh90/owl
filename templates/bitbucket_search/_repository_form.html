@@ -1,6 +1,6 @@
 <form class="bb-repository-form" method="post" action="{% url 'bitbucket_search:repository_add' %}" data-repository-add-form>
     {% csrf_token %}
-    <label for="{{ form_id|default:'bb-repository-url' }}">SSH or HTTPS Git URLs</label>
+    <label for="{{ form_id|default:'bb-repository-url' }}">HTTPS Git URLs</label>
     <textarea
         id="{{ form_id|default:'bb-repository-url' }}"
         name="repository_url"
@@ -8,7 +8,7 @@
         autocomplete="off"
         autocapitalize="none"
         spellcheck="false"
-        placeholder="git@host:workspace/repository-one.git&#10;git@host:workspace/repository-two.git"
+        placeholder="https://bitbucket.org/workspace/repository-one.git&#10;https://bitbucket.org/workspace/repository-two.git"
         required
     ></textarea>
     <small>Paste one repository URL per line. Blank lines are ignored; up to 100 repositories can be added at once.</small>
@@ -23,5 +23,5 @@
         <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4v12M7 9l5-5 5 5M5 19h14"/></svg>
         Add &amp; clone in background
     </button>
-    <small>OWL clones once, then uses a safe fetch and fast-forward refresh.</small>
+    <small>HTTPS only. OWL clones once, then uses a safe fetch and fast-forward pull.</small>
 </form>

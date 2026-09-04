@@ -3360,7 +3360,7 @@ html.bb-operation-blocked { cursor: wait; }
     background: var(--bb-surface-soft);
 }
 
-.bb-open-all-dialog [data-confirm-open-search-results] {
+.bb-open-all-dialog [data-confirm-open-selected-pdfs] {
     border-color: var(--bb-amber);
     color: var(--bb-amber);
 }

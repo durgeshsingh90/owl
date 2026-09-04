@@ -150,9 +150,9 @@ def test_search_html_paginates_at_one_hundred_and_preserves_canonical_query(
     assert "chip=Guide" in html
     assert "page=2" in html
     assert "page_size=100" in html
-    assert "Copy page paths (100)" in html
-    assert "Open page PDFs (100)" in html
-    assert "Open 100 PDFs?" in html
+    assert "Copy selected paths (0)" in html
+    assert "Open selected (0)" in html
+    assert "Open selected PDFs?" in html
     assert 'data-confirm-threshold="10"' in html
 
     second_page = client.get(
@@ -163,9 +163,9 @@ def test_search_html_paginates_at_one_hundred_and_preserves_canonical_query(
 
     assert second_page.status_code == 200
     assert second_page_html.count("data-pdf-row") == 1
-    assert "Copy page paths (1)" in second_page_html
-    assert "Open page PDFs (1)" in second_page_html
-    assert "data-open-all-confirmation" not in second_page_html
+    assert "Copy selected paths (0)" in second_page_html
+    assert "Open selected (0)" in second_page_html
+    assert "data-open-selected-confirmation" in second_page_html
 
 
 def test_repository_filtered_search_honors_configured_page_size(client, settings):
@@ -191,7 +191,7 @@ def test_repository_filtered_search_honors_configured_page_size(client, settings
     assert "page_size=50" in html
 
 
-def test_search_bulk_actions_include_only_the_rendered_result_page(client):
+def test_pdf_bulk_actions_are_wired_to_each_rendered_result_checkbox(client):
     repository = _repository("Bulk actions")
     first = _indexed_pdf(
         repository,
@@ -210,41 +210,46 @@ def test_search_bulk_actions_include_only_the_rendered_result_page(client):
     html = response.content.decode()
 
     assert response.status_code == 200
-    assert "Copy page paths (2)" in html
-    assert "Open page PDFs (2)" in html
-    assert "data-copy-search-result-paths" in html
+    assert "Copy selected paths (0)" in html
+    assert "Open selected (0)" in html
+    assert "data-copy-selected-pdf-paths" in html
     assert 'role="status" aria-live="polite"' in html
     assert html.count("data-search-result-row") == 2
     assert html.count("data-pdf-local-path") == 2
+    assert html.count('name="document_id"') == 2
+    assert html.count('form="bb-open-selected-pdfs-form"') == 2
 
-    form_start = html.index("data-open-search-results-form")
+    form_start = html.index("data-open-selected-pdfs-form")
     form_end = html.index("</form>", form_start)
     form_html = html[form_start:form_end]
     assert f'action="{reverse("bitbucket_search:documents_open_all")}"' in html[:form_end]
     assert 'name="return_to" value="/pdfs/?q=shared"' in form_html
-    assert form_html.count('name="document_id"') == 2
-    assert f'name="document_id" value="{first.pk}"' in form_html
-    assert f'name="document_id" value="{second.pk}"' in form_html
+    assert 'name="document_id"' not in form_html
     assert 'name="csrfmiddlewaretoken"' in form_html
     assert 'name="confirmed" value="0"' in form_html
-    assert "data-open-all-confirmation" not in html
+    assert "data-open-selected-confirmation" in html
+    assert f'name="document_id" value="{first.pk}" form="bb-open-selected-pdfs-form"' in html
+    assert f'name="document_id" value="{second.pk}" form="bb-open-selected-pdfs-form"' in html
 
     inventory_html = client.get(reverse("bitbucket_search:index")).content.decode()
     empty_search_html = client.get(
         reverse("bitbucket_search:index"),
         {"q": "does not match anything"},
     ).content.decode()
-    for inactive_html in (inventory_html, empty_search_html):
-        assert "data-copy-search-result-paths" not in inactive_html
-        assert "data-open-search-results-form" not in inactive_html
+    assert "data-copy-selected-pdf-paths" in inventory_html
+    assert 'name="return_to" value="/pdfs/"' in inventory_html
+    assert "data-open-selected-pdfs-form" in inventory_html
+    assert "data-copy-selected-pdf-paths" in empty_search_html
+    assert "data-open-selected-pdfs-form" in empty_search_html
 
 
-def test_search_bulk_copy_uses_visible_result_paths_and_clipboard_fallback():
+def test_bulk_copy_uses_selected_pdf_paths_and_clipboard_fallback():
     javascript = (
         Path(__file__).parents[1] / "static" / "bitbucket_search" / "bitbucket_search.js"
     ).read_text(encoding="utf-8")
 
-    assert '"[data-search-result-row]:not([hidden]) [data-pdf-local-path]"' in javascript
+    assert 'row.querySelector("[data-pdf-local-path]")' in javascript
+    assert ".filter((checkbox) => checkbox.checked)" in javascript
     assert "navigator.clipboard?.writeText" in javascript
     assert 'paths.join("\\n")' in javascript
     assert 'document.createElement("textarea")' in javascript
@@ -266,15 +271,15 @@ def test_commit_copy_uses_full_id_and_accessible_feedback():
     assert "pendingCommitCopies" in javascript
 
 
-def test_large_search_page_requires_accessible_open_all_confirmation():
+def test_large_selection_requires_accessible_open_confirmation():
     javascript = (
         Path(__file__).parents[1] / "static" / "bitbucket_search" / "bitbucket_search.js"
     ).read_text(encoding="utf-8")
 
-    assert 'openSearchResultsForm.addEventListener("submit"' in javascript
-    assert "openAllConfirmation.showModal()" in javascript
+    assert 'openSelectedPdfsForm.addEventListener("submit"' in javascript
+    assert "openSelectedConfirmation.showModal()" in javascript
     assert "window.confirm(" in javascript
-    assert 'confirmedInput.value = "1"' in javascript
+    assert 'confirmedSelectedInput.value = "1"' in javascript
 
 
 def test_invalid_search_state_is_explained_without_disabling_search(client):
