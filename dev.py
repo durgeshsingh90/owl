@@ -1,292 +1,211 @@
 #!/usr/bin/env python3
-"""Start OWL's Django backend and Vite frontend together."""
+"""Manage OWL's static frontend and FastAPI backend on macOS/Linux."""
 
 from __future__ import annotations
 
 import argparse
+import fcntl
+import json
 import os
-import shutil
+from pathlib import Path
 import signal
 import socket
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
-from pathlib import Path
+import uuid
+from urllib.request import urlopen
 
-STOP_TIMEOUT_SECONDS = 10
-HOST = "127.0.0.1"
-DEFAULT_BACKEND_PORT = 8000
-DEFAULT_FRONTEND_PORT = 5173
-PORT_SEARCH_LIMIT = 100
-
-
-class StartupError(RuntimeError):
-    """A local service cannot be started from this checkout."""
+ROOT = Path(__file__).resolve().parent
+RUNTIME = ROOT / '.owl-dev'
+STATE = RUNTIME / 'state.json'
+HOST = '127.0.0.1'
 
 
-@dataclass(frozen=True)
-class Service:
-    name: str
-    command: tuple[str, ...]
-    working_directory: Path
-    environment: dict[str, str] | None = None
-
-
-def repository_root() -> Path:
-    return Path(__file__).resolve().parent
-
-
-def find_backend_python(root: Path) -> Path:
-    """Prefer the backend venv while accepting OWL's former root venv."""
-    relative = ("Scripts", "python.exe") if os.name == "nt" else ("bin", "python")
-    candidates = (
-        root / "backend" / ".venv" / Path(*relative),
-        root / ".venv" / Path(*relative),
-    )
-    return next(
-        (candidate for candidate in candidates if candidate.is_file()),
-        Path(sys.executable).absolute(),
-    )
-
-
-def _port_is_available(host: str, port: int) -> bool:
+def read_state():
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-            listener.bind((host, port))
-    except OSError:
+        return json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def owned(state):
+    """Check identity, not just a potentially recycled PID."""
+    if not state:
         return False
-    return True
-
-
-def find_available_port(host: str, preferred_port: int) -> int:
-    """Return the preferred local port, or the next bindable port."""
-    last_port = min(65_535, preferred_port + PORT_SEARCH_LIMIT)
-    for port in range(preferred_port, last_port + 1):
-        if _port_is_available(host, port):
-            return port
-    raise StartupError(
-        f"No available port was found from {preferred_port} through {last_port}."
+    result = subprocess.run(
+        ['ps', '-p', str(state['pid']), '-o', 'command='],
+        capture_output=True, text=True,
     )
+    return str(ROOT / 'dev.py') in result.stdout and state['token'] in result.stdout
 
 
-def services(
-    root: Path,
-    *,
-    backend_port: int = DEFAULT_BACKEND_PORT,
-    frontend_port: int = DEFAULT_FRONTEND_PORT,
-) -> tuple[Service, Service]:
-    backend = root / "backend"
-    frontend = root / "frontend"
-    backend_launcher = backend / "start.py"
-    frontend_manifest = frontend / "package.json"
+def python_path():
+    for path in (ROOT / 'backend/.venv/bin/python', ROOT / '.venv/bin/python'):
+        if path.is_file():
+            return str(path)
+    return sys.executable
 
-    if not backend_launcher.is_file():
-        raise StartupError(f"Django launcher was not found: {backend_launcher}")
-    if not frontend_manifest.is_file():
-        raise StartupError(
-            f"Frontend package manifest was not found: {frontend_manifest}"
+
+def stop():
+    state = read_state()
+    if not owned(state):
+        STATE.unlink(missing_ok=True)
+        print('OWL is stopped.')
+        return
+    # The supervisor and its children share a dedicated process group.
+    os.killpg(state['pid'], signal.SIGTERM)
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(state['pid'], 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.killpg(state['pid'], signal.SIGKILL)
+    STATE.unlink(missing_ok=True)
+    print('Stopped OWL frontend and backend.')
+
+
+def available(port):
+    with socket.socket() as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((HOST, port))
+        except OSError:
+            raise RuntimeError(f'Port {port} is in use. Stop its server or choose another port.')
+
+
+def show(state):
+    print(f"Frontend: http://{HOST}:{state['frontend_port']}/home/")
+    print(f"API docs: http://{HOST}:{state['backend_port']}/docs")
+    print(f'Logs: {RUNTIME}')
+
+
+def start(args):
+    state = read_state()
+    if owned(state):
+        print('OWL is already running.')
+        show(state)
+        return
+    if not (ROOT / 'backend/main.py').is_file() or not (ROOT / 'frontend/index.html').is_file():
+        raise RuntimeError('Expected backend/main.py and frontend/index.html.')
+    python = python_path()
+    check = subprocess.run([python, '-c', 'import fastapi, uvicorn'], capture_output=True)
+    if check.returncode:
+        raise RuntimeError(
+            'Install backend dependencies first:\n'
+            '  python3 -m venv backend/.venv\n'
+            '  backend/.venv/bin/python -m pip install -r backend/requirements.txt'
         )
-    if not (frontend / "node_modules").is_dir():
-        raise StartupError(
-            "Frontend packages are not installed. Run `cd frontend && npm ci`, "
-            "then start OWL again."
+    if args.frontend_port == args.backend_port:
+        raise RuntimeError('Frontend and backend ports must be different.')
+    for port in (args.frontend_port, args.backend_port):
+        available(port)
+    token = uuid.uuid4().hex
+    with (RUNTIME / 'supervisor.log').open('ab') as log:
+        process = subprocess.Popen(
+            [sys.executable, str(ROOT / 'dev.py'), '_serve', '--token', token,
+             '--frontend-port', str(args.frontend_port), '--backend-port', str(args.backend_port)],
+            cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+            start_new_session=True,
         )
-
-    npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
-    if npm is None:
-        raise StartupError(
-            "npm was not found on PATH. Install Node.js and npm, then try again."
-        )
-
-    frontend_environment = os.environ.copy()
-    frontend_environment["OWL_BACKEND_URL"] = f"http://{HOST}:{backend_port}"
-
-    return (
-        Service(
-            name="backend",
-            command=(
-                str(find_backend_python(root)),
-                str(backend_launcher),
-                f"{HOST}:{backend_port}",
-            ),
-            working_directory=backend,
-        ),
-        Service(
-            name="frontend",
-            command=(
-                npm,
-                "run",
-                "dev",
-                "--",
-                "--host",
-                HOST,
-                "--port",
-                str(frontend_port),
-                "--strictPort",
-            ),
-            working_directory=frontend,
-            environment=frontend_environment,
-        ),
-    )
-
-
-def prepare_backend(root: Path) -> None:
-    """Apply Django database updates before either development service starts."""
-    backend = root / "backend"
-    backend_launcher = backend / "start.py"
-    print("Checking OWL database updates...", flush=True)
+    state = dict(pid=process.pid, token=token, frontend_port=args.frontend_port,
+                 backend_port=args.backend_port)
+    STATE.write_text(json.dumps(state))
     try:
-        completed = subprocess.run(
-            (str(find_backend_python(root)), str(backend_launcher), "--prepare"),
-            cwd=backend,
-            check=False,
-        )
-    except OSError as error:
-        raise StartupError(
-            f"Django database preparation could not start: {error}"
-        ) from error
-    if completed.returncode:
-        raise StartupError(
-            "Django checks or database updates failed. Review the error above; "
-            "the frontend and backend were not started."
-        )
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError(f'OWL exited during startup. See logs in {RUNTIME}.')
+            try:
+                for port, path in ((args.frontend_port, '/home/'), (args.backend_port, '/openapi.json')):
+                    with urlopen(f'http://{HOST}:{port}{path}', timeout=0.5) as response:
+                        if response.status != 200:
+                            raise OSError('Service not ready')
+                print('Started OWL frontend and FastAPI backend.')
+                show(state)
+                return
+            except OSError:
+                time.sleep(0.2)
+        raise RuntimeError(f'Startup timed out. See logs in {RUNTIME}.')
+    except BaseException:
+        stop()
+        raise
 
 
-def _process_options() -> dict[str, object]:
-    if os.name == "nt":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-    return {"start_new_session": True}
+def serve(args):
+    running = True
+    children = []
+    logs = []
 
+    def shutdown(_signal, _frame):
+        nonlocal running
+        running = False
 
-def _signal_process_group(
-    process: subprocess.Popen[bytes], requested_signal: int
-) -> None:
-    if process.poll() is not None:
-        return
-    if os.name == "nt":
-        if requested_signal == signal.SIGINT:
-            process.send_signal(signal.CTRL_BREAK_EVENT)
-        elif requested_signal == signal.SIGTERM:
-            process.terminate()
-        else:
-            process.kill()
-        return
-    os.killpg(process.pid, requested_signal)
-
-
-def stop_process(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
     try:
-        _signal_process_group(process, signal.SIGINT)
-        process.wait(timeout=STOP_TIMEOUT_SECONDS)
-        return
-    except OSError:
-        return
-    except subprocess.TimeoutExpired:
-        pass
-
-    try:
-        _signal_process_group(process, signal.SIGTERM)
-        process.wait(timeout=5)
-        return
-    except OSError:
-        return
-    except subprocess.TimeoutExpired:
-        pass
-
-    try:
-        if os.name == "nt":
-            process.kill()
-        else:
-            os.killpg(process.pid, signal.SIGKILL)
-        process.wait(timeout=2)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-
-
-def run(root: Path) -> int:
-    processes: list[tuple[Service, subprocess.Popen[bytes]]] = []
-    try:
-        backend_port = find_available_port(HOST, DEFAULT_BACKEND_PORT)
-        frontend_port = find_available_port(HOST, DEFAULT_FRONTEND_PORT)
-        if backend_port != DEFAULT_BACKEND_PORT:
-            print(
-                f"Backend port {DEFAULT_BACKEND_PORT} is busy; using {backend_port}.",
-                flush=True,
-            )
-        if frontend_port != DEFAULT_FRONTEND_PORT:
-            print(
-                f"Frontend port {DEFAULT_FRONTEND_PORT} is busy; using {frontend_port}.",
-                flush=True,
-            )
-        service_definitions = services(
-            root,
-            backend_port=backend_port,
-            frontend_port=frontend_port,
-        )
-        prepare_backend(root)
-        for service in service_definitions:
-            print(f"Starting OWL {service.name}...", flush=True)
-            process_options = _process_options()
-            if service.environment is not None:
-                process_options["env"] = service.environment
-            process = subprocess.Popen(
-                service.command,
-                cwd=service.working_directory,
-                **process_options,
-            )
-            processes.append((service, process))
-
-        print(
-            f"OWL is starting. Open http://{HOST}:{frontend_port}/static/. "
-            "Press Ctrl+C to stop both frontend and backend.",
-            flush=True,
-        )
-        while True:
-            for service, process in processes:
-                return_code = process.poll()
-                if return_code is not None:
-                    print(
-                        f"OWL {service.name} stopped with exit code {return_code}.",
-                        file=sys.stderr,
-                    )
-                    return return_code or 1
+        commands = [
+            ('backend', [python_path(), '-m', 'uvicorn', 'main:app', '--host', HOST,
+                         '--port', str(args.backend_port), '--reload', '--reload-dir', str(ROOT / 'backend')], ROOT / 'backend'),
+            ('frontend', [sys.executable, '-u', '-m', 'http.server', str(args.frontend_port),
+                          '--bind', HOST, '--directory', str(ROOT / 'frontend')], ROOT),
+        ]
+        for name, command, cwd in commands:
+            log = (RUNTIME / f'{name}.log').open('ab')
+            logs.append(log)
+            children.append(subprocess.Popen(command, cwd=cwd, stdout=log, stderr=log,
+                                             stdin=subprocess.DEVNULL))
+        while running and all(child.poll() is None for child in children):
             time.sleep(0.2)
-    except KeyboardInterrupt:
-        print("\nStopping OWL frontend and backend...", flush=True)
-        return 130
-    except OSError as error:
-        raise StartupError(f"An OWL service could not be started: {error}") from error
     finally:
-        for _service, process in reversed(processes):
-            stop_process(process)
+        # Also reaches the Uvicorn reload child, including when one service crashes.
+        os.killpg(os.getpgrp(), signal.SIGTERM)
+        deadline = time.monotonic() + 8
+        for child in children:
+            try:
+                child.wait(timeout=max(0.1, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgrp(), signal.SIGKILL)
+        for log in logs:
+            log.close()
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Start OWL's backend and frontend together."
-    )
-    parser.add_argument(
-        "command",
-        nargs="?",
-        default="start",
-        choices=("start",),
-        help="start both Django and Vite",
-    )
-    return parser
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', nargs='?', default='start', choices=['start', 'stop', 'restart', 'status', '_serve'])
+    parser.add_argument('--frontend-port', type=int, default=8771)
+    parser.add_argument('--backend-port', type=int, default=8000)
+    parser.add_argument('--token', help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if not all(1 <= port <= 65535 for port in (args.frontend_port, args.backend_port)):
+        parser.error('Ports must be between 1 and 65535.')
+    if args.command == '_serve':
+        if not args.token:
+            parser.error('Internal command requires a token.')
+        serve(args)
+        return
+    RUNTIME.mkdir(exist_ok=True)
+    with (RUNTIME / 'control.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if args.command == 'status':
+            state = read_state()
+            print('OWL is running.' if owned(state) else 'OWL is stopped.')
+            if owned(state):
+                show(state)
+        elif args.command == 'stop':
+            stop()
+        else:
+            if args.command == 'restart':
+                stop()
+            start(args)
 
 
-def main(argv: list[str] | None = None) -> int:
-    arguments = sys.argv[1:] if argv is None else argv
-    _parser().parse_args(arguments)
+if __name__ == '__main__':
     try:
-        return run(repository_root())
-    except StartupError as error:
-        print(f"OWL could not start: {error}", file=sys.stderr)
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+        main()
+    except (RuntimeError, OSError) as error:
+        print(f'OWL: {error}', file=sys.stderr)
+        sys.exit(1)

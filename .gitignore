@@ -250,3 +250,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local development processes and logs
+.owl-dev/
