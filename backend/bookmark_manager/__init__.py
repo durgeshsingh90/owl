@@ -1,1 +1,0 @@
-"""Confluence bookmark management application."""

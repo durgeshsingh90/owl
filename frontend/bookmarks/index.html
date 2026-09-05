@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>OWL · Bookmarks Manager</title>
+    <script src="../bitbucket/theme.js"></script>
+    <link rel="stylesheet" href="../bitbucket/style.css" />
+    <link rel="stylesheet" href="style.css?v=toolbar-margin-fix-6" />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&amp;icon_names=settings,sync"
+    />
+  </head>
+  <body>
+    <svg
+      class="connection-filter-defs"
+      width="0"
+      height="0"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <defs>
+        <filter id="connection-remove-white" color-interpolation-filters="sRGB">
+          <feColorMatrix
+            in="SourceGraphic"
+            type="matrix"
+            values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  -10 -10 -10 0 30"
+            result="whiteRemoved"
+          />
+          <feComposite in="whiteRemoved" in2="SourceGraphic" operator="in" />
+        </filter>
+      </defs>
+    </svg>
+    <header class="topbar">
+      <a
+        class="brand"
+        href="../home/"
+        aria-label="OWL homepage"
+        title="Go to OWL homepage"
+        ><img
+          class="brand-logo"
+          src="../bitbucket/assets/owl.png"
+          alt=""
+          width="36"
+          height="36"
+        />
+        <div>
+          <span class="brand-eyebrow">OWL</span
+          ><strong>Bookmarks Manager</strong>
+        </div></a
+      >
+      <form class="global-search" id="bookmark-search-form">
+        <input
+          id="bookmark-search"
+          type="search"
+          placeholder="Search bookmarks or paste a URL to add…"
+          aria-label="Search bookmarks or paste a URL to add"
+          autocomplete="off"
+        /><button id="add-bookmark" type="submit" hidden>Add bookmark ↵</button>
+      </form>
+      <div class="topbar-status" id="connection-status" data-state="connecting">
+        <button
+          id="import-bookmarks"
+          class="connection-test"
+          type="button"
+          aria-label="Import bookmarks"
+          title="Import bookmarks"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5" />
+          </svg></button
+        ><button
+          id="settings-button"
+          class="connection-test"
+          aria-label="Confluence settings"
+          title="Confluence settings"
+        >
+          <span class="material-symbols-outlined" aria-hidden="true"
+            >settings</span
+          ></button
+        ><button
+          id="theme-toggle"
+          class="connection-test"
+          aria-label="Switch color theme"
+        >
+          <span class="theme-glyph" aria-hidden="true">◐</span
+          ><svg class="theme-sun" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="4" />
+            <path
+              d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"
+            /></svg
+          ><svg class="theme-moon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z" />
+          </svg></button
+        ><button
+          id="test-connection"
+          class="connection-test"
+          type="button"
+          aria-label="Checking Confluence connection"
+          title="Checking Confluence connection"
+          disabled
+        >
+          <img
+            id="connection-image"
+            src="../bitbucket/assets/no-connection.gif"
+            width="36"
+            height="36"
+            alt=""
+          /></button
+        ><span
+          id="connection-label"
+          class="visually-hidden"
+          role="status"
+          aria-live="polite"
+          >Checking Confluence connection</span
+        >
+      </div>
+    </header>
+    <main class="workspace">
+      <aside
+        class="left-sidebar"
+        id="bookmark-sidebar"
+        aria-label="Bookmark navigation"
+      >
+        <div class="sidebar-heading">
+          <div>
+            <p class="eyebrow">Workspace</p>
+            <h1>Bookmarks</h1>
+          </div>
+        </div>
+        <nav id="bookmark-views" aria-label="Bookmark views"></nav>
+        <div class="domain-heading">
+          <h2>Domains</h2>
+          <button
+            id="new-domain-group"
+            type="button"
+            aria-label="New domain group"
+            title="New domain group"
+          >
+            +</button
+          ><button id="clear-domain" type="button" hidden>Clear</button>
+        </div>
+        <div id="domain-groups"></div>
+        <nav id="bookmark-domains" aria-label="Filter by domain"></nav>
+      </aside>
+      <section class="main-panel" aria-labelledby="bookmark-title">
+        <div class="content-header">
+          <div class="selection-copy">
+            <div class="selection-breadcrumb">
+              Bookmarks / <span id="view-breadcrumb">All bookmarks</span>
+            </div>
+            <h2 id="bookmark-title">Bookmark Tree</h2>
+            <p id="bookmark-summary" aria-live="polite"></p>
+          </div>
+          <span id="bookmark-last-update" class="bookmark-last-update"
+            >Last update all: unavailable</span
+          >
+        </div>
+        <section class="table-panel">
+          <div class="tree-heading">
+            <span
+              id="bookmark-refresh-status"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></span>
+            <div class="tree-toolbar-controls">
+              <div
+                class="bookmark-bulk"
+                role="group"
+                aria-label="Select and open bookmarks"
+              >
+                <label for="select-all-bookmarks">Select all</label
+                ><span id="bookmark-selection-count">0 selected</span
+                ><input id="select-all-bookmarks" type="checkbox" /><button
+                  id="open-selected-bookmarks"
+                  class="folder-button"
+                  type="button"
+                  aria-label="Open selected bookmarks"
+                  title="Open selected bookmarks"
+                  disabled
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M14 3h7v7M21 3 10 14M10 5H4v15h15v-6" />
+                  </svg>
+                </button>
+              </div>
+              <div
+                class="bookmark-bulk"
+                role="group"
+                aria-label="Update and delete bookmarks"
+              >
+                <button
+                  id="update-all-bookmarks"
+                  class="folder-button"
+                  type="button"
+                  aria-label="Update all bookmarks"
+                  title="Update all saved bookmarks"
+                >
+                  <span class="material-symbols-outlined" aria-hidden="true"
+                    >sync</span
+                  ></button
+                ><button
+                  id="delete-selected-bookmarks"
+                  class="folder-button"
+                  type="button"
+                  aria-label="Delete selected bookmarks"
+                  title="Delete selected bookmarks"
+                  disabled
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7"
+                    />
+                  </svg>
+                </button>
+              </div>
+              <div
+                class="bookmark-bulk"
+                role="group"
+                aria-label="Expand and collapse tree"
+              >
+                <button
+                  id="expand-bookmark-tree"
+                  class="folder-button"
+                  type="button"
+                  aria-label="Expand all"
+                  title="Expand all"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m8 7 4-4 4 4M12 3v7m-4 7 4 4 4-4m-4 4v-7" />
+                  </svg></button
+                ><button
+                  id="collapse-bookmark-tree"
+                  class="folder-button"
+                  type="button"
+                  aria-label="Collapse all"
+                  title="Collapse all"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m8 3 4 4 4-4M12 7V1m-4 20 4-4 4 4m-4-4v6" />
+                  </svg>
+                </button>
+              </div>
+              <span id="filter-description"
+                >Your saved pages, in one place.</span
+              ><label
+                ><span class="visually-hidden">Sort bookmarks</span
+                ><select id="bookmark-sort">
+                  <option value="added">Recently added</option>
+                  <option value="viewed">Recently viewed</option>
+                  <option value="opens">Most viewed</option>
+                  <option value="title">Title A–Z</option>
+                </select></label
+              >
+            </div>
+          </div>
+          <div class="table-scroll bookmark-tree-scroll">
+            <div id="bookmark-tree" aria-label="Bookmark hierarchy"></div>
+            <p id="bookmark-empty" hidden>No bookmarks match this view.</p>
+          </div>
+          <footer class="pagination-bar">
+            <span id="bookmark-total"></span
+            ><span>Favourites and pins are saved on this browser.</span>
+          </footer>
+        </section>
+      </section>
+      <aside
+        class="page-details-sidebar"
+        id="bookmark-details-sidebar"
+        aria-labelledby="page-details-heading"
+      >
+        <div class="page-details-heading">
+          <p class="eyebrow">Selected bookmark</p>
+          <h2 id="page-details-heading">Page details</h2>
+        </div>
+        <div id="page-details-empty">
+          Select a bookmark to view its notes and page details.
+        </div>
+        <div id="page-details-content" hidden>
+          <section class="page-notes">
+            <label for="page-note">Notes</label
+            ><textarea
+              id="page-note"
+              rows="6"
+              placeholder="Add your notes for this page…"
+            ></textarea>
+            <p id="page-note-status" role="status" aria-live="polite">
+              Notes are saved on this browser.
+            </p>
+          </section>
+          <section
+            id="detail-authorship"
+            aria-label="Confluence authors and edit dates"
+          ></section>
+          <h3 id="detail-title"></h3>
+          <p id="detail-description"></p>
+          <dl id="detail-metadata"></dl>
+          <a id="detail-open" target="_blank" rel="noopener noreferrer"
+            >Open page ↗</a
+          >
+        </div>
+      </aside>
+      <aside
+        class="right-sidebar"
+        id="bookmark-people-sidebar"
+        aria-labelledby="confluence-people-title"
+      >
+        <div class="confluence-people-heading">
+          <div>
+            <p class="eyebrow">Confluence</p>
+            <h2 id="confluence-people-title">
+              People <span id="confluence-people-count"></span>
+            </h2>
+          </div>
+          <button id="all-confluence-people" type="button">All people</button>
+        </div>
+        <input
+          id="confluence-people-search"
+          type="search"
+          placeholder="Search people…"
+          aria-label="Search Confluence people"
+        />
+        <p class="people-explanation">Sample page authors and latest editors</p>
+        <div id="confluence-people"></div>
+        <p id="confluence-people-empty" hidden>
+          No Confluence people match this view.
+        </p>
+      </aside>
+    </main>
+    <dialog id="domain-group-dialog" aria-labelledby="domain-group-title">
+      <form id="domain-group-form">
+        <div class="settings-heading">
+          <h2 id="domain-group-title">New domain group</h2>
+          <button
+            id="domain-group-close"
+            type="button"
+            aria-label="Close domain group"
+          >
+            ×
+          </button>
+        </div>
+        <label for="domain-group-name">Group name</label
+        ><input
+          id="domain-group-name"
+          type="text"
+          maxlength="80"
+          required
+          autocomplete="off"
+        />
+        <p class="settings-description">
+          Select the domains to include. Edit this group later to rename it or
+          change its domains.
+        </p>
+        <div id="domain-group-options"></div>
+        <p id="domain-group-feedback" role="status"></p>
+        <div class="settings-actions">
+          <button type="submit">Save group</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog
+      id="delete-bookmarks-dialog"
+      aria-labelledby="delete-bookmarks-title"
+    >
+      <form id="delete-bookmarks-form">
+        <div class="settings-heading">
+          <h2 id="delete-bookmarks-title">Delete selected bookmarks</h2>
+          <button
+            id="delete-bookmarks-close"
+            type="button"
+            aria-label="Cancel deletion"
+          >
+            ×
+          </button>
+        </div>
+        <p>
+          Only the selected bookmarks will be removed from this browser. Source
+          pages will not be deleted.
+        </p>
+        <ul id="delete-bookmark-list"></ul>
+        <label
+          ><input id="delete-bookmarks-unlock" type="checkbox" /> Unlock
+          deletion</label
+        >
+        <p>Type this exact lowercase phrase to confirm:</p>
+        <button id="copy-bookmark-delete-phrase" type="button">
+          delete all</button
+        ><input
+          id="delete-bookmarks-phrase"
+          aria-label="Deletion confirmation phrase"
+          autocomplete="off"
+          autocapitalize="none"
+          spellcheck="false"
+          disabled
+        />
+        <p id="delete-bookmarks-feedback" role="status"></p>
+        <div class="settings-actions">
+          <button id="delete-bookmarks-confirm" type="submit" disabled>
+            Delete selected
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="bookmark-import-dialog" aria-labelledby="import-title">
+      <div class="settings-heading">
+        <h2 id="import-title">Import bookmarks</h2>
+        <button id="import-close" type="button" aria-label="Close import">
+          ×
+        </button>
+      </div>
+      <p class="settings-description">
+        Choose a bookmark HTML export from Chrome, Edge, Firefox or Safari.
+        Folders and nested folders from your export will be preserved. Domain
+        filters remain available.
+      </p>
+      <input
+        id="bookmark-import-file"
+        type="file"
+        accept=".html,.htm,text/html"
+        aria-label="Bookmark HTML file"
+      />
+      <p id="import-feedback" role="status">
+        Imported bookmarks are saved in this browser.
+      </p>
+      <div class="settings-actions">
+        <button id="import-confirm" type="button" disabled>
+          Import bookmarks
+        </button>
+      </div>
+    </dialog>
+    <dialog id="confluence-settings" aria-labelledby="settings-title">
+      <form id="confluence-form">
+        <div class="settings-heading">
+          <div>
+            <p class="eyebrow">Connection settings</p>
+            <h2 id="settings-title">Confluence</h2>
+          </div>
+          <button id="settings-close" type="button" aria-label="Close settings">
+            ×
+          </button>
+        </div>
+        <p class="settings-description">
+          Connect your Confluence pages using a Personal Access Token.
+        </p>
+        <label for="confluence-url">Base URL</label
+        ><input
+          id="confluence-url"
+          name="base_url"
+          type="url"
+          placeholder="https://confluence.example.com/wiki"
+          required
+          autocomplete="url"
+        /><label for="confluence-pat">Personal Access Token</label
+        ><input
+          id="confluence-pat"
+          name="personal_access_token"
+          type="password"
+          autocomplete="new-password"
+          spellcheck="false"
+        /><input name="auth_mode" type="hidden" value="bearer" /><input
+          id="verification-receipt"
+          name="verification_receipt"
+          type="hidden"
+        />
+        <p class="token-help">
+          Leave blank to keep a saved PAT. A new connection requires a PAT.
+          Tokens are cleared when this window closes.
+        </p>
+        <p id="settings-feedback" role="status" aria-live="polite"></p>
+        <div class="settings-actions">
+          <button id="confluence-test" type="button">Test connection</button
+          ><button id="confluence-save" class="primary-button" type="submit">
+            Save details
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <div id="bookmark-toast" role="status" aria-live="polite"></div>
+    <script src="sample-data.js"></script>
+    <script src="sample-config.js"></script>
+    <script src="domain-groups.js"></script>
+    <script src="script.js?v=domain-groups-1"></script>
+    <script src="connection.js"></script>
+    <script src="settings.js"></script>
+    <script src="import.js"></script>
+    <script src="bulk.js"></script>
+    <script src="refresh.js"></script>
+  </body>
+</html>

@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OWL · Home</title>
+    <meta
+      name="description"
+      content="Your OWL apps, repository insights and document activity in one place."
+    />
+    <script src="../bitbucket/theme.js"></script>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <aside class="rail">
+      <a class="brand" href="./"
+        ><img src="../bitbucket/assets/owl.png" alt="" /><strong>OWL</strong></a
+      ><span class="rail-label">WORKSPACE</span
+      ><a class="nav active" href="./"><span>⌂</span> Overview</a
+      ><a class="nav" href="../bitbucket/"
+        ><span>▱</span> Bitbucket <span class="arrow">↗</span></a
+      ><a class="nav" href="../bookmarks/"
+        ><span>▣</span> Bookmarks <span class="arrow">↗</span></a
+      >
+      <div class="rail-bottom">
+        <div class="avatar">O</div>
+        <div>OWL workspace<small>Your knowledge, connected.</small></div>
+      </div>
+    </aside>
+    <div class="page">
+      <header>
+        <span>Workspace <span class="slash">/</span> Overview</span>
+        <div class="header-actions">
+          <span class="sample-badge">Sample data</span
+          ><button id="theme-toggle" aria-label="Switch color theme">
+            <span>◐</span>
+          </button>
+        </div>
+      </header>
+      <main>
+        <div class="section-heading apps-heading">
+          <div>
+            <p class="eyebrow">OWL WORKSPACE</p>
+            <h1>Your apps <span class="app-total">02</span></h1>
+            <p class="apps-description">
+              Everything you work with, in one place.
+            </p>
+          </div>
+        </div>
+        <section class="app-area" aria-label="Your apps">
+          <a class="app-card" href="../bitbucket/"
+            ><div class="app-icon">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M3 4h18l-3 16H6L3 4Zm6 6 1 5h4l1-5H9Z" />
+              </svg>
+            </div>
+            <div>
+              <div class="app-title">
+                <h3>Bitbucket</h3>
+                <span>PDF explorer</span>
+              </div>
+              <p>
+                Find PDFs across repositories.<br />Explore projects, people and
+                document history.
+              </p>
+            </div>
+            <span class="launch">Open app ↗</span></a
+          >
+          <a class="app-card bookmark-card" href="../bookmarks/"
+            ><div class="app-icon">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 3h12v18l-6-4-6 4V3Z" />
+              </svg>
+            </div>
+            <div>
+              <div class="app-title">
+                <h3>Bookmarks</h3>
+                <span>Saved links</span>
+              </div>
+              <p>
+                Keep useful links together.<br />Find and organise your saved
+                resources.
+              </p>
+            </div>
+            <span class="launch">Open app ↗</span></a
+          >
+        </section>
+        <div class="section-heading statistics-heading">
+          <h2>Workspace statistics</h2>
+          <span>Grouped by app</span>
+        </div>
+        <section
+          class="app-statistics"
+          aria-labelledby="bitbucket-statistics-title"
+        >
+          <div class="statistics-app-heading">
+            <h2 id="bitbucket-statistics-title">Bitbucket statistics</h2>
+            <span class="sample-badge">Sample data</span>
+          </div>
+          <form class="statistics-range" id="statistics-range">
+            <label
+              >Activity period
+              <select id="activity-period">
+                <option value="month">This month</option>
+                <option value="last-month">Last month</option>
+                <option value="custom">Custom</option>
+                <option value="all">All time</option>
+              </select></label
+            >
+            <div id="custom-period" hidden>
+              <label>From <input id="activity-from" type="date" /></label
+              ><label>To <input id="activity-to" type="date" /></label
+              ><button type="submit">Apply</button>
+            </div>
+            <span id="period-label" aria-live="polite"></span
+            ><span id="range-error" role="alert"></span>
+          </form>
+          <section
+            class="metrics"
+            id="metrics"
+            aria-label="Bitbucket statistics"
+          ></section>
+          <div class="insight">
+            <p class="eyebrow">WORKSPACE INSIGHT</p>
+            <h3 id="insight-title"></h3>
+            <p id="insight-copy"></p>
+            <a href="../bitbucket/">Explore the library <span>→</span></a>
+          </div>
+          <section class="analytics">
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Top 10 active repositories</h2>
+                <span class="ranking-period"></span>
+              </div>
+              <div id="active-repos" class="ranking-list"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Top 20 active contributors</h2>
+                <span class="ranking-period"></span>
+              </div>
+              <div id="contributors" class="ranking-list"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Top 20 most opened PDFs</h2>
+                <span class="ranking-period"></span>
+              </div>
+              <div id="popular" class="ranking-list"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Latest 10 commits</h2>
+                <span class="ranking-period"></span>
+              </div>
+              <div id="recent" class="ranking-list"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Inactive repositories</h2>
+                <span>As of today · over 3 months</span>
+              </div>
+              <div id="inactive-repos"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Sync health</h2>
+                <span>Current status</span>
+              </div>
+              <div class="health-grid">
+                <div>Successful<strong>—</strong></div>
+                <div>Failed<strong>—</strong></div>
+                <div>Pending<strong>—</strong></div>
+              </div>
+              <p class="empty-stat">
+                Last successful sync: unavailable. Live sync is not connected.
+              </p>
+            </article>
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Documents by project</h2>
+                <span>All-time PDF totals</span>
+              </div>
+              <div id="project-bars" class="project-bars"></div>
+              <div class="panel-foot">
+                Repository totals include documents beyond the 21 preview
+                records.
+              </div>
+            </article>
+          </section>
+        </section>
+        <section
+          class="bookmarks-statistics"
+          aria-labelledby="bookmarks-statistics-title"
+        >
+          <div class="statistics-app-heading">
+            <h2 id="bookmarks-statistics-title">Bookmarks statistics</h2>
+            <span class="sample-badge"
+              >This browser · includes sample bookmarks</span
+            ><a class="bookmark-app-link" href="../bookmarks/">Open app ↗</a>
+          </div>
+          <div id="bookmark-stat-metrics" class="metrics"></div>
+          <section class="analytics">
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Most viewed bookmarks</h2>
+                <span>All-time local opens</span>
+              </div>
+              <div id="bookmark-stat-popular" class="ranking-list"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Most viewed groups</h2>
+                <span>All-time local opens</span>
+              </div>
+              <div id="bookmark-stat-groups" class="ranking-list"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Bookmarks by domain</h2>
+                <span>Current library</span>
+              </div>
+              <div id="bookmark-stat-domains" class="ranking-list"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Recently added bookmarks</h2>
+                <span id="bookmark-stat-period"></span>
+              </div>
+              <div id="bookmark-stat-recent" class="ranking-list"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading">
+                <h2>Bookmark health & organisation</h2>
+                <span>This browser</span>
+              </div>
+              <div id="bookmark-stat-health"></div>
+            </article>
+          </section>
+        </section>
+        <footer>
+          OWL <span>Designed for a clearer view of your work.</span
+          ><span>Sample overview · September 2026</span>
+        </footer>
+      </main>
+    </div>
+    <script src="sample-data.js"></script>
+    <script src="script.js"></script>
+    <script src="../bookmarks/sample-data.js"></script>
+    <script src="../bookmarks/sample-config.js"></script>
+    <script src="bookmark-stats.js"></script>
+  </body>
+</html>

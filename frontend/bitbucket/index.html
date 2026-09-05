@@ -1,0 +1,973 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="A frontend prototype for exploring PDF documents across Bitbucket projects and repositories."
+    />
+    <title>Bitbucket PDF Explorer</title>
+    <script src="theme.js"></script>
+    <script src="sidebars.js"></script>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <svg
+      class="connection-filter-defs"
+      width="0"
+      height="0"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <defs>
+        <filter id="connection-remove-white" color-interpolation-filters="sRGB">
+          <feColorMatrix
+            in="SourceGraphic"
+            type="matrix"
+            values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  -10 -10 -10 0 30"
+            result="whiteRemoved"
+          />
+          <feComposite in="whiteRemoved" in2="SourceGraphic" operator="in" />
+        </filter>
+      </defs>
+    </svg>
+    <div class="app-shell">
+      <header class="topbar">
+        <a
+          class="brand"
+          href="../home/"
+          aria-label="OWL homepage"
+          title="Go to OWL homepage"
+        >
+          <img
+            class="brand-logo"
+            src="assets/owl.png"
+            width="36"
+            height="36"
+            alt=""
+          />
+          <span class="brand-copy">
+            <span class="brand-kicker">OWL</span>
+            <span class="brand-name">Bitbucket PDF Explorer</span>
+          </span>
+        </a>
+
+        <div class="global-search" role="search">
+          <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="m21 21-4.35-4.35m2.35-5.4A7.75 7.75 0 1 1 3.5 11.25a7.75 7.75 0 0 1 15.5 0Z"
+            />
+          </svg>
+          <input
+            id="search-input"
+            type="search"
+            autocomplete="off"
+            placeholder="Search PDFs, paths, repositories..."
+            aria-label="Search PDF files"
+          />
+          <kbd aria-hidden="true">/</kbd>
+        </div>
+
+        <div
+          class="pull-progress"
+          id="pull-progress"
+          aria-label="Git pull progress"
+        >
+          <div>
+            <strong id="pull-progress-state">Git pull · ready</strong
+            ><time id="pull-elapsed">00:00</time>
+          </div>
+          <span id="pull-progress-counts">0 repositories · 0 files</span>
+          <div>
+            <span id="pull-eta">ETA —</span
+            ><button id="pull-stop" type="button" hidden>Stop</button>
+          </div>
+        </div>
+        <div
+          class="topbar-status"
+          id="connection-status"
+          data-state="connecting"
+          data-workspace-url="/bitbucket/workspace/"
+        >
+          <button
+            id="settings-button"
+            class="connection-test settings-button"
+            type="button"
+            aria-label="Bitbucket settings"
+            title="Bitbucket settings"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="m9 3-.6 2.3-2 .9-2.2-.6-2 3.4 1.6 1.7v2.6L2.2 15l2 3.4 2.2-.6 2 .9L9 21h4l.6-2.3 2-.9 2.2.6 2-3.4-1.6-1.7v-2.6l1.6-1.7-2-3.4-2.2.6-2-.9L13 3H9Z"
+              />
+              <circle cx="11" cy="12" r="3" />
+            </svg>
+          </button>
+          <button
+            id="theme-toggle"
+            class="connection-test theme-toggle"
+            type="button"
+            aria-label="Switch color theme"
+            title="Switch color theme"
+          >
+            <span aria-hidden="true">◐</span>
+          </button>
+          <button
+            id="test-connection"
+            class="connection-test"
+            type="button"
+            aria-label="Connecting…"
+            title="Connecting…"
+            disabled
+          >
+            <img
+              id="connection-image"
+              src="assets/no-connection.gif"
+              width="36"
+              height="36"
+              alt=""
+            />
+          </button>
+          <span
+            id="connection-label"
+            class="visually-hidden"
+            role="status"
+            aria-live="polite"
+            >Connecting…</span
+          >
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="left-sidebar" aria-label="Projects">
+          <button
+            class="sidebar-toggle"
+            id="toggle-projects"
+            type="button"
+            aria-expanded="true"
+            aria-controls="projects-content"
+            aria-label="Collapse Projects"
+            title="Collapse Projects"
+          >
+            <span class="sidebar-chevron" aria-hidden="true">‹</span
+            ><span class="sidebar-bar-label" aria-hidden="true">Projects</span>
+          </button>
+          <div
+            class="project-bar-repos"
+            id="project-bar-repos"
+            role="group"
+            aria-label="Select repositories"
+          ></div>
+          <div id="projects-content">
+            <div class="sidebar-heading">
+              <div>
+                <p class="eyebrow">Workspace</p>
+                <h1 id="projects-heading">Projects</h1>
+              </div>
+              <div class="repository-toolbar">
+                <span
+                  class="sidebar-count"
+                  id="project-count"
+                  aria-label="Project count"
+                  >0</span
+                >
+                <button
+                  class="primary-button new-project-button"
+                  id="new-project-button"
+                  type="button"
+                  aria-label="New"
+                  title="New"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                </button>
+                <button
+                  class="pull-button"
+                  id="pull-repositories"
+                  type="button"
+                  aria-label="Git pull all repositories"
+                  title="Git pull all repositories"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4" />
+                  </svg>
+                </button>
+                <button
+                  class="single-repo-delete"
+                  id="delete-selected-repo"
+                  type="button"
+                  aria-label="Delete selected repository"
+                  title="Select exactly one repository to delete"
+                  disabled
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 10v7m4-7v7"
+                    />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <p
+              class="repository-selection-help"
+              id="repository-selection-status"
+              role="status"
+              hidden
+            ></p>
+
+            <nav class="project-nav" aria-label="Projects and repositories">
+              <button
+                class="all-repositories-nav"
+                id="all-repositories"
+                type="button"
+              >
+                <span class="nav-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <path
+                      d="M4 6.5h5l1.7 2H20v9.75A1.75 1.75 0 0 1 18.25 20H5.75A1.75 1.75 0 0 1 4 18.25V6.5Z"
+                    />
+                    <path d="M4 9h16" />
+                  </svg>
+                </span>
+                <span>
+                  <strong>All Repositories</strong>
+                  <small id="all-repositories-meta"
+                    >0 PDFs · 0 repositories</small
+                  >
+                </span>
+                <span class="nav-arrow" aria-hidden="true">›</span>
+              </button>
+              <div class="project-list" id="project-list"></div>
+            </nav>
+          </div>
+        </aside>
+
+        <section class="main-panel" aria-labelledby="selection-title">
+          <div class="content-header">
+            <div class="selection-copy">
+              <div class="selection-breadcrumb" id="selection-breadcrumb">
+                PDF index / All repositories
+              </div>
+              <h2 id="selection-title">All Repositories</h2>
+              <p id="selection-description">
+                PDF files across all projects and repositories
+              </p>
+            </div>
+            <div
+              class="repository-pull-summary"
+              hidden
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              <span id="repository-pull-status"></span>
+              <div class="repository-pull-counts">
+                <span class="pull-updating-count"
+                  >Updating
+                  <strong id="repository-pull-updating">0</strong></span
+                >
+                <span
+                  class="pull-success-count"
+                  title="Available when backend Git pull is connected"
+                  >New <strong id="repository-pull-new">—</strong></span
+                >
+                <span title="Available when backend Git pull is connected"
+                  >No change
+                  <strong id="repository-pull-unchanged">—</strong></span
+                >
+                <span class="pull-failed-count"
+                  >Failed <strong id="repository-pull-failed">—</strong></span
+                >
+              </div>
+            </div>
+          </div>
+
+          <section class="table-panel" aria-label="PDF documents">
+            <section class="commit-chart" aria-labelledby="commit-chart-title">
+              <div class="commit-chart-heading">
+                <h4 id="commit-chart-title">Commit date</h4>
+                <span
+                  class="commit-date-selection"
+                  id="commit-date-selection"
+                  aria-live="polite"
+                  >All dates</span
+                >
+                <button
+                  class="date-text-button"
+                  id="clear-commit-date"
+                  type="button"
+                  hidden
+                >
+                  Clear date filter
+                </button>
+                <div
+                  class="bulk-pdf-controls"
+                  role="group"
+                  aria-label="Selected PDF actions"
+                >
+                  <label title="Select all matching PDFs across pages"
+                    ><input id="select-all-pdfs" type="checkbox" />All
+                    PDFs</label
+                  >
+                  <span id="selected-pdf-count" aria-live="polite"
+                    >0 selected</span
+                  >
+                  <button
+                    class="folder-button"
+                    id="copy-selected-pdfs"
+                    type="button"
+                    title="Copy selected PDF URLs"
+                    aria-label="Copy selected PDF URLs"
+                    disabled
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M9 8h11v13H9V8ZM15 8V3H4v13h5" />
+                    </svg>
+                  </button>
+                  <button
+                    class="folder-button"
+                    id="open-selected-pdfs"
+                    type="button"
+                    title="Open selected PDFs"
+                    aria-label="Open selected PDFs"
+                    disabled
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M14 3h7v7M21 3 10 14M10 5H4v15h15v-6" />
+                    </svg>
+                  </button>
+                </div>
+                <div
+                  class="pagination-controls"
+                  role="navigation"
+                  aria-label="Top PDF pagination"
+                >
+                  <span class="page-size">1,000 per page</span>
+                  <button
+                    id="previous-page-top"
+                    type="button"
+                    aria-label="Previous PDF page"
+                    disabled
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="m14.5 6-6 6 6 6" />
+                    </svg>
+                  </button>
+                  <span
+                    class="current-page"
+                    id="current-page-top"
+                    aria-live="polite"
+                    >1 / 1</span
+                  >
+                  <button
+                    id="next-page-top"
+                    type="button"
+                    aria-label="Next PDF page"
+                    disabled
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="m9.5 6 6 6-6 6" />
+                    </svg>
+                  </button>
+                </div>
+                <button
+                  class="date-text-button chart-toggle"
+                  id="toggle-commit-chart"
+                  type="button"
+                  aria-expanded="false"
+                  aria-controls="commit-chart-content"
+                >
+                  Show chart
+                </button>
+              </div>
+              <div
+                class="commit-chart-content"
+                id="commit-chart-content"
+                hidden
+              >
+                <div class="commit-chart-controls">
+                  <div
+                    class="date-view-buttons"
+                    role="group"
+                    aria-label="Commit date chart view"
+                  >
+                    <button
+                      id="commit-periods-view"
+                      type="button"
+                      aria-pressed="true"
+                    >
+                      Periods
+                    </button>
+                    <button
+                      id="commit-calendar-view"
+                      type="button"
+                      aria-pressed="false"
+                    >
+                      Year &amp; month
+                    </button>
+                  </div>
+                  <label
+                    class="commit-year-control"
+                    id="commit-year-control"
+                    hidden
+                  >
+                    Year
+                    <select
+                      id="commit-year-select"
+                      aria-label="Commit year"
+                    ></select>
+                  </label>
+                  <span class="commit-chart-caption" id="commit-chart-caption"
+                    >PDFs by commit date</span
+                  >
+                </div>
+                <form class="custom-date-range" id="custom-date-range">
+                  <label for="commit-date-from"
+                    >From<input id="commit-date-from" type="date" required
+                  /></label>
+                  <label for="commit-date-to"
+                    >To<input id="commit-date-to" type="date" required
+                  /></label>
+                  <button class="secondary-button" type="submit">
+                    Apply range
+                  </button>
+                  <span
+                    id="custom-date-error"
+                    class="custom-date-error"
+                    role="alert"
+                    hidden
+                  ></span>
+                </form>
+                <div
+                  class="commit-date-bars"
+                  id="commit-date-bars"
+                  role="group"
+                  aria-label="Filter PDFs by commit date"
+                ></div>
+                <p class="commit-chart-help" id="commit-chart-help">
+                  Dublin time · Weeks start Monday · Periods overlap.
+                </p>
+              </div>
+            </section>
+
+            <div class="table-scroll" id="table-scroll">
+              <table
+                class="timeline-table"
+                aria-label="Document timeline grouped by commit date"
+              >
+                <thead>
+                  <tr>
+                    <th class="select-column">
+                      <span class="visually-hidden">Select</span>
+                    </th>
+                    <th scope="col">PDF name</th>
+                    <th scope="col">Path</th>
+                    <th scope="col">Project</th>
+                    <th scope="col">Repository</th>
+                    <th scope="col">Commit date &amp; time</th>
+                    <th scope="col">Committed by</th>
+                    <th scope="col" class="number-column">Opens</th>
+                    <th scope="col" class="actions-column">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="pdf-table-body"></tbody>
+              </table>
+              <div class="empty-state" id="pdf-empty-state" hidden>
+                <div class="empty-state-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <path
+                      d="m3.75 4.5 16.5 15M10.4 5H14l4 4v5.6M7 8.2V20h10.9"
+                    />
+                    <path d="M14 5v4h4" />
+                  </svg>
+                </div>
+                <h4>No PDF records found</h4>
+                <p id="pdf-empty-copy">
+                  Try adjusting the search or choose another repository.
+                </p>
+              </div>
+            </div>
+
+            <footer class="pagination-bar" aria-label="PDF pagination">
+              <span id="pagination-summary">Showing 0 of 0 PDFs</span>
+              <div class="pagination-controls">
+                <span class="page-size">1,000 per page</span>
+                <button
+                  id="previous-page"
+                  type="button"
+                  aria-label="Previous PDF page"
+                  disabled
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m14.5 6-6 6 6 6" />
+                  </svg>
+                </button>
+                <span class="current-page" id="current-page" aria-live="polite"
+                  >1 / 1</span
+                >
+                <button
+                  id="next-page"
+                  type="button"
+                  aria-label="Next PDF page"
+                  disabled
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m9.5 6 6 6-6 6" />
+                  </svg>
+                </button>
+              </div>
+            </footer>
+          </section>
+        </section>
+
+        <aside class="right-sidebar" aria-label="People">
+          <button
+            class="sidebar-toggle"
+            id="toggle-people"
+            type="button"
+            aria-expanded="true"
+            aria-controls="people-content"
+            aria-label="Collapse People"
+            title="Collapse People"
+          >
+            <span class="sidebar-chevron" aria-hidden="true">›</span
+            ><span class="sidebar-bar-label" aria-hidden="true">People</span>
+          </button>
+          <div
+            class="people-bar-filters team-filter-list"
+            id="people-bar-filters"
+            role="group"
+            aria-label="People and team filters"
+          ></div>
+          <section
+            class="people-bar-favourites"
+            id="people-bar-favourites"
+            aria-label="Favourite people"
+            hidden
+          >
+            <span class="people-bar-favourites-title">Starred people</span>
+            <div id="people-bar-favourite-list"></div>
+          </section>
+          <div id="people-content">
+            <div class="people-header">
+              <p class="eyebrow">Directory</p>
+              <div class="people-heading-row">
+                <h2 id="people-heading">People</h2>
+                <span
+                  class="sidebar-count"
+                  id="people-count"
+                  aria-label="People count"
+                  aria-live="polite"
+                  >0</span
+                >
+                <div
+                  class="team-filter-list people-heading-filters"
+                  id="people-heading-filters"
+                  role="group"
+                  aria-label="All or starred people"
+                ></div>
+              </div>
+            </div>
+
+            <div class="people-team-controls">
+              <div
+                class="team-filter-list"
+                id="team-filter-list"
+                role="group"
+                aria-label="Filter PDFs by people or team"
+              ></div>
+              <div class="team-edit-actions">
+                <button class="date-text-button" id="create-team" type="button">
+                  + New team</button
+                ><button
+                  class="date-text-button"
+                  id="edit-team"
+                  type="button"
+                  hidden
+                >
+                  Edit team</button
+                ><button
+                  class="date-text-button"
+                  id="remove-team"
+                  type="button"
+                  hidden
+                >
+                  Remove team
+                </button>
+              </div>
+            </div>
+            <label class="people-search" for="people-search-input">
+              <span class="visually-hidden">Search people</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="m21 21-4.35-4.35m2.35-5.4A7.75 7.75 0 1 1 3.5 11.25a7.75 7.75 0 0 1 15.5 0Z"
+                />
+              </svg>
+              <input
+                id="people-search-input"
+                type="search"
+                autocomplete="off"
+                placeholder="Search people..."
+              />
+            </label>
+
+            <div class="people-list" id="people-list"></div>
+            <div class="people-empty-state" id="people-empty-state" hidden>
+              <span aria-hidden="true">—</span>
+              <p id="people-empty-copy">
+                No contributor data is loaded for this selection.
+              </p>
+            </div>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <div class="modal-backdrop" id="project-modal" hidden>
+      <section
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modal-title"
+        aria-describedby="modal-description"
+      >
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Connect repositories</p>
+            <h2 id="modal-title">New</h2>
+            <p id="modal-description">Add repositories using their URLs.</p>
+          </div>
+          <button
+            class="icon-button modal-close"
+            id="modal-close"
+            type="button"
+            aria-label="Close modal"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m6 6 12 12M18 6 6 18" />
+            </svg>
+          </button>
+        </div>
+
+        <form id="project-form" novalidate>
+          <div class="form-field">
+            <div class="field-label-row">
+              <label for="repository-urls">Bitbucket Repository URLs</label>
+              <span>HTTPS</span>
+            </div>
+            <textarea
+              id="repository-urls"
+              name="repositoryUrls"
+              rows="7"
+              placeholder="https://bitbucket.org/company/payment-services&#10;https://bitbucket.org/company/payment-api&#10;https://bitbucket.org/company/payment-documents"
+            ></textarea>
+            <p class="helper-text">
+              Enter one Bitbucket repository URL per line.
+            </p>
+          </div>
+
+          <p class="form-error" id="form-error" role="alert" hidden></p>
+
+          <div class="modal-actions">
+            <button class="secondary-button" id="modal-cancel" type="button">
+              Cancel
+            </button>
+            <button class="primary-button" type="submit">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              Add
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div
+      class="toast"
+      id="toast"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="m5 12.5 4 4L19 6.75" />
+      </svg>
+      <span>Path copied</span>
+    </div>
+
+    <dialog
+      class="modal settings-dialog"
+      id="settings-dialog"
+      aria-labelledby="settings-title"
+    >
+      <div class="modal-header">
+        <div>
+          <p class="eyebrow">Connection</p>
+          <h2 id="settings-title">Bitbucket settings</h2>
+        </div>
+        <button
+          class="icon-button modal-close"
+          id="settings-close"
+          type="button"
+          aria-label="Close settings"
+        >
+          ×
+        </button>
+      </div>
+      <form id="settings-form">
+        <div class="form-field">
+          <label for="settings-base-url">Base URL</label>
+          <input
+            id="settings-base-url"
+            name="base_url"
+            type="url"
+            required
+            placeholder="https://bitbucket.example.com"
+            autocomplete="url"
+          />
+        </div>
+        <div class="form-field">
+          <label for="settings-username">Username</label>
+          <input
+            id="settings-username"
+            name="username"
+            type="text"
+            maxlength="255"
+            autocomplete="username"
+          />
+        </div>
+        <div class="form-field">
+          <label for="settings-token">Access token</label>
+          <input
+            id="settings-token"
+            name="access_token"
+            type="password"
+            maxlength="16384"
+            autocomplete="new-password"
+            spellcheck="false"
+            aria-describedby="settings-token-help"
+          />
+          <p class="helper-text" id="settings-token-help">
+            Leave blank to keep a saved token. Saved tokens are never displayed.
+          </p>
+        </div>
+        <p
+          class="settings-feedback"
+          id="settings-feedback"
+          role="status"
+          aria-live="polite"
+        ></p>
+        <div class="modal-actions">
+          <button class="secondary-button" id="settings-test" type="button">
+            Test connection
+          </button>
+          <button class="primary-button" id="settings-save" type="submit">
+            Save
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog
+      class="modal settings-dialog"
+      id="delete-repo-dialog"
+      aria-labelledby="delete-repo-title"
+    >
+      <div class="modal-header">
+        <div>
+          <p class="eyebrow">Safety lock</p>
+          <h2 id="delete-repo-title">Delete repository</h2>
+        </div>
+      </div>
+      <form id="delete-repo-form" class="delete-repo-form">
+        <p id="delete-repo-description"></p>
+        <p class="helper-text">
+          Removes this repository, its indexed documents, contributors, and job
+          history from OWL. The remote Bitbucket repository is not deleted.
+        </p>
+        <label class="delete-unlock"
+          ><input id="delete-repo-unlock" type="checkbox" /> Unlock deletion for
+          this repository</label
+        >
+        <div class="form-field">
+          <label for="delete-repo-name"
+            >Type the lowercase phrase below to confirm</label
+          ><button
+            id="copy-delete-phrase"
+            class="copy-delete-phrase"
+            type="button"
+            title="Copy delete all"
+            aria-label="Copy delete all"
+          >
+            delete all</button
+          ><span
+            id="delete-phrase-feedback"
+            class="helper-text"
+            role="status"
+            aria-live="polite"
+          ></span
+          ><input
+            id="delete-repo-name"
+            type="text"
+            autocomplete="off"
+            autocapitalize="none"
+            spellcheck="false"
+            disabled
+          />
+        </div>
+        <p
+          id="delete-repo-feedback"
+          class="settings-feedback"
+          role="status"
+          aria-live="polite"
+        ></p>
+        <div class="modal-actions">
+          <button
+            id="delete-repo-cancel"
+            class="secondary-button"
+            type="button"
+          >
+            Cancel</button
+          ><button
+            id="delete-repo-confirm"
+            class="primary-button danger-button"
+            type="submit"
+            disabled
+          >
+            Delete repository
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog
+      class="modal settings-dialog"
+      id="notes-dialog"
+      aria-labelledby="notes-title"
+    >
+      <div class="modal-header">
+        <div>
+          <p class="eyebrow">Personal notes</p>
+          <h2 id="notes-title">PDF notes</h2>
+          <p id="notes-filename"></p>
+        </div>
+        <button
+          class="icon-button modal-close"
+          id="notes-close"
+          type="button"
+          aria-label="Close notes"
+        >
+          ×
+        </button>
+      </div>
+      <form id="notes-form">
+        <div class="form-field">
+          <label for="pdf-notes">Your notes</label
+          ><textarea
+            id="pdf-notes"
+            rows="8"
+            maxlength="20000"
+            placeholder="Add reminders, context, or comments about this PDF…"
+          ></textarea>
+          <p class="helper-text">
+            Saved in this browser for this PDF. Leave blank and save to remove a
+            note.
+          </p>
+        </div>
+        <p
+          id="notes-feedback"
+          class="settings-feedback"
+          role="status"
+          aria-live="polite"
+        ></p>
+        <div class="modal-actions">
+          <button id="notes-cancel" class="secondary-button" type="button">
+            Cancel</button
+          ><button class="primary-button" type="submit">Save notes</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog
+      class="modal settings-dialog"
+      id="pull-dialog"
+      aria-labelledby="pull-title"
+    >
+      <div class="modal-header">
+        <div>
+          <p class="eyebrow">Repository updates</p>
+          <h2 id="pull-title">Git pull all repositories</h2>
+        </div>
+      </div>
+      <div class="pull-dialog-content">
+        <p id="pull-summary"></p>
+        <p class="helper-text">
+          Backend integration is coming later. No Git pull is performed yet.
+        </p>
+        <div class="modal-actions">
+          <button id="pull-dialog-close" class="secondary-button" type="button">
+            Close
+          </button>
+        </div>
+      </div>
+    </dialog>
+    <dialog
+      class="modal settings-dialog"
+      id="team-dialog"
+      aria-labelledby="team-dialog-title"
+    >
+      <div class="modal-header">
+        <div>
+          <p class="eyebrow">People</p>
+          <h2 id="team-dialog-title">New team</h2>
+        </div>
+        <button
+          class="icon-button modal-close"
+          id="team-close"
+          type="button"
+          aria-label="Close team editor"
+        >
+          ×
+        </button>
+      </div>
+      <form id="team-form">
+        <div class="form-field">
+          <label for="team-name">Team name</label
+          ><input id="team-name" type="text" maxlength="80" required />
+        </div>
+        <fieldset class="team-members">
+          <legend>Choose members</legend>
+          <div id="team-members-list"></div>
+        </fieldset>
+        <p class="helper-text">
+          Teams and stars are saved in this browser. Team filters combine with
+          repository, search, and date filters.
+        </p>
+        <p
+          id="team-feedback"
+          class="settings-feedback"
+          role="status"
+          aria-live="polite"
+        ></p>
+        <div class="modal-actions">
+          <button
+            class="secondary-button"
+            id="team-delete"
+            type="button"
+            hidden
+          >
+            Delete team</button
+          ><button class="secondary-button" id="team-cancel" type="button">
+            Cancel</button
+          ><button class="primary-button" type="submit">Save team</button>
+        </div>
+      </form>
+    </dialog>
+    <script src="pull-progress.js"></script>
+    <script src="people-teams.js"></script>
+    <script src="notes.js"></script>
+    <script src="script.js"></script>
+    <script src="settings.js"></script>
+    <script src="repository-delete.js"></script>
+  </body>
+</html>

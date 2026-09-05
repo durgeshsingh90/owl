@@ -1,1 +1,0 @@
-"""Bookmark Manager management commands."""

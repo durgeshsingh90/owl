@@ -1,1 +1,0 @@
-"""OWL synthetic automated tests."""

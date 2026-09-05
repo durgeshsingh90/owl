@@ -1,1 +1,0 @@
-"""OWL Django project package."""

@@ -1,1 +1,0 @@
-"""Bookmark Manager service boundaries."""

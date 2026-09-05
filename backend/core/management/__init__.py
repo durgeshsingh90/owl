@@ -1,1 +1,0 @@
-"""Core management package."""
