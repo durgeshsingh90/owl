@@ -1,11 +1,13 @@
 """Search-only copies of Confluence folder pages, separate from bookmarks."""
 
 import json
+import logging
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl, urlsplit
 
 from app.bookmarks import confluence
 from app.core.database import connection
+from fastapi import HTTPException
 
 
 def stamp():
@@ -14,6 +16,7 @@ def stamp():
 
 async def download(settings, key, space_key, root_ids, root_title=""):
     seen = set()
+    request_url = settings.base_url + "/rest/api/content"
     try:
         if root_title:
             if not root_ids:
@@ -35,9 +38,11 @@ async def download(settings, key, space_key, root_ids, root_title=""):
             space_key = ""
 
         async def save(page_id):
+            nonlocal request_url
             page_id = str(page_id)
             if page_id in seen:
                 return
+            request_url = settings.base_url + "/rest/api/content/" + page_id
             data = await confluence.resolved_content(settings, "", page_id)
             parser = confluence.TextContent()
             body = data.get("body", {})
@@ -90,6 +95,7 @@ async def download(settings, key, space_key, root_ids, root_title=""):
                 if signature in visited:
                     raise ValueError("Confluence pagination repeated a page.")
                 visited.add(signature)
+                request_url = settings.base_url + "/rest/api/" + path
                 data = await confluence.get(settings, path, {**params, **paging})
                 results = data.get("results")
                 if not isinstance(results, list):
@@ -118,12 +124,24 @@ async def download(settings, key, space_key, root_ids, root_title=""):
                 "UPDATE bookmark_downloads SET status='completed',count=?,error=NULL,updated_at=? WHERE folder_key=?",
                 (len(seen), stamp(), key),
             )
-    except Exception:  # noqa: BLE001 - persist failure for background downloads
+    except Exception as error:  # noqa: BLE001 - persist failure for background downloads
+        if isinstance(error, HTTPException):
+            reason = str(error.detail)
+        elif isinstance(error, (ValueError, TypeError)):
+            reason = str(error)
+        else:
+            reason = f"Unexpected {type(error).__name__} while downloading pages."
+        # Never include credentials in the persisted message or log.
+        token = settings.token.get_secret_value()
+        if token:
+            reason = reason.replace(token, "[redacted]")
+        message = f"Downloaded {len(seen)} pages before failure. {reason} Request: {request_url}"
+        logging.getLogger(__name__).error("%s %s", stamp(), message)
         with connection() as db:
             db.execute(
                 "UPDATE bookmark_downloads SET status='failed',error=?,updated_at=? WHERE folder_key=?",
                 (
-                    "Could not download all pages. Check the Confluence connection and page permissions, then retry.",
+                    message,
                     stamp(),
                     key,
                 ),

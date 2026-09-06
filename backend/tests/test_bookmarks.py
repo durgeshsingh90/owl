@@ -129,6 +129,11 @@ class BookmarkTests(unittest.TestCase):
         self.assertEqual(
             self.client.get("/api/bookmarks/downloads").json()[0]["status"], "failed"
         )
+        failure = self.client.get("/api/bookmarks/downloads").json()[0]["error"]
+        self.assertIn("failure", failure)
+        self.assertIn("/rest/api/content", failure)
+        self.assertIn("Downloaded 0 pages", failure)
+
         self.assertEqual(
             self.client.get(
                 "/api/bookmarks/downloaded-search", params={"q": "azure"}

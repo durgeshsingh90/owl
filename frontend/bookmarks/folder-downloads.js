@@ -23,7 +23,13 @@
     try {
       const response = await fetch('/api/bookmarks/downloads');
       if (!response.ok) return;
-      statuses = new Map((await response.json()).map(item => [item.folder_key,item]));
+      const updated = new Map((await response.json()).map(item => [item.folder_key,item]));
+      for (const [key, status] of updated) {
+        if (status.status === 'failed' && statuses.get(key)?.status === 'running') {
+          toast(status.error || 'Folder download failed.');
+        }
+      }
+      statuses = updated;
       document.querySelectorAll('[data-folder-download]').forEach(button => {
         const key = button.dataset.folderDownload, scope = scopes.get(key);
         if (!scope) return;
