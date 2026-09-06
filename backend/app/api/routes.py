@@ -10,7 +10,7 @@ from app.core.config import (
     parse_target,
     save_settings,
 )
-from app.core.database import connection
+from app.core.database import connection, exclude_repositories, repository_url
 from app.core.logging import error_details, event, request_id
 from app.pdfs.client import BitbucketClient, BitbucketError
 from app.pdfs.search import search_documents
@@ -271,7 +271,7 @@ def repository_delete_scope(value, db):
     rows = [
         dict(row)
         for row in db.execute(
-            f"SELECT r.id,r.repo,p.project FROM repositories r JOIN tracked_projects p ON p.id=r.project_id WHERE r.id IN ({placeholders}) ORDER BY p.project,r.repo",
+            f"SELECT r.id,r.repo,p.project,p.server FROM repositories r JOIN tracked_projects p ON p.id=r.project_id WHERE r.id IN ({placeholders}) ORDER BY p.project,r.repo",
             ids,
         )
     ]
@@ -305,9 +305,9 @@ async def delete_repositories(value: RepositoryDeletion, request: Request):
     if request.app.state.jobs.active():
         raise HTTPException(409, "Stop the active crawl before deleting repositories.")
     with connection() as db:
-        ids, placeholders, rows = repository_delete_scope(value, db)
+        _, _, rows = repository_delete_scope(value, db)
         # Foreign keys remove documents and failures; document triggers remove FTS entries.
-        db.execute(f"DELETE FROM repositories WHERE id IN ({placeholders})", ids)
+        exclude_repositories(db, rows)
     return {"ok": True, "deleted": len(rows)}
 
 
@@ -320,11 +320,10 @@ def delete_repo(repository_id: int, value: DeleteRequest, request: Request):
     if request.app.state.jobs.active():
         raise HTTPException(409, "Stop the active crawl before deleting a repository.")
     with connection() as db:
-        if (
-            db.execute("DELETE FROM repositories WHERE id=?", (repository_id,)).rowcount
-            == 0
-        ):
-            raise HTTPException(404, "Repository not found.")
+        _, _, rows = repository_delete_scope(
+            RepositorySelection(repository_ids=[repository_id]), db
+        )
+        exclude_repositories(db, rows)
     return {
         "ok": True,
         "detail": "Removed local indexed records. Remote repository is unchanged.",
@@ -462,3 +461,49 @@ async def retry_failed(request: Request):
         for r in rows
     ]
     return jobs.start(list({r["project_id"] for r in rows}), targets, auto_retry=False)
+
+
+class RestoreRepository(BaseModel):
+    url: str = Field(max_length=2000)
+
+
+@router.get("/excluded-repositories")
+def excluded_repositories():
+    with connection() as db:
+        return [
+            dict(row)
+            for row in db.execute("SELECT url FROM excluded_repositories ORDER BY url")
+        ]
+
+
+@router.post("/excluded-repositories/restore", status_code=202)
+async def restore_repository(value: RestoreRepository, request: Request):
+    if request.app.state.jobs.active():
+        raise HTTPException(
+            409, "Wait for the active crawl to finish before restoring."
+        )
+    settings = load_settings()
+    target = parse_target(value.url, settings)
+    if not target["repo"] or target["path"]:
+        raise HTTPException(400, "Select a repository URL from the excluded list.")
+    url = repository_url(settings.base_url, target["project"], target["repo"])
+    with connection() as db:
+        if not db.execute(
+            "SELECT 1 FROM excluded_repositories WHERE url=?", (url,)
+        ).fetchone():
+            raise HTTPException(404, "Repository is not in the excluded list.")
+        row = db.execute(
+            "INSERT INTO tracked_projects(project_url,server,project) VALUES(?,?,?) "
+            "ON CONFLICT(server,project) DO UPDATE SET project_url=excluded.project_url RETURNING id",
+            (target["url"], settings.base_url, target["project"]),
+        ).fetchone()
+        project_id = row["id"]
+        db.execute("DELETE FROM excluded_repositories WHERE url=?", (url,))
+    try:
+        return request.app.state.jobs.start([project_id], [target])
+    except Exception:
+        with connection() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO excluded_repositories(url) VALUES(?)", (url,)
+            )
+        raise

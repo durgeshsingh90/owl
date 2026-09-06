@@ -52,3 +52,40 @@
     finally {busy = false; update();}
   };
 })();
+
+(() => {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "↶";
+  button.title = "Excluded repositories";
+  button.setAttribute("aria-label", "Excluded repositories");
+  document.querySelector("#delete-selected-repo").after(button);
+  const dialog = document.createElement("dialog");
+  dialog.innerHTML = '<h2>Excluded repositories</h2><p>Only repository URLs are retained. Restore scans and downloads the entire repository again.</p><div class="excluded-repository-list"></div><p role="status"></p><button type="button">Close</button>';
+  document.body.append(dialog);
+  dialog.querySelector("button").onclick = () => dialog.close();
+  const list = dialog.querySelector(".excluded-repository-list");
+  const feedback = dialog.querySelector('[role="status"]');
+  button.onclick = async () => {
+    list.replaceChildren(); feedback.textContent = "Loading…"; dialog.showModal();
+    try {
+      const rows = await crawlJson("/api/excluded-repositories");
+      feedback.textContent = rows.length ? "" : "No excluded repositories.";
+      for (const row of rows) {
+        const entry = document.createElement("p");
+        const url = document.createElement("span"); url.textContent = row.url;
+        url.style.overflowWrap = "anywhere";
+        const restore = document.createElement("button");
+        restore.type = "button"; restore.textContent = "Restore and crawl";
+        restore.onclick = async () => {
+          restore.disabled = true; feedback.textContent = "Starting fresh crawl…";
+          try {
+            const job = await crawlJson("/api/excluded-repositories/restore", {url:row.url});
+            dialog.close(); watchCrawl(job); await loadDatabaseWorkspace();
+          } catch (error) {feedback.textContent = error.message; restore.disabled = false;}
+        };
+        entry.append(url, " ", restore); list.append(entry);
+      }
+    } catch (error) {feedback.textContent = error.message;}
+  };
+})();

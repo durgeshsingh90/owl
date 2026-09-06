@@ -38,6 +38,7 @@ def initialize(*, recover_jobs=False):
             added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             UNIQUE(server, project)
         );
+        CREATE TABLE IF NOT EXISTS excluded_repositories (url TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS repositories (
             id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES tracked_projects(id) ON DELETE CASCADE,
             repo TEXT NOT NULL, name TEXT NOT NULL, last_scanned TEXT,
@@ -114,3 +115,29 @@ def initialize(*, recover_jobs=False):
             db.execute(
                 "UPDATE jobs SET status='interrupted' WHERE status IN ('queued','running')"
             )
+
+
+def repository_url(server, project, repo):
+    return (
+        server.rstrip("/")
+        + "/projects/"
+        + quote(project, safe="")
+        + "/repos/"
+        + quote(repo, safe="")
+    )
+
+
+def exclude_repositories(db, rows):
+    for row in rows:
+        db.execute(
+            "INSERT OR IGNORE INTO excluded_repositories(url) VALUES(?)",
+            (repository_url(row["server"], row["project"], row["repo"]),),
+        )
+        # Historical progress includes file paths and errors; discard affected jobs too.
+        for job in db.execute("SELECT id,progress FROM jobs").fetchall():
+            import json
+
+            progress = json.loads(job["progress"])
+            if str(row["id"]) in progress.get("repository_statuses", {}):
+                db.execute("DELETE FROM jobs WHERE id=?", (job["id"],))
+        db.execute("DELETE FROM repositories WHERE id=?", (row["id"],))

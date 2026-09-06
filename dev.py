@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -380,6 +381,36 @@ class LogTail:
         return [line.decode("utf-8", errors="replace").rstrip("\r") for line in parts]
 
 
+class LogFilter:
+    """Filter structured records and retain multiline error tracebacks."""
+
+    def __init__(self, level="error"):
+        self.level = level
+        self.in_error = False
+
+    def accepts(self, line):
+        if self.level == "all":
+            return True
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError):
+            record = None
+        if isinstance(record, dict) and "level" in record:
+            self.in_error = str(record["level"]).upper() in (
+                "ERROR",
+                "CRITICAL",
+                "FATAL",
+            )
+            return self.in_error
+        match = re.match(r"^(DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL|FATAL)\s*:", line)
+        if match:
+            self.in_error = match[1] in ("ERROR", "CRITICAL", "FATAL")
+            return self.in_error
+        if line.startswith("Traceback (most recent call last):"):
+            self.in_error = True
+        return self.in_error
+
+
 def follow_logs(args):
     directory = Path(os.environ.get("OWL_LOG_DIR", ROOT / "backend/data/logs"))
     if not directory.is_absolute():
@@ -398,15 +429,19 @@ def follow_logs(args):
         if args.service in ("all", name)
         for item in items
     ]
-    tails = [(name, LogTail(path, args.lines)) for name, path in selected]
+    tails = [
+        (name, LogTail(path, args.lines), LogFilter(args.level))
+        for name, path in selected
+    ]
     print("OWL logs — Ctrl+C stops following; the app keeps running.", flush=True)
     for name, path in selected:
         print(f"[{name}] {path}", flush=True)
     try:
         while True:
-            for name, tail in tails:
+            for name, tail, log_filter in tails:
                 for line in tail.read():
-                    print(f"[{name}] {line}", flush=True)
+                    if log_filter.accepts(line):
+                        print(f"[{name}] {line}", flush=True)
             if args.no_follow:
                 return
             time.sleep(0.25)
@@ -439,6 +474,12 @@ def main():
     )
     parser.add_argument(
         "--no-follow", action="store_true", help="Print recent logs and exit"
+    )
+    parser.add_argument(
+        "--level",
+        choices=["error", "all"],
+        default="error",
+        help="Console log filter (default: error; use all for diagnostic logs)",
     )
     args = parser.parse_args()
     if args.lines < 0:

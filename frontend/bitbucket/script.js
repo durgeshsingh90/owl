@@ -674,7 +674,7 @@ function renderPdfTable() {
         <td class="select-column"><input class="row-radio" type="checkbox" name="selected-pdf" value="${pdf.id}" aria-label="Select ${escapeHtml(pdf.name)}" ${state.selectedPdfs.has(pdf.id) ? "checked" : ""} /></td>
         <td class="serial-number">${formatNumber(pageStart + index + 1)}</td>
         <td><a class="timeline-file pdf-link" href="${escapeHtml(pdf.pdfUrl)}" data-open-pdf="${pdf.id}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(pdf.name)}"><span class="timeline-pdf-icon" aria-hidden="true">PDF</span><span>${escapeHtml(pdf.name)}</span></a></td>
-        <td><button class="path-button" type="button" data-copy-path="${pdf.id}" title="Copy ${escapeHtml(pdf.path)}">${escapeHtml(pdf.path)}</button></td>
+        <td><button class="path-button" type="button" data-copy-path="${pdf.id}" title="Copy PDF URL: ${escapeHtml(pdf.pdfUrl)}" aria-label="Copy complete URL for ${escapeHtml(pdf.name)}">${escapeHtml(pdf.path)}</button></td>
         <td><span class="badge project-badge">${escapeHtml(pdf.project || pdf.projectId)}</span></td>
         <td><span class="badge" title="${escapeHtml(pdf.repo)}">${escapeHtml(pdf.repo)}</span></td>
         <td class="commit-id">${pdf.commitId ? `<button type="button" class="commit-copy" data-copy-commit="${pdf.id}" title="Copy full commit ID: ${escapeHtml(pdf.commitId)}" aria-label="Copy full commit ID ${escapeHtml(pdf.commitId)}">${escapeHtml(pdf.commitId.slice(0, 7))}</button>` : "—"}</td>
@@ -925,15 +925,15 @@ async function copyPath(pdfId, button) {
   const pdf = pdfs.find((item) => item.id === pdfId);
   if (!pdf) return;
   try {
-    await copyText(pdf.path);
+    await copyText(pdf.pdfUrl);
   } catch {
-    showToast("Unable to copy path", false);
+    showToast("Unable to copy PDF URL", false);
     return;
   }
 
   if (!button?.isConnected) return;
   clearTimeout(pathCopyTimers.get(button));
-  button.textContent = "Copied";
+  button.textContent = "URL copied";
   button.setAttribute("aria-live", "polite");
   button.classList.add("path-copied");
   pathCopyTimers.set(

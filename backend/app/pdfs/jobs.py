@@ -8,10 +8,18 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from app.core.config import load_settings
-from app.core.database import connection, database_path
+from app.core.database import connection, database_path, repository_url
 from app.core.logging import error_details, event
 from app.pdfs.client import BitbucketClient, BitbucketError
 from app.pdfs.crawler import crawl_repository, discover_pdfs, now
+
+
+def remaining_eta(elapsed, processed, total):
+    if processed >= total:
+        return 0
+    if not processed:
+        return None
+    return round(max(0, elapsed) / processed * (total - processed))
 
 
 class Jobs:
@@ -161,6 +169,16 @@ class Jobs:
                 async for repo in repositories():
                     slug = repo["slug"]
                     with connection() as db:
+                        if db.execute(
+                            "SELECT 1 FROM excluded_repositories WHERE url=?",
+                            (
+                                repository_url(
+                                    settings.base_url, project["project"], slug
+                                ),
+                            ),
+                        ).fetchone():
+                            continue
+                    with connection() as db:
                         row = db.execute(
                             "INSERT INTO repositories(project_id,repo,name) VALUES(?,?,?) "
                             "ON CONFLICT(project_id,repo) DO UPDATE SET name=excluded.name RETURNING id",
@@ -172,6 +190,7 @@ class Jobs:
                         "repo": slug,
                         "status": "queued",
                         "found": 0,
+                        "failed": 0,
                     }
                     self.save()
             p["repositories"] = len(repos)
@@ -296,6 +315,21 @@ class Jobs:
                 repo_status(repository_id, "processing")
                 p["detail"] = f"Indexing {project}/{slug}"
                 local_failed = repository_id in partial_repositories
+                repository = p["repository_statuses"][str(repository_id)]
+                repo_started = time.monotonic()
+                repository.update(
+                    processed=0, eta_seconds=remaining_eta(0, 0, len(paths))
+                )
+
+                def repo_progress():
+                    repository["eta_seconds"] = remaining_eta(
+                        time.monotonic() - repo_started,
+                        repository["processed"],
+                        len(paths),
+                    )
+                    progress_save()
+
+                self.save()
 
                 class Counters(dict):
                     def __getitem__(self, key):
@@ -303,12 +337,15 @@ class Jobs:
                             return lambda path: failed_paths.setdefault(
                                 (project, slug, repository_id), set()
                             ).add(path)
-                        return progress_save if key == "save" else p[key]
+                        return repo_progress if key == "save" else p[key]
 
                     def __setitem__(self, key, value):
                         nonlocal local_failed
                         if key == "failed":
                             local_failed = True
+                            repository["failed"] += value - p[key]
+                        if key == "processed":
+                            repository["processed"] += value - p[key]
                         p[key] = value
 
                 try:
@@ -338,62 +375,84 @@ class Jobs:
                         != "cancelled"
                     ):
                         repo_status(
-                            repository_id, "failed" if local_failed else "succeeded"
+                            repository_id,
+                            "retrying"
+                            if auto_retry
+                            and failed_paths.get((project, slug, repository_id))
+                            else "failed"
+                            if local_failed
+                            else "succeeded",
                         )
-                    p["repositories_done"] += 1
                     progress_save()
+
+            async def retry_repository_failures(project, slug, repository_id):
+                paths = failed_paths.get((project, slug, repository_id), set())
+                if not auto_retry or not paths:
+                    return
+                p["retry_active"] = True
+                p["retry_total"] += len(paths)
+                retry_started = time.monotonic()
+                self.save()
+                repo_status(repository_id, "retrying")
+                remaining_failures = len(paths)
+                retry_repo_started = time.monotonic()
+                retry_repository = p["repository_statuses"][str(repository_id)]
+                retry_repository.update(
+                    retry_processed=0, retry_total=len(paths), eta_seconds=None
+                )
+                for path in sorted(paths, key=lambda path: (path.casefold(), path)):
+                    p["detail"] = f"Automatic retry: {project}/{slug}/{path}"
+                    self.save()
+                    counters = {
+                        "new": 0,
+                        "updated": 0,
+                        "unchanged": 0,
+                        "failed": 0,
+                        "processed": 0,
+                        "save": lambda: None,
+                        "failure": lambda path: None,
+                    }
+                    await crawl_repository(
+                        client, project, slug, repository_id, counters, [path]
+                    )
+                    p["retry_processed"] += 1
+                    retry_repository["retry_processed"] += 1
+                    retry_repository["eta_seconds"] = remaining_eta(
+                        time.monotonic() - retry_repo_started,
+                        retry_repository["retry_processed"],
+                        len(paths),
+                    )
+                    if not counters["failed"]:
+                        remaining_failures -= 1
+                        retry_repository["failed"] -= 1
+                        p["failed"] -= 1
+                        p["retry_recovered"] += 1
+                        for outcome in ("new", "updated", "unchanged"):
+                            p[outcome] += counters[outcome]
+                    p["elapsed_seconds"] = round(time.monotonic() - started, 1)
+                    p["eta_seconds"] = round(
+                        (time.monotonic() - retry_started)
+                        / retry_repository["retry_processed"]
+                        * (p["retry_total"] - p["retry_processed"])
+                    )
+                    self.save()
+                if not remaining_failures and repository_id not in hard_failures:
+                    p["repositories_failed"] -= 1
+                    p["repositories_succeeded"] += 1
+                    repo_status(repository_id, "succeeded")
+                else:
+                    repo_status(repository_id, "failed")
+                p["retry_active"] = False
 
             for repo in repos:
                 paths = await discover(*repo)
                 if paths is not None:
                     await scan(*repo, paths)
+                    await retry_repository_failures(*repo)
+                    p["repositories_done"] += 1
+                    self.save()
             p["discovery_complete"] = True
             self.save()
-            # Exactly one additional pass, scoped to failures from this job.
-            if auto_retry and failed_paths:
-                p["retry_active"] = True
-                p["retry_total"] = sum(len(paths) for paths in failed_paths.values())
-                retry_started = time.monotonic()
-                self.save()
-                for (project, slug, repository_id), paths in failed_paths.items():
-                    repo_status(repository_id, "retrying")
-                    remaining_failures = len(paths)
-                    for path in sorted(paths, key=lambda path: (path.casefold(), path)):
-                        p["detail"] = f"Automatic retry: {project}/{slug}/{path}"
-                        self.save()
-                        counters = {
-                            "new": 0,
-                            "updated": 0,
-                            "unchanged": 0,
-                            "failed": 0,
-                            "processed": 0,
-                            "save": lambda: None,
-                            "failure": lambda path: None,
-                        }
-                        await crawl_repository(
-                            client, project, slug, repository_id, counters, [path]
-                        )
-                        p["retry_processed"] += 1
-                        if not counters["failed"]:
-                            remaining_failures -= 1
-                            p["failed"] -= 1
-                            p["retry_recovered"] += 1
-                            for outcome in ("new", "updated", "unchanged"):
-                                p[outcome] += counters[outcome]
-                        p["elapsed_seconds"] = round(time.monotonic() - started, 1)
-                        p["eta_seconds"] = round(
-                            (time.monotonic() - retry_started)
-                            / p["retry_processed"]
-                            * (p["retry_total"] - p["retry_processed"])
-                        )
-                        self.save()
-                    if not remaining_failures and repository_id not in hard_failures:
-                        p["repositories_failed"] -= 1
-                        p["repositories_succeeded"] += 1
-                        repo_status(repository_id, "succeeded")
-                    else:
-                        repo_status(repository_id, "failed")
-                p["retry_active"] = False
 
             p["status"] = (
                 "succeeded_with_errors"

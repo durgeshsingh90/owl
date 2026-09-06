@@ -56,6 +56,141 @@ class BackendTests(unittest.TestCase):
         self.env.stop()
         self.temp.cleanup()
 
+    def test_exclude_and_restore_repository(self):
+        self.crawl()
+        with connection() as db:
+            repo_id = db.execute(
+                "SELECT id FROM repositories WHERE repo='one'"
+            ).fetchone()[0]
+        result = self.client.post(
+            "/api/repositories/delete",
+            json={"repository_ids": [repo_id], "confirmation": "delete all"},
+        )
+        self.assertEqual(result.status_code, 200, result.text)
+        url = self.config["base_url"] + "/projects/DEMO/repos/one"
+        self.assertEqual(
+            self.client.get("/api/excluded-repositories").json(), [{"url": url}]
+        )
+        self.calls.clear()
+        job = self.crawl()
+        self.assertEqual(job["repositories"], 1)
+        self.assertFalse(any("/repos/one/" in call for call in self.calls))
+        with connection() as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM documents WHERE repo='one'"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                [
+                    r["name"]
+                    for r in db.execute("PRAGMA table_info(excluded_repositories)")
+                ],
+                ["url"],
+            )
+        self.calls.clear()
+        response = self.client.post(
+            "/api/excluded-repositories/restore", json={"url": url}
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        job = response.json()
+        for _ in range(300):
+            job = self.client.get("/api/jobs/" + job["id"]).json()
+            if job["status"] not in ("queued", "running"):
+                break
+            time.sleep(0.01)
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertEqual(job["new"], 2)
+        self.assertEqual(len([c for c in self.calls if "/repos/one/raw/" in c]), 2)
+        self.assertEqual(self.client.get("/api/excluded-repositories").json(), [])
+
+    def test_crawl_continues_without_browser_polling(self):
+        from app.pdfs.crawler import discover_pdfs
+
+        async def delayed(*args, **kwargs):
+            await asyncio.sleep(0.05)
+            async for path in discover_pdfs(*args, **kwargs):
+                yield path
+
+        project = self.client.post(
+            "/api/project",
+            json={"project_url": self.config["base_url"] + "/projects/DEMO"},
+        ).json()
+        with patch("app.pdfs.jobs.discover_pdfs", delayed):
+            response = self.client.post(
+                "/api/crawl", json={"project_ids": [project["id"]]}
+            )
+            self.assertEqual(response.status_code, 202)
+            job_id = response.json()["id"]
+            # No UI requests while the backend completes discovery and indexing.
+            for _ in range(300):
+                with connection() as db:
+                    status = db.execute(
+                        "SELECT status FROM jobs WHERE id=?", (job_id,)
+                    ).fetchone()[0]
+                if status not in ("queued", "running"):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(status, "succeeded")
+            reconnected = self.client.get("/api/jobs/latest").json()["job"]
+            self.assertEqual(reconnected["id"], job_id)
+            self.assertEqual(reconnected["processed"], 4)
+            with connection() as db:
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1
+                )
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 4
+                )
+
+    def test_retry_finishes_before_next_repository(self):
+        original = self.upstream
+        attempts = {}
+        next_repo_snapshot = []
+
+        def fail_once(request):
+            path = request.url.path
+            if "/raw/" in path:
+                attempts[path] = attempts.get(path, 0) + 1
+                if attempts[path] == 1:
+                    return httpx.Response(403)
+            if path.endswith("/repos/two/browse/"):
+                with connection() as db:
+                    next_repo_snapshot.append(
+                        (
+                            db.execute(
+                                "SELECT COUNT(*) FROM documents WHERE repo='one'"
+                            ).fetchone()[0],
+                            db.execute(
+                                "SELECT COUNT(*) FROM failed_documents"
+                            ).fetchone()[0],
+                        )
+                    )
+            return original(request)
+
+        self.upstream = fail_once
+        job = self.crawl()
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertTrue(next_repo_snapshot)
+        self.assertTrue(all(snapshot == (2, 0) for snapshot in next_repo_snapshot))
+        self.assertEqual(set(attempts.values()), {2})
+        self.assertEqual(
+            [r["failed"] for r in job["repository_statuses"].values()], [0, 0]
+        )
+        self.assertEqual(
+            (job["processed"], job["retry_recovered"], job["failed"]), (4, 4, 0)
+        )
+
+    def test_repository_eta(self):
+        from app.pdfs.jobs import remaining_eta
+
+        self.assertIsNone(remaining_eta(0, 0, 10))
+        self.assertEqual(remaining_eta(20, 2, 10), 80)
+        self.assertEqual(remaining_eta(30, 5, 10), 30)
+        self.assertEqual(remaining_eta(60, 10, 10), 0)
+        self.assertEqual(remaining_eta(0, 0, 0), 0)
+
     def test_connection_diagnostics(self):
         import socket
 

@@ -41,3 +41,21 @@ class LogTests(unittest.TestCase):
             with path.open("ab") as output:
                 output.write(b"live\n")
             self.assertEqual(tail.read(), ["live"])
+
+    def test_error_filter_and_tracebacks(self):
+        log_filter = dev.LogFilter()
+        self.assertFalse(
+            log_filter.accepts('{"level":"INFO","event":"crawl.pdf_found"}')
+        )
+        self.assertTrue(
+            log_filter.accepts('{"level":"ERROR","event":"crawl.folder_failed"}')
+        )
+        self.assertFalse(log_filter.accepts("INFO: GET /api/jobs/123 200 OK"))
+        self.assertTrue(log_filter.accepts("ERROR: Exception in ASGI application"))
+        self.assertTrue(log_filter.accepts("Traceback (most recent call last):"))
+        self.assertTrue(log_filter.accepts('  File "main.py", line 1'))
+        self.assertTrue(log_filter.accepts("RuntimeError: failed"))
+        self.assertFalse(log_filter.accepts("INFO: request completed"))
+        self.assertFalse(log_filter.accepts("WARNING: something"))
+        self.assertTrue(log_filter.accepts("CRITICAL: stopped"))
+        self.assertTrue(dev.LogFilter("all").accepts("INFO: normal"))

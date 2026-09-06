@@ -70,21 +70,6 @@
         </div>
 
         <div
-          class="pull-progress"
-          id="pull-progress"
-          aria-label="Git pull progress"
-        >
-          <div>
-            <strong id="pull-progress-state">Git pull · ready</strong
-            ><time id="pull-elapsed">00:00</time>
-          </div>
-          <span id="pull-progress-counts">0 repositories · 0 files</span>
-          <div>
-            <span id="pull-eta">ETA —</span
-            ><button id="pull-stop" type="button" hidden>Stop</button>
-          </div>
-        </div>
-        <div
           class="topbar-status"
           id="connection-status"
           data-state="connecting"
@@ -799,7 +784,7 @@
       <form id="delete-repo-form" class="delete-repo-form">
         <p id="delete-repo-description"></p>
         <p class="helper-text">
-          Removes the selected repositories and all their PDF metadata, extracted text, search entries, PDF notes, view counts and failure records. Contributors derived from those PDFs disappear. Project registrations and bookmarks are kept. The remote Bitbucket repositories are not deleted. Future project crawls can discover them again.
+          Removes the selected repositories and all their PDF metadata, extracted text, search entries, PDF notes, view counts and failure records. Contributors derived from those PDFs disappear. Project registrations and bookmarks are kept. The remote Bitbucket repositories are not deleted. Only the repository URL is retained in Excluded repositories. Future crawls skip it until you restore it.
         </p>
         <label class="delete-unlock"
           ><input id="delete-repo-unlock" type="checkbox" /> Unlock deletion for
@@ -1012,13 +997,13 @@
       <button type="button" id="hard-retry-cancel">Cancel</button>
       <button type="button" id="hard-retry-start" disabled>Delete index and start again</button>
     </dialog>
-    <script src="pull-progress.js?v=20260906-crawl-18"></script>
+    <script src="pull-progress.js?v=20260906-crawl-23"></script>
     <script src="people-teams.js?v=20260906-crawl-18"></script>
     <script src="notes.js?v=20260906-crawl-18"></script>
-    <script src="script.js?v=20260906-crawl-18"></script>
+    <script src="script.js?v=20260906-copy-path-url-1"></script>
     <script src="database.js?v=20260906-crawl-18"></script>
     <script src="settings.js?v=20260906-crawl-18"></script>
-    <script src="repository-delete.js?v=20260906-crawl-18"></script>
+    <script src="repository-delete.js?v=20260906-excluded-1"></script>
     <script src="hard-retry.js?v=20260906-hard-1"></script>
     <script src="failed-pdfs.js?v=20260906-failed-4"></script>
   </body>
