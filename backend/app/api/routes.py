@@ -257,6 +257,60 @@ def opened(doc_id: int):
     return dict(row)
 
 
+class RepositorySelection(BaseModel):
+    repository_ids: list[int] = Field(min_length=1, max_length=10000)
+
+
+class RepositoryDeletion(RepositorySelection):
+    confirmation: str
+
+
+def repository_delete_scope(value, db):
+    ids = sorted(set(value.repository_ids))
+    placeholders = ",".join("?" for _ in ids)
+    rows = [
+        dict(row)
+        for row in db.execute(
+            f"SELECT r.id,r.repo,p.project FROM repositories r JOIN tracked_projects p ON p.id=r.project_id WHERE r.id IN ({placeholders}) ORDER BY p.project,r.repo",
+            ids,
+        )
+    ]
+    if len(rows) != len(ids):
+        raise HTTPException(
+            404, "A selected repository no longer exists. Refresh the selection."
+        )
+    return ids, placeholders, rows
+
+
+@router.post("/repositories/delete-preview")
+def preview_repository_deletion(value: RepositorySelection):
+    with connection() as db:
+        ids, placeholders, rows = repository_delete_scope(value, db)
+        counts = {
+            table: db.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE repository_id IN ({placeholders})",
+                ids,
+            ).fetchone()[0]
+            for table in ("documents", "failed_documents")
+        }
+    return {"repositories": rows, **counts}
+
+
+@router.post("/repositories/delete")
+async def delete_repositories(value: RepositoryDeletion, request: Request):
+    if value.confirmation != "delete all":
+        raise HTTPException(
+            400, "Type delete all to confirm deletion of the selected repositories."
+        )
+    if request.app.state.jobs.active():
+        raise HTTPException(409, "Stop the active crawl before deleting repositories.")
+    with connection() as db:
+        ids, placeholders, rows = repository_delete_scope(value, db)
+        # Foreign keys remove documents and failures; document triggers remove FTS entries.
+        db.execute(f"DELETE FROM repositories WHERE id IN ({placeholders})", ids)
+    return {"ok": True, "deleted": len(rows)}
+
+
 @router.delete("/repositories/{repository_id}")
 def delete_repo(repository_id: int, value: DeleteRequest, request: Request):
     if value.confirmation != "delete all":

@@ -383,6 +383,142 @@ class BackendTests(unittest.TestCase):
                 self.assertEqual(browsed, order)
                 self.assertEqual(maximum, 1)
 
+    def test_unreadable_folder_does_not_discard_or_skip_accessible_pdfs(self):
+        original = self.upstream
+
+        def folder_error(request):
+            path = request.url.path
+            if path.endswith("/browse/"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "children": {
+                            "values": [
+                                {"type": "FILE", "path": {"name": "root.pdf"}},
+                                {"type": "DIRECTORY", "path": {"name": "nested"}},
+                                {"type": "DIRECTORY", "path": {"name": "broken"}},
+                            ],
+                            "isLastPage": True,
+                        }
+                    },
+                )
+            if path.endswith("/browse/broken"):
+                return httpx.Response(404)
+            return original(request)
+
+        self.upstream = folder_error
+        job = self.crawl()
+        self.assertEqual(job["status"], "succeeded_with_errors", job)
+        self.assertEqual((job["found"], job["processed"], job["new"]), (4, 4, 4))
+        self.assertEqual(job["failed"], 0)
+        self.assertEqual(job["repositories_failed"], 2)
+        self.assertEqual(len(job["folder_failures"]), 2)
+        self.assertTrue(
+            all(
+                f["path"] == "broken" and "404" in f["error"]
+                for f in job["folder_failures"]
+            )
+        )
+        with connection() as db:
+            paths = {row["path"] for row in db.execute("SELECT path FROM documents")}
+        self.assertEqual(paths, {"root.pdf", "nested/first.pdf"})
+
+    def test_one_failed_pdf_saves_identifiers_and_others_continue(self):
+        original = self.upstream
+
+        def one_failure(request):
+            if "/repos/one/raw/nested/first.pdf" in request.url.path:
+                return httpx.Response(404)
+            return original(request)
+
+        self.upstream = one_failure
+        job = self.crawl()
+        self.assertEqual((job["new"], job["failed"], job["processed"]), (3, 1, 4))
+        failures = self.client.get("/api/failed").json()
+        self.assertEqual(len(failures), 1)
+        failure = failures[0]
+        self.assertEqual(failure["pdf_name"], "first.pdf")
+        self.assertEqual(
+            failure["url"],
+            self.config["base_url"]
+            + "/projects/DEMO/repos/one/browse/nested/first.pdf",
+        )
+        self.assertEqual(failure["attempts"], 2)
+        with connection() as db:
+            saved = db.execute("SELECT pdf_name,url FROM failed_documents").fetchone()
+            self.assertEqual(
+                dict(saved), {key: failure[key] for key in ("pdf_name", "url")}
+            )
+            # Simulate an older failure without these identifiers.
+            db.execute("UPDATE failed_documents SET pdf_name='',url=''")
+        from app.core.database import initialize
+
+        initialize()
+        restored = self.client.get("/api/failed").json()[0]
+        self.assertEqual(restored["url"], failure["url"])
+        self.assertEqual(restored["pdf_name"], "first.pdf")
+
+    def test_bulk_delete_is_atomic_and_cascades_selected_repo_data(self):
+        self.crawl()
+        with connection() as db:
+            ids = [
+                r["id"] for r in db.execute("SELECT id FROM repositories ORDER BY id")
+            ]
+            db.execute(
+                "INSERT INTO failed_documents(repository_id,path,error,last_attempt) SELECT id,'bad.pdf','failed','now' FROM repositories"
+            )
+        preview = self.client.post(
+            "/api/repositories/delete-preview", json={"repository_ids": ids}
+        ).json()
+        self.assertEqual((preview["documents"], preview["failed_documents"]), (4, 2))
+        self.assertEqual(
+            self.client.post(
+                "/api/repositories/delete",
+                json={"repository_ids": ids, "confirmation": "wrong"},
+            ).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/repositories/delete",
+                json={"repository_ids": [ids[0], 9999], "confirmation": "delete all"},
+            ).status_code,
+            404,
+        )
+        with connection() as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 4
+            )
+        self.assertEqual(
+            self.client.post(
+                "/api/repositories/delete",
+                json={"repository_ids": [ids[0]], "confirmation": "delete all"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            len(self.client.get("/api/search", params={"q": "azure"}).json()), 2
+        )
+        self.assertEqual(len(self.client.get("/api/failed").json()), 1)
+        self.assertEqual(
+            self.client.post(
+                "/api/repositories/delete",
+                json={"repository_ids": [ids[1]], "confirmation": "delete all"},
+            ).json()["deleted"],
+            1,
+        )
+        with connection() as db:
+            for table in ("repositories", "documents", "failed_documents"):
+                self.assertEqual(
+                    db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0
+                )
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM tracked_projects").fetchone()[0], 1
+            )
+        self.assertEqual(
+            self.client.get("/api/search", params={"q": "azure"}).json(), []
+        )
+
     def test_import_pdf_and_project(self):
         base = self.config["base_url"] + "/projects/TEST"
         for url, expected in [(base + "/repos/one/browse/manual.pdf", 1), (base, 5)]:

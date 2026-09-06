@@ -115,7 +115,7 @@ async def process_pdf(client, project, repo, repository_id, path):
     return "updated" if old else "new"
 
 
-async def discover_pdfs(client, project, repo):
+async def discover_pdfs(client, project, repo, on_folder_error=None):
     prefix = client.repo_path(project, repo)
     folders = [""]
     visited = set()
@@ -124,17 +124,22 @@ async def discover_pdfs(client, project, repo):
         if folder in visited:
             continue
         visited.add(folder)
-        async for item in client.pages(
-            prefix + "/browse/" + quote(folder, safe="/"), nested="children"
-        ):
-            name = item.get("path", {}).get("name", "")
-            if not name or name in (".", "..") or "/" in name:
-                raise BitbucketError("Invalid repository path entry.")
-            path = str(PurePosixPath(folder) / name)
-            if item.get("type") == "DIRECTORY":
-                folders.append(path)
-            elif item.get("type") == "FILE" and path.lower().endswith(".pdf"):
-                yield path
+        try:
+            async for item in client.pages(
+                prefix + "/browse/" + quote(folder, safe="/"), nested="children"
+            ):
+                name = item.get("path", {}).get("name", "")
+                if not name or name in (".", "..") or "/" in name:
+                    raise BitbucketError("Invalid repository path entry.")
+                path = str(PurePosixPath(folder) / name)
+                if item.get("type") == "DIRECTORY":
+                    folders.append(path)
+                elif item.get("type") == "FILE" and path.lower().endswith(".pdf"):
+                    yield path
+        except BitbucketError as error:
+            if not folder or on_folder_error is None:
+                raise
+            on_folder_error(folder, error)
 
 
 async def crawl_repository(client, project, repo, repository_id, progress, paths):
@@ -147,9 +152,10 @@ async def crawl_repository(client, project, repo, repository_id, progress, paths
             progress["failure"](path)
             with connection() as db:
                 db.execute(
-                    """INSERT INTO failed_documents(repository_id,path,error,last_attempt)
-                              VALUES(?,?,?,?) ON CONFLICT(repository_id,path) DO UPDATE SET
-                              error=excluded.error,last_attempt=excluded.last_attempt,attempts=attempts+1""",
+                    """INSERT INTO failed_documents(repository_id,path,error,last_attempt,pdf_name,url)
+                              VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id,path) DO UPDATE SET
+                              error=excluded.error,last_attempt=excluded.last_attempt,attempts=attempts+1,
+                              pdf_name=excluded.pdf_name,url=excluded.url""",
                     (
                         repository_id,
                         path,
@@ -157,6 +163,11 @@ async def crawl_repository(client, project, repo, repository_id, progress, paths
                         if isinstance(error, BitbucketError)
                         else "PDF metadata could not be processed.",
                         now(),
+                        PurePosixPath(path).name,
+                        client.base
+                        + client.repo_path(project, repo)
+                        + "/browse/"
+                        + quote(path, safe="/"),
                     ),
                 )
         progress["processed"] += 1

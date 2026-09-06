@@ -13,11 +13,36 @@
     try {
       const failures = await crawlJson(`/api/failed?limit=100&offset=${offset}`);
       rows.replaceChildren();
+      const folderList = document.querySelector("#failed-folders-list");
+      folderList.replaceChildren();
+      const {job} = await crawlJson("/api/jobs/latest");
+      for (const failure of job?.folder_failures || []) {
+        const item = document.createElement("li");
+        item.textContent = `${failure.project} / ${failure.repo} / ${failure.path}: ${failure.error}`;
+        folderList.append(item);
+      }
+      document.querySelector("#failed-folders-section").hidden = !folderList.children.length;
       for (const failure of failures) {
         const row = document.createElement("tr");
-        for (const key of ["project", "repo", "path", "error", "attempts", "last_attempt"]) {
+        for (const key of ["project", "repo", "pdf_name", "url", "path", "error", "attempts", "last_attempt"]) {
           const cell = document.createElement("td");
-          cell.textContent = failure[key] ?? "Unknown";
+          cell.textContent = failure[key] || "Unknown";
+          if (key === "url" && /^https?:\/\//i.test(failure.url || "")) {
+            const link = document.createElement("a");
+            link.href = failure.url;
+            link.textContent = failure.url;
+            link.target = "_blank";
+            link.rel = "noopener noreferrer";
+            link.style.color = "#93c5fd";
+            const copy = document.createElement("button");
+            copy.type = "button";
+            copy.textContent = "Copy URL";
+            copy.onclick = async () => {
+              try {await copyText(failure.url); showToast("Failed PDF URL copied");}
+              catch {showToast("Unable to copy URL", false);}
+            };
+            cell.replaceChildren(link, document.createElement("br"), copy);
+          }
           cell.style.cssText = "padding:8px;overflow-wrap:anywhere;white-space:normal";
           row.append(cell);
         }

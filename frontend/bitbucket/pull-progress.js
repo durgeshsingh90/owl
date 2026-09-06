@@ -5,7 +5,7 @@ function pullRepoMark(projectId, repoName) {
   const marks = {
     queued: ["◷", "Queued"], scanning: ["↻", "Scanning"],
     processing: ["↻", "Processing"], retrying: ["↻", "Retrying"],
-    succeeded: ["✓", "Completed"], failed: ["!", "Failed"], cancelled: ["–", "Stopped"],
+    succeeded: ["✓", "Completed"], failed: ["!", "Has failures"], cancelled: ["–", "Stopped"],
   };
   if (!marks[status]) return "";
   const [icon, label] = marks[status];

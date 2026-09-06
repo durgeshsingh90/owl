@@ -752,11 +752,11 @@ function selectedRepositories() {
 function updateSelectionHeader() {
   const selected = selectedRepositories();
   const deleteButton = document.querySelector("#delete-selected-repo");
-  deleteButton.disabled = selected.length !== 1;
+  deleteButton.disabled = selected.length === 0 || pullProgress.active;
   deleteButton.title =
-    selected.length === 1
-      ? `Delete ${selected[0].name} (locked)`
-      : "Select exactly one repository to delete";
+    pullProgress.active ? "Stop the crawl before deleting repositories" : selected.length
+      ? `Delete ${selected.length} selected repositories`
+      : "Select repositories to delete";
   const project = state.selectedProject
     ? findProject(state.selectedProject)
     : null;

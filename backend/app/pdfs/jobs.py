@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from app.core.config import load_settings
 from app.core.database import connection, database_path
 from app.core.logging import error_details, event
-from app.pdfs.client import BitbucketClient
+from app.pdfs.client import BitbucketClient, BitbucketError
 from app.pdfs.crawler import crawl_repository, discover_pdfs, now
 
 
@@ -89,6 +89,7 @@ class Jobs:
             "repositories_succeeded": 0,
             "discovery_complete": False,
             "discovery_failed": False,
+            "folder_failures": [],
             "repositories_failed": 0,
             "found": 0,
             "processed": 0,
@@ -185,12 +186,41 @@ class Jobs:
             )
 
             work = []
+            partial_repositories = set()
 
             async def discover(project, slug, repository_id):
                 repo_status(repository_id, "scanning")
                 p["detail"] = f"Finding PDFs in {project}/{slug}"
                 self.save()
                 paths = []
+
+                def folder_failed(folder, error):
+                    partial_repositories.add(repository_id)
+                    p["discovery_failed"] = True
+                    message = (
+                        str(error)
+                        if isinstance(error, BitbucketError)
+                        else "Folder discovery failed; check backend logs."
+                    )
+                    p["folder_failures"].append(
+                        {
+                            "project": project,
+                            "repo": slug,
+                            "path": folder or "/",
+                            "error": message,
+                        }
+                    )
+                    event(
+                        "crawl.folder_failed",
+                        level=40,
+                        repository_id=repository_id,
+                        project=project,
+                        repo=slug,
+                        path=folder or "/",
+                        error=message,
+                    )
+                    self.save()
+
                 try:
                     selected = [
                         t
@@ -200,7 +230,9 @@ class Jobs:
                     if selected and all(t["path"] for t in selected):
                         paths = list(dict.fromkeys(t["path"] for t in selected))
                     else:
-                        async for path in discover_pdfs(client, project, slug):
+                        async for path in discover_pdfs(
+                            client, project, slug, on_folder_error=folder_failed
+                        ):
                             paths.append(path)
                     work.append(
                         (
@@ -220,6 +252,7 @@ class Jobs:
                     p["repositories_failed"] += 1
                     p["repositories_done"] += 1
                     p["discovery_failed"] = True
+                    folder_failed("", error)
                     repo_status(repository_id, "failed")
                     event(
                         "crawl.discovery_failed",
@@ -247,12 +280,12 @@ class Jobs:
                 self.save()
 
             failed_paths = {}
-            hard_failures = set()
+            hard_failures = set(partial_repositories)
 
             async def scan(project, slug, repository_id, paths):
                 repo_status(repository_id, "processing")
                 p["detail"] = f"Indexing {project}/{slug}"
-                local_failed = False
+                local_failed = repository_id in partial_repositories
 
                 class Counters(dict):
                     def __getitem__(self, key):

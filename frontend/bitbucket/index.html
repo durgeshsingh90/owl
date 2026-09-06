@@ -8,8 +8,8 @@
       content="A frontend prototype for exploring PDF documents across Bitbucket projects and repositories."
     />
     <title>Bitbucket PDF Explorer</title>
-    <script src="theme.js?v=20260906-crawl-15"></script>
-    <script src="sidebars.js?v=20260906-crawl-15"></script>
+    <script src="theme.js?v=20260906-crawl-17"></script>
+    <script src="sidebars.js?v=20260906-crawl-17"></script>
     <link rel="stylesheet" href="style.css?v=20260906-failed-icon" />
   </head>
   <body>
@@ -198,8 +198,8 @@
                   class="single-repo-delete"
                   id="delete-selected-repo"
                   type="button"
-                  aria-label="Delete selected repository"
-                  title="Select exactly one repository to delete"
+                  aria-label="Delete selected repositories"
+                  title="Select repositories to delete"
                   disabled
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -793,18 +793,17 @@
       <div class="modal-header">
         <div>
           <p class="eyebrow">Safety lock</p>
-          <h2 id="delete-repo-title">Delete repository</h2>
+          <h2 id="delete-repo-title">Delete selected repositories</h2>
         </div>
       </div>
       <form id="delete-repo-form" class="delete-repo-form">
         <p id="delete-repo-description"></p>
         <p class="helper-text">
-          Removes this repository, its indexed documents, contributors, and job
-          history from OWL. The remote Bitbucket repository is not deleted.
+          Removes the selected repositories and all their PDF metadata, extracted text, search entries, PDF notes, view counts and failure records. Contributors derived from those PDFs disappear. Project registrations and bookmarks are kept. The remote Bitbucket repositories are not deleted. Future project crawls can discover them again.
         </p>
         <label class="delete-unlock"
           ><input id="delete-repo-unlock" type="checkbox" /> Unlock deletion for
-          this repository</label
+          the selected repositories</label
         >
         <div class="form-field">
           <label for="delete-repo-name"
@@ -851,7 +850,7 @@
             type="submit"
             disabled
           >
-            Delete repository
+            Delete selected repositories
           </button>
         </div>
       </form>
@@ -991,9 +990,14 @@
       <button type="button" id="failed-pdfs-close">Close</button>
       <button type="button" id="failed-pdfs-refresh">Refresh</button>
       <button type="button" id="failed-pdfs-retry">Retry all failed PDFs</button>
+      <section id="failed-folders-section" hidden>
+        <h3>Folders that could not be scanned (latest crawl)</h3>
+        <p>Accessible PDFs are still processed. Retry failed PDFs retries known PDF failures only; use the normal crawl button to rescan these folders.</p>
+        <ul id="failed-folders-list" style="overflow-wrap:anywhere"></ul>
+      </section>
       <p id="failed-pdfs-status" role="status"></p>
       <p>Retry applies to the configured Bitbucket server after the current crawl finishes.</p>
-      <div style="overflow:auto"><table style="width:100%;text-align:left"><thead><tr><th>Project</th><th>Repository</th><th>PDF path</th><th>Error</th><th>Attempts</th><th>Last attempt</th></tr></thead><tbody id="failed-pdfs-rows"></tbody></table></div>
+      <div style="overflow:auto"><table style="width:100%;text-align:left"><thead><tr><th>Project</th><th>Repository</th><th>PDF name</th><th>PDF URL</th><th>PDF path</th><th>Error</th><th>Attempts</th><th>Last attempt</th></tr></thead><tbody id="failed-pdfs-rows"></tbody></table></div>
       <button type="button" id="failed-pdfs-prev">Previous</button>
       <button type="button" id="failed-pdfs-next">Next</button>
     </dialog>
@@ -1008,14 +1012,14 @@
       <button type="button" id="hard-retry-cancel">Cancel</button>
       <button type="button" id="hard-retry-start" disabled>Delete index and start again</button>
     </dialog>
-    <script src="pull-progress.js?v=20260906-crawl-15"></script>
-    <script src="people-teams.js?v=20260906-crawl-15"></script>
-    <script src="notes.js?v=20260906-crawl-15"></script>
-    <script src="script.js?v=20260906-crawl-15"></script>
-    <script src="database.js?v=20260906-crawl-15"></script>
-    <script src="settings.js?v=20260906-crawl-15"></script>
-    <script src="repository-delete.js?v=20260906-crawl-15"></script>
+    <script src="pull-progress.js?v=20260906-crawl-17"></script>
+    <script src="people-teams.js?v=20260906-crawl-17"></script>
+    <script src="notes.js?v=20260906-crawl-17"></script>
+    <script src="script.js?v=20260906-crawl-17"></script>
+    <script src="database.js?v=20260906-crawl-17"></script>
+    <script src="settings.js?v=20260906-crawl-17"></script>
+    <script src="repository-delete.js?v=20260906-crawl-17"></script>
     <script src="hard-retry.js?v=20260906-hard-1"></script>
-    <script src="failed-pdfs.js?v=20260906-failed-2"></script>
+    <script src="failed-pdfs.js?v=20260906-failed-4"></script>
   </body>
 </html>

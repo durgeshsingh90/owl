@@ -3,7 +3,8 @@
 import os
 import sqlite3
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 
 def database_path():
@@ -82,6 +83,33 @@ def initialize(*, recover_jobs=False):
             id TEXT PRIMARY KEY, status TEXT NOT NULL, progress TEXT NOT NULL
         );
         """)
+        columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(failed_documents)")
+        }
+        for column in ("pdf_name", "url"):
+            if column not in columns:
+                db.execute(
+                    f"ALTER TABLE failed_documents ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
+        # Fill identifiers for failures saved by older versions, without network access.
+        for row in db.execute(
+            "SELECT f.id,f.path,r.repo,p.project,p.server FROM failed_documents f "
+            "JOIN repositories r ON r.id=f.repository_id "
+            "JOIN tracked_projects p ON p.id=r.project_id WHERE f.pdf_name='' OR f.url=''"
+        ).fetchall():
+            url = (
+                row["server"].rstrip("/")
+                + "/projects/"
+                + quote(row["project"], safe="")
+                + "/repos/"
+                + quote(row["repo"], safe="")
+                + "/browse/"
+                + quote(row["path"], safe="/")
+            )
+            db.execute(
+                "UPDATE failed_documents SET pdf_name=?,url=? WHERE id=?",
+                (PurePosixPath(row["path"]).name, url, row["id"]),
+            )
         if recover_jobs:
             db.execute(
                 "UPDATE jobs SET status='interrupted' WHERE status IN ('queued','running')"
