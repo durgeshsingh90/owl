@@ -227,6 +227,77 @@ class BackendTests(unittest.TestCase):
                 self.assertEqual(row["path"], directory + "/" + filename)
                 self.assertIn("Design%20%231%20%26%20100%25.PDF", row["url"])
 
+    def test_folder_relative_compacted_paths(self):
+        original = self.upstream
+        full_folder = (
+            "Platform_Services/Policy_Management_Service/Security_Policy_Management/TAD"
+        )
+
+        def relative_entries(request):
+            if "/browse/" not in request.url.path:
+                return original(request)
+            folder = request.url.path.split("/browse/", 1)[1]
+            if folder == "":
+                parts, kind = ["Platform_Services"], "DIRECTORY"
+            elif folder == "Platform_Services":
+                parts, kind = (
+                    ["Policy_Management_Service", "Security_Policy_Management", "TAD"],
+                    "DIRECTORY",
+                )
+            elif folder == full_folder:
+                parts, kind = ["Design #1 & 100%.PDF"], "FILE"
+            else:
+                return httpx.Response(404)
+            return httpx.Response(
+                200,
+                json={
+                    "children": {
+                        "values": [
+                            {
+                                "type": kind,
+                                "path": {
+                                    "name": parts[-1],
+                                    "components": parts,
+                                    "toString": "/".join(parts),
+                                },
+                            }
+                        ],
+                        "isLastPage": True,
+                    }
+                },
+            )
+
+        self.upstream = relative_entries
+        job = self.crawl()
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertEqual((job["found"], job["new"]), (2, 2))
+        self.assertEqual(job["folder_failures"], [])
+        with connection() as db:
+            self.assertEqual(
+                {r["path"] for r in db.execute("SELECT path FROM documents")},
+                {full_folder + "/Design #1 & 100%.PDF"},
+            )
+
+    def test_entry_path_formats_and_invalid_components(self):
+        from app.pdfs.client import BitbucketError
+        from app.pdfs.crawler import entry_path
+
+        for metadata in [
+            {"components": ["A", "B", "file.pdf"]},
+            {"components": ["B", "file.pdf"]},
+            {"toString": "B/file.pdf"},
+            {"toString": "A/B/file.pdf"},
+            {"name": "B/file.pdf"},
+        ]:
+            self.assertEqual(entry_path("A", {"path": metadata}), "A/B/file.pdf")
+        for metadata in [
+            {"components": ["..", "file.pdf"]},
+            {"toString": "/outside/file.pdf"},
+            {"name": "../file.pdf"},
+        ]:
+            with self.assertRaises(BitbucketError):
+                entry_path("A", {"path": metadata})
+
     def test_repository_eta(self):
         from app.pdfs.jobs import remaining_eta
 

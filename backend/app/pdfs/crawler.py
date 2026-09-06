@@ -116,7 +116,7 @@ async def process_pdf(client, project, repo, repository_id, path):
 
 
 def entry_path(folder, item):
-    """Preserve repository-relative paths, including compacted directories."""
+    """Preserve compacted paths returned relative to the folder or repository."""
     metadata = item.get("path") or {}
     components = metadata.get("components")
     if components is not None:
@@ -144,7 +144,7 @@ def entry_path(folder, item):
     ):
         raise BitbucketError("Invalid repository path entry.")
     if folder and not path.startswith(folder + "/"):
-        raise BitbucketError("Repository entry is outside the listed folder.")
+        path = folder + "/" + path
     return path
 
 
