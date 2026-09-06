@@ -62,7 +62,8 @@ function readPdfNote(pdf) {
         return;
       }
       dialog.close();
-      renderPdfTable();
+      if (state.searchQuery.trim()) scheduleAdvancedSearch();
+      else renderPdfTable();
       showToast("Notes saved");
     });
   window.addEventListener("storage", (event) => {

@@ -10,7 +10,7 @@
     <title>Bitbucket PDF Explorer</title>
     <script src="theme.js?v=20260906-crawl-18"></script>
     <script src="sidebars.js?v=20260906-crawl-18"></script>
-    <link rel="stylesheet" href="style.css?v=20260906-repo-filters" />
+    <link rel="stylesheet" href="style.css?v=20260906-column-order-1" />
   </head>
   <body>
     <svg
@@ -66,11 +66,31 @@
             placeholder="Search PDFs, paths, repositories..."
             aria-label="Search PDF files"
           />
-          <kbd aria-hidden="true">/</kbd>
+          <button id="advanced-search-toggle" type="button" aria-label="Advanced search" title="Advanced search" aria-expanded="false" aria-controls="advanced-search-panel">⚙</button>
+          <section id="advanced-search-panel" hidden aria-label="Advanced search">
+            <strong>Advanced search</strong>
+            <fieldset><legend>Search in</legend>
+              <label><input type="checkbox" name="search-field" value="name" checked> Name</label>
+              <label><input type="checkbox" name="search-field" value="path" checked> Path</label>
+              <label><input type="checkbox" name="search-field" value="content" checked> Content</label>
+              <label><input type="checkbox" name="search-field" value="notes" checked> Notes</label>
+            </fieldset>
+            <fieldset><legend>Match</legend>
+              <label><input type="radio" name="search-mode" value="separate" checked> Separately — any word</label>
+              <label><input type="radio" name="search-mode" value="together"> Together — exact phrase</label>
+            </fieldset>
+            <p>Searches selected repositories. Matches in any checked field are included. Case insensitive.</p>
+            <button id="advanced-search-reset" type="button">Reset options</button>
+          </section>
+          <span id="advanced-search-status" role="status"></span>
         </div>
 
         <div id="crawl-controls" class="crawl-controls" hidden>
+          <button id="crawl-resume" type="button" title="Resume interrupted crawl" aria-label="Resume interrupted crawl" hidden>
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2l10 6-10 6z" fill="currentColor"/></svg>
+          </button>
           <time id="crawl-elapsed" title="Elapsed crawl time">00h 00m 00s</time>
+          <span id="crawl-percentage" aria-label="Repository progress: 0 percent" title="Repositories finished / total repositories">0%</span>
           <button id="crawl-stop" type="button" title="Stop crawl" aria-label="Stop crawl">
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg>
           </button>
@@ -466,11 +486,11 @@
                     <th class="select-column">
                       <span class="visually-hidden">Select</span>
                     </th>
-                    <th scope="col">Serial No.</th>
-                    <th scope="col">PDF name</th>
-                    <th scope="col">Path</th>
                     <th scope="col">Project</th>
                     <th scope="col">Repository</th>
+                    <th scope="col">Path</th>
+                    <th scope="col">PDF name</th>
+                    <th scope="col">Serial No.</th>
                     <th scope="col">Commit ID</th>
                     <th scope="col">Commit date &amp; time</th>
                     <th scope="col">Committed by</th>
@@ -970,10 +990,10 @@
     </dialog>
     <dialog id="pdf-details-dialog" aria-labelledby="pdf-details-title" style="width:min(850px,90vw);max-height:85vh;overflow:auto;padding:24px;background:var(--panel-bg,#182535);color:inherit;border:1px solid #536278;border-radius:12px">
       <h2 id="pdf-details-title">Saved PDF details</h2>
-      <button type="button" id="pdf-details-close">Close</button>
+      <div style="display:flex;align-items:center;gap:8px"><button type="button" id="pdf-details-close">Close</button><button type="button" id="pdf-details-copy" title="Copy saved PDF details" aria-label="Copy saved PDF details" disabled><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H4v13h4"/></svg></button></div>
       <p id="pdf-details-status" role="status"></p>
       <dl id="pdf-details-fields" style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;overflow-wrap:anywhere"></dl>
-      <h3>Extracted text</h3>
+      <div style="display:flex;align-items:center;gap:8px"><h3>Extracted text</h3><button type="button" id="pdf-text-copy" title="Copy extracted text" aria-label="Copy extracted text" disabled><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H4v13h4"/></svg></button></div>
       <pre id="pdf-details-text" style="white-space:pre-wrap;max-height:40vh;overflow:auto"></pre>
     </dialog>
     <dialog id="failed-pdfs-dialog" aria-labelledby="failed-pdfs-title" style="width:min(1000px,94vw);max-height:85vh;overflow:auto;padding:24px;background:#182535;color:#e5edf7;border-radius:12px">
@@ -1003,13 +1023,14 @@
       <button type="button" id="hard-retry-cancel">Cancel</button>
       <button type="button" id="hard-retry-start" disabled>Delete index and start again</button>
     </dialog>
-    <script src="pull-progress.js?v=20260906-crawl-26"></script>
-    <script src="people-teams.js?v=20260906-crawl-18"></script>
+    <script src="pull-progress.js?v=20260906-percentage-1"></script>
+    <script src="people-teams.js?v=20260906-people-1"></script>
     <script src="notes.js?v=20260906-crawl-18"></script>
-    <script src="script.js?v=20260906-repo-queue-2"></script>
-    <script src="database.js?v=20260906-crawl-18"></script>
+    <script src="advanced-search.js?v=20260906-search-1"></script>
+    <script src="script.js?v=20260906-selection-heading-1"></script>
+    <script src="database.js?v=20260906-details-copy-1"></script>
     <script src="settings.js?v=20260906-crawl-18"></script>
-    <script src="repository-delete.js?v=20260906-excluded-1"></script>
+    <script src="repository-delete.js?v=20260906-active-delete-1"></script>
     <script src="hard-retry.js?v=20260906-hard-1"></script>
     <script src="failed-pdfs.js?v=20260906-failed-5"></script>
   </body>

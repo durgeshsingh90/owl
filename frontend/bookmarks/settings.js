@@ -53,7 +53,7 @@
       message("Loading Confluence settings…");
       const pending = new AbortController();
       controller = pending;
-      const timer = setTimeout(() => pending.abort(), 10000);
+      const timer = setTimeout(() => pending.abort(), 30000);
       try {
         const data = await request("/bookmarks/settings/workspace/", {
           signal: pending.signal,
@@ -61,7 +61,7 @@
         if (!dialog.open) return;
         workspace = data;
         url.value = data.configuration?.baseUrl || "";
-        applyConfluenceBaseUrl(url.value);
+        document.querySelector("#confluence-ssl").checked = data.configuration?.verifySsl !== false;
         pat.value = "";
         message(
           data.configuration?.managed_externally
@@ -98,7 +98,7 @@
     const path = testOnly
       ? workspace.urls.confluenceTest
       : workspace.urls.confluenceSave;
-    if (!path || !workspace.csrfToken) {
+    if (!path) {
       message("Backend settings response is incomplete.", true);
       return;
     }
@@ -106,12 +106,12 @@
     message(testOnly ? "Testing connection…" : "Saving settings…");
     const pending = new AbortController();
     controller = pending;
-    const timer = setTimeout(() => pending.abort(), 10000);
+    const timer = setTimeout(() => pending.abort(), 30000);
     try {
       const result = await request(path, {
         method: "POST",
         body,
-        headers: { "X-CSRFToken": workspace.csrfToken },
+
         signal: pending.signal,
       });
       if (!dialog.open) return;
@@ -121,7 +121,6 @@
       } else {
         if (result.state !== "success")
           throw Error(result.detail || "Settings were not saved.");
-        applyConfluenceBaseUrl(body.get("base_url"));
         pat.value = "";
         receipt.value = "";
         message("Confluence settings saved.");
@@ -132,7 +131,7 @@
         receipt.value = "";
         message(
           error.name === "AbortError"
-            ? "Request timed out after 10 seconds."
+            ? "Request timed out after 30 seconds."
             : error.message,
           true,
         );

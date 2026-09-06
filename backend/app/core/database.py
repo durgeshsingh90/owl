@@ -54,23 +54,6 @@ def initialize(*, recover_jobs=False):
             added_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_scanned TEXT NOT NULL,
             UNIQUE(repository_id,path)
         );
-        CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-            pdf_name, repo, path, pdf_text, content='documents', content_rowid='id'
-        );
-        CREATE TRIGGER IF NOT EXISTS document_insert AFTER INSERT ON documents BEGIN
-            INSERT INTO documents_fts(rowid,pdf_name,repo,path,pdf_text)
-            VALUES(new.id,new.pdf_name,new.repo,new.path,new.pdf_text);
-        END;
-        CREATE TRIGGER IF NOT EXISTS document_delete AFTER DELETE ON documents BEGIN
-            INSERT INTO documents_fts(documents_fts,rowid,pdf_name,repo,path,pdf_text)
-            VALUES('delete',old.id,old.pdf_name,old.repo,old.path,old.pdf_text);
-        END;
-        CREATE TRIGGER IF NOT EXISTS document_update AFTER UPDATE ON documents BEGIN
-            INSERT INTO documents_fts(documents_fts,rowid,pdf_name,repo,path,pdf_text)
-            VALUES('delete',old.id,old.pdf_name,old.repo,old.path,old.pdf_text);
-            INSERT INTO documents_fts(rowid,pdf_name,repo,path,pdf_text)
-            VALUES(new.id,new.pdf_name,new.repo,new.path,new.pdf_text);
-        END;
         CREATE TABLE IF NOT EXISTS failed_documents (
             id INTEGER PRIMARY KEY, repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
             path TEXT NOT NULL, error TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 1,
@@ -84,6 +67,37 @@ def initialize(*, recover_jobs=False):
             id TEXT PRIMARY KEY, status TEXT NOT NULL, progress TEXT NOT NULL
         );
         """)
+        # FTS5 cannot add columns in place. Rebuild only its derived index,
+        # preserving all documents and saved notes, including older databases.
+        fts_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(documents_fts)")
+        }
+        if "notes" not in fts_columns:
+            db.executescript("""BEGIN IMMEDIATE;
+                DROP TRIGGER IF EXISTS document_insert;
+                DROP TRIGGER IF EXISTS document_delete;
+                DROP TRIGGER IF EXISTS document_update;
+                DROP TABLE IF EXISTS documents_fts;
+        CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+            pdf_name, repo, path, pdf_text, notes, content='documents', content_rowid='id'
+        );
+        CREATE TRIGGER IF NOT EXISTS document_insert AFTER INSERT ON documents BEGIN
+            INSERT INTO documents_fts(rowid,pdf_name,repo,path,pdf_text,notes)
+            VALUES(new.id,new.pdf_name,new.repo,new.path,new.pdf_text,new.notes);
+        END;
+        CREATE TRIGGER IF NOT EXISTS document_delete AFTER DELETE ON documents BEGIN
+            INSERT INTO documents_fts(documents_fts,rowid,pdf_name,repo,path,pdf_text,notes)
+            VALUES('delete',old.id,old.pdf_name,old.repo,old.path,old.pdf_text,old.notes);
+        END;
+        CREATE TRIGGER IF NOT EXISTS document_update AFTER UPDATE ON documents BEGIN
+            INSERT INTO documents_fts(documents_fts,rowid,pdf_name,repo,path,pdf_text,notes)
+            VALUES('delete',old.id,old.pdf_name,old.repo,old.path,old.pdf_text,old.notes);
+            INSERT INTO documents_fts(rowid,pdf_name,repo,path,pdf_text,notes)
+            VALUES(new.id,new.pdf_name,new.repo,new.path,new.pdf_text,new.notes);
+        END;
+                INSERT INTO documents_fts(documents_fts) VALUES('rebuild');
+                COMMIT;
+            """)
         columns = {
             row["name"] for row in db.execute("PRAGMA table_info(failed_documents)")
         }

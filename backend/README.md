@@ -130,3 +130,25 @@ PDF extraction uses a single shared background thread, with no multiprocessing o
 ### Flowing console logs
 
 Run `python dev.py logs` from the project root (or `python3 dev.py logs` on macOS/Linux). It prints the last 20 lines per source, then follows backend, crawler diagnostics, frontend and supervisor logs. Use `--service backend` for backend/crawler only, `--lines 0` for new output only, or `--no-follow` for a snapshot. Ctrl+C exits the log viewer without stopping OWL. Missing files are watched until created; rotation and truncation are handled on Windows, macOS and Linux.
+
+
+## Bookmark Manager and Confluence
+The existing Bookmark Manager stores bookmarks, full extracted page text, ancestor
+metadata, notes, flags, and open counts in SQLite's bookmark_workspace record.
+Use its settings gear to save a Confluence Data Center base URL and bearer PAT.
+The PAT is encrypted in confluence.enc with a separate local confluence.key under
+OWL_CONFIG_DIR (backend/data by default); it is never returned to the browser.
+SSL verification is selectable. Saving settings validates the connection.
+
+Adding a URL on the configured Confluence origin resolves pageId, /pages/ID,
+/display/SPACE/title, and /x/ short links, checks the page, and fetches its
+rendered text (storage text fallback), space, authorship, version, dates and
+ancestor breadcrumbs. The tree displays the saved page under those ancestors.
+This does not recursively import unrelated pages or download attachments.
+Other HTTP(S) links are saved and grouped by hostname without sending the PAT
+or fetching their content. Update refreshes saved metadata while preserving
+notes and open counts; failures retain previous content and display the error.
+HTML imports attempt the same metadata lookup and retain failed entries for retry.
+
+Validation uses mocked Confluence responses and an isolated SQLite database;
+corporate connectivity must be tested through the settings gear on your network.

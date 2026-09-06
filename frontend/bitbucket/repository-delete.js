@@ -15,7 +15,6 @@
     cancel.disabled = busy;
   }
   document.querySelector("#delete-selected-repo").onclick = async () => {
-    if (pullProgress.active) return;
     ids = selectedRepositories().map(repo => Number(repo.id));
     if (!ids.length) return;
     const current = ++generation;

@@ -8,6 +8,7 @@ async function loadDatabaseWorkspace() {
     pdfs.splice(0, pdfs.length, ...data.documents);
     people.splice(0, people.length, ...data.people);
     renderApp();
+    if (state.searchQuery.trim()) scheduleAdvancedSearch();
   } catch (error) {
     showToast(error.message);
   }
@@ -36,12 +37,28 @@ document
   const fields = document.querySelector("#pdf-details-fields");
   const text = document.querySelector("#pdf-details-text");
   let sequence = 0;
+  let savedDetails = "", extractedText = "";
+  const copyDetails = document.querySelector("#pdf-details-copy");
+  const copyExtracted = document.querySelector("#pdf-text-copy");
+  async function copySaved(value, label) {
+    const current = sequence;
+    try {
+      await copyText(value);
+      if (sequence === current) status.textContent = `${label} copied.`;
+    } catch {
+      if (sequence === current) status.textContent = "Could not copy. Please select and copy the text manually.";
+    }
+  }
+  copyDetails.onclick = () => copySaved(savedDetails, "Saved PDF details");
+  copyExtracted.onclick = () => copySaved(extractedText, "Extracted text");
   document.querySelector("#pdf-details-close").onclick = () => dialog.close();
   dialog.addEventListener("close", () => { sequence++; });
   document.querySelector("#pdf-table-body").addEventListener("click", async event => {
     const button = event.target.closest("[data-pdf-details]");
     if (!button) return;
     const current = ++sequence;
+    copyDetails.disabled = copyExtracted.disabled = true;
+    savedDetails = extractedText = "";
     fields.replaceChildren();
     text.textContent = "";
     status.textContent = "Loading saved record…";
@@ -58,6 +75,10 @@ document
         commit_date: "Commit date", added_at: "Saved at", updated_at: "Updated at",
         last_scanned: "Last scanned", pdf_hash: "SHA-256", open_count: "Open count", notes: "Notes",
       };
+      savedDetails = Object.entries(labels).map(([key, label]) => `${label}: ${record[key] ?? "Not available"}`).join("\n");
+      extractedText = record.pdf_text || "";
+      copyDetails.disabled = false;
+      copyExtracted.disabled = !extractedText;
       for (const [key, label] of Object.entries(labels)) {
         const title = document.createElement("dt");
         const value = document.createElement("dd");

@@ -182,13 +182,7 @@ td:first-child {
   padding: 45px;
   color: var(--text-muted);
 }
-.sample-badge {
-  font-size: 10px;
-  color: var(--text-muted);
-  border: 1px solid var(--border);
-  padding: 4px 8px;
-  border-radius: 12px;
-}
+
 .pagination-bar {
   font-size: 10px;
 }
@@ -323,9 +317,7 @@ button:disabled {
   .main-panel {
     padding-top: 18px;
   }
-  .sample-badge {
-    display: none;
-  }
+
   .bookmark-toolbar {
     flex-wrap: wrap;
   }
@@ -1945,3 +1937,8 @@ body {
 #domain-group-feedback {
   font-size: 12px;
 }
+
+/* Leave room for both URL creation and search options. */
+#bookmark-search { padding-right: 46px; }
+#add-bookmark { right: 44px; }
+#bookmark-search-form:has(#add-bookmark:not([hidden])) #bookmark-search { padding-right: 182px; }

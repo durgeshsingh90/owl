@@ -45,12 +45,33 @@ async function crawlJson(url, body) {
 function updatePullSummary(message) {
   document.querySelector("#repository-pull-status").textContent = message;
 }
+function canResumeCrawl(job) {
+  const checkpoint = job.checkpoint;
+  if (!checkpoint || job.resumed_by || !["cancelled", "interrupted", "failed"].includes(job.status)) return false;
+  if (!checkpoint.enumeration_complete) return true;
+  return (checkpoint.repos || []).some(([project, repo, id]) => {
+    if (checkpoint.finished.includes(String(id))) return false;
+    const inventory = checkpoint.inventories[String(id)];
+    return inventory == null || inventory.some(path => !(checkpoint.successful[String(id)] || []).includes(path)
+      || JSON.stringify(checkpoint.active_pdf) === JSON.stringify([project, repo, path]));
+  });
+}
 function watchCrawl(job) {
   pullProgress.active = true;
   clearTimeout(pullProgress.timer);
   pullProgress.jobId = job.id;
   const controls = document.querySelector("#crawl-controls");
   const stop = document.querySelector("#crawl-stop");
+  const resume = document.querySelector("#crawl-resume");
+  resume.hidden = !canResumeCrawl(job);
+  resume.disabled = false;
+  resume.onclick = async () => {
+    resume.disabled = true;
+    try {
+      const resumed = await crawlJson(`/api/jobs/${job.id}/resume`, {});
+      watchCrawl(resumed);
+    } catch (error) { resume.disabled = false; showToast(error.message); }
+  };
   controls.hidden = false;
   stop.hidden = !["queued", "running"].includes(job.status);
   stop.disabled = false;
@@ -73,7 +94,15 @@ function watchCrawl(job) {
         ? Math.max(current.elapsed_seconds || 0, (Date.now() - Date.parse(current.started_at)) / 1000)
         : current.elapsed_seconds;
       document.querySelector("#crawl-elapsed").textContent = formatEta(elapsed);
+      const totalRepos = Math.max(0, Number(current.repositories) || 0);
+      const doneRepos = Math.min(totalRepos, Math.max(0, Number(current.repositories_done) || 0));
+      const percentage = totalRepos ? Math.floor(doneRepos / totalRepos * 100) : 0;
+      const progress = document.querySelector("#crawl-percentage");
+      progress.textContent = `${percentage}%`;
+      progress.title = `${doneRepos}/${totalRepos} repositories finished (including failures and empty repositories)`;
+      progress.setAttribute("aria-label", `${percentage}% complete: ${doneRepos} of ${totalRepos} repositories finished`);
       stop.hidden = !running;
+      resume.hidden = !canResumeCrawl(current);
       if (current.bitbucket_connected && (["queued", "running"].includes(current.status) || ["queued", "running"].includes(job.status))) {
         setConnectionStatus("connected", "Bitbucket responded successfully. Background indexing is running.");
       }

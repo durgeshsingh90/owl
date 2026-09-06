@@ -32,6 +32,9 @@ class Jobs:
     def __init__(self):
         self.task = None
         self.current = None
+        self.repository_task = None
+        self.repository_id = None
+        self.deleted_ids = set()
         self.extractor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="owl-pdf")
 
     def active(self):
@@ -40,6 +43,7 @@ class Jobs:
     def start(self, project_ids=None, targets=None, auto_retry=True, hard_retry=False):
         if self.active():
             raise ValueError("A crawl is already running.")
+        self.deleted_ids = set()
         settings = load_settings()
         with connection() as db:
             projects = [
@@ -95,6 +99,15 @@ class Jobs:
         self.current = {
             "id": uuid.uuid4().hex,
             "status": "queued",
+            "checkpoint": {
+                "server": settings.base_url,
+                "project_ids": [project["id"] for project in projects],
+                "inventories": {},
+                "successful": {},
+                "finished": [],
+                "active_pdf": None,
+                "enumeration_complete": False,
+            },
             "hard_retry": hard_retry,
             "backup_path": str(backup_path) if backup_path else None,
             "started_at": now(),
@@ -129,6 +142,84 @@ class Jobs:
         )
         return self.current.copy()
 
+    def resume(self, job_id):
+        if self.active():
+            raise ValueError("Stop the current crawl before resuming another one.")
+        with connection() as db:
+            row = db.execute(
+                "SELECT status,progress FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+        if row is None:
+            raise ValueError("Crawl not found.")
+        previous = json.loads(row["progress"])
+        checkpoint = previous.get("checkpoint")
+        if (
+            row["status"] not in {"cancelled", "interrupted", "failed"}
+            or not checkpoint
+        ):
+            raise ValueError("This crawl has no resumable checkpoint.")
+        if previous.get("resumed_by"):
+            raise ValueError(
+                "This crawl has already been resumed. Use the latest crawl."
+            )
+        if checkpoint["server"] != load_settings().base_url:
+            raise ValueError(
+                "Restore the original Bitbucket server settings before resuming."
+            )
+        targets = []
+        project_ids = set(checkpoint["project_ids"])
+        if checkpoint["enumeration_complete"]:
+            for project, slug, repository_id in checkpoint.get("repos", []):
+                key = str(repository_id)
+                if key in checkpoint["finished"]:
+                    continue
+                with connection() as db:
+                    exists = db.execute(
+                        "SELECT project_id FROM repositories WHERE id=?",
+                        (repository_id,),
+                    ).fetchone()
+                if exists is None:
+                    continue
+                project_ids.add(exists["project_id"])
+                inventory = checkpoint["inventories"].get(key)
+                base = {"project": project, "repo": slug, "path": None}
+                if inventory is None:
+                    targets.append(base)
+                else:
+                    successful = checkpoint["successful"].get(key, [])
+                    active = checkpoint.get("active_pdf")
+                    remaining = [
+                        path
+                        for path in inventory
+                        if path not in successful or active == [project, slug, path]
+                    ]
+                    targets.extend({**base, "path": path} for path in remaining)
+        else:
+            targets = checkpoint.get("targets", [])
+        if checkpoint["enumeration_complete"] and not targets:
+            raise ValueError("No unfinished PDFs or repositories remain in this crawl.")
+        # Narrow projects too: projects absent from targets must not be scanned again.
+        if checkpoint["enumeration_complete"]:
+            with connection() as db:
+                project_ids = {
+                    row["id"]
+                    for row in db.execute("SELECT id,project FROM tracked_projects")
+                    if row["project"] in {target["project"] for target in targets}
+                    and row["id"] in project_ids
+                }
+        self.start(list(project_ids), targets or None)
+        self.current["resumed_from"] = job_id
+        self.current["force_paths"] = (
+            [checkpoint["active_pdf"]] if checkpoint.get("active_pdf") else []
+        )
+        self.save()
+        previous["resumed_by"] = self.current["id"]
+        with connection() as db:
+            db.execute(
+                "UPDATE jobs SET progress=? WHERE id=?", (json.dumps(previous), job_id)
+            )
+        return self.current.copy()
+
     def enqueue(self, targets):
         """Reserve additional repositories in the running single-worker job."""
         with connection() as db:
@@ -158,6 +249,8 @@ class Jobs:
                 ).fetchone()
                 if str(row["id"]) in self.current["repository_statuses"]:
                     continue
+                if project["id"] not in self.current["checkpoint"]["project_ids"]:
+                    self.current["checkpoint"]["project_ids"].append(project["id"])
                 self.repos.append((target["project"], target["repo"], row["id"]))
                 self.targets.append(target)
                 self.current["repository_statuses"][str(row["id"])] = {
@@ -167,11 +260,102 @@ class Jobs:
                     "found": 0,
                     "failed": 0,
                 }
-        self.current["repositories"] = len(self.repos)
+        self.current["repositories"] = len(
+            [r for r in self.repos if r[2] not in self.deleted_ids]
+        )
         self.save()
         return self.current.copy()
 
+    async def delete_repositories(self, rows):
+        """Cancel only selected in-flight work before cascading its saved records."""
+        was_active = self.active()
+        ids = {row["id"] for row in rows}
+        pairs = {(row["project"], row["repo"]) for row in rows}
+        self.deleted_ids.update(ids)
+        task = self.repository_task
+        if self.repository_id in ids and task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        # No awaits from here through deletion/save: the worker cannot interleave writes.
+        with connection() as db:
+            exclude_repositories(db, rows)
+        if was_active and self.current:
+            p = self.current
+            cp = p["checkpoint"]
+            for repository_id in ids:
+                key = str(repository_id)
+                status = p["repository_statuses"].pop(key, {})
+                for counter, field in (
+                    ("found", "found"),
+                    ("processed", "processed"),
+                    ("failed", "failed"),
+                ):
+                    p[counter] = max(0, p[counter] - status.get(field, 0))
+                cp["inventories"].pop(key, None)
+                cp["successful"].pop(key, None)
+                if key in cp["finished"]:
+                    cp["finished"].remove(key)
+                    p["repositories_done"] = max(0, p["repositories_done"] - 1)
+                    counter = (
+                        "repositories_succeeded"
+                        if status.get("status") == "succeeded"
+                        else "repositories_failed"
+                    )
+                    p[counter] = max(0, p[counter] - 1)
+            for container, field in ((cp, "active_pdf"),):
+                if container.get(field) and tuple(container[field][:2]) in pairs:
+                    container[field] = None
+            self.targets = [
+                t for t in self.targets if (t["project"], t.get("repo")) not in pairs
+            ]
+            p["force_paths"] = [
+                t for t in p.get("force_paths", []) if tuple(t[:2]) not in pairs
+            ]
+            p["folder_failures"] = [
+                f
+                for f in p.get("folder_failures", [])
+                if (f.get("project"), f.get("repo")) not in pairs
+            ]
+            p["repositories"] = len(
+                [r for r in self.repos if r[2] not in self.deleted_ids]
+            )
+            statuses = [r["status"] for r in p["repository_statuses"].values()]
+            p["repositories_succeeded"] = (
+                statuses.count("succeeded") + p["repositories_auto_excluded"]
+            )
+            p["repositories_failed"] = statuses.count("failed") + statuses.count(
+                "retrying"
+            )
+            p["repositories_done"] = (
+                statuses.count("succeeded")
+                + statuses.count("failed")
+                + p["repositories_auto_excluded"]
+            )
+            p["retry_active"] = "retrying" in statuses
+            p["discovery_failed"] = bool(p["folder_failures"])
+            if p["status"] in {"succeeded", "succeeded_with_errors"}:
+                p["status"] = (
+                    "succeeded_with_errors"
+                    if p["failed"] or p["repositories_failed"]
+                    else "succeeded"
+                )
+            p["detail"] = (
+                "Selected repositories deleted; continuing remaining queue."
+                if self.active()
+                else "Crawl completed."
+            )
+
+            self.save()
+
     def save(self):
+        if self.current.get("checkpoint"):
+            self.current["checkpoint"]["repos"] = [
+                r for r in self.repos if r[2] not in self.deleted_ids
+            ]
+            self.current["checkpoint"]["targets"] = self.targets
         with connection() as db:
             db.execute(
                 "INSERT INTO jobs VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,progress=excluded.progress",
@@ -183,6 +367,23 @@ class Jobs:
         client.extractor = self.extractor
         started = time.monotonic()
         p = self.current
+        checkpoint = p["checkpoint"]
+        client.force_paths = {tuple(path) for path in p.get("force_paths", [])}
+
+        def pdf_started(project, slug, repository_id, path):
+            checkpoint["active_pdf"] = [project, slug, path]
+            self.save()
+
+        def pdf_finished(project, slug, repository_id, path, succeeded):
+            if succeeded:
+                completed = checkpoint["successful"].setdefault(str(repository_id), [])
+                if path not in completed:
+                    completed.append(path)
+            checkpoint["active_pdf"] = None
+            self.save()
+
+        client.on_pdf_started = pdf_started
+        client.on_pdf_finished = pdf_finished
 
         def repo_status(repository_id, status):
             p["repository_statuses"][str(repository_id)]["status"] = status
@@ -246,7 +447,8 @@ class Jobs:
                         "failed": 0,
                     }
                     self.save()
-            p["repositories"] = len(repos)
+            checkpoint["enumeration_complete"] = True
+            p["repositories"] = len([r for r in repos if r[2] not in self.deleted_ids])
             self.save()
             # Stable order across API pages, regardless of configured worker count.
             repos.sort(
@@ -340,7 +542,11 @@ class Jobs:
                             client, project, slug, on_folder_error=folder_failed
                         ):
                             found(path)
-                    return sorted(paths, key=lambda path: (path.casefold(), path))
+                    ordered = sorted(paths, key=lambda path: (path.casefold(), path))
+                    if repository_id not in partial_repositories:
+                        checkpoint["inventories"][str(repository_id)] = ordered
+                    self.save()
+                    return ordered
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:  # noqa: BLE001 - isolate repository discovery
@@ -508,7 +714,7 @@ class Jobs:
                     repo_status(repository_id, "failed")
                 p["retry_active"] = False
 
-            for repo in repos:
+            async def process_repository(repo):
                 paths = await discover(*repo)
                 if paths == [] and repo[2] not in partial_repositories:
                     # Only a complete, successful inventory proves a repository empty.
@@ -525,13 +731,14 @@ class Jobs:
                                 }
                             ],
                         )
+                    checkpoint["finished"].append(str(repo[2]))
                     p["repository_statuses"].pop(str(repo[2]), None)
                     p["repositories_auto_excluded"] += 1
                     p["repositories_succeeded"] += 1
                     p["repositories_done"] += 1
                     p["detail"] = "Empty repository moved to excluded repositories."
                     self.save()
-                    continue
+                    return
                 if paths is not None:
                     repo_processing_started = time.monotonic()
                     repository = p["repository_statuses"][str(repo[2])]
@@ -544,8 +751,26 @@ class Jobs:
                         )
                         repository["eta_seconds"] = None
                         self.save()
+                    checkpoint["finished"].append(str(repo[2]))
                     p["repositories_done"] += 1
                     self.save()
+
+            for repo in repos:
+                if repo[2] in self.deleted_ids:
+                    continue
+                self.repository_id = repo[2]
+                self.repository_task = asyncio.create_task(process_repository(repo))
+                try:
+                    await self.repository_task
+                except asyncio.CancelledError:
+                    if (
+                        repo[2] not in self.deleted_ids
+                        or asyncio.current_task().cancelling()
+                    ):
+                        raise
+                finally:
+                    self.repository_task = None
+                    self.repository_id = None
             p["discovery_complete"] = True
             self.save()
 

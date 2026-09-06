@@ -47,7 +47,7 @@ function personKey(person) {
 }
 function pdfAuthorKey(pdf) {
   if (pdf.commitAuthorEmail) return pdf.commitAuthorEmail.toLocaleLowerCase();
-  // Resolve the explicit sample author, not every contributor in the repository.
+  // Match the saved PDF author to the contributor in this repository.
   const matches = people.filter(
     (person) =>
       person.name === pdf.commitAuthor &&
@@ -193,6 +193,8 @@ function refreshPeopleFilter() {
       const button = event.target.closest("[data-team-filter]");
       if (!button) return;
       activePeopleFilter = button.dataset.teamFilter;
+      state.peopleQuery = activePeopleFilter.startsWith("person:") ? activePeopleFilterLabel() : "";
+      elements.peopleSearchInput.value = state.peopleQuery;
       refreshPeopleFilter();
     });
   document

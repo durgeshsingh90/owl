@@ -19,6 +19,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.path.startswith("/api/")
             or self.path.startswith("/bitbucket/settings/")
             or self.path.startswith("/bitbucket/workspace/")
+            or self.path.startswith("/bookmarks/settings/")
+            or self.path.startswith("/bookmarks/connection/")
         ):
             if self.command in ("GET", "HEAD"):
                 return getattr(super(), "do_" + self.command)()
@@ -29,7 +31,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_error(403)
             return
         length = int(self.headers.get("Content-Length", "0"))
-        if length > 1024 * 1024:
+        if length > 64 * 1024 * 1024:
             self.send_error(413)
             return
         body = self.rfile.read(length) if length else None
@@ -59,7 +61,7 @@ class Handler(SimpleHTTPRequestHandler):
         finally:
             conn.close()
 
-    do_GET = do_HEAD = do_POST = do_PATCH = do_DELETE = dispatch
+    do_GET = do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = dispatch
 
 
 if __name__ == "__main__":

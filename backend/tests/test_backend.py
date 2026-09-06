@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sqlite3
 import tempfile
@@ -361,6 +362,102 @@ class BackendTests(unittest.TestCase):
         ]:
             with self.assertRaises(BitbucketError):
                 entry_path("A", {"path": metadata})
+
+    def test_advanced_search_fields_and_word_modes(self):
+        self.crawl()
+        with connection() as db:
+            ids = [row[0] for row in db.execute("SELECT id FROM documents ORDER BY id")]
+            db.execute(
+                "UPDATE documents SET pdf_name='neutral.pdf', pdf_text='neutral'"
+            )
+            db.execute("UPDATE documents SET pdf_name='aws.pdf' WHERE id=?", (ids[0],))
+            db.execute(
+                "UPDATE documents SET path='cloud/azure.pdf' WHERE id=?", (ids[1],)
+            )
+            db.execute(
+                "UPDATE documents SET pdf_text='aws azure' WHERE id=?", (ids[2],)
+            )
+            db.execute(
+                "UPDATE documents SET pdf_text='aws versus azure' WHERE id=?", (ids[3],)
+            )
+
+        def matches(**options):
+            response = self.client.post(
+                "/api/search/matches", json={"q": "aws azure", **options}
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            return set(response.json()["ids"])
+
+        self.assertEqual(matches(), set(ids))
+        self.assertEqual(matches(fields=["name"]), {ids[0]})
+        self.assertEqual(matches(fields=["path"]), {ids[1]})
+        self.assertEqual(matches(fields=["content"]), set(ids[2:]))
+        self.assertEqual(matches(fields=["name", "path"]), set(ids[:2]))
+        self.assertEqual(matches(mode="together"), {ids[2]})
+        self.assertEqual(matches(fields=[]), set())
+        self.assertEqual(matches(q="AWS AZURE", mode="together"), {ids[2]})
+        self.assertEqual(matches(q='" OR *'), set())
+        self.assertEqual(
+            self.client.post(
+                "/api/search/matches", json={"q": "aws", "fields": ["invalid"]}
+            ).status_code,
+            422,
+        )
+
+    def test_notes_search_updates_and_existing_index_migration(self):
+        from app.core.database import initialize
+
+        self.crawl()
+        with connection() as db:
+            doc_id = db.execute("SELECT id FROM documents LIMIT 1").fetchone()[0]
+        response = self.client.patch(
+            f"/api/document/{doc_id}/notes", json={"notes": "uniquenote azure"}
+        )
+        self.assertEqual(response.status_code, 200)
+
+        def matches(fields=None, mode="separate", q="uniquenote"):
+            payload = {"q": q, "mode": mode}
+            if fields is not None:
+                payload["fields"] = fields
+            result = self.client.post("/api/search/matches", json=payload)
+            self.assertEqual(result.status_code, 200, result.text)
+            return result.json()["ids"]
+
+        self.assertEqual(matches(), [doc_id])
+        self.assertEqual(matches(["notes"]), [doc_id])
+        self.assertEqual(matches(["name", "path", "content"]), [])
+        self.assertEqual(matches(["notes"], "together", "uniquenote azure"), [doc_id])
+        self.assertEqual(matches(["notes"], "together", "azure uniquenote"), [])
+        self.assertEqual(
+            [
+                row["id"]
+                for row in self.client.get(
+                    "/api/search", params={"q": "uniquenote"}
+                ).json()
+            ],
+            [doc_id],
+        )
+        # Simulate the pre-notes FTS schema with existing saved documents.
+        with connection() as db:
+            db.executescript("""
+                DROP TRIGGER document_insert;
+                DROP TRIGGER document_update;
+                DROP TRIGGER document_delete;
+                DROP TABLE documents_fts;
+                CREATE VIRTUAL TABLE documents_fts USING fts5(
+                    pdf_name,repo,path,pdf_text,content='documents',content_rowid='id'
+                );
+            """)
+        initialize()
+        initialize()  # The upgrade is safe on subsequent startups.
+        self.assertEqual(matches(["notes"]), [doc_id])
+        self.client.patch(
+            f"/api/document/{doc_id}/notes", json={"notes": "replacementnote"}
+        )
+        self.assertEqual(matches(["notes"]), [])
+        self.assertEqual(matches(["notes"], q="replacementnote"), [doc_id])
+        self.client.patch(f"/api/document/{doc_id}/notes", json={"notes": ""})
+        self.assertEqual(matches(["notes"], q="replacementnote"), [])
 
     def test_repository_eta(self):
         from app.pdfs.jobs import remaining_eta
@@ -1178,8 +1275,207 @@ class BackendTests(unittest.TestCase):
                 self.assertEqual(self.client.get("/api/failed").json(), [])
         self.assertEqual(self.client.post("/api/failed/retry").status_code, 400)
 
+    def test_resume_after_manual_stop(self):
+        self.check_resume_checkpoint(restart=False)
+
+    def test_resume_after_application_restart(self):
+        self.check_resume_checkpoint(restart=True)
+
+    def check_resume_checkpoint(self, restart):
+        original = self.upstream
+        paused = False
+
+        async def interrupt_second_pdf(request):
+            nonlocal paused
+            if request.url.path.endswith("/repos/one/raw/second.pdf"):
+                paused = True
+                await asyncio.sleep(30)
+            return original(request)
+
+        self.upstream = interrupt_second_pdf
+        project = self.config["base_url"] + "/projects/DEMO"
+        self.client.post("/api/project", json={"project_url": project})
+        job = self.client.post("/api/crawl", json={}).json()
+        for _ in range(200):
+            if paused:
+                break
+            time.sleep(0.01)
+        self.assertTrue(paused)
+        snapshot = self.client.get("/api/jobs/" + job["id"]).json()
+        self.assertEqual(snapshot["processed"], 1)
+        self.assertEqual(
+            snapshot["checkpoint"]["active_pdf"], ["DEMO", "one", "second.pdf"]
+        )
+        self.client.post("/api/jobs/" + job["id"] + "/cancel")
+        self.upstream = original
+        if restart:
+            # Simulate the on-disk state left by sudden power loss, then a fresh lifespan.
+            with connection() as db:
+                db.execute(
+                    "UPDATE jobs SET status='running',progress=? WHERE id=?",
+                    (json.dumps(snapshot), job["id"]),
+                )
+            self.client.__exit__(None, None, None)
+            self.client = TestClient(app)
+            self.client.__enter__()
+            self.assertEqual(
+                self.client.get("/api/jobs/" + job["id"]).json()["status"],
+                "interrupted",
+            )
+        # Model a PDF commit that reached SQLite just before its checkpoint was saved.
+        with connection() as db:
+            saved = dict(
+                db.execute("SELECT * FROM documents WHERE repo='one'").fetchone()
+            )
+            saved.pop("id")
+            saved.update(
+                path="second.pdf",
+                pdf_name="second.pdf",
+                pdf_text="stale text to re-extract",
+            )
+            columns = list(saved)
+            db.execute(
+                f"INSERT INTO documents ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                list(saved.values()),
+            )
+        self.calls.clear()
+        response = self.client.post("/api/jobs/" + job["id"] + "/resume")
+        self.assertEqual(response.status_code, 202, response.text)
+        resumed = response.json()
+        for _ in range(300):
+            current = self.client.get("/api/jobs/" + resumed["id"]).json()
+            if current["status"] not in ("queued", "running"):
+                break
+            time.sleep(0.01)
+        self.assertEqual(current["status"], "succeeded", current)
+        self.assertEqual(current["resumed_from"], job["id"])
+        self.assertEqual(current["processed"], 3)
+        with connection() as db:
+            self.assertNotEqual(
+                db.execute(
+                    "SELECT pdf_text FROM documents WHERE repo='one' AND path='second.pdf'"
+                ).fetchone()[0],
+                "stale text to re-extract",
+            )
+        self.assertFalse(any("/repos/one/browse/" in url for url in self.calls))
+        self.assertFalse(
+            any("/repos/one/raw/nested/first.pdf" in url for url in self.calls)
+        )
+        self.assertEqual(
+            sum("/repos/one/raw/second.pdf" in url for url in self.calls), 1
+        )
+        with connection() as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 4
+            )
+        self.assertEqual(
+            self.client.post("/api/jobs/" + job["id"] + "/resume").status_code, 400
+        )
+
+    def test_delete_queued_repository_does_not_interrupt_active_repository(self):
+        original = self.upstream
+        release = False
+
+        async def paused(request):
+            if "/repos/one/browse/" in request.url.path:
+                while not release:
+                    await asyncio.sleep(0.01)
+            return original(request)
+
+        self.upstream = paused
+        root = self.config["base_url"] + "/projects/DEMO/repos/"
+        job = self.client.post("/api/imports", json={"urls": [root + "one"]}).json()
+        try:
+            queued = self.client.post(
+                "/api/imports", json={"urls": [root + "two"]}
+            ).json()
+            repo_id = next(
+                int(key)
+                for key, value in queued["repository_statuses"].items()
+                if value["repo"] == "two"
+            )
+            response = self.client.post(
+                "/api/repositories/delete",
+                json={"repository_ids": [repo_id], "confirmation": "delete all"},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            current = self.client.get("/api/jobs/" + job["id"]).json()
+            self.assertEqual(current["status"], "running")
+        finally:
+            release = True
+        for _ in range(300):
+            current = self.client.get("/api/jobs/" + job["id"]).json()
+            if current["status"] not in ("queued", "running"):
+                break
+            time.sleep(0.01)
+        self.assertEqual(current["status"], "succeeded", current)
+        self.assertEqual(current["repositories"], 1)
+        self.assertEqual(current["processed"], 2)
+        self.assertFalse(any("/repos/two/browse/" in url for url in self.calls))
+
+    def test_delete_active_repository_during_extraction_continues_queue(self):
+        import threading
+
+        from app.pdfs.crawler import extract
+
+        extracting, release = threading.Event(), threading.Event()
+
+        def paused_extract(content):
+            extracting.set()
+            release.wait(5)
+            return extract(content)
+
+        root = self.config["base_url"] + "/projects/DEMO/repos/"
+        with patch("app.pdfs.crawler.extract", paused_extract):
+            job = self.client.post("/api/imports", json={"urls": [root + "one"]}).json()
+            try:
+                self.assertTrue(extracting.wait(3))
+                self.client.post("/api/imports", json={"urls": [root + "two"]})
+                with connection() as db:
+                    repo_id = db.execute(
+                        "SELECT id FROM repositories WHERE repo='one'"
+                    ).fetchone()[0]
+                response = self.client.post(
+                    "/api/repositories/delete",
+                    json={"repository_ids": [repo_id], "confirmation": "delete all"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+            finally:
+                release.set()
+            for _ in range(300):
+                current = self.client.get("/api/jobs/" + job["id"]).json()
+                if current["status"] not in ("queued", "running"):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(current["status"], "succeeded", current)
+            self.assertEqual(current["repositories"], 1)
+            self.assertEqual(current["processed"], 2)
+            self.assertNotIn(str(repo_id), current["repository_statuses"])
+            self.assertNotIn("one", json.dumps(current["checkpoint"]))
+            with connection() as db:
+                self.assertEqual(
+                    db.execute(
+                        "SELECT COUNT(*) FROM documents WHERE repo='one'"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    db.execute(
+                        "SELECT COUNT(*) FROM failed_documents WHERE repository_id=?",
+                        (repo_id,),
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    db.execute(
+                        "SELECT COUNT(*) FROM documents WHERE repo='two'"
+                    ).fetchone()[0],
+                    2,
+                )
+
     def test_import_remains_available_during_pdf_extraction(self):
         import threading
+
         from app.pdfs.crawler import extract
 
         extracting = threading.Event()

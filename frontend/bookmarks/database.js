@@ -3,12 +3,13 @@
   let ready = false,
     revision = 0,
     saving = false,
-    dirty = false;
-  window.saveBookmarkDatabase = async () => {
-    if (!ready) return;
+    dirty = false, pending = null;
+  window.saveBookmarkDatabase = () => {
+    if (!ready) return Promise.resolve(false);
     dirty = true;
-    if (saving) return;
+    if (saving) return pending;
     saving = true;
+    pending = (async () => {
     try {
       while (dirty) {
         dirty = false;
@@ -30,11 +31,15 @@
           );
         revision = (await response.json()).revision;
       }
+      return true;
     } catch (error) {
       toast(error.message);
+      return false;
     } finally {
       saving = false;
     }
+    })();
+    return pending;
   };
   async function load() {
     try {
@@ -86,6 +91,7 @@
       Object.assign(localPageNotes, data.notes);
       revision = data.revision;
       ready = true;
+      window.bookmarkDatabaseReady = true;
       render();
     } catch {
       toast("Unable to load bookmarks from the database. Refresh to retry.");

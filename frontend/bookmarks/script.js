@@ -3,7 +3,6 @@
 const day = 86400000,
   now = Date.now();
 const bookmarks = [];
-const confluenceAttribution = {};
 let deletedBookmarkIds = new Set();
 const selectedBookmarks = new Set();
 let visibleBookmarkIds = [];
@@ -102,7 +101,7 @@ function matches(item, key) {
   );
 }
 function persist() {
-  window.saveBookmarkDatabase?.();
+  return window.saveBookmarkDatabase?.();
 }
 function date(value) {
   return value
@@ -197,7 +196,7 @@ function renderBookmarkTree(filtered) {
     if (!included.has(item.id)) continue;
     const hierarchy = pageHierarchy[item.id];
     const path = hierarchy
-      ? ["Confluence", hierarchy.space]
+      ? ["Confluence", item.domain, hierarchy.space, ...(item.breadcrumb || [])]
       : Array.isArray(item.folderPath) && item.folderPath.length
         ? item.folderPath.filter(
             (part) => typeof part === "string" && part.trim(),
@@ -284,7 +283,7 @@ function showPageDetails(id) {
   document.querySelector("#page-note").value =
     typeof localPageNotes[id] === "string" ? localPageNotes[id] : "";
   document.querySelector("#page-note-status").textContent =
-    "Notes are saved on this browser.";
+    "Notes are saved in the database.";
   document.querySelector("#detail-title").textContent = item.title;
   document.querySelector("#detail-description").textContent = item.description;
   const exact = (value) =>
@@ -305,14 +304,21 @@ function showPageDetails(id) {
   const parent = hierarchy?.parent
     ? bookmarks.find((page) => page.id === hierarchy.parent)
     : null;
+  document.querySelector("#detail-page-text").textContent = item.contentText || "No page text saved.";
   const fields = [
+    ["Page ID", item.page_id || "Not applicable"],
+    ["Version", item.version ?? "Not applicable"],
+    ["Breadcrumb", (item.breadcrumb || []).join(" > ") || "None"],
+    ["Last refreshed", item.lastRefreshed || "Never"],
+    ["Text size", (item.pageTextSizeBytes || 0) + " bytes"],
+    ["Fetch error", item.fetchError || "None"],
     ["URL", item.url],
     ["Domain", item.domain],
     ["Source", item.author ? "Confluence" : "Web bookmark"],
     ["Space", hierarchy?.space || "Not available"],
     [
       "Parent page",
-      parent?.title || (hierarchy ? "Top-level page" : "Not available"),
+      parent?.title || item.ancestors?.at(-1)?.title || (hierarchy ? "Top-level page" : "Not available"),
     ],
     ["Opens", item.views],
     ["Favourite", item.favorite ? "Yes" : "No"],
@@ -406,7 +412,7 @@ document.querySelector("#page-note").addEventListener("input", (event) => {
     item.updatedInOwlAt = Date.now();
     persist();
     document.querySelector("#page-note-status").textContent =
-      "Saved on this browser";
+      "Saved in the database";
   } catch {
     document.querySelector("#page-note-status").textContent =
       "Unable to save. Keep this page open and copy your notes.";
@@ -417,6 +423,8 @@ document.querySelector("#page-note").addEventListener("blur", () => {
   if (selectedBookmarkId !== null) showPageDetails(selectedBookmarkId);
 });
 function render() {
+  for (const key of Object.keys(pageHierarchy)) delete pageHierarchy[key];
+  for (const item of bookmarks) if (item.sourceType === "confluence") pageHierarchy[item.id] = {space:item.space, parent:null};
   document.querySelector("#bookmark-views").innerHTML = views
     .map(
       ([key, label, icon]) =>
@@ -439,19 +447,12 @@ function render() {
   const label = views.find((item) => item[0] === view)[1];
   document.querySelector("#bookmark-title").textContent = "Bookmark Tree";
   document.querySelector("#view-breadcrumb").textContent = label;
-  const searchedUrl = parseBookmarkUrl(
-    document.querySelector("#bookmark-search").value,
-  );
   const scoped = bookmarks.filter(
     (item) =>
       matches(item, view) &&
       (!domain || item.domain === domain) &&
       matchesDomainGroup(item) &&
-      (searchedUrl
-        ? parseBookmarkUrl(item.url)?.href === searchedUrl.href
-        : `${item.title} ${item.description} ${item.url}`
-            .toLowerCase()
-            .includes(query)),
+      matchesBookmarkSearch(item),
   );
   renderConfluencePeople(scoped);
   const filtered = scoped.filter(matchesPerson);
@@ -534,12 +535,6 @@ document
   .addEventListener("input", (event) => {
     query = event.target.value.trim().toLowerCase();
     const url = parseBookmarkUrl(event.target.value);
-    if (url) {
-      view = "all";
-      domain = "";
-      selectedDomainGroup = "";
-      selectedPerson = "";
-    }
     document.querySelector("#add-bookmark").hidden =
       !url ||
       bookmarks.some((item) => parseBookmarkUrl(item.url)?.href === url.href);
@@ -617,75 +612,8 @@ function parseBookmarkUrl(value) {
     return null;
   }
 }
-function applyConfluenceBaseUrl(value) {
-  const base = parseBookmarkUrl(value);
-  if (!base || base.protocol !== "https:") return;
-  for (const item of bookmarks) {
-    if (!confluenceAttribution[item.id] || item.custom) continue;
-    const oldDomain = item.domain;
-    const original = new URL(bookmarkSeed[item.id - 1][1]);
-    item.url =
-      base.origin +
-      base.pathname.replace(/\/$/, "") +
-      original.pathname.replace(/^\/wiki/, "");
-    item.domain = base.hostname;
-    if (domain === oldDomain) domain = base.hostname;
-  }
-  render();
-}
-document
-  .querySelector("#bookmark-search-form")
-  .addEventListener("submit", (event) => {
-    event.preventDefault();
-    const input = document.querySelector("#bookmark-search");
-    const url = parseBookmarkUrl(input.value);
-    if (!url) return;
-    if (
-      bookmarks.some((item) => parseBookmarkUrl(item.url)?.href === url.href)
-    ) {
-      view = "all";
-      domain = "";
-      selectedDomainGroup = "";
-      selectedPerson = "";
-      query = input.value.trim().toLowerCase();
-      document.querySelector("#add-bookmark").hidden = true;
-      render();
-      toast("This bookmark is already saved.");
-      return;
-    }
-    const slug = url.pathname.split("/").filter(Boolean).at(-1);
-    let title = url.hostname;
-    try {
-      title = slug
-        ? decodeURIComponent(slug).replace(/[-_+]/g, " ")
-        : url.hostname;
-    } catch {}
-    bookmarks.push({
-      id: nextBookmarkId(),
-      title,
-      url: url.href,
-      domain: url.hostname,
-      description: "Added in this browser · page details not fetched yet",
-      views: 0,
-      lastViewed: null,
-      added: Date.now(),
-      favorite: false,
-      pinned: false,
-      custom: true,
-    });
-    persist();
-    view = "all";
-    domain = "";
-    selectedDomainGroup = "";
-    selectedPerson = "";
-    query = input.value.trim().toLowerCase();
-    document.querySelector("#add-bookmark").hidden = true;
-    render();
-    toast("Bookmark added on this browser.");
-  });
 for (let i = bookmarks.length - 1; i >= 0; i--)
   if (deletedBookmarkIds.has(bookmarks[i].id)) bookmarks.splice(i, 1);
-applyConfluenceBaseUrl(sampleConfluenceBaseUrl);
 // Persist user-created bookmarks.
 persist();
 document.addEventListener("visibilitychange", () => {

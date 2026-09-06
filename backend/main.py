@@ -92,9 +92,11 @@ async def validation_error(request, error):
     )
 
 
+from app.api.bookmarks import router as bookmarks_router
 from app.api.compat import router as compat_router
 from app.api.workspace import router as workspace_router
 
+app.include_router(bookmarks_router)
 app.include_router(workspace_router)
 app.include_router(compat_router)
 app.include_router(router)

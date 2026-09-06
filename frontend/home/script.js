@@ -8,6 +8,7 @@
   } catch {
     document.querySelector("#metrics").textContent =
       "Unable to load database statistics. Refresh to retry.";
+    document.querySelector("#weekday-commit-bars").textContent = "Unable to load commit statistics. Refresh to retry.";
     return;
   }
   const { projects, documents, people } = overviewData;
@@ -134,6 +135,14 @@
     metrics[index] = [label, value, detail];
   }
   function renderActivity() {
+    const weekdayCounts = weekdayCommitCounts(documents, activeRange.start, activeRange.end, eventDay);
+    const weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const peak = Math.max(1, ...weekdayCounts);
+    const commitTotal = weekdayCounts.reduce((sum, count) => sum + count, 0);
+    document.querySelector("#weekday-commit-total").textContent = `${number(commitTotal)} commits · ${activeRange.label}`;
+    document.querySelector("#weekday-commit-bars").innerHTML = weekdayCounts.map((count, index) =>
+      `<div class="bar-row"><div class="bar-title"><span>${weekdays[index]}</span><strong>${number(count)}</strong></div><div class="track" role="img" aria-label="${weekdays[index]}: ${count} commits"><span style="width:${count / peak * 100}%"></span></div></div>`
+    ).join("") + (commitTotal ? "" : empty("No dated commits from indexed PDFs in this period."));
     document.querySelector("#period-label").textContent = activeRange.label;
     document
       .querySelectorAll(".ranking-period")
@@ -310,6 +319,13 @@
         end: monthStart - dayMs,
         label: "Last month",
       };
+    else if (mode === "week") activeRange = {
+      start: today - ((new Date(today).getUTCDay() + 6) % 7) * dayMs,
+      end: today, label: "This week",
+    };
+    else if (mode === "year") activeRange = {
+      start: Date.UTC(calendarValue("year"), 0, 1), end: today, label: "This year",
+    };
     else activeRange = { start: monthStart, end: today, label: "This month" };
     renderActivity();
   }

@@ -164,12 +164,7 @@ function getSearchMatchedPdfs() {
 
   if (!query) return scopedPdfs;
 
-  return scopedPdfs.filter((pdf) => {
-    const searchable = [pdf.name, pdf.path, pdf.projectId, pdf.repo]
-      .join(" ")
-      .toLocaleLowerCase();
-    return searchable.includes(query);
-  });
+  return scopedPdfs.filter(pdf => advancedSearch.ids.has(pdf.id));
 }
 
 // UTC numbers below represent Dublin calendar days, not UTC instants. Comparing
@@ -677,11 +672,11 @@ function renderPdfTable() {
       return `${separator}
       <tr class="timeline-document ${state.selectedPdfs.has(pdf.id) ? "selected" : ""}" data-pdf-id="${pdf.id}">
         <td class="select-column"><input class="row-radio" type="checkbox" name="selected-pdf" value="${pdf.id}" aria-label="Select ${escapeHtml(pdf.name)}" ${state.selectedPdfs.has(pdf.id) ? "checked" : ""} /></td>
-        <td class="serial-number">${formatNumber(pageStart + index + 1)}</td>
-        <td><a class="timeline-file pdf-link" href="${escapeHtml(pdf.pdfUrl)}" data-open-pdf="${pdf.id}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(pdf.name)}"><span class="timeline-pdf-icon" aria-hidden="true">PDF</span><span>${escapeHtml(pdf.name)}</span></a></td>
-        <td><button class="path-button" type="button" data-copy-path="${pdf.id}" title="Copy PDF URL: ${escapeHtml(pdf.pdfUrl)}" aria-label="Copy complete URL for ${escapeHtml(pdf.name)}">${escapeHtml(pdf.path)}</button></td>
         <td><span class="badge project-badge">${escapeHtml(pdf.project || pdf.projectId)}</span></td>
         <td><span class="badge" title="${escapeHtml(pdf.repo)}">${escapeHtml(pdf.repo)}</span></td>
+        <td><button class="path-button" type="button" data-copy-path="${pdf.id}" title="Copy PDF URL: ${escapeHtml(pdf.pdfUrl)}" aria-label="Copy complete URL for ${escapeHtml(pdf.name)}">${escapeHtml(pdf.path)}</button></td>
+        <td><a class="timeline-file pdf-link" href="${escapeHtml(pdf.pdfUrl)}" data-open-pdf="${pdf.id}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(pdf.name)}"><span class="timeline-pdf-icon" aria-hidden="true">PDF</span><span>${escapeHtml(pdf.name)}</span></a></td>
+        <td class="serial-number">${formatNumber(pageStart + index + 1)}</td>
         <td class="commit-id">${pdf.commitId ? `<button type="button" class="commit-copy" data-copy-commit="${pdf.id}" title="Copy full commit ID: ${escapeHtml(pdf.commitId)}" aria-label="Copy full commit ID ${escapeHtml(pdf.commitId)}">${escapeHtml(pdf.commitId.slice(0, 7))}</button>` : "—"}</td>
         <td><time class="commit-time" datetime="${escapeHtml(pdf.committedAt)}">${escapeHtml(dateLabel)}<small>${day === null ? "" : escapeHtml(COMMIT_TIME_FORMATTER.format(new Date(pdf.committedAt)))}</small></time></td>
         <td class="commit-author" title="${escapeHtml(pdf.commitAuthor || "Unknown")}">${escapeHtml(pdf.commitAuthor || "Unknown")}${isPersonStarred(pdfAuthorKey(pdf)) ? ' <span class="author-star" role="img" aria-label="Starred person">★</span>' : ""}</td>
@@ -729,7 +724,7 @@ function renderPeople() {
         <article class="person-card">
           <div class="avatar avatar-tone-${(index % 3) + 1}" aria-hidden="true">${escapeHtml(getInitials(person.name))}</div>
           <div class="person-main">
-            <div class="person-name-row"><span class="person-name">${escapeHtml(person.name)}</span><button class="person-star" type="button" data-star-person="${escapeHtml(personKey(person))}" aria-label="${isPersonStarred(personKey(person)) ? "Unstar" : "Star"} ${escapeHtml(person.name)}" aria-pressed="${isPersonStarred(personKey(person))}">${isPersonStarred(personKey(person)) ? "★" : "☆"}</button></div>
+            <div class="person-name-row"><button type="button" class="person-name person-filter-button" data-team-filter="person:${escapeHtml(personKey(person))}" aria-pressed="${activePeopleFilter === `person:${personKey(person)}`}" title="Show PDFs by ${escapeHtml(person.name)}">${escapeHtml(person.name)}</button><button class="person-star" type="button" data-star-person="${escapeHtml(personKey(person))}" aria-label="${isPersonStarred(personKey(person)) ? "Unstar" : "Star"} ${escapeHtml(person.name)}" aria-pressed="${isPersonStarred(personKey(person))}">${isPersonStarred(personKey(person)) ? "★" : "☆"}</button></div>
             <span class="person-email" title="${escapeHtml(person.email)}">${escapeHtml(person.email)}</span>
             <div class="person-metrics">
               <span><strong>${formatNumber(person.commits)}</strong> commits</span>
@@ -757,9 +752,9 @@ function selectedRepositories() {
 function updateSelectionHeader() {
   const selected = selectedRepositories();
   const deleteButton = document.querySelector("#delete-selected-repo");
-  deleteButton.disabled = selected.length === 0 || pullProgress.active;
+  deleteButton.disabled = selected.length === 0;
   deleteButton.title =
-    pullProgress.active ? "Stop the crawl before deleting repositories" : selected.length
+    selected.length
       ? `Delete ${selected.length} selected repositories`
       : "Select repositories to delete";
   const project = state.selectedProject
@@ -776,14 +771,13 @@ function updateSelectionHeader() {
       : "";
   document.querySelector("#repository-selection-status").hidden =
     !selected.length;
+  elements.selectionDescription.hidden = selected.length > 0;
   if (selected.length) {
     elements.selectionTitle.textContent =
       selected.length === 1
         ? selected[0].name
         : `${selected.length} repositories selected`;
-    elements.selectionDescription.textContent = selected
-      .map((repo) => repo.name)
-      .join(", ");
+    elements.selectionDescription.textContent = "";
     elements.selectionBreadcrumb.textContent =
       "PDF index / Selected repositories";
   } else {
@@ -1207,8 +1201,7 @@ function bindEvents() {
     state.searchQuery = event.target.value;
     state.selectedPdf = null;
     state.currentPage = 1;
-    renderCommitChart();
-    renderPdfTable();
+    scheduleAdvancedSearch();
     elements.tableScroll.scrollTop = 0;
   });
 
@@ -1289,7 +1282,10 @@ function bindEvents() {
 
   elements.peopleSearchInput.addEventListener("input", (event) => {
     state.peopleQuery = event.target.value;
-    renderPeople();
+    if (!state.peopleQuery.trim()) {
+      activePeopleFilter = "all";
+      refreshPeopleFilter();
+    } else renderPeople();
   });
 
   elements.modal.addEventListener("click", (event) => {

@@ -58,6 +58,23 @@
           aria-label="Search bookmarks or paste a URL to add"
           autocomplete="off"
         /><button id="add-bookmark" type="submit" hidden>Add bookmark ↵</button>
+      <button id="advanced-search-toggle" type="button" aria-label="Advanced search" title="Advanced search" aria-expanded="false" aria-controls="advanced-search-panel">⚙</button>
+        <section id="advanced-search-panel" hidden aria-label="Advanced search">
+          <strong>Advanced search</strong>
+          <fieldset><legend>Search in</legend>
+            <label><input type="checkbox" name="bookmark-search-field" value="title" checked> Title</label>
+            <label><input type="checkbox" name="bookmark-search-field" value="notes" checked> Notes</label>
+            <label><input type="checkbox" name="bookmark-search-field" value="url" checked> URL</label>
+            <label><input type="checkbox" name="bookmark-search-field" value="content" checked> Page data</label>
+            <label><input type="checkbox" name="bookmark-search-field" value="page_id" checked> Page ID</label>
+          </fieldset>
+          <fieldset><legend>Match</legend>
+            <label><input type="radio" name="bookmark-search-mode" value="separate" checked> Separately — any word</label>
+            <label><input type="radio" name="bookmark-search-mode" value="together"> Together — exact phrase</label>
+          </fieldset>
+          <p>Searches saved data within your current filters. Matches in any checked field are included. Case insensitive.</p>
+          <button id="advanced-search-reset" type="button">Reset options</button>
+        </section>
       </form>
       <div class="topbar-status" id="connection-status" data-state="connecting">
         <button
@@ -71,6 +88,9 @@
             <path d="M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5" />
           </svg></button
         ><button
+          id="export-bookmarks"
+          class="connection-test" type="button" aria-label="Export bookmarks" title="Export bookmarks as JSON"
+        ><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m-4 4 4-4 4 4M4 16v5h16v-5" /></svg></button><button
           id="settings-button"
           class="connection-test"
           aria-label="Confluence settings"
@@ -262,7 +282,7 @@
           </div>
           <footer class="pagination-bar">
             <span id="bookmark-total"></span
-            ><span>Favourites and pins are saved on this browser.</span>
+            ><span>Favourites and pins are saved in the database.</span>
           </footer>
         </section>
       </section>
@@ -287,7 +307,7 @@
               placeholder="Add your notes for this page…"
             ></textarea>
             <p id="page-note-status" role="status" aria-live="polite">
-              Notes are saved on this browser.
+              Notes are saved in the database.
             </p>
           </section>
           <section
@@ -295,7 +315,7 @@
             aria-label="Confluence authors and edit dates"
           ></section>
           <h3 id="detail-title"></h3>
-          <p id="detail-description"></p>
+          <p id="detail-description"></p><details><summary>Saved page text</summary><pre id="detail-page-text" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto"></pre></details>
           <dl id="detail-metadata"></dl>
           <a id="detail-open" target="_blank" rel="noopener noreferrer"
             >Open page ↗</a
@@ -376,7 +396,7 @@
           </button>
         </div>
         <p>
-          Only the selected bookmarks will be removed from this browser. Source
+          Only the selected bookmarks will be removed from the database. Source
           pages will not be deleted.
         </p>
         <ul id="delete-bookmark-list"></ul>
@@ -411,18 +431,18 @@
         </button>
       </div>
       <p class="settings-description">
-        Choose a bookmark HTML export from Chrome, Edge, Firefox or Safari.
+        Choose a bookmark JSON file or an HTML export from Chrome, Edge, Firefox or Safari. JSON preserves notes, favourites, metadata and open counts; deleted entries and duplicates are skipped.
         Folders and nested folders from your export will be preserved. Domain
         filters remain available.
       </p>
       <input
         id="bookmark-import-file"
         type="file"
-        accept=".html,.htm,text/html"
-        aria-label="Bookmark HTML file"
+        accept=".json,application/json,.html,.htm,text/html"
+        aria-label="Bookmark JSON or HTML file"
       />
       <p id="import-feedback" role="status">
-        Imported bookmarks are saved in this browser.
+        Imported bookmarks are saved in the database.
       </p>
       <div class="settings-actions">
         <button id="import-confirm" type="button" disabled>
@@ -464,6 +484,7 @@
           name="verification_receipt"
           type="hidden"
         />
+        <label><input id="confluence-ssl" name="verify_ssl" type="checkbox" checked /> Verify SSL certificate</label>
         <p class="token-help">
           Leave blank to keep a saved PAT. A new connection requires a PAT.
           Tokens are cleared when this window closes.
@@ -478,15 +499,16 @@
       </form>
     </dialog>
     <div id="bookmark-toast" role="status" aria-live="polite"></div>
-    <script src="sample-data.js"></script>
-    <script src="sample-config.js"></script>
     <script src="domain-groups.js"></script>
-    <script src="script.js?v=domain-groups-1"></script>
-    <script src="database.js"></script>
-    <script src="connection.js"></script>
-    <script src="settings.js"></script>
-    <script src="import.js"></script>
-    <script src="bulk.js"></script>
-    <script src="refresh.js"></script>
+    <script src="search.js?v=1"></script>
+    <script src="script.js?v=bookmark-search-3"></script>
+    <script src="database.js?v=confluence-live-2"></script>
+    <script src="metadata.js?v=confluence-live-2"></script>
+    <script src="connection.js?v=confluence-live-2"></script>
+    <script src="settings.js?v=confluence-live-2"></script>
+    <script src="json-transfer.js?v=1"></script>
+    <script src="import.js?v=3"></script>
+    <script src="bulk.js?v=confluence-live-2"></script>
+    <script src="refresh.js?v=confluence-live-2"></script>
   </body>
 </html>

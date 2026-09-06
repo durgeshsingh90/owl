@@ -44,3 +44,35 @@ def search_documents(q="", project=None, repo=None, author=None, limit=100, offs
                 [*params, limit, offset],
             )
         ]
+
+
+def matching_document_ids(query, fields, mode):
+    """Search selected FTS columns without truncating the workspace result set."""
+    columns = {
+        "name": "pdf_name",
+        "path": "path",
+        "content": "pdf_text",
+        "notes": "notes",
+    }
+    selected = [columns[field] for field in fields if field in columns]
+    if not selected or not query.strip():
+        return []
+    terms = query.split() if mode == "separate" else [query.strip()]
+    terms = [term for term in terms if any(c.isalnum() for c in term)]
+    if not terms:
+        return []
+    expression = (
+        "{"
+        + " ".join(selected)
+        + "} : ("
+        + " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
+        + ")"
+    )
+    with connection() as db:
+        return [
+            row[0]
+            for row in db.execute(
+                "SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?",
+                (expression,),
+            )
+        ]

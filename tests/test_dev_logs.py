@@ -3,6 +3,7 @@
 import importlib.util
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location(
@@ -13,6 +14,26 @@ spec.loader.exec_module(dev)
 
 
 class LogTests(unittest.TestCase):
+    def test_timestamp_uses_record_time_for_historical_logs(self):
+        stamp = "2026-09-06T13:28:04.928260+00:00"
+        line = '{"time":"' + stamp + '","level":"ERROR","event":"failed"}'
+        local = (
+            datetime.fromisoformat(stamp)
+            .astimezone()
+            .isoformat(sep=" ", timespec="milliseconds")
+        )
+        self.assertEqual(
+            dev.format_log_line("crawler", line), f"[{local}] [crawler] {line}"
+        )
+
+    def test_untimestamped_lines_use_explicit_display_time(self):
+        for line in ["ERROR: failed", "  traceback line", '{"time":"invalid"}']:
+            result = dev.format_log_line("backend", line)
+            self.assertIn(" displayed] [backend] " + line, result)
+            self.assertRegex(
+                result, r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}"
+            )
+
     def test_follow_and_rotation(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "log"

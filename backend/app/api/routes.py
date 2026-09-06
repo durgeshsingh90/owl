@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from typing import Literal
 from urllib.parse import quote
 
 from app.core.config import (
@@ -11,10 +12,10 @@ from app.core.config import (
     parse_target,
     save_settings,
 )
-from app.core.database import connection, exclude_repositories, repository_url
+from app.core.database import connection, repository_url
 from app.core.logging import error_details, event, request_id
 from app.pdfs.client import BitbucketClient, BitbucketError
-from app.pdfs.search import search_documents
+from app.pdfs.search import matching_document_ids, search_documents
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
@@ -188,6 +189,17 @@ def job(job_id: str):
     return {**json.loads(row["progress"]), "status": row["status"]}
 
 
+@router.post("/jobs/{job_id}/resume", status_code=202)
+async def resume_job(job_id: str, request: Request):
+    jobs = request.app.state.jobs
+    if jobs.active():
+        raise HTTPException(409, "A crawl is already running.")
+    try:
+        return jobs.resume(job_id)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
+
 @router.post("/jobs/{job_id}/cancel")
 async def cancel(job_id: str, request: Request):
     jobs = request.app.state.jobs
@@ -195,6 +207,19 @@ async def cancel(job_id: str, request: Request):
         raise HTTPException(404, "Active job not found.")
     await jobs.shutdown()
     return jobs.current
+
+
+class AdvancedSearchRequest(BaseModel):
+    q: str = Field(max_length=1000)
+    fields: list[Literal["name", "path", "content", "notes"]] = Field(
+        default_factory=lambda: ["name", "path", "content", "notes"], max_length=4
+    )
+    mode: Literal["separate", "together"] = "separate"
+
+
+@router.post("/search/matches")
+def advanced_search(value: AdvancedSearchRequest):
+    return {"ids": matching_document_ids(value.q, value.fields, value.mode)}
 
 
 @router.get("/search")
@@ -303,28 +328,23 @@ async def delete_repositories(value: RepositoryDeletion, request: Request):
         raise HTTPException(
             400, "Type delete all to confirm deletion of the selected repositories."
         )
-    if request.app.state.jobs.active():
-        raise HTTPException(409, "Stop the active crawl before deleting repositories.")
     with connection() as db:
         _, _, rows = repository_delete_scope(value, db)
-        # Foreign keys remove documents and failures; document triggers remove FTS entries.
-        exclude_repositories(db, rows)
+    await request.app.state.jobs.delete_repositories(rows)
     return {"ok": True, "deleted": len(rows)}
 
 
 @router.delete("/repositories/{repository_id}")
-def delete_repo(repository_id: int, value: DeleteRequest, request: Request):
+async def delete_repo(repository_id: int, value: DeleteRequest, request: Request):
     if value.confirmation != "delete all":
         raise HTTPException(
             400, "Type delete all to confirm local repository deletion."
         )
-    if request.app.state.jobs.active():
-        raise HTTPException(409, "Stop the active crawl before deleting a repository.")
     with connection() as db:
         _, _, rows = repository_delete_scope(
             RepositorySelection(repository_ids=[repository_id]), db
         )
-        exclude_repositories(db, rows)
+    await request.app.state.jobs.delete_repositories(rows)
     return {
         "ok": True,
         "detail": "Removed local indexed records. Remote repository is unchanged.",

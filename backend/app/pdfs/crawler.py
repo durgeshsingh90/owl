@@ -43,12 +43,13 @@ async def process_pdf(client, project, repo, repository_id, path):
     commits = data.get("values", [])
     commit = commits[0] if commits else {}
     commit_id = commit.get("id") or None
+    force = (project, repo, path) in getattr(client, "force_paths", set())
     with connection() as db:
         old = db.execute(
             "SELECT * FROM documents WHERE repository_id=? AND path=?",
             (repository_id, path),
         ).fetchone()
-        if old and commit_id and old["commit_id"] == commit_id:
+        if old and commit_id and old["commit_id"] == commit_id and not force:
             db.execute(
                 "UPDATE documents SET last_scanned=? WHERE id=?", (now(), old["id"])
             )
@@ -63,7 +64,7 @@ async def process_pdf(client, project, repo, repository_id, path):
         raw=True,
     )
     digest = hashlib.sha256(content).hexdigest()
-    if old and old["pdf_hash"] == digest:
+    if old and old["pdf_hash"] == digest and not force:
         page_count, text = old["page_count"], old["pdf_text"]
     else:
         # One shared background thread extracts PDFs serially, without child processes.
@@ -175,9 +176,13 @@ async def discover_pdfs(client, project, repo, on_folder_error=None):
 
 async def crawl_repository(client, project, repo, repository_id, progress, paths):
     for path in paths:
+        if callback := getattr(client, "on_pdf_started", None):
+            callback(project, repo, repository_id, path)
+        succeeded = False
         try:
             outcome = await process_pdf(client, project, repo, repository_id, path)
             progress[outcome] += 1
+            succeeded = True
         except (BitbucketError, ValueError, OverflowError) as error:
             request_url = getattr(error, "request_url", "")
             event(
@@ -216,6 +221,8 @@ async def crawl_repository(client, project, repo, repository_id, progress, paths
                         request_url,
                     ),
                 )
+        if callback := getattr(client, "on_pdf_finished", None):
+            callback(project, repo, repository_id, path, succeeded)
         progress["processed"] += 1
         progress["save"]()
     with connection() as db:

@@ -2813,11 +2813,11 @@ tbody tr.selected td:first-child {
 
 /* Explicit widths keep the expanded PDF columns aligned. */
 .timeline-table { min-width: 1480px; }
-.timeline-table thead th:nth-child(2) { width: 60px; }
-.timeline-table thead th:nth-child(3) { width: 340px; }
+.timeline-table thead th:nth-child(2) { width: 105px; }
+.timeline-table thead th:nth-child(3) { width: 155px; }
 .timeline-table thead th:nth-child(4) { width: 290px; }
-.timeline-table thead th:nth-child(5) { width: 105px; }
-.timeline-table thead th:nth-child(6) { width: 155px; }
+.timeline-table thead th:nth-child(5) { width: 340px; }
+.timeline-table thead th:nth-child(6) { width: 60px; }
 .timeline-table thead th:nth-child(7) { width: 95px; }
 .timeline-table thead th:nth-child(8) { width: 145px; }
 .timeline-table thead th:nth-child(9) { width: 150px; }
@@ -2888,3 +2888,17 @@ tbody tr.selected td:first-child {
 .project-expand-controls [data-repo-filter] { padding: 4px 6px; font-size: 11px; }
 .project-expand-controls [data-repo-filter][aria-pressed="true"] { background: var(--blue); color: white; }
 .project-expand-controls [data-project-expand-all], .project-expand-controls [data-project-collapse-all] { padding: 4px 7px; font-size: 20px; line-height: 1; }
+
+#advanced-search-toggle { position: absolute; right: 6px; width: 32px; height: 30px; border: 0; border-radius: 4px; background: transparent; color: #c6d3e7; cursor: pointer; font-size: 19px; }
+#advanced-search-panel { position: absolute; right: 0; top: 48px; width: min(420px, 85vw); padding: 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: var(--shadow-modal); z-index: 30; }
+#advanced-search-panel[hidden] { display: none; }
+#advanced-search-panel fieldset { margin: 14px 0; padding: 10px; border: 1px solid var(--border); }
+#advanced-search-panel label { display: inline-flex; align-items: center; gap: 6px; margin: 5px 10px 5px 0; font-size: 13px; }
+#advanced-search-panel input { width: 15px; height: 15px; margin: 0; padding: 0; box-shadow: none; }
+#advanced-search-panel p { font-size: 12px; line-height: 1.5; }
+#advanced-search-reset { padding: 6px 10px; cursor: pointer; }
+#advanced-search-status { position: absolute; top: 42px; left: 0; padding: 2px 5px; background: var(--navy); color: white; font-size: 11px; }
+#advanced-search-status:empty { display: none; }
+
+.person-filter-button { border: 0; padding: 0; background: transparent; text-align: left; cursor: pointer; font: inherit; color: inherit; }
+.person-filter-button:hover, .person-filter-button[aria-pressed="true"] { color: var(--blue); text-decoration: underline; }

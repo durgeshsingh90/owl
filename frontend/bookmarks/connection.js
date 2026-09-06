@@ -48,23 +48,16 @@ const confluenceConnection = (() => {
     current = controller;
     status("connecting");
     let outcome = "failed",
-      detail = "Connection check timed out after 10 seconds.";
-    const windowFinished = new Promise((resolve) =>
-      setTimeout(() => {
-        controller.abort();
-        resolve();
-      }, 10000),
-    );
+      detail = "Connection check timed out after 30 seconds.";
+    const timer = setTimeout(() => controller.abort(), 30000);
     try {
       const workspace = await json("/bookmarks/settings/workspace/", {
         signal: controller.signal,
       });
-      if (!workspace.csrfToken)
-        throw Error("Backend did not provide a connection-test token.");
-      applyConfluenceBaseUrl(workspace.configuration?.baseUrl);
+
       const result = await json("/bookmarks/connection/test/", {
         method: "POST",
-        headers: { "X-CSRFToken": workspace.csrfToken },
+
         signal: controller.signal,
       });
       outcome = "connected";
@@ -72,10 +65,10 @@ const confluenceConnection = (() => {
     } catch (error) {
       detail =
         error.name === "AbortError"
-          ? "Connection check timed out after 10 seconds."
+          ? "Connection check timed out after 30 seconds."
           : error.message;
     } finally {
-      await windowFinished;
+      clearTimeout(timer);
       if (current === controller) {
         current = null;
         status(outcome, detail);

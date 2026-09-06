@@ -33,8 +33,11 @@
       const selected = bookmarks.filter((item) =>
         selectedBookmarks.has(item.id),
       );
-      for (const item of selected)
+      for (const item of selected) {
         window.open(item.url, "_blank", "noopener,noreferrer");
+        item.views++; item.lastViewed = Date.now();
+      }
+      persist(); render();
       if (selected.length)
         toast(
           "Tabs requested. Allow pop-ups for this site if some do not open.",

@@ -15,6 +15,7 @@ import time
 import uuid
 from collections import deque
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from urllib.request import urlopen
 
@@ -411,6 +412,24 @@ class LogFilter:
         return self.in_error
 
 
+def format_log_line(name, line):
+    """Expose event time in local time; distinguish untimestamped legacy lines."""
+    stamp = None
+    try:
+        record = json.loads(line)
+        if isinstance(record, dict) and isinstance(record.get("time"), str):
+            parsed = datetime.fromisoformat(record["time"].replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                stamp = parsed.astimezone()
+    except (ValueError, TypeError):
+        pass
+    label = "" if stamp is not None else " displayed"
+    stamp = stamp or datetime.now().astimezone()
+    return (
+        f"[{stamp.isoformat(sep=' ', timespec='milliseconds')}{label}] [{name}] {line}"
+    )
+
+
 def follow_logs(args):
     directory = Path(os.environ.get("OWL_LOG_DIR", ROOT / "backend/data/logs"))
     if not directory.is_absolute():
@@ -441,7 +460,7 @@ def follow_logs(args):
             for name, tail, log_filter in tails:
                 for line in tail.read():
                     if log_filter.accepts(line):
-                        print(f"[{name}] {line}", flush=True)
+                        print(format_log_line(name, line), flush=True)
             if args.no_follow:
                 return
             time.sleep(0.25)
