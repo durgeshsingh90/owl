@@ -12,12 +12,12 @@
 }
 .brand-eyebrow {
   color: #a6b5cb;
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: 2px;
 }
 .preview-label {
   color: #a6b5cb;
-  font-size: 10px;
+  font-size: 12px;
   margin-right: 8px;
 }
 .workspace {
@@ -43,7 +43,7 @@
   background: transparent;
   color: var(--text-muted);
   font: inherit;
-  font-size: 12px;
+  font-size: 14px;
   cursor: pointer;
   text-align: left;
 }
@@ -58,7 +58,7 @@
 .side-link .count {
   margin-left: auto;
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 13px;
 }
 .side-link .nav-symbol {
   font-size: 16px;
@@ -74,7 +74,7 @@
   padding: 20px 12px 10px;
 }
 .domain-heading h2 {
-  font-size: 13px;
+  font-size: 15px;
   margin: 0;
 }
 .domain-heading button {
@@ -82,7 +82,7 @@
   border: 0;
   color: var(--blue);
   cursor: pointer;
-  font-size: 11px;
+  font-size: 13px;
 }
 .domain-name {
   overflow: hidden;
@@ -96,7 +96,7 @@
   height: 24px;
   background: var(--surface-subtle);
   border-radius: 5px;
-  font-size: 10px;
+  font-size: 12px;
   flex-shrink: 0;
 }
 .bookmark-toolbar {
@@ -106,7 +106,7 @@
   gap: 14px;
   padding: 10px 14px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 14px;
   border-bottom: 1px solid var(--border);
 }
 select {
@@ -127,7 +127,7 @@ table {
 }
 th {
   text-align: left;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-muted);
   background: var(--surface-subtle);
   position: sticky;
@@ -137,7 +137,7 @@ th {
 td {
   padding: 16px 12px;
   border-bottom: 1px solid var(--border);
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
 }
 td:first-child {
@@ -146,7 +146,7 @@ td:first-child {
 }
 .bookmark-link {
   display: block;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--text);
   text-decoration: none;
@@ -160,7 +160,7 @@ td:first-child {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11px;
+  font-size: 13px;
 }
 .bookmark-action {
   border: 0;
@@ -184,7 +184,7 @@ td:first-child {
 }
 
 .pagination-bar {
-  font-size: 10px;
+  font-size: 12px;
 }
 dialog {
   width: min(470px, calc(100vw - 32px));
@@ -214,13 +214,13 @@ dialog::backdrop {
 }
 .settings-description,
 .token-help {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
   line-height: 1.7;
 }
 #confluence-form > label {
   display: block;
-  font-size: 12px;
+  font-size: 14px;
   margin: 18px 0 8px;
 }
 #confluence-form > input:not([type="hidden"]) {
@@ -251,7 +251,7 @@ dialog::backdrop {
   color: #fff;
 }
 #settings-feedback {
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.6;
 }
 #settings-feedback[data-error="true"] {
@@ -338,12 +338,12 @@ button:disabled {
   margin: 0;
 }
 #confluence-people-count {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
   margin-left: 5px;
 }
 #all-confluence-people {
-  font-size: 10px;
+  font-size: 12px;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--surface-subtle);
@@ -363,10 +363,10 @@ button:disabled {
   border-radius: 5px;
   padding: 10px;
   font: inherit;
-  font-size: 12px;
+  font-size: 14px;
 }
 .people-explanation {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
   margin: 10px 0 14px;
 }
@@ -389,7 +389,7 @@ button:disabled {
   width: 100%;
   text-align: left;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 14px;
 }
 .person-initials {
   width: 32px;
@@ -399,7 +399,7 @@ button:disabled {
   place-items: center;
   background: var(--blue-soft);
   color: var(--blue);
-  font-size: 10px;
+  font-size: 12px;
   flex-shrink: 0;
 }
 .person-page-counts {
@@ -411,7 +411,7 @@ button:disabled {
   background: none;
   border: 0;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
   cursor: pointer;
   padding: 3px;
 }
@@ -423,11 +423,11 @@ button:disabled {
 .bookmark-attribution {
   display: block;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
   margin-top: 7px;
 }
 #confluence-people-empty {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
   line-height: 1.6;
 }
@@ -468,7 +468,7 @@ button:disabled {
   border-radius: 4px;
   color: #e5efff;
   background: #304c6c;
-  font-size: 11px;
+  font-size: 13px;
   padding: 6px 9px;
   cursor: pointer;
 }
@@ -488,11 +488,11 @@ button:disabled {
   border-bottom: 1px solid var(--border);
 }
 .tree-heading strong {
-  font-size: 13px;
+  font-size: 15px;
 }
 .tree-heading small {
   display: block;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
   margin-top: 4px;
 }
@@ -502,7 +502,7 @@ button:disabled {
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 6px 8px;
-  font-size: 10px;
+  font-size: 12px;
   cursor: pointer;
 }
 .bookmark-tree-scroll {
@@ -511,12 +511,17 @@ button:disabled {
 .tree-space {
   margin: 0 0 12px;
 }
+#bookmark-tree > .tree-space + .tree-space {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+  margin-top: 16px;
+}
 .tree-space > summary {
   background: var(--surface-subtle);
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 10px;
-  font-size: 12px;
+  font-size: 14px;
   cursor: pointer;
 }
 .tree-space summary::marker {
@@ -528,7 +533,7 @@ button:disabled {
 }
 .tree-count {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
   margin-left: 12px;
 }
 .tree-space ul {
@@ -551,17 +556,17 @@ button:disabled {
 }
 .tree-node summary {
   cursor: pointer;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.7;
 }
 .tree-leaf {
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.7;
   padding-left: 13px;
 }
 .tree-number {
   color: var(--blue);
-  font-size: 10px;
+  font-size: 12px;
   margin-right: 8px;
 }
 .tree-page-icon {
@@ -578,7 +583,7 @@ button:disabled {
   gap: 5px 12px;
   padding: 5px 8px 7px 16px;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 .tree-open {
   color: var(--blue);
@@ -592,7 +597,7 @@ button:disabled {
   margin-left: auto;
 }
 .tree-context {
-  font-size: 9px;
+  font-size: 12px;
   color: var(--text-muted);
   margin-left: 8px;
 }
@@ -611,7 +616,7 @@ button:disabled {
   align-items: center;
   border-radius: 10px;
   padding: 3px 7px;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.3;
   white-space: nowrap;
 }
@@ -650,7 +655,7 @@ button:disabled {
   padding: 2px 7px;
   border: 1px solid var(--border);
   border-radius: 10px;
-  font-size: 9px;
+  font-size: 12px;
   color: var(--text-muted);
   font-weight: 400;
 }
@@ -680,12 +685,12 @@ button:disabled {
   padding: 32px 15px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.7;
 }
 .page-notes label {
   display: block;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   margin-bottom: 9px;
 }
@@ -698,12 +703,12 @@ button:disabled {
   background: var(--surface-subtle);
   color: var(--text);
   font: inherit;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.6;
   padding: 10px;
 }
 #page-note-status {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
   line-height: 1.5;
 }
@@ -713,17 +718,17 @@ button:disabled {
   margin: 22px 0 8px;
 }
 #detail-description {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text-muted);
   line-height: 1.6;
 }
 #detail-metadata dt {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
   margin-top: 15px;
 }
 #detail-metadata dd {
-  font-size: 12px;
+  font-size: 14px;
   margin: 5px 0 0;
   overflow-wrap: anywhere;
   line-height: 1.6;
@@ -731,7 +736,7 @@ button:disabled {
 #detail-open,
 #detail-copy {
   display: inline-block;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--blue);
   margin: 12px 8px 15px 0;
   background: none;
@@ -791,12 +796,12 @@ button:disabled {
 }
 #bookmark-import-file {
   width: 100%;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--text);
   margin: 12px 0;
 }
 #import-feedback {
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.7;
   color: var(--text-muted);
 }
@@ -814,7 +819,7 @@ button:disabled {
     gap: 8px;
   }
   .topbar .brand strong {
-    font-size: 13px;
+    font-size: 15px;
     white-space: nowrap;
   }
   #bookmark-search-form {
@@ -835,7 +840,7 @@ button:disabled {
     grid-template-columns: 156px minmax(0, 1fr) auto;
   }
   .topbar .brand strong {
-    font-size: 11px;
+    font-size: 13px;
   }
   .topbar .brand-logo {
     width: 28px;
@@ -897,7 +902,7 @@ button:disabled {
   gap: 10px;
   margin-left: auto;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -907,7 +912,7 @@ button:disabled {
 /* Compact workspace density with consistent type and spacing. */
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 12px;
+  font-size: 14px;
 }
 .left-sidebar,
 .right-sidebar {
@@ -927,16 +932,16 @@ body {
   letter-spacing: -0.3px;
 }
 .eyebrow {
-  font-size: 9px;
+  font-size: 12px;
   margin-bottom: 3px;
   letter-spacing: 1px;
 }
 .selection-breadcrumb {
-  font-size: 9px;
+  font-size: 12px;
   margin-bottom: 3px;
 }
 .selection-copy p {
-  font-size: 11px;
+  font-size: 13px;
   margin-top: 4px;
 }
 .side-link {
@@ -952,7 +957,7 @@ body {
   padding: 12px 8px 6px;
 }
 .domain-heading h2 {
-  font-size: 12px;
+  font-size: 14px;
 }
 .domain-initial {
   width: 20px;
@@ -960,7 +965,7 @@ body {
 }
 .bookmark-toolbar {
   padding: 6px 10px;
-  font-size: 11px;
+  font-size: 13px;
 }
 .bookmark-toolbar select {
   padding: 3px 5px;
@@ -969,7 +974,7 @@ body {
   padding: 7px 10px;
 }
 .tree-heading strong {
-  font-size: 12px;
+  font-size: 14px;
 }
 .tree-heading small {
   margin-top: 2px;
@@ -1058,10 +1063,10 @@ body {
 }
 #page-details-empty {
   padding: 20px 10px;
-  font-size: 11px;
+  font-size: 13px;
 }
 .page-notes label {
-  font-size: 12px;
+  font-size: 14px;
   margin-bottom: 6px;
 }
 #page-note {
@@ -1074,18 +1079,18 @@ body {
   margin: 5px 0;
 }
 #detail-title {
-  font-size: 13px;
+  font-size: 15px;
   margin: 14px 0 5px;
 }
 #detail-description {
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.5;
 }
 #detail-metadata dt {
   margin-top: 10px;
 }
 #detail-metadata dd {
-  font-size: 11px;
+  font-size: 13px;
   margin-top: 3px;
   line-height: 1.5;
 }
@@ -1110,7 +1115,7 @@ body {
 }
 .person-name {
   gap: 7px;
-  font-size: 11px;
+  font-size: 13px;
 }
 .person-initials {
   width: 26px;
@@ -1140,14 +1145,14 @@ body {
 @media (min-width: 701px) {
   #bookmark-search {
     height: 36px;
-    font-size: 12px;
+    font-size: 14px;
   }
   .topbar .brand-logo {
     width: 30px;
     height: 30px;
   }
   .topbar .brand strong {
-    font-size: 12px;
+    font-size: 14px;
   }
 }
 /* People as compact directory rows rather than individual cards. */
@@ -1171,12 +1176,12 @@ body {
   gap: 6px;
   padding: 0;
   min-height: 22px;
-  font-size: 11px;
+  font-size: 13px;
 }
 .person-initials {
   width: 22px;
   height: 22px;
-  font-size: 9px;
+  font-size: 12px;
 }
 .person-page-counts {
   margin: 0 0 0 28px;
@@ -1184,7 +1189,7 @@ body {
 }
 .person-page-counts button {
   padding: 1px 0;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.3;
 }
 @media (min-width: 1500px) {
@@ -1209,7 +1214,7 @@ body {
   display: flex;
   align-items: center;
   gap: 7px;
-  font-size: 10px;
+  font-size: 12px;
   white-space: nowrap;
 }
 .bookmark-bulk label {
@@ -1230,12 +1235,12 @@ body {
   max-height: 180px;
   overflow: auto;
   padding-left: 20px;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.7;
 }
 #delete-bookmarks-dialog p,
 #delete-bookmarks-dialog label {
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.6;
 }
 #delete-bookmarks-phrase {
@@ -1284,12 +1289,12 @@ body {
   border: 1px solid var(--border);
   border-radius: 5px;
   font: inherit;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.6;
 }
 #new-bookmarks-form > label,
 #new-bookmarks-feedback {
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.6;
 }
 
@@ -1307,14 +1312,14 @@ body {
   text-overflow: clip;
   overflow-wrap: anywhere;
   line-height: 1.4;
-  font-size: 11px;
+  font-size: 13px;
 }
 .person-page-counts {
   margin: 2px 0 0 28px;
   gap: 8px;
 }
 .person-page-counts button {
-  font-size: 9px;
+  font-size: 12px;
   line-height: 1.4;
 }
 #detail-authorship {
@@ -1331,19 +1336,19 @@ body {
 }
 #detail-authorship span {
   display: block;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 #detail-authorship strong {
   display: block;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 550;
   margin: 3px 0;
   overflow-wrap: anywhere;
 }
 #detail-authorship small {
   display: block;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.5;
   color: var(--text-muted);
 }
@@ -1354,7 +1359,7 @@ body {
 }
 #bookmark-refresh-status {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
   max-width: 220px;
 }
 #update-all-bookmarks.refreshing svg {
@@ -1411,7 +1416,7 @@ body {
 
 .bookmark-last-update {
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.4;
 }
 .bookmark-toolbar {
@@ -1462,7 +1467,7 @@ body {
   flex-wrap: wrap;
   flex-shrink: 1;
   gap: 6px;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 .tree-toolbar-controls .bookmark-bulk {
@@ -1474,7 +1479,7 @@ body {
   gap: 5px;
 }
 .tree-toolbar-controls select {
-  font-size: 10px;
+  font-size: 12px;
   padding: 4px;
 }
 .tree-toolbar-controls .folder-button {
@@ -1483,7 +1488,7 @@ body {
   height: 26px;
 }
 .tree-toolbar-controls .bookmark-last-update {
-  font-size: 9px;
+  font-size: 12px;
 }
 
 #settings-button .material-symbols-outlined {
@@ -1834,7 +1839,7 @@ body {
 
 .tree-folder-opens {
   margin-left: 10px;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
@@ -1859,7 +1864,7 @@ body {
   flex: 1 1 180px;
   max-width: none;
   text-align: left;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.5;
 }
 .main-panel .tree-heading > #bookmark-refresh-status[hidden] {
@@ -1907,7 +1912,7 @@ body {
 .domain-group details {
   margin-left: 20px;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 12px;
 }
 .domain-group summary {
   cursor: pointer;
@@ -1931,11 +1936,11 @@ body {
   display: flex;
   gap: 8px;
   padding: 7px 0;
-  font-size: 12px;
+  font-size: 14px;
   overflow-wrap: anywhere;
 }
 #domain-group-feedback {
-  font-size: 12px;
+  font-size: 14px;
 }
 
 /* Leave room for both URL creation and search options. */
@@ -1980,4 +1985,4 @@ body {
 .bookmark-folder-star[aria-pressed="true"] { color:#bf8500; }
 :root[data-theme="dark"] .bookmark-folder-star[aria-pressed="true"] { color:#ffd36a; }
 
-#bookmark-search-count { font-size:13px; font-weight:500; color:var(--text-muted); margin-left:8px; white-space:nowrap; }
+#bookmark-search-count { font-size:15px; font-weight:500; color:var(--text-muted); margin-left:8px; white-space:nowrap; }

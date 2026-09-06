@@ -78,6 +78,41 @@ def read_state():
         return None
 
 
+class ProcessIdentityError(RuntimeError):
+    """The process lookup failed; this does not mean OWL is stopped."""
+
+
+def windows_process_running(pid):
+    """Query process exit without starting PowerShell or using WMI."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.OpenProcess(0x00100000, False, int(pid))  # SYNCHRONIZE only
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == 87:  # ERROR_INVALID_PARAMETER: PID no longer exists
+            return False
+        raise ProcessIdentityError(
+            f"Unable to check OWL process {pid} (Windows error {error}). State retained."
+        )
+    try:
+        result = kernel.WaitForSingleObject(handle, 0)
+        if result == 0:
+            return False
+        if result == 258:  # WAIT_TIMEOUT: still running
+            return True
+        raise ProcessIdentityError("Unable to check OWL process exit. State retained.")
+    finally:
+        kernel.CloseHandle(handle)
+
+
 def owned(state):
     """Check identity, not just a potentially recycled PID."""
     if not state:
@@ -92,11 +127,18 @@ def owned(state):
         ]
     else:
         command = ["ps", "-p", str(state["pid"]), "-o", "command="]
-    result = subprocess.run(
-        command, capture_output=True, check=False, text=True, timeout=10
-    )
+    try:
+        result = subprocess.run(
+            command, capture_output=True, check=False, text=True, timeout=10
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        raise ProcessIdentityError(
+            "Process identity lookup failed or timed out. State retained; no new instance started."
+        ) from error
     if WINDOWS and result.returncode:
-        raise RuntimeError("Unable to verify OWL process identity using PowerShell.")
+        raise ProcessIdentityError(
+            "Unable to verify OWL process identity using PowerShell. State retained."
+        )
     return (
         str(ROOT / "dev.py").casefold() in result.stdout.casefold()
         and state["token"] in result.stdout
@@ -113,7 +155,16 @@ def python_path():
 
 def stop():
     state = read_state()
-    if not owned(state):
+    try:
+        is_owned = owned(state)
+    except ProcessIdentityError:
+        if not WINDOWS or not state:
+            raise
+        is_owned = None
+        print(
+            "Windows identity lookup unavailable; requesting a cooperative OWL shutdown."
+        )
+    if is_owned is False:
         STATE.unlink(missing_ok=True)
         print("OWL is stopped.")
         return
@@ -121,12 +172,19 @@ def stop():
         request = stop_file(state["token"])
         request.touch()
         deadline = time.monotonic() + 15
-        while time.monotonic() < deadline and owned(state):
+        while time.monotonic() < deadline and windows_process_running(state["pid"]):
             time.sleep(0.2)
-        if owned(state) and not kill_windows_tree(state["pid"]):
-            raise RuntimeError(
-                "Could not stop the OWL process tree. State retained for retry."
-            )
+        if windows_process_running(state["pid"]):
+            # Recheck ownership before any forced termination, including PID reuse.
+            if is_owned is None or not owned(state):
+                raise ProcessIdentityError(
+                    "Shutdown could not be confirmed. State retained; restart cancelled. "
+                    "Close the OWL processes using Task Manager, then retry."
+                )
+            if not kill_windows_tree(state["pid"]):
+                raise RuntimeError(
+                    "Could not stop the OWL process tree. State retained for retry."
+                )
         request.unlink(missing_ok=True)
         STATE.unlink(missing_ok=True)
         print("Stopped OWL frontend and backend.")
@@ -577,8 +635,9 @@ Internal use only (not a normal launch command):
     with control_lock():
         if args.command == "status":
             state = read_state()
-            print("OWL is running." if owned(state) else "OWL is stopped.")
-            if owned(state):
+            running = owned(state)
+            print("OWL is running." if running else "OWL is stopped.")
+            if running:
                 show(state)
         elif args.command == "stop":
             stop()
@@ -591,6 +650,6 @@ Internal use only (not a normal launch command):
 if __name__ == "__main__":
     try:
         main()
-    except (RuntimeError, OSError) as error:
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
         print(f"OWL: {error}", file=sys.stderr)
         sys.exit(1)
