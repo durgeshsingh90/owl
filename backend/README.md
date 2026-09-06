@@ -118,3 +118,9 @@ A repository with a PDF failure does not count as successful. PDF processed coun
 include failed attempts; failures remain separately visible. ETA is unavailable
 until discovery finishes and at least one PDF has been processed. If discovery
 fails, the UI labels the PDF count as known files.
+
+### Hard retry
+
+The Bitbucket page's **Hard retry** button previews all tracked projects on the configured server and requires `HARD RETRY` confirmation. It saves a SQLite backup under `backend/data/backups/` (or next to `OWL_DB_PATH`), then clears those projects' PDF records, PDF notes/view counts, FTS entries and failed-PDF records. Project/repository registrations, settings, bookmarks and other servers' data remain. The background job rediscovers every repository and PDF, downloads and extracts unchanged PDFs too, and automatically retries failed PDFs once. Progress uses the normal job/sidebar statuses. A failed or cancelled rebuild leaves a partial index; the pre-retry snapshot remains available. Hard retry is rejected while another crawl is active.
+
+Crawls enumerate project/repository API pages and sort projects and repository slugs alphabetically (case-insensitive). PDF discovery runs sequentially first to determine the total, followed by sequential repository processing in the same order. PDF paths are alphabetical too. Initial imports, normal crawls and hard retries all use this order; `max_workers` remains readable for configuration compatibility but does not enable repository concurrency.

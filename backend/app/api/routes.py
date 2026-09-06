@@ -121,6 +121,54 @@ async def crawl(value: CrawlRequest, request: Request):
     return request.app.state.jobs.start(value.project_ids)
 
 
+@router.get("/crawl/hard-retry/preview")
+def hard_retry_preview(request: Request):
+    settings = load_settings()
+    with connection() as db:
+        projects = [
+            dict(row)
+            for row in db.execute(
+                "SELECT id,project FROM tracked_projects WHERE server=? ORDER BY project",
+                (settings.base_url,),
+            )
+        ]
+        scope = "SELECT r.id FROM repositories r JOIN tracked_projects p ON p.id=r.project_id WHERE p.server=?"
+        counts = {
+            table: db.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE repository_id IN ({scope})",
+                (settings.base_url,),
+            ).fetchone()[0]
+            for table in ("documents", "failed_documents")
+        }
+        repositories = db.execute(
+            f"SELECT COUNT(*) FROM repositories WHERE id IN ({scope})",
+            (settings.base_url,),
+        ).fetchone()[0]
+    return {
+        "server": settings.base_url,
+        "projects": projects,
+        "repositories": repositories,
+        **counts,
+        "active": request.app.state.jobs.active(),
+    }
+
+
+@router.post("/crawl/hard-retry", status_code=202)
+async def hard_retry(value: DeleteRequest, request: Request):
+    if request.app.state.jobs.active():
+        raise HTTPException(
+            409, "Wait for the current crawl to finish or stop it before hard retry."
+        )
+    if value.confirmation != "HARD RETRY":
+        raise HTTPException(
+            400, "Confirm with HARD RETRY before clearing the PDF index."
+        )
+    preview = hard_retry_preview(request)
+    return request.app.state.jobs.start(
+        [project["id"] for project in preview["projects"]], hard_retry=True
+    )
+
+
 @router.get("/jobs/latest")
 def latest_job():
     with connection() as db:

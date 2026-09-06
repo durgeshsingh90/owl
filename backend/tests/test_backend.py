@@ -1,8 +1,10 @@
 import asyncio
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -230,6 +232,156 @@ class BackendTests(unittest.TestCase):
             }
         self.assertEqual(scanned, set(slugs[1:]))
         self.assertEqual(indexed, set(slugs[2:]))
+
+    def test_hard_retry_clears_index_and_downloads_unchanged_pdfs(self):
+        self.crawl()
+        with connection() as db:
+            db.execute("UPDATE documents SET notes='old note', open_count=9")
+            db.execute(
+                "INSERT INTO failed_documents(repository_id,path,error,last_attempt) SELECT id,'stale.pdf','old failure','now' FROM repositories"
+            )
+            db.execute(
+                "INSERT INTO tracked_projects(project_url,server,project) VALUES('https://other.test/projects/OTHER','https://other.test','OTHER')"
+            )
+        preview = self.client.get("/api/crawl/hard-retry/preview").json()
+        self.assertEqual(
+            (
+                preview["documents"],
+                preview["failed_documents"],
+                preview["repositories"],
+            ),
+            (4, 2, 2),
+        )
+        self.assertEqual([p["project"] for p in preview["projects"]], ["DEMO"])
+        denied = self.client.post("/api/crawl/hard-retry", json={"confirmation": ""})
+        self.assertEqual(denied.status_code, 400)
+        with connection() as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 4
+            )
+        original = self.upstream
+        checked_empty = []
+        downloads = []
+
+        def inspect(request):
+            if request.url.path.endswith("/repos") and not checked_empty:
+                with connection() as db:
+                    self.assertEqual(
+                        db.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 0
+                    )
+                    self.assertEqual(
+                        db.execute("SELECT COUNT(*) FROM failed_documents").fetchone()[
+                            0
+                        ],
+                        0,
+                    )
+                checked_empty.append(True)
+            if "/raw/" in request.url.path:
+                downloads.append(request.url.path)
+            return original(request)
+
+        self.upstream = inspect
+        response = self.client.post(
+            "/api/crawl/hard-retry", json={"confirmation": "HARD RETRY"}
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        job = response.json()
+        for _ in range(300):
+            job = self.client.get(f"/api/jobs/{job['id']}").json()
+            if job["status"] not in ("queued", "running"):
+                break
+            time.sleep(0.01)
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertTrue(job["hard_retry"])
+        self.assertTrue(checked_empty)
+        self.assertEqual(len(downloads), 4)
+        self.assertEqual(
+            (job["new"], job["unchanged"], job["repositories_succeeded"]), (4, 0, 2)
+        )
+        with closing(sqlite3.connect(job["backup_path"])) as backup:
+            self.assertEqual(
+                backup.execute(
+                    "SELECT COUNT(*) FROM documents WHERE notes='old note'"
+                ).fetchone()[0],
+                4,
+            )
+        with connection() as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM documents WHERE notes='' AND open_count=0"
+                ).fetchone()[0],
+                4,
+            )
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM tracked_projects").fetchone()[0], 2
+            )
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM bookmark_workspace").fetchone()[0], 1
+            )
+        self.assertEqual(
+            len(self.client.get("/api/search", params={"q": "azure"}).json()), 4
+        )
+
+    def test_alphabetical_sequential_import_and_hard_retry(self):
+        original = self.upstream
+        from app.pdfs.crawler import crawl_repository
+
+        active = 0
+        maximum = 0
+        order = []
+        browsed = []
+
+        def unordered(request):
+            if request.url.path.endswith("/repos"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "values": [
+                            {"slug": slug} for slug in ["zebra", "Beta", "alpha"]
+                        ],
+                        "isLastPage": True,
+                    },
+                )
+            if "/browse/" in request.url.path:
+                slug = request.url.path.split("/repos/")[1].split("/")[0]
+                if not browsed or browsed[-1] != slug:
+                    browsed.append(slug)
+            return original(request)
+
+        async def tracked(*args):
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            order.append(args[2])
+            try:
+                await asyncio.sleep(0.01)
+                return await crawl_repository(*args)
+            finally:
+                active -= 1
+
+        self.upstream = unordered
+        with patch("app.pdfs.jobs.crawl_repository", tracked):
+            for endpoint, body in [
+                (
+                    "/api/imports",
+                    {"urls": [self.config["base_url"] + "/projects/DEMO"]},
+                ),
+                ("/api/crawl/hard-retry", {"confirmation": "HARD RETRY"}),
+            ]:
+                order.clear()
+                browsed.clear()
+                response = self.client.post(endpoint, json=body)
+                self.assertEqual(response.status_code, 202, response.text)
+                job = response.json()
+                for _ in range(300):
+                    job = self.client.get(f"/api/jobs/{job['id']}").json()
+                    if job["status"] not in ("queued", "running"):
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(job["status"], "succeeded", job)
+                self.assertEqual(order, ["alpha", "Beta", "zebra"])
+                self.assertEqual(browsed, order)
+                self.assertEqual(maximum, 1)
 
     def test_import_pdf_and_project(self):
         base = self.config["base_url"] + "/projects/TEST"
@@ -526,6 +678,12 @@ class BackendTests(unittest.TestCase):
             recovered = self.client.get("/api/jobs/latest").json()["job"]
             self.assertEqual(recovered["id"], job["id"])
             self.assertIn(recovered["status"], ("queued", "running"))
+            self.assertEqual(
+                self.client.post(
+                    "/api/crawl/hard-retry", json={"confirmation": "HARD RETRY"}
+                ).status_code,
+                409,
+            )
             self.assertEqual(self.client.post("/api/crawl", json={}).status_code, 409)
             self.assertEqual(self.client.post("/api/failed/retry").status_code, 409)
             self.assertEqual(

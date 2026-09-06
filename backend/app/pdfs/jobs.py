@@ -3,12 +3,13 @@
 import asyncio
 import json
 import multiprocessing
+import sqlite3
 import time
 import uuid
 from concurrent.futures import ProcessPoolExecutor
 
 from app.core.config import load_settings
-from app.core.database import connection
+from app.core.database import connection, database_path
 from app.core.logging import error_details, event
 from app.pdfs.client import BitbucketClient
 from app.pdfs.crawler import crawl_repository, discover_pdfs, now
@@ -22,7 +23,7 @@ class Jobs:
     def active(self):
         return self.task is not None and not self.task.done()
 
-    def start(self, project_ids=None, targets=None, auto_retry=True):
+    def start(self, project_ids=None, targets=None, auto_retry=True, hard_retry=False):
         if self.active():
             raise ValueError("A crawl is already running.")
         settings = load_settings()
@@ -40,9 +41,46 @@ class Jobs:
             raise ValueError(
                 "Tracked projects belong to a different server. Select projects for the configured server."
             )
+        backup_path = None
+        if hard_retry:
+            if targets:
+                raise ValueError("Hard retry must scan whole projects.")
+            # Preserve a recoverable snapshot before clearing the selected index.
+            backup_path = (
+                database_path().parent
+                / "backups"
+                / f"before-hard-retry-{uuid.uuid4().hex}.db"
+            )
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            with connection() as source:
+                destination = sqlite3.connect(backup_path)
+                try:
+                    source.backup(destination)
+                finally:
+                    destination.close()
+            ids = [project["id"] for project in projects]
+            placeholders = ",".join("?" for _ in ids)
+            with connection() as db:
+                scope = (
+                    f"SELECT id FROM repositories WHERE project_id IN ({placeholders})"
+                )
+                db.execute(
+                    f"DELETE FROM documents WHERE repository_id IN ({scope})", ids
+                )
+                db.execute(
+                    f"DELETE FROM failed_documents WHERE repository_id IN ({scope})",
+                    ids,
+                )
+                db.execute(
+                    f"UPDATE repositories SET last_scanned=NULL WHERE project_id IN ({placeholders})",
+                    ids,
+                )
+            event("crawl.hard_retry_reset", project_ids=ids, backup=str(backup_path))
         self.current = {
             "id": uuid.uuid4().hex,
             "status": "queued",
+            "hard_retry": hard_retry,
+            "backup_path": str(backup_path) if backup_path else None,
             "started_at": now(),
             "completed_at": None,
             "repositories": 0,
@@ -105,7 +143,9 @@ class Jobs:
         event("crawl.started", job_id=p["id"])
         try:
             repos = []
-            for project in projects:
+            for project in sorted(
+                projects, key=lambda item: (item["project"].casefold(), item["project"])
+            ):
                 selected = [
                     t for t in (targets or []) if t["project"] == project["project"]
                 ]
@@ -137,47 +177,63 @@ class Jobs:
                     self.save()
             p["repositories"] = len(repos)
             self.save()
-            # Bounded repository concurrency; HTTP is async and SQLite transactions are short.
-            semaphore = asyncio.Semaphore(settings.max_workers)
+            # Stable order across API pages, regardless of configured worker count.
+            repos.sort(
+                key=lambda repo: (
+                    repo[0].casefold(),
+                    repo[0],
+                    repo[1].casefold(),
+                    repo[1],
+                )
+            )
 
             work = []
 
             async def discover(project, slug, repository_id):
-                async with semaphore:
-                    repo_status(repository_id, "scanning")
-                    p["detail"] = f"Finding PDFs in {project}/{slug}"
-                    self.save()
-                    paths = []
-                    try:
-                        selected = [
-                            t
-                            for t in (targets or [])
-                            if t["project"] == project and t["repo"] in (None, slug)
-                        ]
-                        if selected and all(t["path"] for t in selected):
-                            paths = list(dict.fromkeys(t["path"] for t in selected))
-                        else:
-                            async for path in discover_pdfs(client, project, slug):
-                                paths.append(path)
-                        work.append((project, slug, repository_id, paths))
-                        p["found"] += len(paths)
-                        repo_status(repository_id, "queued")
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as error:  # noqa: BLE001 - isolate repository discovery
-                        p["repositories_failed"] += 1
-                        p["repositories_done"] += 1
-                        p["discovery_failed"] = True
-                        repo_status(repository_id, "failed")
-                        event(
-                            "crawl.discovery_failed",
-                            level=40,
-                            repository_id=repository_id,
-                            **error_details(error),
+                repo_status(repository_id, "scanning")
+                p["detail"] = f"Finding PDFs in {project}/{slug}"
+                self.save()
+                paths = []
+                try:
+                    selected = [
+                        t
+                        for t in (targets or [])
+                        if t["project"] == project and t["repo"] in (None, slug)
+                    ]
+                    if selected and all(t["path"] for t in selected):
+                        paths = list(dict.fromkeys(t["path"] for t in selected))
+                    else:
+                        async for path in discover_pdfs(client, project, slug):
+                            paths.append(path)
+                    work.append(
+                        (
+                            project,
+                            slug,
+                            repository_id,
+                            sorted(
+                                set(paths), key=lambda path: (path.casefold(), path)
+                            ),
                         )
-                    self.save()
+                    )
+                    p["found"] += len(paths)
+                    repo_status(repository_id, "queued")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # noqa: BLE001 - isolate repository discovery
+                    p["repositories_failed"] += 1
+                    p["repositories_done"] += 1
+                    p["discovery_failed"] = True
+                    repo_status(repository_id, "failed")
+                    event(
+                        "crawl.discovery_failed",
+                        level=40,
+                        repository_id=repository_id,
+                        **error_details(error),
+                    )
+                self.save()
 
-            await asyncio.gather(*(discover(*repo) for repo in repos))
+            for repo in repos:
+                await discover(*repo)
             p["discovery_complete"] = True
             processing_started = time.monotonic()
             self.save()
@@ -197,58 +253,58 @@ class Jobs:
             hard_failures = set()
 
             async def scan(project, slug, repository_id, paths):
-                async with semaphore:
-                    repo_status(repository_id, "processing")
-                    p["detail"] = f"Indexing {project}/{slug}"
-                    local_failed = False
+                repo_status(repository_id, "processing")
+                p["detail"] = f"Indexing {project}/{slug}"
+                local_failed = False
 
-                    class Counters(dict):
-                        def __getitem__(self, key):
-                            if key == "failure":
-                                return lambda path: failed_paths.setdefault(
-                                    (project, slug, repository_id), set()
-                                ).add(path)
-                            return progress_save if key == "save" else p[key]
+                class Counters(dict):
+                    def __getitem__(self, key):
+                        if key == "failure":
+                            return lambda path: failed_paths.setdefault(
+                                (project, slug, repository_id), set()
+                            ).add(path)
+                        return progress_save if key == "save" else p[key]
 
-                        def __setitem__(self, key, value):
-                            nonlocal local_failed
-                            if key == "failed":
-                                local_failed = True
-                            p[key] = value
+                    def __setitem__(self, key, value):
+                        nonlocal local_failed
+                        if key == "failed":
+                            local_failed = True
+                        p[key] = value
 
-                    try:
-                        await crawl_repository(
-                            client, project, slug, repository_id, Counters(), paths
+                try:
+                    await crawl_repository(
+                        client, project, slug, repository_id, Counters(), paths
+                    )
+                except asyncio.CancelledError:
+                    repo_status(repository_id, "cancelled")
+                    raise
+                except Exception as error:  # noqa: BLE001 - isolate repository processing
+                    local_failed = True
+                    hard_failures.add(repository_id)
+                    event(
+                        "crawl.repository_failed",
+                        level=40,
+                        repository_id=repository_id,
+                        **error_details(error),
+                    )
+                else:
+                    if not local_failed:
+                        p["repositories_succeeded"] += 1
+                finally:
+                    if local_failed:
+                        p["repositories_failed"] += 1
+                    if (
+                        p["repository_statuses"][str(repository_id)]["status"]
+                        != "cancelled"
+                    ):
+                        repo_status(
+                            repository_id, "failed" if local_failed else "succeeded"
                         )
-                    except asyncio.CancelledError:
-                        repo_status(repository_id, "cancelled")
-                        raise
-                    except Exception as error:  # noqa: BLE001 - isolate repository processing
-                        local_failed = True
-                        hard_failures.add(repository_id)
-                        event(
-                            "crawl.repository_failed",
-                            level=40,
-                            repository_id=repository_id,
-                            **error_details(error),
-                        )
-                    else:
-                        if not local_failed:
-                            p["repositories_succeeded"] += 1
-                    finally:
-                        if local_failed:
-                            p["repositories_failed"] += 1
-                        if (
-                            p["repository_statuses"][str(repository_id)]["status"]
-                            != "cancelled"
-                        ):
-                            repo_status(
-                                repository_id, "failed" if local_failed else "succeeded"
-                            )
-                        p["repositories_done"] += 1
-                        progress_save()
+                    p["repositories_done"] += 1
+                    progress_save()
 
-            await asyncio.gather(*(scan(*repo) for repo in work))
+            for repo in work:
+                await scan(*repo)
             # Exactly one additional pass, scoped to failures from this job.
             if auto_retry and failed_paths:
                 p["retry_active"] = True
@@ -258,7 +314,7 @@ class Jobs:
                 for (project, slug, repository_id), paths in failed_paths.items():
                     repo_status(repository_id, "retrying")
                     remaining_failures = len(paths)
-                    for path in sorted(paths):
+                    for path in sorted(paths, key=lambda path: (path.casefold(), path)):
                         p["detail"] = f"Automatic retry: {project}/{slug}/{path}"
                         self.save()
                         counters = {

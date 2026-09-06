@@ -502,6 +502,25 @@ function isRepositoryInactive(repo, now = new Date()) {
 
 const collapsedProjects = new Set();
 
+function repoSelectAllIcon(projectId = null) {
+  const scope = projects.filter(project => projectId === null || project.id === projectId);
+  const keys = scope.flatMap(project => project.repos.map(repo => repositoryKey(project.id, repo.name)));
+  const allSelected = keys.length > 0 && keys.every(key => state.selectedRepos.has(key));
+  const label = allSelected ? "Deselect all repositories" : "Select all repositories";
+  return `<button type="button" class="repo-select-all" data-select-repos="${projectId === null ? "" : escapeHtml(projectId)}" aria-label="${label}" title="${label}" aria-pressed="${allSelected}" ${keys.length ? "" : "disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="14" height="14" rx="2"/><path d="M16 3H5a2 2 0 0 0-2 2v11M10 14l3 3 5-6"/></svg></button>`;
+}
+
+function toggleAllRepositorySelection(projectId = null) {
+  const keys = projects.filter(project => projectId === null || project.id === projectId)
+    .flatMap(project => project.repos.map(repo => repositoryKey(project.id, repo.name)));
+  const allSelected = keys.length > 0 && keys.every(key => state.selectedRepos.has(key));
+  keys.forEach(key => allSelected ? state.selectedRepos.delete(key) : state.selectedRepos.add(key));
+  state.selectedProject = null;
+  state.selectedPdf = null;
+  state.currentPage = 1;
+  renderApp({resetScroll: true});
+}
+
 function renderProjects() {
   const now = new Date();
   const repositoryCount = projects.reduce(
@@ -544,7 +563,7 @@ function renderProjects() {
         }),
       )
       .join("");
-  elements.projectList.innerHTML = `<div class="project-expand-controls"><button type="button" data-project-expand-all>Expand all</button><button type="button" data-project-collapse-all>Collapse all</button></div>` + projects
+  elements.projectList.innerHTML = `<div class="project-expand-controls">${repoSelectAllIcon()}<button type="button" data-project-expand-all>Expand all</button><button type="button" data-project-collapse-all>Collapse all</button></div>` + projects
     .map((project) => {
       const projectIsActive =
         state.selectedProject === project.id && !state.selectedRepos.size;
@@ -575,6 +594,7 @@ function renderProjects() {
       return `
         <section class="project-group" aria-label="${escapeHtml(project.name)}">
           <div class="project-heading-row">
+          ${repoSelectAllIcon(project.id)}
           <button type="button" class="project-toggle" data-project-toggle="${escapeHtml(project.id)}" aria-expanded="${!collapsedProjects.has(project.id)}" aria-label="${collapsedProjects.has(project.id) ? "Expand" : "Collapse"} ${escapeHtml(project.name)} repositories">${collapsedProjects.has(project.id) ? "▸" : "▾"}</button>
           <button
             class="project-button${projectIsActive ? " active" : ""}"
@@ -741,6 +761,7 @@ function updateSelectionHeader() {
     ? findProject(state.selectedProject)
     : null;
   document.querySelector("#pull-repositories").disabled = pullProgress.active;
+  document.querySelector("#retry-failed-pdfs").disabled = pullProgress.active;
   elements.newProjectButton.disabled = pullProgress.active;
   document.querySelector("#pull-repositories").title =
     "Git pull all repositories";
@@ -1035,6 +1056,13 @@ function trapModalFocus(event) {
 }
 
 function handleProjectNavigation(event) {
+  const selectAll = event.target.closest("[data-select-repos]");
+  if (selectAll) {
+    const id = selectAll.dataset.selectRepos;
+    toggleAllRepositorySelection(id || null);
+    [...elements.projectList.querySelectorAll("[data-select-repos]")].find(button => button.dataset.selectRepos === id)?.focus();
+    return;
+  }
   const toggle = event.target.closest("[data-project-toggle]");
   const expandAll = event.target.closest("[data-project-expand-all]");
   const collapseAll = event.target.closest("[data-project-collapse-all]");

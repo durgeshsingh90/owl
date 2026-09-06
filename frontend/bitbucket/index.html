@@ -8,9 +8,9 @@
       content="A frontend prototype for exploring PDF documents across Bitbucket projects and repositories."
     />
     <title>Bitbucket PDF Explorer</title>
-    <script src="theme.js?v=20260906-crawl-11"></script>
-    <script src="sidebars.js?v=20260906-crawl-11"></script>
-    <link rel="stylesheet" href="style.css?v=20260906-repo-status" />
+    <script src="theme.js?v=20260906-crawl-14"></script>
+    <script src="sidebars.js?v=20260906-crawl-14"></script>
+    <link rel="stylesheet" href="style.css?v=20260906-repo-select" />
   </head>
   <body>
     <svg
@@ -284,6 +284,8 @@
             </div>
           </div>
 
+          <button type="button" id="hard-retry-open" class="secondary-button">Hard retry</button>
+          <button type="button" id="retry-failed-pdfs" class="secondary-button" title="Retry only failed PDFs for the configured server">Retry failed PDFs</button>
           <button type="button" id="show-failed-pdfs" class="secondary-button">Failed PDFs</button>
           <section class="table-panel" aria-label="PDF documents">
             <section class="commit-chart" aria-labelledby="commit-chart-title">
@@ -985,13 +987,25 @@
       <button type="button" id="failed-pdfs-prev">Previous</button>
       <button type="button" id="failed-pdfs-next">Next</button>
     </dialog>
-    <script src="pull-progress.js?v=20260906-crawl-11"></script>
-    <script src="people-teams.js?v=20260906-crawl-11"></script>
-    <script src="notes.js?v=20260906-crawl-11"></script>
-    <script src="script.js?v=20260906-crawl-11"></script>
-    <script src="database.js?v=20260906-crawl-11"></script>
-    <script src="settings.js?v=20260906-crawl-11"></script>
-    <script src="repository-delete.js?v=20260906-crawl-11"></script>
-    <script src="failed-pdfs.js?v=20260906-failed-1"></script>
+    <dialog id="hard-retry-dialog" aria-labelledby="hard-retry-title" style="width:min(620px,94vw);padding:24px;background:var(--surface);color:var(--text);border-radius:12px">
+      <h2 id="hard-retry-title">Hard retry all repositories</h2>
+      <p id="hard-retry-scope" role="status"></p>
+      <p>This first deletes the existing PDF records, extracted text, search entries, PDF notes, view counts and failed-PDF records for these projects. A database backup is saved before deletion.</p>
+      <p>Every repository is discovered again. Every PDF is downloaded and extracted again, including unchanged files. New results appear as they are saved. If stopped or unsuccessful, the index remains incomplete.</p>
+      <p>Project registrations, repository registrations, settings and bookmarks are kept.</p>
+      <label>Type HARD RETRY to confirm <input id="hard-retry-confirmation" autocomplete="off"></label>
+      <p id="hard-retry-error" role="alert"></p>
+      <button type="button" id="hard-retry-cancel">Cancel</button>
+      <button type="button" id="hard-retry-start" disabled>Delete index and start again</button>
+    </dialog>
+    <script src="pull-progress.js?v=20260906-crawl-14"></script>
+    <script src="people-teams.js?v=20260906-crawl-14"></script>
+    <script src="notes.js?v=20260906-crawl-14"></script>
+    <script src="script.js?v=20260906-crawl-14"></script>
+    <script src="database.js?v=20260906-crawl-14"></script>
+    <script src="settings.js?v=20260906-crawl-14"></script>
+    <script src="repository-delete.js?v=20260906-crawl-14"></script>
+    <script src="hard-retry.js?v=20260906-hard-1"></script>
+    <script src="failed-pdfs.js?v=20260906-failed-2"></script>
   </body>
 </html>

@@ -2845,3 +2845,8 @@ tbody tr.selected td:first-child {
 :root[data-theme="dark"] .repo-job-scanning,
 :root[data-theme="dark"] .repo-job-processing,
 :root[data-theme="dark"] .repo-job-retrying { color: #93c5fd; }
+
+.repo-select-all { display: inline-flex; flex: 0 0 28px; width: 28px; height: 28px; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.repo-select-all svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.repo-select-all[aria-pressed="true"] { color: var(--blue, #2563eb); background: var(--blue-soft); }
+.repo-select-all:disabled { opacity: .4; cursor: default; }

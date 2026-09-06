@@ -35,13 +35,24 @@
   document.querySelector("#failed-pdfs-refresh").onclick = load;
   document.querySelector("#failed-pdfs-prev").onclick = () => {if (!loading) {offset = Math.max(0, offset - 100); void load();}};
   document.querySelector("#failed-pdfs-next").onclick = () => {if (!loading) {offset += 100; void load();}};
-  retry.onclick = async () => {
+  const directRetry = document.querySelector("#retry-failed-pdfs");
+  async function retryFailedPdfs() {
+    if (pullProgress.active) {showToast("Wait for the current crawl to finish before retrying failed PDFs."); return;}
     retry.disabled = true;
+    directRetry.disabled = true;
     try {
       const job = await crawlJson("/api/failed/retry", {});
       dialog.close();
       watchCrawl(job);
-    } catch (error) {status.textContent = error.message; retry.disabled = pullProgress.active;}
-  };
+    } catch (error) {
+      status.textContent = error.message;
+      showToast(error.message);
+    } finally {
+      retry.disabled = pullProgress.active;
+      directRetry.disabled = pullProgress.active;
+    }
+  }
+  retry.onclick = retryFailedPdfs;
+  directRetry.onclick = retryFailedPdfs;
   window.addEventListener("owl-crawl-finished", () => {if (dialog.open) void load();});
 })();
