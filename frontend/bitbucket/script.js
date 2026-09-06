@@ -520,6 +520,16 @@ function toggleAllRepositorySelection(projectId = null) {
   renderApp({resetScroll: true});
 }
 
+function formatLastPull(value) {
+  if (!value) return "Not recorded";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "Not recorded";
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Dublin", day: "2-digit", month: "short", year: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  }).format(date) + " (Dublin)";
+}
+
 function renderProjects() {
   const now = new Date();
   const repositoryCount = projects.reduce(
@@ -583,6 +593,7 @@ function renderProjects() {
               aria-pressed="${repoIsActive}"
             >
               <span class="repo-selection-check" aria-hidden="true">${repoIsActive ? "✓" : ""}</span><span class="repo-name">${escapeHtml(repo.name)}${pullRepoMark(project.id, repo.name)}${inactive ? ' <span class="repo-inactive-label">Inactive</span>' : ""}</span>
+              <span class="repo-date repo-last-pull">Last Git pull: ${escapeHtml(formatLastPull(repo.lastPullAt))}</span>
               <span class="repo-meta">${formatNumber(repo.pdfCount)} PDFs</span>
               <span class="repo-date">Last commit: ${escapeHtml(repo.lastCommit)}</span>
             </button>
@@ -627,6 +638,11 @@ function renderPdfTable() {
   updateBulkPdfControls(filteredPdfs);
   const scopedRecordCount = getScopedPdfs().length;
   const hasSearch = Boolean(state.searchQuery.trim());
+  const searchCount = document.querySelector("#repository-search-count");
+  searchCount.hidden = !hasSearch;
+  searchCount.textContent = hasSearch
+    ? document.querySelector("#advanced-search-status").textContent || `${formatNumber(filteredPdfs.length)} search matches`
+    : "";
   const commitRange = getActiveCommitRange();
   const totalPages = Math.max(
     1,
@@ -672,14 +688,14 @@ function renderPdfTable() {
       return `${separator}
       <tr class="timeline-document ${state.selectedPdfs.has(pdf.id) ? "selected" : ""}" data-pdf-id="${pdf.id}">
         <td class="select-column"><input class="row-radio" type="checkbox" name="selected-pdf" value="${pdf.id}" aria-label="Select ${escapeHtml(pdf.name)}" ${state.selectedPdfs.has(pdf.id) ? "checked" : ""} /></td>
+        <td class="serial-number">${formatNumber(pageStart + index + 1)}</td>
+        <td><a class="timeline-file pdf-link" href="${escapeHtml(pdf.pdfUrl)}" data-open-pdf="${pdf.id}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(pdf.name)}"><span class="timeline-pdf-icon" aria-hidden="true">PDF</span><span>${escapeHtml(pdf.name)}</span></a></td>
         <td><span class="badge project-badge">${escapeHtml(pdf.project || pdf.projectId)}</span></td>
         <td><span class="badge" title="${escapeHtml(pdf.repo)}">${escapeHtml(pdf.repo)}</span></td>
         <td><button class="path-button" type="button" data-copy-path="${pdf.id}" title="Copy PDF URL: ${escapeHtml(pdf.pdfUrl)}" aria-label="Copy complete URL for ${escapeHtml(pdf.name)}">${escapeHtml(pdf.path)}</button></td>
-        <td><a class="timeline-file pdf-link" href="${escapeHtml(pdf.pdfUrl)}" data-open-pdf="${pdf.id}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(pdf.name)}"><span class="timeline-pdf-icon" aria-hidden="true">PDF</span><span>${escapeHtml(pdf.name)}</span></a></td>
-        <td class="serial-number">${formatNumber(pageStart + index + 1)}</td>
-        <td class="commit-id">${pdf.commitId ? `<button type="button" class="commit-copy" data-copy-commit="${pdf.id}" title="Copy full commit ID: ${escapeHtml(pdf.commitId)}" aria-label="Copy full commit ID ${escapeHtml(pdf.commitId)}">${escapeHtml(pdf.commitId.slice(0, 7))}</button>` : "—"}</td>
         <td><time class="commit-time" datetime="${escapeHtml(pdf.committedAt)}">${escapeHtml(dateLabel)}<small>${day === null ? "" : escapeHtml(COMMIT_TIME_FORMATTER.format(new Date(pdf.committedAt)))}</small></time></td>
         <td class="commit-author" title="${escapeHtml(pdf.commitAuthor || "Unknown")}">${escapeHtml(pdf.commitAuthor || "Unknown")}${isPersonStarred(pdfAuthorKey(pdf)) ? ' <span class="author-star" role="img" aria-label="Starred person">★</span>' : ""}</td>
+        <td class="commit-id">${pdf.commitId ? `<button type="button" class="commit-copy" data-copy-commit="${pdf.id}" title="Copy full commit ID: ${escapeHtml(pdf.commitId)}" aria-label="Copy full commit ID ${escapeHtml(pdf.commitId)}">${escapeHtml(pdf.commitId.slice(0, 7))}</button>` : "—"}</td>
         <td class="number-column"><span class="open-count">${formatNumber(pdf.openCount)}</span></td>
         <td class="actions-column"><div class="timeline-actions">
           <button class="folder-button" type="button" data-pdf-details="${pdf.id}" aria-label="Details for ${escapeHtml(pdf.name)}" title="Database details">ⓘ</button>
@@ -702,7 +718,7 @@ function renderPdfTable() {
 
 function renderPeople() {
   renderTeamFilters();
-  const scopedPeople = getScopedPeople();
+  const scopedPeople = groupPeopleByIdentity(getScopedPeople());
   const range = getActiveCommitRange();
   const query = state.peopleQuery.trim().toLocaleLowerCase();
   const visiblePeople = query
@@ -727,6 +743,7 @@ function renderPeople() {
             <div class="person-name-row"><button type="button" class="person-name person-filter-button" data-team-filter="person:${escapeHtml(personKey(person))}" aria-pressed="${activePeopleFilter === `person:${personKey(person)}`}" title="Show PDFs by ${escapeHtml(person.name)}">${escapeHtml(person.name)}</button><button class="person-star" type="button" data-star-person="${escapeHtml(personKey(person))}" aria-label="${isPersonStarred(personKey(person)) ? "Unstar" : "Star"} ${escapeHtml(person.name)}" aria-pressed="${isPersonStarred(personKey(person))}">${isPersonStarred(personKey(person)) ? "★" : "☆"}</button></div>
             <span class="person-email" title="${escapeHtml(person.email)}">${escapeHtml(person.email)}</span>
             <div class="person-metrics">
+              <span><strong>${formatNumber(person.repoCount)}</strong> ${person.repoCount === 1 ? "repo" : "repos"}</span>
               <span><strong>${formatNumber(person.commits)}</strong> commits</span>
               <span><strong>${formatNumber(person.pdfCount)}</strong> PDFs</span>
             </div>
@@ -752,9 +769,10 @@ function selectedRepositories() {
 function updateSelectionHeader() {
   const selected = selectedRepositories();
   const deleteButton = document.querySelector("#delete-selected-repo");
-  deleteButton.disabled = selected.length === 0;
-  deleteButton.title =
-    selected.length
+  deleteButton.disabled = selected.length === 0 && !state.selectedProject;
+  deleteButton.title = state.selectedProject
+    ? `Delete project ${findProject(state.selectedProject)?.name || ""}`
+    : selected.length
       ? `Delete ${selected.length} selected repositories`
       : "Select repositories to delete";
   const project = state.selectedProject

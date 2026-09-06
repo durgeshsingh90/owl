@@ -963,6 +963,77 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(restored["url"], failure["url"])
         self.assertEqual(restored["pdf_name"], "first.pdf")
 
+    def test_repository_last_pull_timestamp_is_persisted(self):
+        from datetime import datetime
+
+        self.crawl()
+        workspace = self.client.get("/api/workspace").json()
+        repos = [repo for project in workspace["projects"] for repo in project["repos"]]
+        self.assertTrue(repos)
+        for repo in repos:
+            self.assertIsNotNone(repo["lastPullAt"])
+            self.assertIsNotNone(datetime.fromisoformat(repo["lastPullAt"]).tzinfo)
+            with connection() as db:
+                self.assertEqual(
+                    repo["lastPullAt"],
+                    db.execute(
+                        "SELECT last_pull_at FROM repositories WHERE id=?",
+                        (repo["id"],),
+                    ).fetchone()[0],
+                )
+
+    def test_delete_project_empty_and_populated(self):
+        self.crawl()
+        with connection() as db:
+            project_id = db.execute(
+                "SELECT id FROM tracked_projects LIMIT 1"
+            ).fetchone()[0]
+            empty_id = db.execute(
+                "INSERT INTO tracked_projects(project_url,server,project) VALUES('https://example.test/empty','https://example.test','EMPTY') RETURNING id"
+            ).fetchone()[0]
+        for pid in (empty_id, project_id):
+            preview = self.client.post(
+                "/api/projects/delete-preview", json={"project_id": pid}
+            )
+            self.assertEqual(preview.status_code, 200, preview.text)
+            if pid == empty_id:
+                self.assertEqual(preview.json()["repositories"], [])
+            else:
+                self.assertGreater(preview.json()["documents"], 0)
+            self.assertEqual(
+                self.client.post(
+                    "/api/projects/delete",
+                    json={"project_id": pid, "confirmation": "wrong"},
+                ).status_code,
+                400,
+            )
+            result = self.client.post(
+                "/api/projects/delete",
+                json={"project_id": pid, "confirmation": "delete all"},
+            )
+            self.assertEqual(result.status_code, 200, result.text)
+            with connection() as db:
+                self.assertIsNone(
+                    db.execute(
+                        "SELECT id FROM tracked_projects WHERE id=?", (pid,)
+                    ).fetchone()
+                )
+                self.assertEqual(
+                    db.execute(
+                        "SELECT COUNT(*) FROM repositories WHERE project_id=?", (pid,)
+                    ).fetchone()[0],
+                    0,
+                )
+        self.assertEqual(
+            self.client.get("/api/search", params={"q": "azure"}).json(), []
+        )
+        self.assertEqual(
+            self.client.post(
+                "/api/projects/delete-preview", json={"project_id": empty_id}
+            ).status_code,
+            404,
+        )
+
     def test_bulk_delete_is_atomic_and_cascades_selected_repo_data(self):
         self.crawl()
         with connection() as db:

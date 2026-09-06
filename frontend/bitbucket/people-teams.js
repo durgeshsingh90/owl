@@ -43,18 +43,34 @@ function savePeoplePreferences(next) {
 }
 
 function personKey(person) {
-  return (person.email || person.name).toLocaleLowerCase();
+  return (person.email || person.name).trim().replace(/\s+/g, " ").toLocaleLowerCase();
 }
 function pdfAuthorKey(pdf) {
   if (pdf.commitAuthorEmail) return pdf.commitAuthorEmail.toLocaleLowerCase();
   // Match the saved PDF author to the contributor in this repository.
   const matches = people.filter(
     (person) =>
-      person.name === pdf.commitAuthor &&
+      person.name.trim().replace(/\s+/g, " ").toLocaleLowerCase() === (pdf.commitAuthor || "").trim().replace(/\s+/g, " ").toLocaleLowerCase() &&
       person.repo === pdf.repo &&
       person.projectId === pdf.projectId,
   );
-  return matches.length === 1 ? personKey(matches[0]) : null;
+  const keys = new Set(matches.map(personKey));
+  return keys.size === 1 ? [...keys][0] : null;
+}
+function groupPeopleByIdentity(records) {
+  const groups = new Map();
+  for (const person of records) {
+    const key = personKey(person);
+    let group = groups.get(key);
+    if (!group) {
+      group = {...person, name: person.name.trim().replace(/\s+/g, " "), commits: 0, pdfCount: 0, repositories: new Set()};
+      groups.set(key, group);
+    }
+    group.commits += Number(person.commits) || 0;
+    group.pdfCount += Number(person.pdfCount) || 0;
+    group.repositories.add(JSON.stringify([String(person.projectId), person.repo]));
+  }
+  return [...groups.values()].map(person => ({...person, repoCount: person.repositories.size}));
 }
 function isPersonStarred(key) {
   return key !== null && peoplePreferences.stars.includes(key);

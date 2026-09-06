@@ -308,6 +308,68 @@ def repository_delete_scope(value, db):
     return ids, placeholders, rows
 
 
+class ProjectDeletion(BaseModel):
+    project_id: int
+    confirmation: str = ""
+
+
+def project_delete_preview(project_id, db):
+    project = db.execute(
+        "SELECT * FROM tracked_projects WHERE id=?", (project_id,)
+    ).fetchone()
+    if not project:
+        raise HTTPException(404, "Project no longer exists. Refresh the selection.")
+    rows = [
+        dict(row)
+        for row in db.execute(
+            "SELECT r.id,r.repo,p.project,p.server FROM repositories r JOIN tracked_projects p ON p.id=r.project_id WHERE p.id=?",
+            (project_id,),
+        )
+    ]
+    counts = {
+        table: db.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE repository_id IN (SELECT id FROM repositories WHERE project_id=?)",
+            (project_id,),
+        ).fetchone()[0]
+        for table in ("documents", "failed_documents")
+    }
+    return {"project": dict(project), "repositories": rows, **counts}
+
+
+@router.post("/projects/delete-preview")
+def preview_project_deletion(value: ProjectDeletion):
+    with connection() as db:
+        return project_delete_preview(value.project_id, db)
+
+
+@router.post("/projects/delete")
+async def delete_project(value: ProjectDeletion, request: Request):
+    if value.confirmation != "delete all":
+        raise HTTPException(400, "Type delete all to confirm local project deletion.")
+    with connection() as db:
+        preview = project_delete_preview(value.project_id, db)
+    await request.app.state.jobs.delete_repositories(preview["repositories"])
+    from app.core.database import exclude_repositories
+
+    with connection() as db:
+        # Include any repositories discovered while active work was being cancelled.
+        remaining = project_delete_preview(value.project_id, db)["repositories"]
+        exclude_repositories(db, remaining)
+        db.execute("DELETE FROM tracked_projects WHERE id=?", (value.project_id,))
+    current = request.app.state.jobs.current
+    if current:
+        checkpoint = current.get("checkpoint", {})
+        checkpoint["project_ids"] = [
+            pid for pid in checkpoint.get("project_ids", []) if pid != value.project_id
+        ]
+        request.app.state.jobs.save()
+    return {
+        "ok": True,
+        "deleted": len(preview["repositories"]) + len(remaining),
+        "project_deleted": True,
+    }
+
+
 @router.post("/repositories/delete-preview")
 def preview_repository_deletion(value: RepositorySelection):
     with connection() as db:

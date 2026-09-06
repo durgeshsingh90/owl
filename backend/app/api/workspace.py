@@ -73,6 +73,7 @@ def workspace():
                         "id": r["id"],
                         "name": r["repo"],
                         "pdfCount": r["pdf_count"],
+                        "lastPullAt": r["last_pull_at"],
                         "lastCommit": __import__("datetime")
                         .datetime.fromisoformat(r["last_commit"])
                         .strftime("%d %b %Y")

@@ -387,6 +387,12 @@ class Jobs:
 
         def repo_status(repository_id, status):
             p["repository_statuses"][str(repository_id)]["status"] = status
+            if status in {"scanning", "succeeded", "failed", "cancelled"}:
+                with connection() as db:
+                    db.execute(
+                        "UPDATE repositories SET last_pull_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
+                        (repository_id,),
+                    )
             self.save()
 
         def connected():
@@ -419,6 +425,12 @@ class Jobs:
                             yield item
 
                 async for repo in repositories():
+                    with connection() as db:
+                        if not db.execute(
+                            "SELECT 1 FROM tracked_projects WHERE id=?",
+                            (project["id"],),
+                        ).fetchone():
+                            break
                     slug = repo["slug"]
                     with connection() as db:
                         if db.execute(

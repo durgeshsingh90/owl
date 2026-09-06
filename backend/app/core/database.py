@@ -67,6 +67,15 @@ def initialize(*, recover_jobs=False):
             id TEXT PRIMARY KEY, status TEXT NOT NULL, progress TEXT NOT NULL
         );
         """)
+        repository_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(repositories)")
+        }
+        if "last_pull_at" not in repository_columns:
+            db.execute("ALTER TABLE repositories ADD COLUMN last_pull_at TEXT")
+            db.execute(
+                "UPDATE repositories SET last_pull_at=last_scanned WHERE last_scanned IS NOT NULL"
+            )
+            db.commit()
         # FTS5 cannot add columns in place. Rebuild only its derived index,
         # preserving all documents and saved notes, including older databases.
         fts_columns = {

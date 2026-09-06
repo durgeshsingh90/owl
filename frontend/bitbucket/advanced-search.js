@@ -9,10 +9,10 @@ function scheduleAdvancedSearch() {
   const q = state.searchQuery.trim();
   const fields = [...document.querySelectorAll('[name="search-field"]:checked')].map(input => input.value);
   const mode = document.querySelector('[name="search-mode"]:checked').value;
+  status.textContent = !q ? '' : !fields.length ? 'Select a search field' : 'Searching…';
   state.currentPage = 1;
   renderCommitChart();
   renderPdfTable();
-  status.textContent = !q ? '' : !fields.length ? 'Select a search field' : 'Searching…';
   if (!q || !fields.length) return;
   advancedSearch.timer = setTimeout(async () => {
     const controller = new AbortController();
@@ -31,7 +31,10 @@ function scheduleAdvancedSearch() {
       renderCommitChart();
       renderPdfTable();
     } catch (error) {
-      if (version === advancedSearch.version) status.textContent = controller.signal.aborted ? 'Search timed out. Try again.' : error.message;
+      if (version === advancedSearch.version) {
+        status.textContent = controller.signal.aborted ? 'Search timed out. Try again.' : error.message;
+        renderPdfTable();
+      }
     } finally { clearTimeout(timeout); }
   }, 200);
 }
