@@ -182,6 +182,51 @@ class BackendTests(unittest.TestCase):
             (job["processed"], job["retry_recovered"], job["failed"]), (4, 4, 0)
         )
 
+    def test_compacted_directory_paths(self):
+        original = self.upstream
+        directory = (
+            "Platform_Services/Policy_Management_Service/Security_Policy_Management/TAD"
+        )
+        filename = "Design #1 & 100%.PDF"
+
+        def compacted(request):
+            path = request.url.path
+            if "/browse/" in path:
+                folder = path.split("/browse/", 1)[1]
+                if folder == "":
+                    item = {
+                        "type": "DIRECTORY",
+                        "path": {
+                            "name": "TAD",
+                            "components": directory.split("/"),
+                            "toString": directory,
+                        },
+                    }
+                elif folder == directory:
+                    item = {
+                        "type": "FILE",
+                        "path": {
+                            "name": filename,
+                            "components": (directory + "/" + filename).split("/"),
+                        },
+                    }
+                else:
+                    return httpx.Response(404)
+                return httpx.Response(
+                    200, json={"children": {"values": [item], "isLastPage": True}}
+                )
+            return original(request)
+
+        self.upstream = compacted
+        job = self.crawl()
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertEqual((job["found"], job["new"]), (2, 2))
+        self.assertEqual(job["folder_failures"], [])
+        with connection() as db:
+            for row in db.execute("SELECT path,url FROM documents"):
+                self.assertEqual(row["path"], directory + "/" + filename)
+                self.assertIn("Design%20%231%20%26%20100%25.PDF", row["url"])
+
     def test_repository_eta(self):
         from app.pdfs.jobs import remaining_eta
 

@@ -10,7 +10,7 @@
     <title>Bitbucket PDF Explorer</title>
     <script src="theme.js?v=20260906-crawl-18"></script>
     <script src="sidebars.js?v=20260906-crawl-18"></script>
-    <link rel="stylesheet" href="style.css?v=20260906-failed-icon" />
+    <link rel="stylesheet" href="style.css?v=20260906-column-widths" />
   </head>
   <body>
     <svg
@@ -69,6 +69,12 @@
           <kbd aria-hidden="true">/</kbd>
         </div>
 
+        <div id="crawl-controls" class="crawl-controls" hidden>
+          <time id="crawl-elapsed" title="Elapsed crawl time">00h 00m 00s</time>
+          <button id="crawl-stop" type="button" title="Stop crawl" aria-label="Stop crawl">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg>
+          </button>
+        </div>
         <div
           class="topbar-status"
           id="connection-status"
@@ -997,7 +1003,7 @@
       <button type="button" id="hard-retry-cancel">Cancel</button>
       <button type="button" id="hard-retry-start" disabled>Delete index and start again</button>
     </dialog>
-    <script src="pull-progress.js?v=20260906-crawl-23"></script>
+    <script src="pull-progress.js?v=20260906-crawl-24"></script>
     <script src="people-teams.js?v=20260906-crawl-18"></script>
     <script src="notes.js?v=20260906-crawl-18"></script>
     <script src="script.js?v=20260906-copy-path-url-1"></script>

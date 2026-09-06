@@ -115,6 +115,39 @@ async def process_pdf(client, project, repo, repository_id, path):
     return "updated" if old else "new"
 
 
+def entry_path(folder, item):
+    """Preserve repository-relative paths, including compacted directories."""
+    metadata = item.get("path") or {}
+    components = metadata.get("components")
+    if components is not None:
+        if (
+            not isinstance(components, list)
+            or not components
+            or any(
+                not isinstance(part, str)
+                or not part
+                or "/" in part
+                or part in (".", "..")
+                for part in components
+            )
+        ):
+            raise BitbucketError("Invalid repository path components.")
+        path = "/".join(components)
+    elif metadata.get("toString"):
+        path = metadata["toString"]
+    else:
+        # Older responses may provide only a name, relative to the listed folder.
+        name = metadata.get("name", "")
+        path = f"{folder}/{name}" if folder else name
+    if not isinstance(path, str) or any(
+        part in ("", ".", "..") for part in path.split("/")
+    ):
+        raise BitbucketError("Invalid repository path entry.")
+    if folder and not path.startswith(folder + "/"):
+        raise BitbucketError("Repository entry is outside the listed folder.")
+    return path
+
+
 async def discover_pdfs(client, project, repo, on_folder_error=None):
     prefix = client.repo_path(project, repo)
     folders = [""]
@@ -128,10 +161,7 @@ async def discover_pdfs(client, project, repo, on_folder_error=None):
             async for item in client.pages(
                 prefix + "/browse/" + quote(folder, safe="/"), nested="children"
             ):
-                name = item.get("path", {}).get("name", "")
-                if not name or name in (".", "..") or "/" in name:
-                    raise BitbucketError("Invalid repository path entry.")
-                path = str(PurePosixPath(folder) / name)
+                path = entry_path(folder, item)
                 if item.get("type") == "DIRECTORY":
                     folders.append(path)
                 elif item.get("type") == "FILE" and path.lower().endswith(".pdf"):

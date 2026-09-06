@@ -42,6 +42,17 @@ function watchCrawl(job) {
   pullProgress.active = true;
   clearTimeout(pullProgress.timer);
   pullProgress.jobId = job.id;
+  const controls = document.querySelector("#crawl-controls");
+  const stop = document.querySelector("#crawl-stop");
+  controls.hidden = false;
+  stop.hidden = !["queued", "running"].includes(job.status);
+  stop.disabled = false;
+  stop.onclick = async () => {
+    stop.disabled = true;
+    try { await crawlJson(`/api/jobs/${job.id}/cancel`, {}); }
+    catch (error) { showToast(error.message); }
+    finally { stop.disabled = false; }
+  };
   document.querySelector(".repository-pull-summary").hidden = false;
   let lastStatuses = "";
   let lastProcessed = -1;
@@ -50,6 +61,12 @@ function watchCrawl(job) {
   async function poll() {
     try {
       const current = await crawlJson(`/api/jobs/${job.id}`);
+      const running = ["queued", "running"].includes(current.status);
+      const elapsed = running && current.started_at
+        ? Math.max(current.elapsed_seconds || 0, (Date.now() - Date.parse(current.started_at)) / 1000)
+        : current.elapsed_seconds;
+      document.querySelector("#crawl-elapsed").textContent = formatEta(elapsed);
+      stop.hidden = !running;
       if (current.bitbucket_connected && (["queued", "running"].includes(current.status) || ["queued", "running"].includes(job.status))) {
         setConnectionStatus("connected", "Bitbucket responded successfully. Background indexing is running.");
       }
