@@ -472,16 +472,73 @@ def follow_logs(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Commands:
+  start      Start the frontend and backend (default when command is omitted).
+  stop       Stop the frontend and backend.
+  restart    Stop and start both services.
+  status     Show whether OWL is running and its service URLs.
+  logs       Show timestamped logs; errors only by default.
+  _serve     Internal supervisor command, launched automatically by start.
+
+Examples:
+  python dev.py
+  python dev.py start
+  python dev.py stop
+  python dev.py restart
+  python dev.py status
+  python dev.py start --frontend-port 8772 --backend-port 8001
+  python dev.py restart --frontend-port 8772 --backend-port 8001
+
+  python dev.py logs
+  python dev.py logs --service all
+  python dev.py logs --service backend
+  python dev.py logs --service frontend
+  python dev.py logs --service supervisor
+  python dev.py logs --level error
+  python dev.py logs --level all
+  python dev.py logs --lines 100
+  python dev.py logs --lines 0
+  python dev.py logs --no-follow
+  python dev.py logs --service backend --level all --lines 100 --no-follow
+
+  python dev.py -h
+  python dev.py --help
+
+Notes:
+  Log options apply to logs only. --lines is per source, before level filtering;
+  --lines 0 follows new output only. Ctrl+C stops log following, not OWL.
+  Port options apply when starting/restarting services; valid range: 1–65535.
+  On macOS/Linux, use python3 instead of python if needed.
+
+Internal use only (not a normal launch command):
+  python dev.py _serve --token INTERNAL_TOKEN --frontend-port 8771 --backend-port 8000
+""",
+    )
     parser.add_argument(
         "command",
         nargs="?",
         default="start",
         choices=["start", "stop", "restart", "status", "logs", "_serve"],
+        help="Action to run (default: start; _serve is internal)",
     )
-    parser.add_argument("--frontend-port", type=int, default=8771)
-    parser.add_argument("--backend-port", type=int, default=8000)
-    parser.add_argument("--token", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--frontend-port",
+        type=int,
+        default=8771,
+        help="Frontend port for start/restart (default: 8771)",
+    )
+    parser.add_argument(
+        "--backend-port",
+        type=int,
+        default=8000,
+        help="Backend port for start/restart (default: 8000)",
+    )
+    parser.add_argument(
+        "--token", help="Internal supervisor ownership token; supplied automatically"
+    )
     parser.add_argument(
         "--service",
         choices=["all", "backend", "frontend", "supervisor"],
@@ -489,7 +546,10 @@ def main():
         help="Log source (default: all)",
     )
     parser.add_argument(
-        "--lines", type=int, default=20, help="Recent lines per log before following"
+        "--lines",
+        type=int,
+        default=20,
+        help="Recent lines per log before following (default: 20; minimum: 0)",
     )
     parser.add_argument(
         "--no-follow", action="store_true", help="Print recent logs and exit"

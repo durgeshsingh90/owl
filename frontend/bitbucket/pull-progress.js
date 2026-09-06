@@ -57,6 +57,7 @@ function canResumeCrawl(job) {
   });
 }
 function watchCrawl(job) {
+  let lastWorkspaceRefresh = 0;
   pullProgress.active = true;
   clearTimeout(pullProgress.timer);
   pullProgress.jobId = job.id;
@@ -126,7 +127,8 @@ function watchCrawl(job) {
         pullProgress.repositories = new Map(Object.values(current.repository_statuses || {}).map(repo =>
           [JSON.stringify([String(repo.project_id), repo.repo]), repo.status]));
       }
-      if (statusesChanged || current.processed !== lastProcessed || current.repositories !== lastRepositories || (current.retry_recovered || 0) !== lastRecovered) {
+      if ((!lastWorkspaceRefresh || Date.now() - lastWorkspaceRefresh >= 5000) && (statusesChanged || current.processed !== lastProcessed || current.repositories !== lastRepositories || (current.retry_recovered || 0) !== lastRecovered)) {
+        lastWorkspaceRefresh = Date.now();
         lastRecovered = current.retry_recovered || 0;
         lastProcessed = current.processed;
         lastRepositories = current.repositories;

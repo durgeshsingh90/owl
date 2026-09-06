@@ -45,17 +45,20 @@ function savePeoplePreferences(next) {
 function personKey(person) {
   return (person.email || person.name).trim().replace(/\s+/g, " ").toLocaleLowerCase();
 }
+let authorLookup = null;
 function pdfAuthorKey(pdf) {
   if (pdf.commitAuthorEmail) return pdf.commitAuthorEmail.toLocaleLowerCase();
-  // Match the saved PDF author to the contributor in this repository.
-  const matches = people.filter(
-    (person) =>
-      person.name.trim().replace(/\s+/g, " ").toLocaleLowerCase() === (pdf.commitAuthor || "").trim().replace(/\s+/g, " ").toLocaleLowerCase() &&
-      person.repo === pdf.repo &&
-      person.projectId === pdf.projectId,
-  );
-  const keys = new Set(matches.map(personKey));
-  return keys.size === 1 ? [...keys][0] : null;
+  const normalize = value => String(value || "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+  if (!authorLookup) {
+    authorLookup = new Map();
+    for (const person of people) {
+      const lookupKey = JSON.stringify([String(person.projectId), person.repo, normalize(person.name)]);
+      const key = personKey(person);
+      if (!authorLookup.has(lookupKey)) authorLookup.set(lookupKey, key);
+      else if (authorLookup.get(lookupKey) !== key) authorLookup.set(lookupKey, null);
+    }
+  }
+  return authorLookup.get(JSON.stringify([String(pdf.projectId), pdf.repo, normalize(pdf.commitAuthor)])) ?? null;
 }
 function groupPeopleByIdentity(records) {
   const groups = new Map();

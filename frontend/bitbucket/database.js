@@ -1,16 +1,25 @@
 "use strict";
+let workspaceLoadVersion = 0;
 async function loadDatabaseWorkspace() {
+  const version = ++workspaceLoadVersion;
   try {
     const response = await fetch("/api/workspace", { cache: "no-store" });
     if (!response.ok) throw new Error("Unable to load saved repository data.");
     const data = await response.json();
-    projects.splice(0, projects.length, ...data.projects);
-    pdfs.splice(0, pdfs.length, ...data.documents);
-    people.splice(0, people.length, ...data.people);
+    if (version !== workspaceLoadVersion) return;
+    if (!Array.isArray(data.projects) || !Array.isArray(data.documents) || !Array.isArray(data.people)) {
+      throw new Error("Invalid workspace response; keeping the last loaded data.");
+    }
+    // Avoid spreading large PDF libraries into function arguments (browser limit).
+    for (const [target, source] of [[projects, data.projects], [pdfs, data.documents], [people, data.people]]) {
+      target.length = 0;
+      for (const item of source) target.push(item);
+    }
+    authorLookup = null;
     renderApp();
     if (state.searchQuery.trim()) scheduleAdvancedSearch();
   } catch (error) {
-    showToast(error.message);
+    if (version === workspaceLoadVersion) showToast(error.message);
   }
 }
 void loadDatabaseWorkspace();

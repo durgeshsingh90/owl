@@ -153,7 +153,7 @@ function getScopedPdfs() {
       !state.selectedRepos.size ||
       state.selectedRepos.has(repositoryKey(pdf.projectId, pdf.repo));
     return (
-      matchesProject && matchesRepo && matchesPeopleFilter(pdfAuthorKey(pdf))
+      matchesProject && matchesRepo && (activePeopleFilter === "all" || matchesPeopleFilter(pdfAuthorKey(pdf)))
     );
   });
 }

@@ -1,16 +1,22 @@
 "use strict";
-const advancedSearch = {ids: new Set(), timer: null, controller: null, version: 0};
+const advancedSearch = {ids: new Set(), timer: null, controller: null, version: 0, signature: null, pending: false};
 function scheduleAdvancedSearch() {
-  clearTimeout(advancedSearch.timer);
-  advancedSearch.controller?.abort();
-  const version = ++advancedSearch.version;
-  advancedSearch.ids = new Set();
   const status = document.querySelector('#advanced-search-status');
   const q = state.searchQuery.trim();
   const fields = [...document.querySelectorAll('[name="search-field"]:checked')].map(input => input.value);
   const mode = document.querySelector('[name="search-mode"]:checked').value;
+  const signature = JSON.stringify([q, fields, mode]);
+  const changed = signature !== advancedSearch.signature;
+  // Polling must not cancel the same search or blank already displayed matches.
+  if (!changed && advancedSearch.pending) return;
+  clearTimeout(advancedSearch.timer);
+  advancedSearch.controller?.abort();
+  const version = ++advancedSearch.version;
+  advancedSearch.signature = signature;
+  advancedSearch.pending = Boolean(q && fields.length);
+  if (changed) advancedSearch.ids = new Set();
   status.textContent = !q ? '' : !fields.length ? 'Select a search field' : 'Searching…';
-  state.currentPage = 1;
+  if (changed) state.currentPage = 1;
   renderCommitChart();
   renderPdfTable();
   if (!q || !fields.length) return;
@@ -35,7 +41,10 @@ function scheduleAdvancedSearch() {
         status.textContent = controller.signal.aborted ? 'Search timed out. Try again.' : error.message;
         renderPdfTable();
       }
-    } finally { clearTimeout(timeout); }
+    } finally {
+      clearTimeout(timeout);
+      if (version === advancedSearch.version) advancedSearch.pending = false;
+    }
   }, 200);
 }
 const searchPanel = document.querySelector('#advanced-search-panel');
