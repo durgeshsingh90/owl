@@ -1346,7 +1346,15 @@ async function connectionJson(url, options = {}) {
     );
   }
   if (!response.ok || result.ok !== true) {
-    throw new Error(result.message || "The connection check did not succeed.");
+    const detail =
+      typeof result.detail === "string"
+        ? result.detail
+        : Array.isArray(result.detail)
+          ? result.detail.map((item) => item.msg).join(" ")
+          : "";
+    throw new Error(
+      result.message || detail || "The connection check did not succeed.",
+    );
   }
   return result;
 }

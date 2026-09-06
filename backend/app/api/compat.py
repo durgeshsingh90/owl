@@ -46,7 +46,7 @@ async def form_settings(request):
     if not token:
         previous = load_settings()
         if (
-            data.get("base_url", "").rstrip("/") != previous.base_url
+            Settings.normalize(data.get("base_url", "")) != previous.base_url
             or data.get("username") != previous.username
         ):
             raise HTTPException(

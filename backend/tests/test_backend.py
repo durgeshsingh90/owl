@@ -216,6 +216,38 @@ class BackendTests(unittest.TestCase):
             200,
         )
 
+    def test_settings_form_preserves_ssl_choice(self):
+        form = {
+            "base_url": self.config["base_url"] + "/rest/api/1.0",
+            "username": "tester",
+            "access_token": "test-secret",
+        }
+        for verify in (False, True):
+            if verify:
+                form["verify_ssl"] = "on"
+            else:
+                form.pop("verify_ssl", None)
+            self.assertEqual(
+                self.client.post("/bitbucket/settings/save/", data=form).status_code,
+                200,
+            )
+            self.assertEqual(
+                self.client.get("/bitbucket/workspace/").json()["credentials"][0][
+                    "verifySsl"
+                ],
+                verify,
+            )
+            with patch("app.api.compat.test_value") as test:
+                test.return_value = {"ok": True}
+                retry = {k: v for k, v in form.items() if k != "access_token"}
+                self.assertEqual(
+                    self.client.post(
+                        "/bitbucket/settings/test/", data=retry
+                    ).status_code,
+                    200,
+                )
+                self.assertEqual(test.call_args.args[0].verify_ssl, verify)
+
     def test_failure_and_retry(self):
         self.fail = True
         job = self.crawl()

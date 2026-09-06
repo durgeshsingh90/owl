@@ -6,6 +6,7 @@
   const baseUrl = document.querySelector("#settings-base-url");
   const username = document.querySelector("#settings-username");
   const token = document.querySelector("#settings-token");
+  const verifySsl = document.querySelector("#settings-verify-ssl");
   const feedback = document.querySelector("#settings-feedback");
   const saveButton = document.querySelector("#settings-save");
   const testButton = document.querySelector("#settings-test");
@@ -23,6 +24,7 @@
     baseUrl.disabled = value;
     username.disabled = value;
     token.disabled = value;
+    verifySsl.disabled = value;
   }
 
   async function loadSettings() {
@@ -34,7 +36,7 @@
     dialog.showModal();
     const controller = new AbortController();
     pending = controller;
-    const timer = setTimeout(() => controller.abort(), 5000);
+    const timer = setTimeout(() => controller.abort(), 10000);
     try {
       workspace = await connectionJson(
         document.querySelector("#connection-status").dataset.workspaceUrl,
@@ -44,6 +46,7 @@
       const server = workspace.credentials?.[0];
       baseUrl.value = server?.baseUrl || "";
       username.value = server?.username || "";
+      verifySsl.checked = server?.verifySsl ?? true;
       token.value = "";
       message(
         server
@@ -90,7 +93,8 @@
       return;
     }
     const body = new URLSearchParams(new FormData(form));
-    body.set("verify_ssl", "on");
+    if (verifySsl.checked) body.set("verify_ssl", "on");
+    else body.delete("verify_ssl");
     const controller = new AbortController();
     pending = controller;
     busy(true);
@@ -99,7 +103,7 @@
       connectionCheckRunning = true;
       setConnectionStatus("connecting");
     }
-    const timer = setTimeout(() => controller.abort(), 5000);
+    const timer = setTimeout(() => controller.abort(), 10000);
     let saved = false;
     try {
       await connectionJson(endpoint, {
@@ -125,7 +129,7 @@
         : error.message;
       message(
         controller.signal.aborted
-          ? "The request timed out after 5 seconds. Please retry."
+          ? "The request timed out after 10 seconds. Please retry."
           : safeMessage,
         true,
       );
