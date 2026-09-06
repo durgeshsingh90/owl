@@ -170,9 +170,53 @@ class BackendTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("Timed out")
 
+    def test_import_pdf_and_project(self):
+        base = self.config["base_url"] + "/projects/TEST"
+        for url, expected in [(base + "/repos/one/browse/manual.pdf", 1), (base, 5)]:
+            response = self.client.post("/api/imports", json={"urls": [url]})
+            self.assertEqual(response.status_code, 202, response.text)
+            identifier = response.json()["id"]
+            for _ in range(200):
+                job = self.client.get(f"/api/jobs/{identifier}").json()
+                if job["status"] not in ("running", "queued"):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(job["status"], "succeeded", job)
+            self.assertEqual(
+                len(self.client.get("/api/search", params={"q": "azure"}).json()),
+                expected,
+            )
+        response = self.client.post(
+            "/api/imports", json={"urls": ["https://wrong.test/projects/TEST"]}
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_temporary_pdf_cleanup(self):
+        from app.pdfs.crawler import extract
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("tempfile.tempdir", directory),
+        ):
+            with self.assertRaises(RuntimeError):
+                extract(b"not a pdf")
+            self.assertEqual(list(Path(directory).iterdir()), [])
+            with pymupdf.open() as document:
+                document.new_page().insert_text((30, 30), "cleanup test")
+                self.assertEqual(extract(document.tobytes())[0], 1)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
     def test_incremental_crawl_fts_and_deletion(self):
         job = self.crawl()
         self.assertEqual((job["status"], job["new"]), ("succeeded", 4), job)
+        workspace = self.client.get("/api/workspace").json()
+        saved = workspace["documents"][0]
+        detail = self.client.get(f"/api/document/{saved['id']}").json()
+        self.assertEqual(saved["pageCount"], detail["page_count"])
+        self.assertEqual(saved["fileSize"], detail["file_size"])
+        self.assertEqual(saved["commitId"], detail["commit_id"])
+        self.assertEqual(saved["project"], detail["project"])
+        self.assertIn("azure", detail["pdf_text"])
         self.assertTrue(any("start=7" in url for url in self.calls))
         self.assertTrue(any("start=11" in url for url in self.calls))
         rows = self.client.get("/api/search", params={"q": "+azure +aws"}).json()
@@ -318,6 +362,10 @@ class BackendTests(unittest.TestCase):
                 json={"project_url": self.config["base_url"] + "/projects/DEMO"},
             )
             job = self.client.post("/api/crawl", json={}).json()
+            self.assertEqual(self.client.get("/api/health").status_code, 200)
+            recovered = self.client.get("/api/jobs/latest").json()["job"]
+            self.assertEqual(recovered["id"], job["id"])
+            self.assertIn(recovered["status"], ("queued", "running"))
             self.assertEqual(self.client.post("/api/crawl", json={}).status_code, 409)
             self.assertEqual(
                 self.client.post("/api/jobs/" + job["id"] + "/cancel").json()["status"],

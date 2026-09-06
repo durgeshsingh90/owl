@@ -87,3 +87,26 @@ The settings UI uses OWL's encrypted saved credentials, not the standalone
 crawler's `config.ini`. Both a server URL ending in `/stash` and its full
 `/stash/rest/api/1.0` URL are accepted. Use the same credentials as the working
 standalone script. Local tests do not establish corporate VPN connectivity.
+
+
+### Import from Bitbucket New
+
+New accepts one project, repository, or PDF browse/raw URL per line, on the
+configured Bitbucket server. Project URLs enumerate repositories and recursively
+scan PDFs; individual PDF URLs index only those files. URLs with branch query
+parameters are rejected rather than silently importing a different revision.
+The existing commit check, SHA-256 hash, PyMuPDF extraction, SQLite upsert and
+FTS search remain shared by both paths. Temporary PDFs are removed in `finally`.
+This is an adaptation of the supplied script to the existing API and database,
+not a verbatim copy: the HTTP client remains HTTPX, and stable upserts/FTS triggers
+avoid duplicate search rows.
+
+POST `/api/imports` starts a managed job. The screen polls `/api/jobs/{id}` for
+actual counts and can stop the job or resume monitoring after a reload. Pull
+now starts a real project crawl as well. No simulated PDF counts are generated.
+
+Background scanning is owned by the running backend, not the browser. PDF text
+extraction uses a separate worker process so progress requests remain responsive.
+The UI discovers the latest saved job on load/focus, including in a new tab.
+Closing the page does not cancel a scan. Stopping/restarting the backend stops
+the job; it does not automatically resume interrupted work.

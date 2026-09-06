@@ -3,7 +3,13 @@
 import asyncio
 import json
 
-from app.core.config import Settings, load_settings, parse_project, save_settings
+from app.core.config import (
+    Settings,
+    load_settings,
+    parse_project,
+    parse_target,
+    save_settings,
+)
 from app.core.database import connection
 from app.core.logging import error_details, event, request_id
 from app.pdfs.client import BitbucketClient, BitbucketError
@@ -113,6 +119,15 @@ async def crawl(value: CrawlRequest, request: Request):
     if request.app.state.jobs.active():
         raise HTTPException(409, "A crawl is already running.")
     return request.app.state.jobs.start(value.project_ids)
+
+
+@router.get("/jobs/latest")
+def latest_job():
+    with connection() as db:
+        row = db.execute("SELECT * FROM jobs ORDER BY rowid DESC LIMIT 1").fetchone()
+    if row is None:
+        return {"job": None}
+    return {"job": {**json.loads(row["progress"]), "status": row["status"]}}
 
 
 @router.get("/jobs/{job_id}")
@@ -290,3 +305,26 @@ def summary():
         }
         for p in sidebar()
     ]
+
+
+class ImportRequest(BaseModel):
+    urls: list[str] = Field(min_length=1, max_length=100)
+
+
+@router.post("/imports", status_code=202)
+async def import_urls(value: ImportRequest, request: Request):
+    jobs = request.app.state.jobs
+    if jobs.active():
+        raise HTTPException(409, "A crawl is already running.")
+    settings = load_settings()
+    targets = [parse_target(url, settings) for url in value.urls]
+    ids = set()
+    with connection() as db:
+        for target in targets:
+            row = db.execute(
+                "INSERT INTO tracked_projects(project_url,server,project) VALUES(?,?,?) "
+                "ON CONFLICT(server,project) DO UPDATE SET project_url=excluded.project_url RETURNING id",
+                (target["url"], settings.base_url, target["project"]),
+            ).fetchone()
+            ids.add(row["id"])
+    return jobs.start(list(ids), targets)

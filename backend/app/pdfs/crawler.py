@@ -1,6 +1,9 @@
 """Incremental PDF crawling without retaining downloaded PDF files."""
 
+import asyncio
 import hashlib
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from urllib.parse import quote
@@ -15,8 +18,12 @@ def now():
 
 
 def extract(content):
+    temp_path = None
     try:
-        with pymupdf.open(stream=content, filetype="pdf") as pdf:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temporary:
+            temp_path = temporary.name
+            temporary.write(content)
+        with pymupdf.open(temp_path) as pdf:
             if pdf.needs_pass:
                 raise BitbucketError("PDF requires a password.")
             return len(pdf), "\n".join(page.get_text() for page in pdf)
@@ -24,6 +31,9 @@ def extract(content):
         raise
     except Exception:  # noqa: BLE001 - isolate parser/upstream failures without leaking secrets
         raise BitbucketError("PDF text extraction failed.") from None
+    finally:
+        if temp_path:
+            os.remove(temp_path)
 
 
 async def process_pdf(client, project, repo, repository_id, path):
@@ -52,12 +62,13 @@ async def process_pdf(client, project, repo, repository_id, path):
         raw=True,
     )
     digest = hashlib.sha256(content).hexdigest()
-    # Extraction runs serially on the event loop: PyMuPDF is not thread-safe.
-    page_count, text = (
-        (old["page_count"], old["pdf_text"])
-        if old and old["pdf_hash"] == digest
-        else extract(content)
-    )
+    if old and old["pdf_hash"] == digest:
+        page_count, text = old["page_count"], old["pdf_text"]
+    else:
+        # A separate process keeps status requests responsive during PDF parsing.
+        page_count, text = await asyncio.get_running_loop().run_in_executor(
+            client.extractor, extract, content
+        )
     stamp = now()
     timestamp = commit.get("authorTimestamp")
     commit_date = (

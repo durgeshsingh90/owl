@@ -2,14 +2,16 @@
 
 import asyncio
 import json
+import multiprocessing
 import time
 import uuid
+from concurrent.futures import ProcessPoolExecutor
 
 from app.core.config import load_settings
 from app.core.database import connection
 from app.core.logging import error_details, event
 from app.pdfs.client import BitbucketClient
-from app.pdfs.crawler import crawl_repository, now
+from app.pdfs.crawler import crawl_repository, now, process_pdf
 
 
 class Jobs:
@@ -20,7 +22,7 @@ class Jobs:
     def active(self):
         return self.task is not None and not self.task.done()
 
-    def start(self, project_ids=None):
+    def start(self, project_ids=None, targets=None):
         if self.active():
             raise ValueError("A crawl is already running.")
         settings = load_settings()
@@ -57,7 +59,7 @@ class Jobs:
             "detail": "Queued",
         }
         self.save()
-        self.task = asyncio.create_task(self.run(settings, projects))
+        self.task = asyncio.create_task(self.run(settings, projects, targets))
         return self.current.copy()
 
     def save(self):
@@ -67,18 +69,36 @@ class Jobs:
                 (self.current["id"], self.current["status"], json.dumps(self.current)),
             )
 
-    async def run(self, settings, projects):
+    async def run(self, settings, projects, targets=None):
         client = BitbucketClient(settings)
+        extractor = ProcessPoolExecutor(
+            max_workers=1, mp_context=multiprocessing.get_context("spawn")
+        )
+        client.extractor = extractor
         started = time.monotonic()
         p = self.current
         p["status"] = "running"
+        p["detail"] = "Discovering repositories"
+        self.save()
         event("crawl.started", job_id=p["id"])
         try:
             repos = []
             for project in projects:
-                async for repo in client.pages(
-                    "/projects/" + project["project"] + "/repos"
-                ):
+                selected = [
+                    t for t in (targets or []) if t["project"] == project["project"]
+                ]
+
+                async def repositories(selected=selected, project=project):
+                    if selected and all(t["repo"] for t in selected):
+                        for slug in dict.fromkeys(t["repo"] for t in selected):
+                            yield {"slug": slug}
+                    else:
+                        async for item in client.pages(
+                            "/projects/" + project["project"] + "/repos"
+                        ):
+                            yield item
+
+                async for repo in repositories():
                     slug = repo["slug"]
                     with connection() as db:
                         row = db.execute(
@@ -105,9 +125,30 @@ class Jobs:
                             p[key] = value
 
                     try:
-                        await crawl_repository(
-                            client, project, slug, repository_id, Counters()
-                        )
+                        selected = [
+                            t
+                            for t in (targets or [])
+                            if t["project"] == project and t["repo"] in (None, slug)
+                        ]
+                        if selected and all(t["path"] for t in selected):
+                            paths = list(dict.fromkeys(t["path"] for t in selected))
+                            p["found"] += len(paths)
+                            for path in paths:
+                                p["detail"] = f"Downloading and indexing {path}"
+                                self.save()
+                                try:
+                                    outcome = await process_pdf(
+                                        client, project, slug, repository_id, path
+                                    )
+                                    p[outcome] += 1
+                                except Exception:  # noqa: BLE001 - isolate individual PDFs
+                                    p["failed"] += 1
+                                p["processed"] += 1
+                                self.save()
+                        else:
+                            await crawl_repository(
+                                client, project, slug, repository_id, Counters()
+                            )
                     except asyncio.CancelledError:
                         raise
                     except Exception as error:  # noqa: BLE001 - isolate parser/upstream failures without leaking secrets
@@ -145,6 +186,7 @@ class Jobs:
                 "Repository discovery failed. Check Bitbucket access and retry."
             )
         finally:
+            extractor.shutdown(wait=False, cancel_futures=True)
             await client.close()
             p["completed_at"] = now()
             p["elapsed_seconds"] = round(time.monotonic() - started, 1)

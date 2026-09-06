@@ -96,6 +96,12 @@ def workspace():
                 {
                     "id": d["id"],
                     "projectId": str(d["project_id"]),
+                    "project": d["project"],
+                    "fileSize": d["file_size"],
+                    "pageCount": d["page_count"],
+                    "commitId": d["commit_id"],
+                    "commitMessage": d["commit_message"],
+                    "lastScanned": d["last_scanned"],
                     "repo": d["repo"],
                     "name": d["pdf_name"],
                     "path": d["path"],

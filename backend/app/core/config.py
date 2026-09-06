@@ -105,3 +105,26 @@ def parse_project(url, settings):
     if not re.fullmatch(r"[A-Za-z0-9_~-]+", key):
         raise ValueError("Invalid project key.")
     return key, settings.base_url + "/projects/" + key
+
+
+def parse_target(url, settings):
+    project, canonical = parse_project(url, settings)
+    parsed = urlsplit(url.strip())
+    if parsed.query or parsed.fragment:
+        raise ValueError("Use a URL without query parameters or a fragment.")
+    tail = parsed.path[len(urlsplit(canonical).path) :].strip("/")
+    if not tail:
+        return {"project": project, "url": canonical, "repo": None, "path": None}
+    match = re.fullmatch(r"repos/([^/]+)(?:/(?:browse|raw)(?:/(.+))?)?", tail)
+    if not match:
+        raise ValueError("Enter a Bitbucket project, repository or PDF browse URL.")
+    repo = unquote(match[1])
+    path = unquote(match[2]) if match[2] else None
+    if not re.fullmatch(r"[A-Za-z0-9_.~-]+", repo):
+        raise ValueError("Invalid repository slug.")
+    if path and (
+        not path.lower().endswith(".pdf")
+        or any(part in ("", ".", "..") for part in path.split("/"))
+    ):
+        raise ValueError("The file URL must point to a PDF.")
+    return {"project": project, "url": canonical, "repo": repo, "path": path}

@@ -654,7 +654,7 @@
         <form id="project-form" novalidate>
           <div class="form-field">
             <div class="field-label-row">
-              <label for="repository-urls">Bitbucket Repository URLs</label>
+              <label for="repository-urls">Bitbucket Project, Repository or PDF URLs</label>
               <span>HTTPS</span>
             </div>
             <textarea
@@ -664,7 +664,7 @@
               placeholder="https://bitbucket.org/company/payment-services&#10;https://bitbucket.org/company/payment-api&#10;https://bitbucket.org/company/payment-documents"
             ></textarea>
             <p class="helper-text">
-              Enter one Bitbucket repository URL per line.
+              Enter one URL per line. Projects scan all repositories; PDF URLs import that file.
             </p>
           </div>
 
@@ -962,6 +962,14 @@
           ><button class="primary-button" type="submit">Save team</button>
         </div>
       </form>
+    </dialog>
+    <dialog id="pdf-details-dialog" aria-labelledby="pdf-details-title" style="width:min(850px,90vw);max-height:85vh;overflow:auto;padding:24px;background:var(--panel-bg,#182535);color:inherit;border:1px solid #536278;border-radius:12px">
+      <h2 id="pdf-details-title">Saved PDF details</h2>
+      <button type="button" id="pdf-details-close">Close</button>
+      <p id="pdf-details-status" role="status"></p>
+      <dl id="pdf-details-fields" style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;overflow-wrap:anywhere"></dl>
+      <h3>Extracted text</h3>
+      <pre id="pdf-details-text" style="white-space:pre-wrap;max-height:40vh;overflow:auto"></pre>
     </dialog>
     <script src="pull-progress.js"></script>
     <script src="people-teams.js"></script>

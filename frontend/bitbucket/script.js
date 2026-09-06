@@ -649,12 +649,13 @@ function renderPdfTable() {
         <td class="select-column"><input class="row-radio" type="checkbox" name="selected-pdf" value="${pdf.id}" aria-label="Select ${escapeHtml(pdf.name)}" ${state.selectedPdfs.has(pdf.id) ? "checked" : ""} /></td>
         <td><a class="timeline-file pdf-link" href="${escapeHtml(pdf.pdfUrl)}" data-open-pdf="${pdf.id}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(pdf.name)}"><span class="timeline-pdf-icon" aria-hidden="true">PDF</span><span>${escapeHtml(pdf.name)}</span></a></td>
         <td><button class="path-button" type="button" data-copy-path="${pdf.id}" title="Copy ${escapeHtml(pdf.path)}">${escapeHtml(pdf.path)}</button></td>
-        <td><span class="badge project-badge">${escapeHtml(pdf.projectId)}</span></td>
+        <td><span class="badge project-badge">${escapeHtml(pdf.project || pdf.projectId)}</span></td>
         <td><span class="badge" title="${escapeHtml(pdf.repo)}">${escapeHtml(pdf.repo)}</span></td>
         <td><time class="commit-time" datetime="${escapeHtml(pdf.committedAt)}">${escapeHtml(dateLabel)}<small>${day === null ? "" : escapeHtml(COMMIT_TIME_FORMATTER.format(new Date(pdf.committedAt)))}</small></time></td>
         <td class="commit-author" title="${escapeHtml(pdf.commitAuthor || "Unknown")}">${escapeHtml(pdf.commitAuthor || "Unknown")}${isPersonStarred(pdfAuthorKey(pdf)) ? ' <span class="author-star" role="img" aria-label="Starred person">★</span>' : ""}</td>
         <td class="number-column"><span class="open-count">${formatNumber(pdf.openCount)}</span></td>
         <td class="actions-column"><div class="timeline-actions">
+          <button class="folder-button" type="button" data-pdf-details="${pdf.id}" aria-label="Details for ${escapeHtml(pdf.name)}" title="Database details">ⓘ</button>
           <button class="folder-button notes-button${readPdfNote(pdf) ? " has-notes" : ""}" type="button" data-pdf-notes="${pdf.id}" aria-label="${readPdfNote(pdf) ? "Edit" : "Add"} notes for ${escapeHtml(pdf.name)}" title="${readPdfNote(pdf) ? "Edit notes" : "Add notes"}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h14v13l-5 5H5V3Zm9 18v-5h5M8 7h8M8 11h8M8 15h3" /></svg></button>
           <button class="folder-button" type="button" data-copy-url="${pdf.id}" aria-label="Copy URL for ${escapeHtml(pdf.name)}" title="Copy URL"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8h11v13H9V8ZM15 8V3H4v13h5" /></svg></button>
           <button class="folder-button" type="button" data-open-folder="${pdf.id}" aria-label="Open Bitbucket folder for ${escapeHtml(pdf.name)}" title="Open Bitbucket folder"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7h6l1.8 2h9.2v9.5a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5V7ZM3.5 10h17" /></svg></button>
@@ -992,84 +993,20 @@ function parseRepositoryUrls(rawValue) {
   return { repositories: parsed };
 }
 
-function stringHash(value) {
-  return Array.from(value).reduce(
-    (hash, character) => (hash * 31 + character.charCodeAt(0)) >>> 0,
-    0,
-  );
-}
-
-function createRepositoryFromUrl(repository, index) {
-  const hash = stringHash(repository.baseUrl) + index;
-  const date = new Date();
-  date.setUTCDate(date.getUTCDate() - (hash % 26));
-
-  return {
-    name: repository.name,
-    baseUrl: repository.baseUrl,
-    pdfCount: 35 + (hash % 140),
-    lastCommit: new Intl.DateTimeFormat("en-GB", {
-      day: "2-digit",
-      month: "short",
-      year: "numeric",
-      timeZone: "UTC",
-    }).format(date),
-  };
-}
-
-function generateProjectId() {
-  const highestId = projects.reduce((highest, project) => {
-    const number = Number.parseInt(project.id.replace(/\D/g, ""), 10);
-    return Number.isNaN(number) ? highest : Math.max(highest, number);
-  }, 0);
-  return `PRJ-${String(highestId + 1).padStart(3, "0")}`;
-}
-
-function addProject(event) {
+async function addProject(event) {
   event.preventDefault();
-  if (pullProgress.active) {
-    showFormError("Wait for the current operation to finish.");
-    return;
-  }
+  if (pullProgress.active) return showFormError("Wait for the current operation to finish.");
   clearFormError();
-
-  const rawUrls = elements.repositoryUrls.value;
-  if (!rawUrls.trim()) {
-    showFormError("Enter at least one repository URL.", ["urls"]);
-    return;
-  }
-
-  const parsedUrls = parseRepositoryUrls(rawUrls);
-  if (parsedUrls.error) {
-    showFormError(parsedUrls.error, ["urls"]);
-    return;
-  }
-
-  const firstUrl = new URL(parsedUrls.repositories[0].baseUrl);
-  const segments = firstUrl.pathname.split("/").filter(Boolean);
-  const projectSegment = segments.indexOf("projects");
-  const name =
-    projectSegment >= 0
-      ? segments[projectSegment + 1] || firstUrl.hostname
-      : segments.at(-2) || firstUrl.hostname;
-  const projectId = generateProjectId();
-  projects.push({
-    id: projectId,
-    name,
-    repos: parsedUrls.repositories.map(createRepositoryFromUrl),
-  });
-
-  state.selectedProject = projectId;
-  state.selectedRepos.clear();
-  state.selectedPdf = null;
-  state.currentPage = 1;
-  closeProjectModal();
-  renderApp({ resetScroll: true });
-  startPullPreview(
-    [projects.find((project) => project.id === projectId)],
-    "New",
-  );
-  showToast(`${name} added to frontend preview`);
+  const urls = elements.repositoryUrls.value.split(/\n/).map(url => url.trim()).filter(Boolean);
+  if (!urls.length) return showFormError("Enter a project, repository or PDF URL.", ["urls"]);
+  const button = elements.projectForm.querySelector('button[type="submit"]');
+  button.disabled = true;
+  try {
+    const job = await crawlJson("/api/imports", {urls});
+    closeProjectModal();
+    watchCrawl(job);
+  } catch (error) { showFormError(error.message); }
+  finally { button.disabled = false; }
 }
 
 function trapModalFocus(event) {

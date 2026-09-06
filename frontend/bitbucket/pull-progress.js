@@ -1,148 +1,90 @@
 "use strict";
-// Frontend-only preview. Replace timed progress with backend job events when available.
-const pullProgress = {
-  active: false,
-  completed: new Set(),
-  failed: new Set(),
-  connectionState: null,
-  timer: null,
-};
-function pullRepoMark(projectId, repoName) {
-  return pullProgress.completed.has(repositoryKey(projectId, repoName))
-    ? '<span class="pull-repo-done" role="img" aria-label="Completed in preview" title="Completed in preview">✓</span>'
-    : "";
+const pullProgress = {active: false, completed: new Set(), failed: new Set(), timer: null};
+function pullRepoMark() { return ""; }
+async function crawlJson(url, body) {
+  const response = await fetch(url, {
+    method: body === undefined ? "GET" : "POST",
+    headers: {"Content-Type": "application/json"},
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(15000),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Backend request failed.");
+  return data;
 }
 function updatePullSummary(message) {
   document.querySelector("#repository-pull-status").textContent = message;
-  document.querySelector("#repository-pull-updating").textContent =
-    pullProgress.active ? 1 : 0;
-  // The preview has no backend outcomes: do not invent new/unchanged/failure counts.
-  document.querySelector("#repository-pull-new").textContent = "—";
-  document.querySelector("#repository-pull-unchanged").textContent = "—";
-  document.querySelector("#repository-pull-failed").textContent = "—";
 }
-function startPullPreview(targetProjects = projects, operation = "Pull") {
-  if (pullProgress.active) return;
-  const repositories = targetProjects.flatMap((project) =>
-    project.repos.map((repo) => ({
-      key: repositoryKey(project.id, repo.name),
-      files: repo.pdfCount,
-    })),
-  );
-  if (!repositories.length) {
-    showToast("No repositories to pull.", false);
-    return;
-  }
-  const container = document.querySelector("#connection-status");
-  pullProgress.connectionState = {
-    status: container.dataset.state || "failed",
-    detail: container.title,
-  };
+function watchCrawl(job) {
   pullProgress.active = true;
-  pullProgress.completed.clear();
-  pullProgress.failed.clear();
-  document.querySelector(".repository-pull-summary").hidden = false;
-  updatePullSummary(`${operation} preview · outcome counts await backend`);
-  const started = performance.now();
-  const durationPerRepository = 2000;
-  const duration = repositories.length * durationPerRepository;
-  const totalFiles = repositories.reduce((sum, repo) => sum + repo.files, 0);
-  const panel = document.querySelector("#pull-progress");
+  clearTimeout(pullProgress.timer);
+  pullProgress.jobId = job.id;
   const stop = document.querySelector("#pull-stop");
-  panel.hidden = false;
+  document.querySelector("#pull-progress").hidden = false;
+  document.querySelector(".repository-pull-summary").hidden = false;
   stop.hidden = false;
   stop.textContent = "Stop";
-  document.querySelector("#pull-progress-state").textContent =
-    `${operation} preview · simulated`;
-  container.dataset.state = "connecting";
-  container.title = `${operation} preview — no backend operation`;
-  document.querySelector("#connection-image").src = "assets/no-connection.gif";
-  document.querySelector("#connection-label").textContent =
-    `${operation} preview running`;
-  const connectionButton = document.querySelector("#test-connection");
-  connectionButton.disabled = true;
-  connectionButton.title = `${operation} preview running`;
-  connectionButton.setAttribute("aria-label", `${operation} preview running`);
-  updateSelectionHeader();
-  renderProjects();
-  function formatSeconds(seconds) {
-    return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
-  }
-  function finish(cancelled) {
-    clearInterval(pullProgress.timer);
-    pullProgress.active = false;
-    document.querySelector("#pull-progress-state").textContent = cancelled
-      ? `${operation} preview stopped`
-      : `${operation} preview complete`;
-    document.querySelector("#pull-eta").textContent =
-      "No backend operation performed";
-    stop.textContent = "Dismiss";
-    const remaining =
-      repositories.length -
-      pullProgress.completed.size -
-      pullProgress.failed.size;
-    updatePullSummary(
-      cancelled
-        ? `Preview stopped · ${remaining} repositories unfinished`
-        : `${operation} preview complete · no backend operation performed`,
-    );
-    const previous = pullProgress.connectionState;
-    setConnectionStatus(
-      connectionCheckRunning ? "connecting" : previous.status,
-      previous.detail,
-    );
-    updateSelectionHeader();
-  }
-  function tick() {
-    const elapsed = Math.min(performance.now() - started, duration);
-    const done = Math.min(
-      repositories.length,
-      Math.floor(elapsed / durationPerRepository),
-    );
-    const completedFiles = repositories
-      .slice(0, done)
-      .reduce((sum, repo) => sum + repo.files, 0);
-    const currentFiles =
-      done < repositories.length
-        ? Math.floor(
-            repositories[done].files *
-              ((elapsed % durationPerRepository) / durationPerRepository),
-          )
-        : 0;
-    if (done !== pullProgress.completed.size) {
-      repositories
-        .slice(0, done)
-        .forEach((repo) => pullProgress.completed.add(repo.key));
-      renderProjects();
-      updatePullSummary(
-        `${operation} preview · ${done}/${repositories.length} repositories completed`,
-      );
+  stop.onclick = async () => {
+    if (!pullProgress.active) {
+      pullProgress.dismissedId = job.id;
+      document.querySelector("#pull-progress").hidden = true;
+      return;
     }
-    document.querySelector("#pull-elapsed").textContent = formatSeconds(
-      Math.floor(elapsed / 1000),
-    );
-    document.querySelector("#pull-progress-counts").textContent =
-      `${done}/${repositories.length} repos · ${formatNumber(completedFiles + currentFiles)}/${formatNumber(totalFiles)} files`;
-    document.querySelector("#pull-eta").textContent =
-      `ETA ${formatSeconds(Math.ceil((duration - elapsed) / 1000))}`;
-    if (done === repositories.length) finish(false);
-  }
-  stop.onclick = () => {
-    if (pullProgress.active) finish(true);
-    else {
-      stop.hidden = true;
-      document.querySelector("#pull-progress-state").textContent =
-        "Git pull · ready";
-      document.querySelector("#pull-elapsed").textContent = "00:00";
-      document.querySelector("#pull-progress-counts").textContent =
-        "0 repositories · 0 files";
-      document.querySelector("#pull-eta").textContent = "ETA —";
-      pullProgress.completed.clear();
-      pullProgress.failed.clear();
-      document.querySelector(".repository-pull-summary").hidden = true;
-      renderProjects();
-    }
+    stop.disabled = true;
+    try { await crawlJson(`/api/jobs/${job.id}/cancel`, {}); }
+    catch (error) { showToast(error.message); }
+    finally { stop.disabled = false; }
   };
-  tick();
-  pullProgress.timer = setInterval(tick, 250);
+  let lastProcessed = -1;
+  let lastRepositories = -1;
+  async function poll() {
+    try {
+      const current = await crawlJson(`/api/jobs/${job.id}`);
+      document.querySelector("#pull-progress-state").textContent = current.detail;
+      document.querySelector("#pull-elapsed").textContent = `${Math.round(current.elapsed_seconds)}s`;
+      document.querySelector("#pull-progress-counts").textContent = `${current.repositories_done}/${current.repositories} repositories · ${current.processed}/${current.found} PDFs processed · ${current.updated} updated`;
+      document.querySelector("#pull-eta").textContent = current.eta_seconds == null ? "Discovering files / ETA unavailable" : `ETA ${current.eta_seconds}s`;
+      updatePullSummary(current.status.replaceAll("_", " "));
+      document.querySelector("#repository-pull-new").textContent = current.new;
+      document.querySelector("#repository-pull-unchanged").textContent = current.unchanged;
+      document.querySelector("#repository-pull-failed").textContent = current.failed + current.repositories_failed;
+      document.querySelector("#repository-pull-updating").textContent = current.updated;
+      if (current.processed !== lastProcessed || current.repositories !== lastRepositories) {
+        lastProcessed = current.processed;
+        lastRepositories = current.repositories;
+        await loadDatabaseWorkspace();
+      }
+      if (!["queued", "running"].includes(current.status)) {
+        pullProgress.active = false;
+        pullProgress.jobId = null;
+        stop.textContent = "Dismiss";
+        document.querySelector("#pull-eta").textContent = current.status.replaceAll("_", " ");
+        await loadDatabaseWorkspace();
+        updateSelectionHeader();
+        return;
+      }
+    } catch (error) {
+      updatePullSummary(`Progress unavailable: ${error.message}. Retrying…`);
+    }
+    pullProgress.timer = setTimeout(poll, 1000);
+  }
+  updateSelectionHeader();
+  void poll();
 }
+async function startPullPreview(targetProjects = projects) {
+  if (pullProgress.active) return;
+  pullProgress.active = true;
+  try {
+    const job = await crawlJson("/api/crawl", {project_ids: targetProjects.map(project => Number(project.id))});
+    watchCrawl(job);
+  } catch (error) { pullProgress.active = false; showToast(error.message); }
+}
+async function reconnectCrawl() {
+  if (pullProgress.active) return;
+  try {
+    const {job} = await crawlJson("/api/jobs/latest");
+    if (job && job.id !== pullProgress.dismissedId) watchCrawl(job);
+  } catch (error) { updatePullSummary(`Cannot load crawl status: ${error.message}`); }
+}
+window.addEventListener("load", reconnectCrawl);
+window.addEventListener("focus", reconnectCrawl);
