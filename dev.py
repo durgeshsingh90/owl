@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Manage OWL's static frontend and FastAPI backend on macOS/Linux."""
+"""Manage OWL's static frontend and FastAPI backend on Windows, macOS and Linux."""
 
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import signal
@@ -13,6 +12,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.request import urlopen
 
@@ -20,6 +20,52 @@ ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / ".owl-dev"
 STATE = RUNTIME / "state.json"
 HOST = "127.0.0.1"
+WINDOWS = os.name == "nt"
+
+
+@contextmanager
+def control_lock():
+    with (RUNTIME / "control.lock").open("a+b") as lock:
+        if WINDOWS:
+            import msvcrt
+
+            lock.seek(0, 2)
+            if lock.tell() == 0:
+                lock.write(b"0")
+                lock.flush()
+            while True:
+                lock.seek(0)
+                try:
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if WINDOWS:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def stop_file(token):
+    return RUNTIME / ("stop-" + token)
+
+
+def kill_windows_tree(pid):
+    result = subprocess.run(
+        ["taskkill", "/PID", str(pid), "/T", "/F"],
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    return result.returncode == 0
 
 
 def read_state():
@@ -33,17 +79,30 @@ def owned(state):
     """Check identity, not just a potentially recycled PID."""
     if not state:
         return False
+    if WINDOWS:
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            f"$ErrorActionPreference='Stop'; (Get-CimInstance Win32_Process -Filter 'ProcessId = {int(state['pid'])}').CommandLine",
+        ]
+    else:
+        command = ["ps", "-p", str(state["pid"]), "-o", "command="]
     result = subprocess.run(
-        ["ps", "-p", str(state["pid"]), "-o", "command="],
-        capture_output=True,
-        check=False,
-        text=True,
+        command, capture_output=True, check=False, text=True, timeout=10
     )
-    return str(ROOT / "dev.py") in result.stdout and state["token"] in result.stdout
+    if WINDOWS and result.returncode:
+        raise RuntimeError("Unable to verify OWL process identity using PowerShell.")
+    return (
+        str(ROOT / "dev.py").casefold() in result.stdout.casefold()
+        and state["token"] in result.stdout
+    )
 
 
 def python_path():
-    for path in (ROOT / "backend/.venv/bin/python", ROOT / ".venv/bin/python"):
+    suffix = "Scripts/python.exe" if WINDOWS else "bin/python"
+    for path in (ROOT / "backend/.venv" / suffix, ROOT / ".venv" / suffix):
         if path.is_file():
             return str(path)
     return sys.executable
@@ -54,6 +113,20 @@ def stop():
     if not owned(state):
         STATE.unlink(missing_ok=True)
         print("OWL is stopped.")
+        return
+    if WINDOWS:
+        request = stop_file(state["token"])
+        request.touch()
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and owned(state):
+            time.sleep(0.2)
+        if owned(state) and not kill_windows_tree(state["pid"]):
+            raise RuntimeError(
+                "Could not stop the OWL process tree. State retained for retry."
+            )
+        request.unlink(missing_ok=True)
+        STATE.unlink(missing_ok=True)
+        print("Stopped OWL frontend and backend.")
         return
     # The supervisor and its children share a dedicated process group.
     os.killpg(state["pid"], signal.SIGTERM)
@@ -72,7 +145,8 @@ def stop():
 
 def available(port):
     with socket.socket() as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        option = socket.SO_EXCLUSIVEADDRUSE if WINDOWS else socket.SO_REUSEADDR
+        sock.setsockopt(socket.SOL_SOCKET, option, 1)
         try:
             sock.bind((HOST, port))
         except OSError:
@@ -105,10 +179,15 @@ def start(args):
         check=False,
     )
     if check.returncode:
+        venv_python = (
+            "backend\\.venv\\Scripts\\python.exe"
+            if WINDOWS
+            else "backend/.venv/bin/python"
+        )
         raise RuntimeError(
             "Install backend dependencies first:\n"
-            "  python3 -m venv backend/.venv\n"
-            "  backend/.venv/bin/python -m pip install -r backend/requirements.txt"
+            f"  {'python' if WINDOWS else 'python3'} -m venv backend/.venv\n"
+            f"  {venv_python} -m pip install -r backend/requirements.txt"
         )
     if args.frontend_port == args.backend_port:
         raise RuntimeError("Frontend and backend ports must be different.")
@@ -132,7 +211,11 @@ def start(args):
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=log,
-            start_new_session=True,
+            **(
+                {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                if WINDOWS
+                else {"start_new_session": True}
+            ),
         )
     state = {
         "pid": process.pid,
@@ -218,20 +301,45 @@ def serve(args):
             logs.append(log)
             children.append(
                 subprocess.Popen(
-                    command, cwd=cwd, stdout=log, stderr=log, stdin=subprocess.DEVNULL
+                    command,
+                    cwd=cwd,
+                    stdout=log,
+                    stderr=log,
+                    stdin=subprocess.DEVNULL,
+                    **(
+                        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                        if WINDOWS
+                        else {}
+                    ),
                 )
             )
-        while running and all(child.poll() is None for child in children):
+        while (
+            running
+            and not stop_file(args.token).exists()
+            and all(child.poll() is None for child in children)
+        ):
             time.sleep(0.2)
     finally:
         # Also reaches the Uvicorn reload child, including when one service crashes.
-        os.killpg(os.getpgrp(), signal.SIGTERM)
+        if WINDOWS:
+            for child in children:
+                if child.poll() is None:
+                    try:
+                        child.send_signal(signal.CTRL_BREAK_EVENT)
+                    except OSError:
+                        kill_windows_tree(child.pid)
+        else:
+            os.killpg(os.getpgrp(), signal.SIGTERM)
         deadline = time.monotonic() + 8
         for child in children:
             try:
                 child.wait(timeout=max(0.1, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
-                os.killpg(os.getpgrp(), signal.SIGKILL)
+                if WINDOWS:
+                    if not kill_windows_tree(child.pid):
+                        raise RuntimeError("Could not stop an OWL child process.")
+                else:
+                    os.killpg(os.getpgrp(), signal.SIGKILL)
         for log in logs:
             log.close()
 
@@ -256,8 +364,7 @@ def main():
         serve(args)
         return
     RUNTIME.mkdir(exist_ok=True)
-    with (RUNTIME / "control.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with control_lock():
         if args.command == "status":
             state = read_state()
             print("OWL is running." if owned(state) else "OWL is stopped.")
