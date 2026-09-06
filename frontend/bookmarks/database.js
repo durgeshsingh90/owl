@@ -18,6 +18,7 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             revision,
+            last_update_all: window.bookmarkLastUpdateAll || null,
             bookmarks,
             groups: domainGroups,
             notes: localPageNotes,
@@ -93,6 +94,8 @@
       Object.assign(localPageNotes, data.notes);
       starredBookmarkFolders = new Set(data.starred_folders || []);
       starredConfluencePeople = new Set((data.starred_people || []).map(confluencePersonKey));
+      window.bookmarkLastUpdateAll = data.last_update_all || null;
+      document.querySelector("#bookmark-last-update").textContent = "Last update all: " + (window.bookmarkLastUpdateAll ? new Date(window.bookmarkLastUpdateAll).toLocaleString() : "unavailable");
       revision = data.revision;
       ready = true;
       window.bookmarkDatabaseReady = true;

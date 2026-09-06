@@ -10,6 +10,7 @@ router = APIRouter(prefix="/api")
 
 
 class BookmarkWorkspace(BaseModel):
+    last_update_all: str | None = Field(default=None, max_length=64)
     revision: int = 0
     bookmarks: list[dict] = Field(default_factory=list, max_length=50000)
     groups: list[dict] = Field(default_factory=list, max_length=1000)

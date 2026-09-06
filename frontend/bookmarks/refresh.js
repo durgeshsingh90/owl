@@ -17,7 +17,13 @@
         done++;if(!await persist())throw Error("Database save failed. Reload before retrying.");render();
       }
       status.textContent=`Updated ${done}/${targets.length} · ${failed} failed`;
-      document.querySelector("#bookmark-last-update").textContent="Last update all: "+new Date().toLocaleString();
+      const previous = window.bookmarkLastUpdateAll;
+      window.bookmarkLastUpdateAll = new Date().toISOString();
+      if (!await persist()) {
+        window.bookmarkLastUpdateAll = previous;
+        throw Error("Could not save the Update all timestamp. Reload before retrying.");
+      }
+      document.querySelector("#bookmark-last-update").textContent="Last update all: "+new Date(window.bookmarkLastUpdateAll).toLocaleString();
       if(selectedBookmarkId!==null)showPageDetails(selectedBookmarkId);
     }catch(error){status.textContent=error.message;}
     finally{button.disabled=false;}

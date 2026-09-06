@@ -40,6 +40,26 @@ class BookmarkTests(unittest.TestCase):
             "verify_ssl": "on",
         }
 
+    def test_update_all_timestamp_is_persisted(self):
+        timestamp = "2026-09-07T09:15:30.000Z"
+        workspace = self.client.get("/api/bookmarks/workspace").json()
+        workspace["last_update_all"] = timestamp
+        response = self.client.put("/api/bookmarks/workspace", json=workspace)
+        self.assertEqual(response.status_code, 200)
+        from app.core.database import connection
+
+        with connection() as db:
+            payload = json.loads(
+                db.execute(
+                    "SELECT payload FROM bookmark_workspace WHERE id=1"
+                ).fetchone()[0]
+            )
+        self.assertEqual(payload["last_update_all"], timestamp)
+        self.assertEqual(
+            self.client.get("/api/bookmarks/workspace").json()["last_update_all"],
+            timestamp,
+        )
+
     def tearDown(self):
         self.client.__exit__(None, None, None)
         self.mock.stop()
