@@ -2863,3 +2863,15 @@ tbody tr.selected td:first-child {
 
 .commit-copy { border: 0; padding: 3px 0; background: transparent; color: var(--text); font: inherit; white-space: nowrap; cursor: pointer; }
 .commit-copy:hover { color: var(--blue, #2563eb); text-decoration: underline; }
+
+/* Keep controls in their own layout rows, including at browser zoom. */
+#projects-content > .sidebar-heading { margin-bottom: 12px; gap: 8px; flex-wrap: wrap; }
+.all-repositories-row { gap: 6px; margin-bottom: 8px; }
+.all-repositories-row .all-repositories-nav { grid-template-columns: 22px minmax(0, 1fr); padding: 9px 7px; }
+.all-repositories-nav > span:nth-child(2) { min-width: 0; }
+.all-repositories-row .all-repositories-nav strong,
+.all-repositories-row .all-repositories-nav small { white-space: normal; overflow-wrap: anywhere; }
+.all-repositories-actions { flex-shrink: 0; }
+.commit-chart-heading { height: auto; flex-shrink: 0; row-gap: 8px; }
+.commit-chart-heading .pagination-controls { flex-wrap: wrap; }
+#show-failed-pdfs { flex-shrink: 0; width: 28px; height: 28px; padding: 4px; }

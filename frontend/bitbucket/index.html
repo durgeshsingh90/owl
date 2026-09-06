@@ -10,7 +10,7 @@
     <title>Bitbucket PDF Explorer</title>
     <script src="theme.js?v=20260906-crawl-15"></script>
     <script src="sidebars.js?v=20260906-crawl-15"></script>
-    <link rel="stylesheet" href="style.css?v=20260906-commit-copy" />
+    <link rel="stylesheet" href="style.css?v=20260906-failed-icon" />
   </head>
   <body>
     <svg
@@ -294,11 +294,13 @@
             </div>
           </div>
 
-          <button type="button" id="show-failed-pdfs" class="secondary-button">Failed PDFs</button>
           <section class="table-panel" aria-label="PDF documents">
             <section class="commit-chart" aria-labelledby="commit-chart-title">
               <div class="commit-chart-heading">
                 <h4 id="commit-chart-title">Commit date</h4>
+                <button type="button" id="show-failed-pdfs" class="repo-action-icon" aria-label="View failed PDFs" title="View failed PDFs" aria-haspopup="dialog" aria-controls="failed-pdfs-dialog">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H5v18h14V8l-5-5Zm0 0v5h5M12 11v4m0 3h.01"/></svg>
+                </button>
                 <span
                   class="commit-date-selection"
                   id="commit-date-selection"
