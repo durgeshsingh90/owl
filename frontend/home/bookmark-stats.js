@@ -7,39 +7,21 @@
       return fallback;
     }
   }
-  function renderStats() {
-    const saved = read("owl-bookmark-demo", {}),
-      deleted = new Set(read("owl-bookmark-deleted", [])),
-      snapshot = read("owl-bookmark-overview", null),
-      custom = read("owl-bookmark-added", []);
-    const fallback = bookmarkSeed.map(
-      ([title, url, description, views, last], index) => {
-        const parsed = new URL(url);
-        if (parsed.hostname === "confluence.example.com") {
-          const base = new URL(sampleConfluenceBaseUrl);
-          url =
-            base.origin +
-            base.pathname.replace(/\/$/, "") +
-            parsed.pathname.replace(/^\/wiki/, "");
-        }
-        return {
-          id: index + 1,
-          title,
-          url,
-          domain: new URL(url).hostname,
-          views,
-          added: null,
-          lastViewed: null,
-          favorite: [0, 2, 6].includes(index),
-          pinned: [0, 1].includes(index),
-          ...saved[index + 1],
-        };
-      },
-    );
-    const source = Array.isArray(snapshot?.bookmarks)
-      ? snapshot.bookmarks
-      : [...fallback, ...(Array.isArray(custom) ? custom : [])];
-    const items = source.filter((item) => !deleted.has(item.id));
+  async function renderStats() {
+    if (!window.inRange) return;
+    let workspace;
+    try {
+      const response = await fetch("/api/bookmarks/workspace", {
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error();
+      workspace = await response.json();
+    } catch {
+      document.querySelector("#bookmark-stat-metrics").textContent =
+        "Unable to load bookmark statistics.";
+      return;
+    }
+    const items = workspace.bookmarks;
     const periodItems = items.filter(
       (item) => item.added && inRange(item.added),
     );
@@ -147,9 +129,9 @@
         )
         .join("") ||
       empty("No bookmarks with known added dates in this period.");
-    const notes = read("owl-bookmark-notes", {}),
-      groups = read("owl-bookmark-domain-groups", []),
-      lastUpdate = read("owl-bookmarks-last-update-all", null);
+    const notes = workspace.notes,
+      groups = workspace.groups,
+      lastUpdate = null;
     const rankedGroups = (Array.isArray(groups) ? groups : [])
       .map((group) => {
         const members = items.filter(
@@ -209,7 +191,7 @@
           : "Unavailable",
       );
   }
-  renderStats();
+  window.addEventListener("owl-database-ready", renderStats);
   window.addEventListener("storage", renderStats);
   window.addEventListener("focus", renderStats);
   document

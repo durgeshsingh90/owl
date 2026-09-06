@@ -1,19 +1,6 @@
 "use strict";
 let domainGroups = [];
 let selectedDomainGroup = "";
-try {
-  const stored = JSON.parse(
-    localStorage.getItem("owl-bookmark-domain-groups") || "[]",
-  );
-  if (Array.isArray(stored))
-    domainGroups = stored.filter(
-      (group) =>
-        typeof group.id === "string" &&
-        typeof group.name === "string" &&
-        Array.isArray(group.domains) &&
-        group.domains.every((domain) => typeof domain === "string"),
-    );
-} catch {}
 function matchesDomainGroup(item) {
   const group = domainGroups.find((group) => group.id === selectedDomainGroup);
   return !group || group.domains.includes(item.domain);
@@ -110,6 +97,7 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
     domainGroups = next;
+    persist();
     selectedDomainGroup = group.id;
     domain = "";
     dialog.close();

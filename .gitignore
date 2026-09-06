@@ -253,3 +253,5 @@ __marimo__/
 
 # Local development processes and logs
 .owl-dev/
+backend/data/
+backend/config.ini

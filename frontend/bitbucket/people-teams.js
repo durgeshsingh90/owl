@@ -43,7 +43,7 @@ function savePeoplePreferences(next) {
 }
 
 function personKey(person) {
-  return person.email.toLocaleLowerCase();
+  return (person.email || person.name).toLocaleLowerCase();
 }
 function pdfAuthorKey(pdf) {
   if (pdf.commitAuthorEmail) return pdf.commitAuthorEmail.toLocaleLowerCase();

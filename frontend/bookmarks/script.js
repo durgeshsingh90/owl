@@ -2,58 +2,14 @@
 
 const day = 86400000,
   now = Date.now();
-let saved = {};
-try {
-  saved = JSON.parse(localStorage.getItem("owl-bookmark-demo") || "{}");
-} catch {}
-const bookmarks = bookmarkSeed.map(
-  ([title, url, description, views, last], index) => ({
-    id: index + 1,
-    title,
-    url,
-    description,
-    domain: new URL(url).hostname,
-    views,
-    lastViewed: last === null ? null : now - last * day,
-    added: now - (index + 1) * day,
-    updatedInOwlAt:
-      index === 1 ? now - day : index === 4 ? now - 3 * day : null,
-    favorite: [0, 2, 6].includes(index),
-    pinned: [0, 1].includes(index),
-    ...(saved[index + 1] || {}),
-  }),
-);
-// Explicit illustrative page attribution; never inferred from domain membership.
-const confluenceAttribution = {
-  1: ["Sarah Wilson", "John Smith"],
-  2: ["John Smith", "Sarah Wilson"],
-  3: ["Priya Patel", "Priya Patel"],
-  4: ["Michael Chen", "John Smith"],
-  5: ["Sarah Wilson", "Priya Patel"],
-  6: ["Emma Brown", "Emma Brown"],
-  12: ["John Smith", "Michael Chen"],
-};
-bookmarks.forEach((item) => {
-  const attribution = confluenceAttribution[item.id];
-  if (attribution) {
-    item.author = attribution[0];
-    item.lastEditor = attribution[1];
-    // Illustrative Confluence dates, distinct from the OWL bookmark timestamps.
-    item.writtenAt = Date.UTC(2026, 6, 1 + item.id);
-    item.confluenceUpdatedAt = Date.UTC(2026, 7, 18 + item.id);
-  }
-});
+const bookmarks = [];
+const confluenceAttribution = {};
 let deletedBookmarkIds = new Set();
-try {
-  deletedBookmarkIds = new Set(
-    JSON.parse(localStorage.getItem("owl-bookmark-deleted") || "[]"),
-  );
-} catch {}
 const selectedBookmarks = new Set();
 let visibleBookmarkIds = [];
 function nextBookmarkId() {
   return (
-    Math.max(0, ...bookmarks.map((item) => item.id), ...deletedBookmarkIds) + 1
+    Math.max(12, ...bookmarks.map((item) => item.id), ...deletedBookmarkIds) + 1
   );
 }
 function updateBookmarkSelection() {
@@ -146,33 +102,7 @@ function matches(item, key) {
   );
 }
 function persist() {
-  try {
-    localStorage.setItem(
-      "owl-bookmark-overview",
-      JSON.stringify({ at: Date.now(), bookmarks }),
-    );
-  } catch {}
-  try {
-    localStorage.setItem(
-      "owl-bookmark-added",
-      JSON.stringify(bookmarks.filter((item) => item.custom)),
-    );
-  } catch {}
-  const data = {};
-  bookmarks.forEach(
-    (item) =>
-      (data[item.id] = {
-        favorite: item.favorite,
-        pinned: item.pinned,
-        views: item.views,
-        lastViewed: item.lastViewed,
-        added: item.added,
-        updatedInOwlAt: item.updatedInOwlAt ?? null,
-      }),
-  );
-  try {
-    localStorage.setItem("owl-bookmark-demo", JSON.stringify(data));
-  } catch {}
+  window.saveBookmarkDatabase?.();
 }
 function date(value) {
   return value
@@ -230,16 +160,8 @@ function bookmarkAgeTag(value, kind, asOf = Date.now()) {
   const label = kind === "updated" ? "Updated" : "New";
   return `<span class="bookmark-age-tag ${kind}" title="${label === "New" ? "Added to" : "Updated in"} OWL on ${esc(date(value))}">${label} · ${age}</span>`;
 }
-// Sample hierarchy is explicit. Live pages must supply their actual parent IDs.
-const pageHierarchy = {
-  1: { space: "Engineering", parent: null },
-  2: { space: "Engineering", parent: 1 },
-  5: { space: "Engineering", parent: 2 },
-  12: { space: "Engineering", parent: 2 },
-  3: { space: "Operations", parent: null },
-  4: { space: "Operations", parent: 3 },
-  6: { space: "Product", parent: null },
-};
+// Live pages supply their actual parent IDs.
+const pageHierarchy = {};
 const collapsedBranches = new Set();
 let treeFilterKey = "";
 function renderBookmarkTree(filtered) {
@@ -353,11 +275,6 @@ function renderBookmarkTree(filtered) {
 }
 let selectedBookmarkId = null;
 const localPageNotes = {};
-try {
-  const notes = JSON.parse(localStorage.getItem("owl-bookmark-notes") || "{}");
-  if (notes && typeof notes === "object" && !Array.isArray(notes))
-    Object.assign(localPageNotes, notes);
-} catch {}
 function showPageDetails(id) {
   const item = bookmarks.find((item) => item.id === id);
   if (!item) return;
@@ -391,7 +308,7 @@ function showPageDetails(id) {
   const fields = [
     ["URL", item.url],
     ["Domain", item.domain],
-    ["Source", item.author ? "Confluence · sample metadata" : "Web bookmark"],
+    ["Source", item.author ? "Confluence" : "Web bookmark"],
     ["Space", hierarchy?.space || "Not available"],
     [
       "Parent page",
@@ -567,7 +484,7 @@ function render() {
   renderBookmarkTree(filtered);
   document.querySelector("#bookmark-empty").hidden = filtered.length > 0;
   document.querySelector("#bookmark-total").textContent =
-    `Showing ${filtered.length} of ${bookmarks.length} sample bookmarks`;
+    `Showing ${filtered.length} of ${bookmarks.length} bookmarks`;
 }
 document.querySelector("#bookmark-tree").addEventListener(
   "toggle",
@@ -716,21 +633,6 @@ function applyConfluenceBaseUrl(value) {
   }
   render();
 }
-try {
-  const added = JSON.parse(localStorage.getItem("owl-bookmark-added") || "[]");
-  if (Array.isArray(added))
-    for (const item of added) {
-      const url = parseBookmarkUrl(item.url);
-      if (
-        url &&
-        item.custom &&
-        Number.isInteger(item.id) &&
-        item.id > bookmarkSeed.length &&
-        !bookmarks.some((existing) => existing.id === item.id)
-      )
-        bookmarks.push({ ...item, url: url.href, domain: url.hostname });
-    }
-} catch {}
 document
   .querySelector("#bookmark-search-form")
   .addEventListener("submit", (event) => {
@@ -784,7 +686,7 @@ document
 for (let i = bookmarks.length - 1; i >= 0; i--)
   if (deletedBookmarkIds.has(bookmarks[i].id)) bookmarks.splice(i, 1);
 applyConfluenceBaseUrl(sampleConfluenceBaseUrl);
-// Keep local sample record dates stable across reloads.
+// Persist user-created bookmarks.
 persist();
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) render();
