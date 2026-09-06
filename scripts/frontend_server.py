@@ -9,6 +9,11 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 class Handler(SimpleHTTPRequestHandler):
     backend_port = 8000
 
+    def end_headers(self):
+        # Development assets must not mix cached preview code with new handlers.
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def dispatch(self):
         if not (
             self.path.startswith("/api/")

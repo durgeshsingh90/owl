@@ -50,6 +50,8 @@ async def diagnostics(request: Request, call_next):
     try:
         response = await call_next(request)
         response.headers["X-Request-ID"] = identifier
+        if request.url.path.endswith((".js", ".css", ".html", "/")):
+            response.headers["Cache-Control"] = "no-store"
         event(
             "request.completed",
             method=request.method,
