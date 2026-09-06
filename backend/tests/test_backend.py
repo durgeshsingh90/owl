@@ -383,6 +383,50 @@ class BackendTests(unittest.TestCase):
                 self.assertEqual(browsed, order)
                 self.assertEqual(maximum, 1)
 
+    def test_live_pdf_discovery_and_finish_repo_before_next_scan(self):
+        from app.pdfs.crawler import discover_pdfs
+
+        jobs = app.state.jobs
+
+        snapshots = []
+        original = self.upstream
+
+        def mixed_case(request):
+            response = original(request)
+            if "/browse/" in request.url.path:
+                data = response.json()
+                for item in data["children"]["values"]:
+                    if item["type"] == "FILE":
+                        item["path"]["name"] = item["path"]["name"].replace(
+                            ".pdf", ".PDF"
+                        )
+                return httpx.Response(200, json=data)
+            return response
+
+        async def observed(client, project, repo, **kwargs):
+            if repo == "two":
+                with connection() as db:
+                    saved = db.execute(
+                        "SELECT COUNT(*) FROM documents WHERE repo='one'"
+                    ).fetchone()[0]
+                snapshots.append(
+                    ("next", saved, jobs.current["repositories_succeeded"])
+                )
+            async for path in discover_pdfs(client, project, repo, **kwargs):
+                yield path
+                snapshots.append(("found", jobs.current["found"], path))
+
+        self.upstream = mixed_case
+        with patch("app.pdfs.jobs.discover_pdfs", observed):
+            job = self.crawl()
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertIn(("next", 2, 1), snapshots)
+        self.assertEqual([s[1] for s in snapshots if s[0] == "found"], [1, 2, 3, 4])
+        self.assertEqual(
+            [r["found"] for r in job["repository_statuses"].values()], [2, 2]
+        )
+        self.assertEqual((job["found"], job["processed"]), (4, 4))
+
     def test_unreadable_folder_does_not_discard_or_skip_accessible_pdfs(self):
         original = self.upstream
 

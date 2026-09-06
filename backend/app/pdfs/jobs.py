@@ -171,6 +171,7 @@ class Jobs:
                         "project_id": str(project["id"]),
                         "repo": slug,
                         "status": "queued",
+                        "found": 0,
                     }
                     self.save()
             p["repositories"] = len(repos)
@@ -185,7 +186,6 @@ class Jobs:
                 )
             )
 
-            work = []
             partial_repositories = set()
 
             async def discover(project, slug, repository_id):
@@ -193,6 +193,28 @@ class Jobs:
                 p["detail"] = f"Finding PDFs in {project}/{slug}"
                 self.save()
                 paths = []
+                seen = set()
+
+                def found(path):
+                    if path in seen:
+                        return
+                    seen.add(path)
+                    paths.append(path)
+                    p["found"] += 1
+                    p["repository_statuses"][str(repository_id)]["found"] = len(paths)
+                    p["detail"] = (
+                        f"Finding PDFs in {project}/{slug}: {len(paths)} found"
+                    )
+                    p["elapsed_seconds"] = round(time.monotonic() - started, 1)
+                    event(
+                        "crawl.pdf_found",
+                        repository_id=repository_id,
+                        project=project,
+                        repo=slug,
+                        path=path,
+                        found=len(paths),
+                    )
+                    self.save()
 
                 def folder_failed(folder, error):
                     partial_repositories.add(repository_id)
@@ -228,24 +250,14 @@ class Jobs:
                         if t["project"] == project and t["repo"] in (None, slug)
                     ]
                     if selected and all(t["path"] for t in selected):
-                        paths = list(dict.fromkeys(t["path"] for t in selected))
+                        for target in selected:
+                            found(target["path"])
                     else:
                         async for path in discover_pdfs(
                             client, project, slug, on_folder_error=folder_failed
                         ):
-                            paths.append(path)
-                    work.append(
-                        (
-                            project,
-                            slug,
-                            repository_id,
-                            sorted(
-                                set(paths), key=lambda path: (path.casefold(), path)
-                            ),
-                        )
-                    )
-                    p["found"] += len(paths)
-                    repo_status(repository_id, "queued")
+                            found(path)
+                    return sorted(paths, key=lambda path: (path.casefold(), path))
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:  # noqa: BLE001 - isolate repository discovery
@@ -261,10 +273,8 @@ class Jobs:
                         **error_details(error),
                     )
                 self.save()
+                return None
 
-            for repo in repos:
-                await discover(*repo)
-            p["discovery_complete"] = True
             processing_started = time.monotonic()
             self.save()
 
@@ -280,7 +290,7 @@ class Jobs:
                 self.save()
 
             failed_paths = {}
-            hard_failures = set(partial_repositories)
+            hard_failures = partial_repositories
 
             async def scan(project, slug, repository_id, paths):
                 repo_status(repository_id, "processing")
@@ -333,8 +343,12 @@ class Jobs:
                     p["repositories_done"] += 1
                     progress_save()
 
-            for repo in work:
-                await scan(*repo)
+            for repo in repos:
+                paths = await discover(*repo)
+                if paths is not None:
+                    await scan(*repo, paths)
+            p["discovery_complete"] = True
+            self.save()
             # Exactly one additional pass, scoped to failures from this job.
             if auto_retry and failed_paths:
                 p["retry_active"] = True

@@ -1,5 +1,5 @@
 "use strict";
-const pullProgress = {active: false, completed: new Set(), failed: new Set(), timer: null, repositories: new Map()};
+const pullProgress = {active: false, completed: new Set(), failed: new Set(), timer: null, repositories: new Map(), found: new Map()};
 function pullRepoMark(projectId, repoName) {
   const status = pullProgress.repositories.get(JSON.stringify([String(projectId), repoName]));
   const marks = {
@@ -8,7 +8,9 @@ function pullRepoMark(projectId, repoName) {
     succeeded: ["✓", "Completed"], failed: ["!", "Has failures"], cancelled: ["–", "Stopped"],
   };
   if (!marks[status]) return "";
-  const [icon, label] = marks[status];
+  const [icon, baseLabel] = marks[status];
+  const found = pullProgress.found.get(JSON.stringify([String(projectId), repoName]));
+  const label = found == null || status === "queued" ? baseLabel : `${baseLabel} · ${found} PDFs found`;
   return `<span class="repo-job-status repo-job-${status}" title="${label}" aria-label="${label}"><span aria-hidden="true">${icon}</span><span class="repo-job-label">${label}</span></span>`;
 }
 function formatEta(seconds) {
@@ -64,7 +66,7 @@ function watchCrawl(job) {
       }
       document.querySelector("#pull-progress-state").textContent = current.detail;
       document.querySelector("#pull-elapsed").textContent = `${Math.round(current.elapsed_seconds)}s`;
-      document.querySelector("#pull-progress-counts").textContent = `Repositories ${current.repositories_succeeded ?? Math.max(0, current.repositories_done - current.repositories_failed)}/${current.repositories} successful · PDFs ${current.processed}/${current.discovery_complete ? current.found : "…"} processed${current.discovery_failed ? " (known files)" : ""}${current.retry_active ? ` · Retry ${current.retry_processed}/${current.retry_total}` : ""}`;
+      document.querySelector("#pull-progress-counts").textContent = `Repositories ${current.repositories_succeeded ?? Math.max(0, current.repositories_done - current.repositories_failed)}/${current.repositories} successful · PDFs ${current.processed}/${current.found} processed${current.discovery_complete ? "" : " (found so far)"}${current.discovery_failed ? " (known files)" : ""}${current.retry_active ? ` · Retry ${current.retry_processed}/${current.retry_total}` : ""}`;
       document.querySelector("#pull-eta").textContent = !current.discovery_complete ? "Total ETA: discovering PDFs…" : current.eta_seconds == null ? "Total ETA: calculating…" : `Total ETA: ~${formatEta(current.eta_seconds)} remaining`;
       updatePullSummary(current.status.replaceAll("_", " "));
       document.querySelector("#repository-pull-new").textContent = current.new;
@@ -75,6 +77,8 @@ function watchCrawl(job) {
       const statusesChanged = statuses !== lastStatuses;
       if (statusesChanged) {
         lastStatuses = statuses;
+        pullProgress.found = new Map(Object.values(current.repository_statuses || {}).map(repo =>
+          [JSON.stringify([String(repo.project_id), repo.repo]), repo.found]));
         pullProgress.repositories = new Map(Object.values(current.repository_statuses || {}).map(repo =>
           [JSON.stringify([String(repo.project_id), repo.repo]), repo.status]));
       }
