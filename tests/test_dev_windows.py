@@ -109,3 +109,32 @@ class WindowsLauncherTests(unittest.TestCase):
             kill.assert_not_called()
             self.assertTrue(dev.STATE.exists())
             self.assertTrue(dev.stop_file("abc").exists())
+
+    def test_surviving_server_keeps_state_after_supervisor_exit(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(dev, "WINDOWS", True),
+            patch.object(dev, "RUNTIME", Path(directory)),
+            patch.object(dev, "STATE", Path(directory) / "state.json"),
+            patch.object(dev, "owned", return_value=False),
+            patch.object(dev.socket, "socket") as socket,
+        ):
+            socket.return_value.__enter__.return_value.connect_ex.return_value = 0
+            dev.STATE.write_text('{"pid":123,"token":"abc","backend_port":8000}')
+            with self.assertRaisesRegex(RuntimeError, "Port 8000 is still serving"):
+                dev.stop()
+            self.assertTrue(dev.STATE.exists())
+
+    def test_free_ports_allow_state_cleanup(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(dev, "WINDOWS", True),
+            patch.object(dev, "RUNTIME", Path(directory)),
+            patch.object(dev, "STATE", Path(directory) / "state.json"),
+            patch.object(dev, "owned", return_value=False),
+            patch.object(dev.socket, "socket") as socket,
+        ):
+            socket.return_value.__enter__.return_value.connect_ex.return_value = 10061
+            dev.STATE.write_text('{"pid":123,"token":"abc","backend_port":8000}')
+            dev.stop()
+            self.assertFalse(dev.STATE.exists())

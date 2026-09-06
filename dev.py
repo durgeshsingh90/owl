@@ -153,6 +153,23 @@ def python_path():
     return sys.executable
 
 
+def confirm_services_stopped(state):
+    """A supervisor exit alone does not prove its child servers stopped."""
+    if not state:
+        return
+    for key in ("frontend_port", "backend_port"):
+        port = state.get(key)
+        if port is None:
+            continue
+        with socket.socket() as probe:
+            probe.settimeout(0.5)
+            if probe.connect_ex((HOST, int(port))) == 0:
+                raise RuntimeError(
+                    f"Port {port} is still serving after shutdown. State retained; "
+                    "restart cancelled. Inspect the owning process before stopping it."
+                )
+
+
 def stop():
     state = read_state()
     try:
@@ -165,6 +182,7 @@ def stop():
             "Windows identity lookup unavailable; requesting a cooperative OWL shutdown."
         )
     if is_owned is False:
+        confirm_services_stopped(state)
         STATE.unlink(missing_ok=True)
         print("OWL is stopped.")
         return
@@ -185,6 +203,7 @@ def stop():
                 raise RuntimeError(
                     "Could not stop the OWL process tree. State retained for retry."
                 )
+        confirm_services_stopped(state)
         request.unlink(missing_ok=True)
         STATE.unlink(missing_ok=True)
         print("Stopped OWL frontend and backend.")
@@ -286,7 +305,7 @@ def start(args):
     }
     STATE.write_text(json.dumps(state))
     try:
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise RuntimeError(f"OWL exited during startup. See logs in {RUNTIME}.")
@@ -305,7 +324,10 @@ def start(args):
                 return
             except OSError:
                 time.sleep(0.2)
-        raise RuntimeError(f"Startup timed out. See logs in {RUNTIME}.")
+        raise RuntimeError(
+            f"Startup timed out after 120 seconds. See logs in {RUNTIME}. "
+            "Run: python dev.py logs --service all --level all --lines 80 --no-follow"
+        )
     except BaseException:
         stop()
         raise
@@ -336,9 +358,12 @@ def serve(args):
                     HOST,
                     "--port",
                     str(args.backend_port),
-                    "--reload",
-                    "--reload-dir",
-                    str(ROOT / "backend"),
+                    # Windows reload creates another process that can outlive its parent.
+                    *(
+                        []
+                        if WINDOWS
+                        else ["--reload", "--reload-dir", str(ROOT / "backend")]
+                    ),
                 ],
                 ROOT / "backend",
             ),
