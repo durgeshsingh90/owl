@@ -2800,11 +2800,6 @@ tbody tr.selected td:first-child {
   display: none;
 }
 
-.settings-ssl-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
 .settings-ssl-option input[type="checkbox"] {
   width: 16px;
   height: 16px;

@@ -57,7 +57,7 @@ async def form_settings(request):
         base_url=data.get("base_url", ""),
         username=data.get("username", ""),
         token=token,
-        verify_ssl=data.get("verify_ssl") == "on",
+        verify_ssl=False,
     )
 
 

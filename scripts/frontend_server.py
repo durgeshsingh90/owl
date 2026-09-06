@@ -43,6 +43,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_header(
                 "Content-Type", response.getheader("Content-Type", "application/json")
             )
+            if response.getheader("X-Request-ID"):
+                self.send_header("X-Request-ID", response.getheader("X-Request-ID"))
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             if self.command != "HEAD":

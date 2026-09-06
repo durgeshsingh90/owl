@@ -6,7 +6,6 @@
   const baseUrl = document.querySelector("#settings-base-url");
   const username = document.querySelector("#settings-username");
   const token = document.querySelector("#settings-token");
-  const verifySsl = document.querySelector("#settings-verify-ssl");
   const feedback = document.querySelector("#settings-feedback");
   const saveButton = document.querySelector("#settings-save");
   const testButton = document.querySelector("#settings-test");
@@ -24,7 +23,6 @@
     baseUrl.disabled = value;
     username.disabled = value;
     token.disabled = value;
-    verifySsl.disabled = value;
   }
 
   async function loadSettings() {
@@ -46,7 +44,6 @@
       const server = workspace.credentials?.[0];
       baseUrl.value = server?.baseUrl || "";
       username.value = server?.username || "";
-      verifySsl.checked = server?.verifySsl ?? true;
       token.value = "";
       message(
         server
@@ -93,8 +90,7 @@
       return;
     }
     const body = new URLSearchParams(new FormData(form));
-    if (verifySsl.checked) body.set("verify_ssl", "on");
-    else body.delete("verify_ssl");
+    body.delete("verify_ssl");
     const controller = new AbortController();
     pending = controller;
     busy(true);

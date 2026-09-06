@@ -1,10 +1,13 @@
 """OWL FastAPI entry point: API, managed crawl lifecycle, and static UI."""
 
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from app.api.routes import router
 from app.core.database import initialize
+from app.core.logging import configure_logging, error_details, event, request_id
 from app.pdfs.jobs import Jobs
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -15,10 +18,13 @@ from pydantic import ValidationError
 
 @asynccontextmanager
 async def lifespan(app):
+    configure_logging()
+    event("backend.starting", verify_ssl=False)
     initialize(recover_jobs=True)
     app.state.jobs = Jobs()
     yield
     await app.state.jobs.shutdown()
+    event("backend.stopped")
 
 
 app = FastAPI(title="OWL API", version="1.0.0", lifespan=lifespan)
@@ -33,6 +39,34 @@ async def local_writes(request: Request, call_next):
                 {"detail": "Cross-origin writes are not allowed."}, status_code=403
             )
     return await call_next(request)
+
+
+@app.middleware("http")
+async def diagnostics(request: Request, call_next):
+    identifier = uuid.uuid4().hex[:16]
+    context = request_id.set(identifier)
+    started = time.monotonic()
+    event("request.started", method=request.method, path=request.url.path)
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = identifier
+        event(
+            "request.completed",
+            method=request.method,
+            path=request.url.path,
+            status=response.status_code,
+            elapsed_ms=round((time.monotonic() - started) * 1000),
+        )
+        return response
+    except Exception as error:  # noqa: BLE001 - log safe diagnostics at the HTTP boundary
+        event("request.failed", level=40, **error_details(error))
+        return JSONResponse(
+            {"detail": "Backend error. Check backend logs.", "request_id": identifier},
+            status_code=500,
+            headers={"X-Request-ID": identifier},
+        )
+    finally:
+        request_id.reset(context)
 
 
 @app.exception_handler(ValueError)

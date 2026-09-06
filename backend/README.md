@@ -20,8 +20,8 @@ The frontend server forwards `/api/` and the existing Bitbucket connection/setti
 
 ## Configure and crawl
 
-1. Open Bitbucket settings in the frontend to test and save the server URL, username and token. Alternatively use `POST /api/settings` in API docs, which also exposes `verify_ssl` and `max_workers` (1–10).
-2. The URL can include a context path (such as `/stash`) or end in `/rest/api/1.0`. No corporate hostname is hardcoded. TLS verification defaults to enabled.
+1. Open Bitbucket settings in the frontend to test and save the server URL, username and token. Alternatively use `POST /api/settings` in API docs, which also exposes `max_workers` (1–10). The legacy `verify_ssl` field is accepted but always normalized to false.
+2. The URL can include a context path (such as `/stash`) or end in `/rest/api/1.0`. No corporate hostname is hardcoded. TLS certificate verification is always disabled for Bitbucket requests.
 3. Add a project using `POST /api/project` with `{"project_url":"https://your-server/projects/KEY"}`.
 4. Call `POST /api/crawl` with `{}` to crawl all tracked projects, or `{"project_ids":[1]}` for selected projects.
 5. Poll `GET /api/jobs/{id}` for new/updated/unchanged/failed counts, repository progress, elapsed time and estimated remaining time. ETA is unavailable until a repository finishes.
@@ -65,3 +65,25 @@ cd backend
 ```
 
 Tests use temporary databases, test credentials and mocked Bitbucket HTTP responses with real PDF extraction. They cover pagination, incremental indexing, FTS replacement/deletion, metadata preservation, failure recovery, cancellation, duplicate-job rejection, and settings validation. Corporate Bitbucket connectivity needs your saved credentials and network access.
+
+
+### Backend diagnostics
+
+Logs are written to `backend/data/logs/backend.log` (JSON lines, 5 MB rotation,
+three backups). Override the folder with `OWL_LOG_DIR`. Request IDs connect HTTP
+requests to Bitbucket attempts, response statuses, timings, retries, network
+exception types and OS error codes. SSL verification remains disabled. Logs do
+not record tokens, authorization headers, request/response bodies, or raw
+exception messages. Proxy environment variable names are logged, not values.
+
+After copying updates to Windows, run `python dev.py restart`, reproduce the
+settings failure, then inspect:
+
+```powershell
+Get-Content backend/data/logs/backend.log -Tail 80
+```
+
+The settings UI uses OWL's encrypted saved credentials, not the standalone
+crawler's `config.ini`. Both a server URL ending in `/stash` and its full
+`/stash/rest/api/1.0` URL are accepted. Use the same credentials as the working
+standalone script. Local tests do not establish corporate VPN connectivity.

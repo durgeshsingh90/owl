@@ -7,6 +7,7 @@ import uuid
 
 from app.core.config import load_settings
 from app.core.database import connection
+from app.core.logging import error_details, event
 from app.pdfs.client import BitbucketClient
 from app.pdfs.crawler import crawl_repository, now
 
@@ -71,6 +72,7 @@ class Jobs:
         started = time.monotonic()
         p = self.current
         p["status"] = "running"
+        event("crawl.started", job_id=p["id"])
         try:
             repos = []
             for project in projects:
@@ -108,7 +110,14 @@ class Jobs:
                         )
                     except asyncio.CancelledError:
                         raise
-                    except Exception:  # noqa: BLE001 - isolate parser/upstream failures without leaking secrets
+                    except Exception as error:  # noqa: BLE001 - isolate parser/upstream failures without leaking secrets
+                        event(
+                            "crawl.repository_failed",
+                            level=40,
+                            job_id=p["id"],
+                            repository_id=repository_id,
+                            **error_details(error),
+                        )
                         p["repositories_failed"] += 1
                     finally:
                         p["repositories_done"] += 1
@@ -129,7 +138,8 @@ class Jobs:
         except asyncio.CancelledError:
             p["status"] = "cancelled"
             p["detail"] = "Crawl stopped; completed documents are saved."
-        except Exception:  # noqa: BLE001 - isolate parser/upstream failures without leaking secrets
+        except Exception as error:  # noqa: BLE001 - isolate parser/upstream failures without leaking secrets
+            event("crawl.failed", level=40, job_id=p["id"], **error_details(error))
             p["status"] = "failed"
             p["detail"] = (
                 "Repository discovery failed. Check Bitbucket access and retry."
@@ -139,6 +149,14 @@ class Jobs:
             p["completed_at"] = now()
             p["elapsed_seconds"] = round(time.monotonic() - started, 1)
             p["eta_seconds"] = None
+            event(
+                "crawl.completed",
+                job_id=p["id"],
+                status=p["status"],
+                processed=p["processed"],
+                failed=p["failed"],
+                elapsed_seconds=p["elapsed_seconds"],
+            )
             self.save()
 
     async def shutdown(self):

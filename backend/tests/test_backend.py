@@ -22,6 +22,7 @@ class BackendTests(unittest.TestCase):
             os.environ,
             {
                 "OWL_DB_PATH": self.temp.name + "/test.db",
+                "OWL_LOG_DIR": self.temp.name + "/logs",
                 "OWL_CONFIG_DIR": self.temp.name + "/config",
             },
         )
@@ -52,6 +53,51 @@ class BackendTests(unittest.TestCase):
         self.patch.stop()
         self.env.stop()
         self.temp.cleanup()
+
+    def test_connection_diagnostics(self):
+        import socket
+
+        from app.core.config import Settings
+        from app.pdfs.client import BitbucketClient
+
+        normalized = Settings(
+            **{**self.config, "base_url": self.config["base_url"] + "/rest/api/1.0"}
+        )
+        self.assertEqual(normalized.base_url, self.config["base_url"])
+
+        def dns_failure(request):
+            try:
+                raise socket.gaierror(11001, "secret-do-not-log")
+            except socket.gaierror as cause:
+                raise httpx.ConnectError(
+                    "test-secret secret-do-not-log", request=request
+                ) from cause
+
+        async def fail_without_delays():
+            client = BitbucketClient(normalized)
+            await client.close()
+            client.client = REAL_CLIENT(transport=httpx.MockTransport(dns_failure))
+            try:
+                await client.request("/projects")
+            finally:
+                await client.close()
+
+        from unittest.mock import AsyncMock
+
+        with (
+            patch("app.pdfs.client.asyncio.sleep", new_callable=AsyncMock),
+            self.assertRaisesRegex(RuntimeError, "hostname could not be resolved"),
+        ):
+            asyncio.run(fail_without_delays())
+        response = self.client.get("/api/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers["x-request-id"])
+        logs = Path(self.temp.name, "logs/backend.log").read_text()
+        self.assertIn("bitbucket.transport_failed", logs)
+        self.assertIn("11001", logs)
+        self.assertIn(response.headers["x-request-id"], logs)
+        self.assertNotIn("test-secret", logs)
+        self.assertNotIn("secret-do-not-log", logs)
 
     def upstream(self, r):
         self.calls.append(str(r.url))
@@ -216,12 +262,16 @@ class BackendTests(unittest.TestCase):
             200,
         )
 
-    def test_settings_form_preserves_ssl_choice(self):
+    def test_settings_always_disable_ssl_verification(self):
         form = {
             "base_url": self.config["base_url"] + "/rest/api/1.0",
             "username": "tester",
             "access_token": "test-secret",
         }
+        from app.core.config import Settings
+
+        self.assertFalse(Settings(**self.config, verify_ssl=True).verify_ssl)
+        self.assertFalse(Settings(**self.config).verify_ssl)
         for verify in (False, True):
             if verify:
                 form["verify_ssl"] = "on"
@@ -235,7 +285,7 @@ class BackendTests(unittest.TestCase):
                 self.client.get("/bitbucket/workspace/").json()["credentials"][0][
                     "verifySsl"
                 ],
-                verify,
+                False,
             )
             with patch("app.api.compat.test_value") as test:
                 test.return_value = {"ok": True}
@@ -246,7 +296,7 @@ class BackendTests(unittest.TestCase):
                     ).status_code,
                     200,
                 )
-                self.assertEqual(test.call_args.args[0].verify_ssl, verify)
+                self.assertFalse(test.call_args.args[0].verify_ssl)
 
     def test_failure_and_retry(self):
         self.fail = True

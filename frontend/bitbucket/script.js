@@ -1388,7 +1388,6 @@ async function testConnection() {
         base_url: server.baseUrl,
         username: server.username || "",
       });
-      if (server.verifySsl) body.set("verify_ssl", "on");
       await connectionJson(endpoint, {
         method: "POST",
         signal: controller.signal,

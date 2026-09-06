@@ -5,6 +5,7 @@ import json
 
 from app.core.config import Settings, load_settings, parse_project, save_settings
 from app.core.database import connection
+from app.core.logging import error_details, event, request_id
 from app.pdfs.client import BitbucketClient, BitbucketError
 from app.pdfs.search import search_documents
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -58,11 +59,19 @@ def save(value: Settings, request: Request):
 
 
 async def test_value(value):
+    event("connection.test_started")
     client = BitbucketClient(value)
     try:
-        return await client.test()
+        result = await client.test()
+        event("connection.test_succeeded")
+        return result
     except (BitbucketError, asyncio.TimeoutError) as error:
-        raise HTTPException(502, str(error) or "Connection timed out.") from None
+        event("connection.test_failed", level=40, **error_details(error))
+        detail = (
+            str(error)
+            or "Connection test exceeded its 8-second deadline. See backend logs for the last network attempt."
+        )
+        raise HTTPException(502, detail + f" Request ID: {request_id.get()}") from None
     finally:
         await client.close()
 

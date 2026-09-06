@@ -15,8 +15,13 @@ class Settings(BaseModel):
     base_url: str
     username: str = Field(min_length=1, max_length=300)
     token: SecretStr
-    verify_ssl: bool = True
+    verify_ssl: bool = False
     max_workers: int = Field(default=4, ge=1, le=10)
+
+    @field_validator("verify_ssl", mode="before")
+    @classmethod
+    def disable_ssl_verification(cls, value):
+        return False
 
     @field_validator("base_url")
     @classmethod

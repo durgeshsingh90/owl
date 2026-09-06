@@ -1,9 +1,12 @@
 """Read-only Bitbucket Data Center client with bounded requests and pagination."""
 
 import asyncio
+import os
+import time
 from urllib.parse import quote
 
 import httpx
+from app.core.logging import error_details, event
 
 
 class BitbucketError(RuntimeError):
@@ -14,9 +17,29 @@ class BitbucketClient:
     def __init__(self, settings):
         self.base = settings.base_url
         self.api = self.base + "/rest/api/1.0"
+        event(
+            "bitbucket.client",
+            api_base=self.api,
+            verify_ssl=False,
+            auth="basic",
+            proxy_environment=[
+                key
+                for key in (
+                    "HTTP_PROXY",
+                    "HTTPS_PROXY",
+                    "ALL_PROXY",
+                    "NO_PROXY",
+                    "http_proxy",
+                    "https_proxy",
+                    "all_proxy",
+                    "no_proxy",
+                )
+                if os.environ.get(key)
+            ],
+        )
         self.client = httpx.AsyncClient(
             auth=(settings.username, settings.token.get_secret_value()),
-            verify=settings.verify_ssl,
+            verify=False,
             timeout=httpx.Timeout(30, connect=5),
             follow_redirects=False,
         )
@@ -26,10 +49,20 @@ class BitbucketClient:
 
     async def request(self, path, params=None, raw=False):
         for attempt in range(3):
+            started = time.monotonic()
+            event("bitbucket.attempt", path=path, attempt=attempt + 1)
             try:
                 async with self.client.stream(
                     "GET", self.api + path, params=params
                 ) as response:
+                    event(
+                        "bitbucket.response",
+                        path=path,
+                        attempt=attempt + 1,
+                        status=response.status_code,
+                        elapsed_ms=round((time.monotonic() - started) * 1000),
+                        redirect=response.is_redirect,
+                    )
                     if response.status_code in (429, 502, 503, 504) and attempt < 2:
                         delay = (
                             min(
@@ -60,17 +93,42 @@ class BitbucketClient:
                         try:
                             data = json.loads(content)
                         except ValueError:
+                            event(
+                                "bitbucket.invalid_json",
+                                level=30,
+                                path=path,
+                                bytes=len(content),
+                            )
                             raise BitbucketError(
                                 "Bitbucket did not return JSON."
                             ) from None
                         if not isinstance(data, dict):
                             raise BitbucketError("Unexpected Bitbucket response.")
                         return data
-            except httpx.HTTPError:
+            except httpx.HTTPError as error:
+                details = error_details(error)
+                event(
+                    "bitbucket.transport_failed",
+                    level=40,
+                    path=path,
+                    attempt=attempt + 1,
+                    elapsed_ms=round((time.monotonic() - started) * 1000),
+                    **details,
+                )
+                if details["dns_failure"]:
+                    message = (
+                        "Bitbucket hostname could not be resolved. Check DNS and VPN."
+                    )
+                elif isinstance(error, httpx.ProxyError):
+                    message = "Bitbucket proxy connection failed. Check the backend proxy configuration."
+                elif isinstance(error, httpx.TimeoutException):
+                    message = "Bitbucket network request timed out. Check VPN, proxy and server reachability."
+                elif isinstance(error, httpx.ConnectError):
+                    message = "Connection to Bitbucket failed. Check VPN, proxy and firewall; see backend logs for OS error codes."
+                else:
+                    message = "Bitbucket transport failed. See backend logs for the error type."
                 if attempt == 2:
-                    raise BitbucketError(
-                        "Cannot reach Bitbucket. Check connection, credentials and TLS settings."
-                    ) from None
+                    raise BitbucketError(message) from None
                 delay = 1
             await asyncio.sleep(delay)
         raise BitbucketError("Bitbucket retry limit reached.")
