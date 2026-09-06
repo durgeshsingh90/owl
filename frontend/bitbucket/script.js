@@ -966,6 +966,10 @@ function showToast(message, success = true) {
 
 function openProjectModal() {
   lastFocusedElement = document.activeElement;
+  document.querySelector("#modal-description").textContent = pullProgress.active
+    ? "A crawl is running. Add URLs now to queue them after the repositories already scheduled."
+    : "Add repositories using their URLs.";
+  document.querySelector("#project-submit-label").textContent = pullProgress.active ? "Add to queue" : "Add";
   elements.modal.hidden = false;
   document.body.setAttribute("data-modal-open", "true");
   window.setTimeout(() => elements.repositoryUrls.focus(), 0);
@@ -1036,7 +1040,10 @@ async function addProject(event) {
     const job = await crawlJson("/api/imports", {urls});
     closeProjectModal();
     if (!pullProgress.active || pullProgress.jobId !== job.id) watchCrawl(job);
-    else showToast("Added to the crawl queue");
+    else {
+      await loadDatabaseWorkspace();
+      showToast("URLs reserved in the crawl queue");
+    }
   } catch (error) { showFormError(error.message); }
   finally { button.disabled = false; }
 }

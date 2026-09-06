@@ -1178,6 +1178,45 @@ class BackendTests(unittest.TestCase):
                 self.assertEqual(self.client.get("/api/failed").json(), [])
         self.assertEqual(self.client.post("/api/failed/retry").status_code, 400)
 
+    def test_import_remains_available_during_pdf_extraction(self):
+        import threading
+        from app.pdfs.crawler import extract
+
+        extracting = threading.Event()
+        release = threading.Event()
+
+        def paused_extract(content):
+            extracting.set()
+            release.wait(5)
+            return extract(content)
+
+        root = self.config["base_url"] + "/projects/DEMO/repos/"
+        with patch("app.pdfs.crawler.extract", paused_extract):
+            job = self.client.post("/api/imports", json={"urls": [root + "one"]}).json()
+            try:
+                self.assertTrue(extracting.wait(3))
+                response = self.client.post(
+                    "/api/imports", json={"urls": [root + "two"]}
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(response.json()["id"], job["id"])
+                self.assertEqual(
+                    {
+                        r["repo"]: r["status"]
+                        for r in response.json()["repository_statuses"].values()
+                    },
+                    {"one": "processing", "two": "queued"},
+                )
+            finally:
+                release.set()
+            for _ in range(300):
+                current = self.client.get("/api/jobs/" + job["id"]).json()
+                if current["status"] not in ("queued", "running"):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(current["status"], "succeeded", current)
+            self.assertEqual(current["processed"], 4)
+
     def test_import_during_crawl_reserves_and_processes_after_current(self):
         original = self.upstream
         release = False
