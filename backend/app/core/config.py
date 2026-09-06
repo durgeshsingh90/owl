@@ -16,7 +16,12 @@ class Settings(BaseModel):
     username: str = Field(min_length=1, max_length=300)
     token: SecretStr
     verify_ssl: bool = False
-    max_workers: int = Field(default=4, ge=1, le=10)
+    max_workers: int = Field(default=1, ge=1, le=10)
+
+    @field_validator("max_workers")
+    @classmethod
+    def single_worker(cls, value):
+        return 1
 
     @field_validator("verify_ssl", mode="before")
     @classmethod

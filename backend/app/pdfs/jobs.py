@@ -2,11 +2,10 @@
 
 import asyncio
 import json
-import multiprocessing
 import sqlite3
 import time
 import uuid
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 
 from app.core.config import load_settings
 from app.core.database import connection, database_path
@@ -19,6 +18,7 @@ class Jobs:
     def __init__(self):
         self.task = None
         self.current = None
+        self.extractor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="owl-pdf")
 
     def active(self):
         return self.task is not None and not self.task.done()
@@ -120,10 +120,7 @@ class Jobs:
 
     async def run(self, settings, projects, targets=None, auto_retry=True):
         client = BitbucketClient(settings)
-        extractor = ProcessPoolExecutor(
-            max_workers=1, mp_context=multiprocessing.get_context("spawn")
-        )
-        client.extractor = extractor
+        client.extractor = self.extractor
         started = time.monotonic()
         p = self.current
 
@@ -377,7 +374,6 @@ class Jobs:
                     repository["status"] = (
                         "cancelled" if p["status"] == "cancelled" else "failed"
                     )
-            extractor.shutdown(wait=False, cancel_futures=True)
             await client.close()
             p["completed_at"] = now()
             p["elapsed_seconds"] = round(time.monotonic() - started, 1)

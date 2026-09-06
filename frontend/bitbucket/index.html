@@ -8,9 +8,9 @@
       content="A frontend prototype for exploring PDF documents across Bitbucket projects and repositories."
     />
     <title>Bitbucket PDF Explorer</title>
-    <script src="theme.js?v=20260906-crawl-14"></script>
-    <script src="sidebars.js?v=20260906-crawl-14"></script>
-    <link rel="stylesheet" href="style.css?v=20260906-repo-select" />
+    <script src="theme.js?v=20260906-crawl-15"></script>
+    <script src="sidebars.js?v=20260906-crawl-15"></script>
+    <link rel="stylesheet" href="style.css?v=20260906-commit-copy" />
   </head>
   <body>
     <svg
@@ -218,6 +218,7 @@
             ></p>
 
             <nav class="project-nav" aria-label="Projects and repositories">
+              <div class="all-repositories-row">
               <button
                 class="all-repositories-nav"
                 id="all-repositories"
@@ -239,6 +240,15 @@
                 </span>
                 <span class="nav-arrow" aria-hidden="true">›</span>
               </button>
+              <div class="all-repositories-actions">
+                <button type="button" id="hard-retry-open" class="repo-action-icon" aria-label="Hard retry all repositories" title="Hard retry: clear and rebuild the PDF index">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6M12 8v8m-4-4h8"/></svg>
+                </button>
+                <button type="button" id="retry-failed-pdfs" class="repo-action-icon" aria-label="Retry failed PDFs" title="Retry only failed PDFs">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6M12 7v6m0 3v1"/></svg>
+                </button>
+              </div>
+              </div>
               <div class="project-list" id="project-list"></div>
             </nav>
           </div>
@@ -284,8 +294,6 @@
             </div>
           </div>
 
-          <button type="button" id="hard-retry-open" class="secondary-button">Hard retry</button>
-          <button type="button" id="retry-failed-pdfs" class="secondary-button" title="Retry only failed PDFs for the configured server">Retry failed PDFs</button>
           <button type="button" id="show-failed-pdfs" class="secondary-button">Failed PDFs</button>
           <section class="table-panel" aria-label="PDF documents">
             <section class="commit-chart" aria-labelledby="commit-chart-title">
@@ -998,13 +1006,13 @@
       <button type="button" id="hard-retry-cancel">Cancel</button>
       <button type="button" id="hard-retry-start" disabled>Delete index and start again</button>
     </dialog>
-    <script src="pull-progress.js?v=20260906-crawl-14"></script>
-    <script src="people-teams.js?v=20260906-crawl-14"></script>
-    <script src="notes.js?v=20260906-crawl-14"></script>
-    <script src="script.js?v=20260906-crawl-14"></script>
-    <script src="database.js?v=20260906-crawl-14"></script>
-    <script src="settings.js?v=20260906-crawl-14"></script>
-    <script src="repository-delete.js?v=20260906-crawl-14"></script>
+    <script src="pull-progress.js?v=20260906-crawl-15"></script>
+    <script src="people-teams.js?v=20260906-crawl-15"></script>
+    <script src="notes.js?v=20260906-crawl-15"></script>
+    <script src="script.js?v=20260906-crawl-15"></script>
+    <script src="database.js?v=20260906-crawl-15"></script>
+    <script src="settings.js?v=20260906-crawl-15"></script>
+    <script src="repository-delete.js?v=20260906-crawl-15"></script>
     <script src="hard-retry.js?v=20260906-hard-1"></script>
     <script src="failed-pdfs.js?v=20260906-failed-2"></script>
   </body>

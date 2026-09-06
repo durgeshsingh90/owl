@@ -677,7 +677,7 @@ function renderPdfTable() {
         <td><button class="path-button" type="button" data-copy-path="${pdf.id}" title="Copy ${escapeHtml(pdf.path)}">${escapeHtml(pdf.path)}</button></td>
         <td><span class="badge project-badge">${escapeHtml(pdf.project || pdf.projectId)}</span></td>
         <td><span class="badge" title="${escapeHtml(pdf.repo)}">${escapeHtml(pdf.repo)}</span></td>
-        <td class="commit-id" title="${escapeHtml(pdf.commitId || "Not available")}">${escapeHtml(pdf.commitId || "—")}</td>
+        <td class="commit-id">${pdf.commitId ? `<button type="button" class="commit-copy" data-copy-commit="${pdf.id}" title="Copy full commit ID: ${escapeHtml(pdf.commitId)}" aria-label="Copy full commit ID ${escapeHtml(pdf.commitId)}">${escapeHtml(pdf.commitId.slice(0, 7))}</button>` : "—"}</td>
         <td><time class="commit-time" datetime="${escapeHtml(pdf.committedAt)}">${escapeHtml(dateLabel)}<small>${day === null ? "" : escapeHtml(COMMIT_TIME_FORMATTER.format(new Date(pdf.committedAt)))}</small></time></td>
         <td class="commit-author" title="${escapeHtml(pdf.commitAuthor || "Unknown")}">${escapeHtml(pdf.commitAuthor || "Unknown")}${isPersonStarred(pdfAuthorKey(pdf)) ? ' <span class="author-star" role="img" aria-label="Starred person">★</span>' : ""}</td>
         <td class="number-column"><span class="open-count">${formatNumber(pdf.openCount)}</span></td>
@@ -1101,7 +1101,23 @@ function handleProjectNavigation(event) {
   if (projectButton) selectProject(projectButton.dataset.projectId);
 }
 
+async function copyCommitId(pdfId) {
+  const pdf = pdfs.find(item => item.id === pdfId);
+  if (!pdf?.commitId) return;
+  try {
+    await copyText(pdf.commitId);
+    showToast("Full commit ID copied");
+  } catch {
+    showToast("Unable to copy commit ID", false);
+  }
+}
+
 function handleTableInteraction(event) {
+  const commitButton = event.target.closest("[data-copy-commit]");
+  if (commitButton) {
+    void copyCommitId(Number(commitButton.dataset.copyCommit));
+    return;
+  }
   const radio = event.target.closest(".row-radio");
   if (radio) {
     selectPdf(Number(radio.value));

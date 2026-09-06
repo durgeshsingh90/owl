@@ -489,6 +489,8 @@ class BackendTests(unittest.TestCase):
 
     def test_settings_validation_and_security(self):
         self.assertNotIn("test-secret", self.client.get("/api/settings").text)
+        self.client.post("/api/settings", json={**self.config, "max_workers": 10})
+        self.assertEqual(self.client.get("/api/settings").json()["max_workers"], 1)
         self.assertNotIn(
             b"test-secret", Path(self.temp.name + "/config/settings.enc").read_bytes()
         )

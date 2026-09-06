@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.request import urlopen
@@ -267,6 +268,7 @@ def serve(args):
                 "backend",
                 [
                     python_path(),
+                    "-u",
                     "-m",
                     "uvicorn",
                     "main:app",
@@ -344,18 +346,106 @@ def serve(args):
             log.close()
 
 
+class LogTail:
+    """Reopen each poll so Windows log rotation is never blocked by our handle."""
+
+    def __init__(self, path, lines=20):
+        self.path = path
+        self.lines = lines
+        self.identity = None
+        self.offset = 0
+        self.pending = b""
+
+    def read(self):
+        try:
+            with self.path.open("rb") as stream:
+                stat = os.fstat(stream.fileno())
+                identity = (stat.st_dev, stat.st_ino)
+                if self.identity is None:
+                    content = b"".join(deque(stream, maxlen=self.lines))
+                    self.offset = stream.tell()
+                    self.identity = identity
+                else:
+                    if identity != self.identity or stat.st_size < self.offset:
+                        self.offset = 0
+                        self.pending = b""
+                    self.identity = identity
+                    stream.seek(self.offset)
+                    content = stream.read(65536)
+                    self.offset = stream.tell()
+        except FileNotFoundError:
+            return []
+        parts = (self.pending + content).split(b"\n")
+        self.pending = parts.pop()
+        return [line.decode("utf-8", errors="replace").rstrip("\r") for line in parts]
+
+
+def follow_logs(args):
+    directory = Path(os.environ.get("OWL_LOG_DIR", ROOT / "backend/data/logs"))
+    if not directory.is_absolute():
+        directory = ROOT / "backend" / directory
+    sources = {
+        "backend": [
+            ("backend", RUNTIME / "backend.log"),
+            ("crawler", directory / "backend.log"),
+        ],
+        "frontend": [("frontend", RUNTIME / "frontend.log")],
+        "supervisor": [("supervisor", RUNTIME / "supervisor.log")],
+    }
+    selected = [
+        item
+        for name, items in sources.items()
+        if args.service in ("all", name)
+        for item in items
+    ]
+    tails = [(name, LogTail(path, args.lines)) for name, path in selected]
+    print("OWL logs — Ctrl+C stops following; the app keeps running.", flush=True)
+    for name, path in selected:
+        print(f"[{name}] {path}", flush=True)
+    try:
+        while True:
+            for name, tail in tails:
+                for line in tail.read():
+                    print(f"[{name}] {line}", flush=True)
+            if args.no_follow:
+                return
+            time.sleep(0.25)
+    except KeyboardInterrupt:
+        print(
+            "\nStopped following logs. OWL is still running if it was started.",
+            flush=True,
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command",
         nargs="?",
         default="start",
-        choices=["start", "stop", "restart", "status", "_serve"],
+        choices=["start", "stop", "restart", "status", "logs", "_serve"],
     )
     parser.add_argument("--frontend-port", type=int, default=8771)
     parser.add_argument("--backend-port", type=int, default=8000)
     parser.add_argument("--token", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--service",
+        choices=["all", "backend", "frontend", "supervisor"],
+        default="all",
+        help="Log source (default: all)",
+    )
+    parser.add_argument(
+        "--lines", type=int, default=20, help="Recent lines per log before following"
+    )
+    parser.add_argument(
+        "--no-follow", action="store_true", help="Print recent logs and exit"
+    )
     args = parser.parse_args()
+    if args.lines < 0:
+        parser.error("--lines must be zero or greater.")
+    if args.command == "logs":
+        follow_logs(args)
+        return
     if not all(1 <= port <= 65535 for port in (args.frontend_port, args.backend_port)):
         parser.error("Ports must be between 1 and 65535.")
     if args.command == "_serve":

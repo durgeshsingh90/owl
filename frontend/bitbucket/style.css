@@ -2850,3 +2850,16 @@ tbody tr.selected td:first-child {
 .repo-select-all svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; }
 .repo-select-all[aria-pressed="true"] { color: var(--blue, #2563eb); background: var(--blue-soft); }
 .repo-select-all:disabled { opacity: .4; cursor: default; }
+
+.all-repositories-row { display: flex; align-items: center; gap: 3px; }
+.all-repositories-row .all-repositories-nav { flex: 1; min-width: 0; grid-template-columns: 24px 1fr; gap: 5px; padding: 8px 5px; }
+.all-repositories-row .nav-arrow { display: none; }
+.all-repositories-row .all-repositories-nav strong { font-size: 12px; }
+.all-repositories-actions { display: flex; gap: 2px; }
+.repo-action-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 28px; padding: 4px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); cursor: pointer; }
+.repo-action-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.repo-action-icon:hover { background: var(--blue-soft); }
+.repo-action-icon:disabled { opacity: .4; cursor: default; }
+
+.commit-copy { border: 0; padding: 3px 0; background: transparent; color: var(--text); font: inherit; white-space: nowrap; cursor: pointer; }
+.commit-copy:hover { color: var(--blue, #2563eb); text-decoration: underline; }

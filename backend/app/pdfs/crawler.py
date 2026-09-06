@@ -65,7 +65,7 @@ async def process_pdf(client, project, repo, repository_id, path):
     if old and old["pdf_hash"] == digest:
         page_count, text = old["page_count"], old["pdf_text"]
     else:
-        # A separate process keeps status requests responsive during PDF parsing.
+        # One shared background thread extracts PDFs serially, without child processes.
         page_count, text = await asyncio.get_running_loop().run_in_executor(
             client.extractor, extract, content
         )

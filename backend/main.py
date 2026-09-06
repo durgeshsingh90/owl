@@ -24,6 +24,7 @@ async def lifespan(app):
     app.state.jobs = Jobs()
     yield
     await app.state.jobs.shutdown()
+    app.state.jobs.extractor.shutdown(wait=False, cancel_futures=True)
     event("backend.stopped")
 
 
