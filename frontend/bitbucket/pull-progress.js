@@ -1,6 +1,23 @@
 "use strict";
-const pullProgress = {active: false, completed: new Set(), failed: new Set(), timer: null};
-function pullRepoMark() { return ""; }
+const pullProgress = {active: false, completed: new Set(), failed: new Set(), timer: null, repositories: new Map()};
+function pullRepoMark(projectId, repoName) {
+  const status = pullProgress.repositories.get(JSON.stringify([String(projectId), repoName]));
+  const marks = {
+    queued: ["◷", "Queued"], scanning: ["↻", "Scanning"],
+    processing: ["↻", "Processing"], retrying: ["↻", "Retrying"],
+    succeeded: ["✓", "Completed"], failed: ["!", "Failed"], cancelled: ["–", "Stopped"],
+  };
+  if (!marks[status]) return "";
+  const [icon, label] = marks[status];
+  return `<span class="repo-job-status repo-job-${status}" title="${label}" aria-label="${label}"><span aria-hidden="true">${icon}</span><span class="repo-job-label">${label}</span></span>`;
+}
+function formatEta(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const hours = String(Math.floor(total / 3600)).padStart(2, "0");
+  const minutes = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
+  const remainingSeconds = String(total % 60).padStart(2, "0");
+  return `${hours}h ${minutes}m ${remainingSeconds}s`;
+}
 async function crawlJson(url, body) {
   const response = await fetch(url, {
     method: body === undefined ? "GET" : "POST",
@@ -35,27 +52,41 @@ function watchCrawl(job) {
     catch (error) { showToast(error.message); }
     finally { stop.disabled = false; }
   };
+  let lastStatuses = "";
   let lastProcessed = -1;
   let lastRepositories = -1;
+  let lastRecovered = -1;
   async function poll() {
     try {
       const current = await crawlJson(`/api/jobs/${job.id}`);
+      if (current.bitbucket_connected && (["queued", "running"].includes(current.status) || ["queued", "running"].includes(job.status))) {
+        setConnectionStatus("connected", "Bitbucket responded successfully. Background indexing is running.");
+      }
       document.querySelector("#pull-progress-state").textContent = current.detail;
       document.querySelector("#pull-elapsed").textContent = `${Math.round(current.elapsed_seconds)}s`;
-      document.querySelector("#pull-progress-counts").textContent = `${current.repositories_done}/${current.repositories} repositories · ${current.processed}/${current.found} PDFs processed · ${current.updated} updated`;
-      document.querySelector("#pull-eta").textContent = current.eta_seconds == null ? "Discovering files / ETA unavailable" : `ETA ${current.eta_seconds}s`;
+      document.querySelector("#pull-progress-counts").textContent = `Repositories ${current.repositories_succeeded ?? Math.max(0, current.repositories_done - current.repositories_failed)}/${current.repositories} successful · PDFs ${current.processed}/${current.discovery_complete ? current.found : "…"} processed${current.discovery_failed ? " (known files)" : ""}${current.retry_active ? ` · Retry ${current.retry_processed}/${current.retry_total}` : ""}`;
+      document.querySelector("#pull-eta").textContent = !current.discovery_complete ? "Total ETA: discovering PDFs…" : current.eta_seconds == null ? "Total ETA: calculating…" : `Total ETA: ~${formatEta(current.eta_seconds)} remaining`;
       updatePullSummary(current.status.replaceAll("_", " "));
       document.querySelector("#repository-pull-new").textContent = current.new;
       document.querySelector("#repository-pull-unchanged").textContent = current.unchanged;
       document.querySelector("#repository-pull-failed").textContent = current.failed + current.repositories_failed;
       document.querySelector("#repository-pull-updating").textContent = current.updated;
-      if (current.processed !== lastProcessed || current.repositories !== lastRepositories) {
+      const statuses = JSON.stringify(current.repository_statuses || {});
+      const statusesChanged = statuses !== lastStatuses;
+      if (statusesChanged) {
+        lastStatuses = statuses;
+        pullProgress.repositories = new Map(Object.values(current.repository_statuses || {}).map(repo =>
+          [JSON.stringify([String(repo.project_id), repo.repo]), repo.status]));
+      }
+      if (statusesChanged || current.processed !== lastProcessed || current.repositories !== lastRepositories || (current.retry_recovered || 0) !== lastRecovered) {
+        lastRecovered = current.retry_recovered || 0;
         lastProcessed = current.processed;
         lastRepositories = current.repositories;
         await loadDatabaseWorkspace();
       }
       if (!["queued", "running"].includes(current.status)) {
         pullProgress.active = false;
+        window.dispatchEvent(new Event("owl-crawl-finished"));
         pullProgress.jobId = null;
         stop.textContent = "Dismiss";
         document.querySelector("#pull-eta").textContent = current.status.replaceAll("_", " ");

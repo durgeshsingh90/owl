@@ -170,6 +170,67 @@ class BackendTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("Timed out")
 
+    def test_project_crawl_visits_every_repo_across_pages_despite_failure(self):
+        original = self.upstream
+        browsed = set()
+        slugs = [f"repo-{number}" for number in range(7)]
+
+        def paginated(request):
+            path = request.url.path
+            if path.endswith("/repos"):
+                start = int(request.url.params.get("start", 0))
+                return httpx.Response(
+                    200,
+                    json={
+                        "values": [{"slug": slug} for slug in slugs[start : start + 3]],
+                        "isLastPage": start + 3 >= len(slugs),
+                        "nextPageStart": start + 3,
+                    },
+                )
+            if "/browse/" in path:
+                slug = path.split("/repos/")[1].split("/")[0]
+                browsed.add(slug)
+                if slug == "repo-0":
+                    return httpx.Response(403)
+                if slug == "repo-1":
+                    return httpx.Response(
+                        200,
+                        json={
+                            "children": {
+                                "values": [],
+                                "isLastPage": True,
+                            }
+                        },
+                    )
+            return original(request)
+
+        self.upstream = paginated
+        job = self.crawl()
+        self.assertEqual(browsed, set(slugs))
+        self.assertEqual(job["repositories"], 7)
+        self.assertEqual(job["repositories_done"], 7)
+        self.assertEqual(job["repositories_succeeded"], 6)
+        self.assertEqual(job["repositories_failed"], 1)
+        self.assertEqual(job["status"], "succeeded_with_errors")
+        self.assertEqual((job["found"], job["processed"], job["new"]), (10, 10, 10))
+        statuses = {r["repo"]: r["status"] for r in job["repository_statuses"].values()}
+        self.assertEqual(
+            statuses,
+            {slug: "failed" if slug == "repo-0" else "succeeded" for slug in slugs},
+        )
+        with connection() as db:
+            scanned = {
+                r["repo"]
+                for r in db.execute(
+                    "SELECT repo FROM repositories WHERE last_scanned IS NOT NULL"
+                )
+            }
+            indexed = {
+                r["repo"] for r in db.execute("SELECT DISTINCT repo FROM documents")
+            }
+        self.assertEqual(scanned, set(slugs[1:]))
+        self.assertEqual(indexed, set(slugs[2:]))
+
     def test_import_pdf_and_project(self):
         base = self.config["base_url"] + "/projects/TEST"
         for url, expected in [(base + "/repos/one/browse/manual.pdf", 1), (base, 5)]:
@@ -209,6 +270,17 @@ class BackendTests(unittest.TestCase):
     def test_incremental_crawl_fts_and_deletion(self):
         job = self.crawl()
         self.assertEqual((job["status"], job["new"]), ("succeeded", 4), job)
+        self.assertTrue(job["bitbucket_connected"])
+        self.assertEqual(job["repositories_succeeded"], 2)
+        self.assertEqual(job["repositories"], 2)
+        self.assertEqual(
+            {r["status"] for r in job["repository_statuses"].values()}, {"succeeded"}
+        )
+        self.assertEqual(
+            {r["repo"] for r in job["repository_statuses"].values()}, {"one", "two"}
+        )
+        self.assertTrue(job["discovery_complete"])
+        self.assertEqual((job["processed"], job["found"]), (4, 4))
         workspace = self.client.get("/api/workspace").json()
         saved = workspace["documents"][0]
         detail = self.client.get(f"/api/document/{saved['id']}").json()
@@ -342,14 +414,102 @@ class BackendTests(unittest.TestCase):
                 )
                 self.assertFalse(test.call_args.args[0].verify_ssl)
 
+    def test_automatic_retry_recovers_counts_once(self):
+        original = self.upstream
+        downloads = {}
+
+        def transient(request):
+            if "/raw/" in request.url.path:
+                key = request.url.path
+                downloads[key] = downloads.get(key, 0) + 1
+                if downloads[key] == 1:
+                    return httpx.Response(403)
+            return original(request)
+
+        self.upstream = transient
+        job = self.crawl()
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertEqual((job["found"], job["processed"], job["new"]), (4, 4, 4))
+        self.assertEqual(
+            (job["retry_total"], job["retry_recovered"], job["failed"]), (4, 4, 0)
+        )
+        self.assertEqual(
+            (job["repositories_succeeded"], job["repositories_failed"]), (2, 0)
+        )
+        self.assertEqual(
+            {r["status"] for r in job["repository_statuses"].values()}, {"succeeded"}
+        )
+        self.assertTrue(all(count == 2 for count in downloads.values()))
+        self.assertEqual(self.client.get("/api/failed").json(), [])
+
     def test_failure_and_retry(self):
         self.fail = True
         job = self.crawl()
         self.assertEqual((job["status"], job["failed"]), ("succeeded_with_errors", 4))
-        self.assertEqual(len(self.client.get("/api/failed").json()), 4)
-        self.fail = False
-        self.assertEqual(self.crawl()["new"], 4)
-        self.assertEqual(self.client.get("/api/failed").json(), [])
+        self.assertEqual(
+            {r["status"] for r in job["repository_statuses"].values()}, {"failed"}
+        )
+        failures = self.client.get("/api/failed").json()
+        self.assertEqual(len(failures), 4)
+        self.assertTrue(all(row["attempts"] == 2 for row in failures))
+        self.assertEqual(failures[0]["error"], "Bitbucket returned HTTP 403.")
+        self.assertTrue(failures[0]["repo"])
+        self.assertTrue(failures[0]["project"])
+        for succeeds in (False, True):
+            self.fail = not succeeds
+            before = len(self.calls)
+            response = self.client.post("/api/failed/retry")
+            self.assertEqual(response.status_code, 202, response.text)
+            identifier = response.json()["id"]
+            for _ in range(200):
+                job = self.client.get(f"/api/jobs/{identifier}").json()
+                if job["status"] not in ("queued", "running"):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(job["processed"], 4)
+            self.assertFalse(any("/browse/" in url for url in self.calls[before:]))
+            if not succeeds:
+                self.assertTrue(
+                    all(
+                        row["attempts"] == 3
+                        for row in self.client.get("/api/failed").json()
+                    )
+                )
+            else:
+                self.assertEqual(job["new"], 4)
+                self.assertEqual(self.client.get("/api/failed").json(), [])
+        self.assertEqual(self.client.post("/api/failed/retry").status_code, 400)
+
+    def test_repository_queue_and_active_status_survive_polling(self):
+        async def delayed(*args, **kwargs):
+            await asyncio.sleep(30)
+            yield "example.pdf"
+
+        self.client.post("/api/settings", json={**self.config, "max_workers": 1})
+        self.client.post(
+            "/api/project",
+            json={"project_url": self.config["base_url"] + "/projects/DEMO"},
+        )
+        with patch("app.pdfs.jobs.discover_pdfs", delayed):
+            job = self.client.post("/api/crawl", json={}).json()
+            for _ in range(100):
+                current = self.client.get(f"/api/jobs/{job['id']}").json()
+                statuses = {
+                    r["status"] for r in current["repository_statuses"].values()
+                }
+                if "scanning" in statuses:
+                    break
+                time.sleep(0.01)
+            self.assertEqual(statuses, {"scanning", "queued"})
+            latest = self.client.get("/api/jobs/latest").json()["job"]
+            self.assertEqual(
+                latest["repository_statuses"], current["repository_statuses"]
+            )
+            stopped = self.client.post(f"/api/jobs/{job['id']}/cancel").json()
+            self.assertEqual(
+                {r["status"] for r in stopped["repository_statuses"].values()},
+                {"cancelled"},
+            )
 
     def test_cancel_and_single_job(self):
         async def delayed(*args, **kwargs):
@@ -367,6 +527,7 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(recovered["id"], job["id"])
             self.assertIn(recovered["status"], ("queued", "running"))
             self.assertEqual(self.client.post("/api/crawl", json={}).status_code, 409)
+            self.assertEqual(self.client.post("/api/failed/retry").status_code, 409)
             self.assertEqual(
                 self.client.post("/api/jobs/" + job["id"] + "/cancel").json()["status"],
                 "cancelled",

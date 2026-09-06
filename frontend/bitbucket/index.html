@@ -8,9 +8,9 @@
       content="A frontend prototype for exploring PDF documents across Bitbucket projects and repositories."
     />
     <title>Bitbucket PDF Explorer</title>
-    <script src="theme.js?v=20260906-crawl-3"></script>
-    <script src="sidebars.js?v=20260906-crawl-3"></script>
-    <link rel="stylesheet" href="style.css" />
+    <script src="theme.js?v=20260906-crawl-11"></script>
+    <script src="sidebars.js?v=20260906-crawl-11"></script>
+    <link rel="stylesheet" href="style.css?v=20260906-repo-status" />
   </head>
   <body>
     <svg
@@ -284,6 +284,7 @@
             </div>
           </div>
 
+          <button type="button" id="show-failed-pdfs" class="secondary-button">Failed PDFs</button>
           <section class="table-panel" aria-label="PDF documents">
             <section class="commit-chart" aria-labelledby="commit-chart-title">
               <div class="commit-chart-heading">
@@ -462,10 +463,12 @@
                     <th class="select-column">
                       <span class="visually-hidden">Select</span>
                     </th>
+                    <th scope="col">Serial No.</th>
                     <th scope="col">PDF name</th>
                     <th scope="col">Path</th>
                     <th scope="col">Project</th>
                     <th scope="col">Repository</th>
+                    <th scope="col">Commit ID</th>
                     <th scope="col">Commit date &amp; time</th>
                     <th scope="col">Committed by</th>
                     <th scope="col" class="number-column">Opens</th>
@@ -971,12 +974,24 @@
       <h3>Extracted text</h3>
       <pre id="pdf-details-text" style="white-space:pre-wrap;max-height:40vh;overflow:auto"></pre>
     </dialog>
-    <script src="pull-progress.js?v=20260906-crawl-3"></script>
-    <script src="people-teams.js?v=20260906-crawl-3"></script>
-    <script src="notes.js?v=20260906-crawl-3"></script>
-    <script src="script.js?v=20260906-crawl-3"></script>
-    <script src="database.js?v=20260906-crawl-3"></script>
-    <script src="settings.js?v=20260906-crawl-3"></script>
-    <script src="repository-delete.js?v=20260906-crawl-3"></script>
+    <dialog id="failed-pdfs-dialog" aria-labelledby="failed-pdfs-title" style="width:min(1000px,94vw);max-height:85vh;overflow:auto;padding:24px;background:#182535;color:#e5edf7;border-radius:12px">
+      <h2 id="failed-pdfs-title">Failed PDFs</h2>
+      <button type="button" id="failed-pdfs-close">Close</button>
+      <button type="button" id="failed-pdfs-refresh">Refresh</button>
+      <button type="button" id="failed-pdfs-retry">Retry all failed PDFs</button>
+      <p id="failed-pdfs-status" role="status"></p>
+      <p>Retry applies to the configured Bitbucket server after the current crawl finishes.</p>
+      <div style="overflow:auto"><table style="width:100%;text-align:left"><thead><tr><th>Project</th><th>Repository</th><th>PDF path</th><th>Error</th><th>Attempts</th><th>Last attempt</th></tr></thead><tbody id="failed-pdfs-rows"></tbody></table></div>
+      <button type="button" id="failed-pdfs-prev">Previous</button>
+      <button type="button" id="failed-pdfs-next">Next</button>
+    </dialog>
+    <script src="pull-progress.js?v=20260906-crawl-11"></script>
+    <script src="people-teams.js?v=20260906-crawl-11"></script>
+    <script src="notes.js?v=20260906-crawl-11"></script>
+    <script src="script.js?v=20260906-crawl-11"></script>
+    <script src="database.js?v=20260906-crawl-11"></script>
+    <script src="settings.js?v=20260906-crawl-11"></script>
+    <script src="repository-delete.js?v=20260906-crawl-11"></script>
+    <script src="failed-pdfs.js?v=20260906-failed-1"></script>
   </body>
 </html>

@@ -89,7 +89,7 @@ svg {
   inset: 0 0 auto 0;
   z-index: 20;
   display: grid;
-  grid-template-columns: var(--left-width) minmax(0, 1fr) 190px auto;
+  grid-template-columns: var(--left-width) minmax(160px, 0.7fr) minmax(320px, 1fr) auto;
   column-gap: 16px;
   align-items: center;
   height: var(--topbar-height);
@@ -2678,6 +2678,10 @@ tbody tr.selected td:first-child {
   gap: 8px;
 }
 .pull-progress strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: #edf4ff;
   font-size: 10px;
 }
@@ -2805,3 +2809,39 @@ tbody tr.selected td:first-child {
   height: 16px;
   margin: 0;
 }
+
+/* Explicit widths keep the expanded PDF columns aligned. */
+.timeline-table { min-width: 1480px; }
+.timeline-table thead th:nth-child(2) { width: 85px; }
+.timeline-table thead th:nth-child(3) { width: 230px; }
+.timeline-table thead th:nth-child(4) { width: 290px; }
+.timeline-table thead th:nth-child(5) { width: 105px; }
+.timeline-table thead th:nth-child(6) { width: 155px; }
+.timeline-table thead th:nth-child(7) { width: 180px; }
+.timeline-table thead th:nth-child(8) { width: 145px; }
+.timeline-table thead th:nth-child(9) { width: 150px; }
+.timeline-table thead th:nth-child(10) { width: 65px; }
+.timeline-table .serial-number { font-variant-numeric: tabular-nums; }
+.timeline-table .commit-id { font-family: monospace; user-select: text; overflow-wrap: anywhere; white-space: normal; }
+
+.project-heading-row { display: flex; align-items: center; gap: 4px; }
+.project-heading-row .project-button { flex: 1; min-width: 0; }
+.project-toggle { background: transparent; color: var(--text-muted); border: 0; padding: 8px; cursor: pointer; font-size: 18px; }
+.repository-list[hidden] { display: none; }
+.project-expand-controls { display: flex; gap: 8px; padding: 8px 0; }
+.project-expand-controls button { background: transparent; color: var(--text-muted); border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; cursor: pointer; }
+
+/* Live statuses come from the persisted background crawl job. */
+.repo-job-status { display: inline-flex; align-items: center; gap: 4px; margin-left: 7px; font-size: 10px; font-weight: 600; color: var(--muted, #64748b); }
+.repo-job-scanning, .repo-job-processing, .repo-job-retrying { color: #2563eb; }
+.repo-job-succeeded { color: #16803c; }
+.repo-job-failed { color: #dc2626; }
+.repo-job-cancelled { color: #a16207; }
+.project-bar-repo .repo-job-label { display: none; }
+
+.project-bar-repo .repo-job-status { position: absolute; bottom: 0; right: 1px; margin: 0; background: var(--surface); border-radius: 3px; }
+.repo-name:has(.repo-job-status) { white-space: normal; overflow-wrap: anywhere; }
+:root[data-theme="dark"] .repo-job-succeeded { color: #62dfa2; }
+:root[data-theme="dark"] .repo-job-scanning,
+:root[data-theme="dark"] .repo-job-processing,
+:root[data-theme="dark"] .repo-job-retrying { color: #93c5fd; }

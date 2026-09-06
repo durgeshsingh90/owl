@@ -110,3 +110,11 @@ extraction uses a separate worker process so progress requests remain responsive
 The UI discovers the latest saved job on load/focus, including in a new tab.
 Closing the page does not cancel a scan. Stopping/restarting the backend stops
 the job; it does not automatically resume interrupted work.
+
+The progress bar reports successful repositories / total repositories, processed
+PDFs / discovered PDFs, and estimated remaining time across the entire job.
+Repository/file discovery runs before PDF processing so the denominator is stable.
+A repository with a PDF failure does not count as successful. PDF processed counts
+include failed attempts; failures remain separately visible. ETA is unavailable
+until discovery finishes and at least one PDF has been processed. If discovery
+fails, the UI labels the PDF count as known files.

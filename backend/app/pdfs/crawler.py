@@ -115,7 +115,7 @@ async def process_pdf(client, project, repo, repository_id, path):
     return "updated" if old else "new"
 
 
-async def crawl_repository(client, project, repo, repository_id, progress):
+async def discover_pdfs(client, project, repo):
     prefix = client.repo_path(project, repo)
     folders = [""]
     visited = set()
@@ -134,28 +134,33 @@ async def crawl_repository(client, project, repo, repository_id, progress):
             if item.get("type") == "DIRECTORY":
                 folders.append(path)
             elif item.get("type") == "FILE" and path.lower().endswith(".pdf"):
-                progress["found"] += 1
-                try:
-                    outcome = await process_pdf(
-                        client, project, repo, repository_id, path
-                    )
-                    progress[outcome] += 1
-                except (BitbucketError, ValueError, OverflowError):
-                    progress["failed"] += 1
-                    with connection() as db:
-                        db.execute(
-                            """INSERT INTO failed_documents(repository_id,path,error,last_attempt)
-                                      VALUES(?,?,?,?) ON CONFLICT(repository_id,path) DO UPDATE SET
-                                      error=excluded.error,last_attempt=excluded.last_attempt,attempts=attempts+1""",
-                            (
-                                repository_id,
-                                path,
-                                "PDF metadata, download or extraction failed.",
-                                now(),
-                            ),
-                        )
-                progress["processed"] += 1
-                progress["save"]()
+                yield path
+
+
+async def crawl_repository(client, project, repo, repository_id, progress, paths):
+    for path in paths:
+        try:
+            outcome = await process_pdf(client, project, repo, repository_id, path)
+            progress[outcome] += 1
+        except (BitbucketError, ValueError, OverflowError) as error:
+            progress["failed"] += 1
+            progress["failure"](path)
+            with connection() as db:
+                db.execute(
+                    """INSERT INTO failed_documents(repository_id,path,error,last_attempt)
+                              VALUES(?,?,?,?) ON CONFLICT(repository_id,path) DO UPDATE SET
+                              error=excluded.error,last_attempt=excluded.last_attempt,attempts=attempts+1""",
+                    (
+                        repository_id,
+                        path,
+                        str(error)
+                        if isinstance(error, BitbucketError)
+                        else "PDF metadata could not be processed.",
+                        now(),
+                    ),
+                )
+        progress["processed"] += 1
+        progress["save"]()
     with connection() as db:
         db.execute(
             "UPDATE repositories SET last_scanned=? WHERE id=?", (now(), repository_id)

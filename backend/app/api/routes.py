@@ -289,7 +289,10 @@ def failed(
         return [
             dict(row)
             for row in db.execute(
-                "SELECT * FROM failed_documents ORDER BY last_attempt DESC LIMIT ? OFFSET ?",
+                "SELECT f.*,r.repo,p.project,p.server FROM failed_documents f "
+                "JOIN repositories r ON r.id=f.repository_id "
+                "JOIN tracked_projects p ON p.id=r.project_id "
+                "ORDER BY f.last_attempt DESC,f.id DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             )
         ]
@@ -328,3 +331,32 @@ async def import_urls(value: ImportRequest, request: Request):
             ).fetchone()
             ids.add(row["id"])
     return jobs.start(list(ids), targets)
+
+
+@router.post("/failed/retry", status_code=202)
+async def retry_failed(request: Request):
+    jobs = request.app.state.jobs
+    if jobs.active():
+        raise HTTPException(
+            409, "Wait for the current crawl to finish before retrying."
+        )
+    settings = load_settings()
+    with connection() as db:
+        rows = db.execute(
+            "SELECT f.path,r.repo,r.project_id,p.project,p.project_url FROM failed_documents f "
+            "JOIN repositories r ON r.id=f.repository_id JOIN tracked_projects p ON p.id=r.project_id "
+            "WHERE p.server=?",
+            (settings.base_url,),
+        ).fetchall()
+    if not rows:
+        raise HTTPException(400, "No failed PDFs for the configured Bitbucket server.")
+    targets = [
+        {
+            "project": r["project"],
+            "repo": r["repo"],
+            "path": r["path"],
+            "url": r["project_url"],
+        }
+        for r in rows
+    ]
+    return jobs.start(list({r["project_id"] for r in rows}), targets, auto_retry=False)

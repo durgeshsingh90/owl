@@ -77,6 +77,8 @@ class BitbucketClient:
                             f"Bitbucket returned HTTP {response.status_code}."
                         )
                     else:
+                        if getattr(self, "on_connected", None):
+                            self.on_connected()
                         chunks, size = [], 0
                         async for chunk in response.aiter_bytes():
                             size += len(chunk)

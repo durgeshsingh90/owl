@@ -500,6 +500,8 @@ function isRepositoryInactive(repo, now = new Date()) {
   );
 }
 
+const collapsedProjects = new Set();
+
 function renderProjects() {
   const now = new Date();
   const repositoryCount = projects.reduce(
@@ -542,7 +544,7 @@ function renderProjects() {
         }),
       )
       .join("");
-  elements.projectList.innerHTML = projects
+  elements.projectList.innerHTML = `<div class="project-expand-controls"><button type="button" data-project-expand-all>Expand all</button><button type="button" data-project-collapse-all>Collapse all</button></div>` + projects
     .map((project) => {
       const projectIsActive =
         state.selectedProject === project.id && !state.selectedRepos.size;
@@ -572,6 +574,8 @@ function renderProjects() {
 
       return `
         <section class="project-group" aria-label="${escapeHtml(project.name)}">
+          <div class="project-heading-row">
+          <button type="button" class="project-toggle" data-project-toggle="${escapeHtml(project.id)}" aria-expanded="${!collapsedProjects.has(project.id)}" aria-label="${collapsedProjects.has(project.id) ? "Expand" : "Collapse"} ${escapeHtml(project.name)} repositories">${collapsedProjects.has(project.id) ? "▸" : "▾"}</button>
           <button
             class="project-button${projectIsActive ? " active" : ""}"
             type="button"
@@ -584,7 +588,8 @@ function renderProjects() {
             </span>
             <span class="project-total">${formatNumber(getProjectPdfTotal(project))}</span>
           </button>
-          <div class="repository-list">${repositories}</div>
+          </div>
+          <div class="repository-list" ${collapsedProjects.has(project.id) ? "hidden" : ""}>${repositories}</div>
         </section>
       `;
     })
@@ -632,7 +637,7 @@ function renderPdfTable() {
     groupCounts.set(group, (groupCounts.get(group) || 0) + 1);
   }
   elements.pdfTableBody.innerHTML = pagePdfs
-    .map((pdf) => {
+    .map((pdf, index) => {
       const day = getCommitCalendarDay(pdf.committedAt);
       const dateLabel =
         day === null
@@ -641,16 +646,18 @@ function renderPdfTable() {
       const group = getTimelineGroup(pdf.committedAt, timelineNow);
       const separator =
         group !== previousGroup
-          ? `<tr class="timeline-date-row"><th colspan="9" scope="rowgroup"><span class="timeline-marker" aria-hidden="true"></span><strong>${escapeHtml(group)}</strong><span class="timeline-group-count" title="Matching PDFs in this period across all pages">${formatNumber(groupCounts.get(group))} ${groupCounts.get(group) === 1 ? "PDF" : "PDFs"}</span></th></tr>`
+          ? `<tr class="timeline-date-row"><th colspan="11" scope="rowgroup"><span class="timeline-marker" aria-hidden="true"></span><strong>${escapeHtml(group)}</strong><span class="timeline-group-count" title="Matching PDFs in this period across all pages">${formatNumber(groupCounts.get(group))} ${groupCounts.get(group) === 1 ? "PDF" : "PDFs"}</span></th></tr>`
           : "";
       previousGroup = group;
       return `${separator}
       <tr class="timeline-document ${state.selectedPdfs.has(pdf.id) ? "selected" : ""}" data-pdf-id="${pdf.id}">
         <td class="select-column"><input class="row-radio" type="checkbox" name="selected-pdf" value="${pdf.id}" aria-label="Select ${escapeHtml(pdf.name)}" ${state.selectedPdfs.has(pdf.id) ? "checked" : ""} /></td>
+        <td class="serial-number">${formatNumber(pageStart + index + 1)}</td>
         <td><a class="timeline-file pdf-link" href="${escapeHtml(pdf.pdfUrl)}" data-open-pdf="${pdf.id}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(pdf.name)}"><span class="timeline-pdf-icon" aria-hidden="true">PDF</span><span>${escapeHtml(pdf.name)}</span></a></td>
         <td><button class="path-button" type="button" data-copy-path="${pdf.id}" title="Copy ${escapeHtml(pdf.path)}">${escapeHtml(pdf.path)}</button></td>
         <td><span class="badge project-badge">${escapeHtml(pdf.project || pdf.projectId)}</span></td>
         <td><span class="badge" title="${escapeHtml(pdf.repo)}">${escapeHtml(pdf.repo)}</span></td>
+        <td class="commit-id" title="${escapeHtml(pdf.commitId || "Not available")}">${escapeHtml(pdf.commitId || "—")}</td>
         <td><time class="commit-time" datetime="${escapeHtml(pdf.committedAt)}">${escapeHtml(dateLabel)}<small>${day === null ? "" : escapeHtml(COMMIT_TIME_FORMATTER.format(new Date(pdf.committedAt)))}</small></time></td>
         <td class="commit-author" title="${escapeHtml(pdf.commitAuthor || "Unknown")}">${escapeHtml(pdf.commitAuthor || "Unknown")}${isPersonStarred(pdfAuthorKey(pdf)) ? ' <span class="author-star" role="img" aria-label="Starred person">★</span>' : ""}</td>
         <td class="number-column"><span class="open-count">${formatNumber(pdf.openCount)}</span></td>
@@ -1028,6 +1035,25 @@ function trapModalFocus(event) {
 }
 
 function handleProjectNavigation(event) {
+  const toggle = event.target.closest("[data-project-toggle]");
+  const expandAll = event.target.closest("[data-project-expand-all]");
+  const collapseAll = event.target.closest("[data-project-collapse-all]");
+  if (toggle || expandAll || collapseAll) {
+    if (toggle) {
+      const id = toggle.dataset.projectToggle;
+      if (collapsedProjects.has(id)) collapsedProjects.delete(id);
+      else collapsedProjects.add(id);
+    } else {
+      collapsedProjects.clear();
+      if (collapseAll) projects.forEach(project => collapsedProjects.add(project.id));
+    }
+    const id = toggle?.dataset.projectToggle;
+    renderProjects();
+    const next = id ? [...elements.projectList.querySelectorAll("[data-project-toggle]")].find(button => button.dataset.projectToggle === id) : elements.projectList.querySelector(expandAll ? "[data-project-expand-all]" : "[data-project-collapse-all]");
+    next?.focus();
+    return;
+  }
+
   if (event.target.closest("[data-all-repositories]")) {
     selectAllRepositories();
     return;
@@ -1237,14 +1263,10 @@ renderApp();
 let connectionCheckRunning = false;
 
 function setConnectionStatus(status, detail = "") {
-  if (pullProgress.active) {
-    pullProgress.connectionState = { status, detail };
-    return;
-  }
   const container = document.querySelector("#connection-status");
   const labels = {
     connecting: "Connecting…",
-    connected: "Index ready",
+    connected: "Connected",
     failed: "Connection failed",
   };
   container.dataset.state = status;
@@ -1304,12 +1326,7 @@ async function testConnection() {
   let resultState = "failed";
   let resultMessage =
     "Connection check timed out after 10 seconds. Click to retry.";
-  const animationWindow = new Promise((resolve) => {
-    setTimeout(() => {
-      controller.abort();
-      resolve();
-    }, 10000);
-  });
+  const timeout = setTimeout(() => controller.abort(), 10000);
   try {
     const workspace = await connectionJson(
       document.querySelector("#connection-status").dataset.workspaceUrl,
@@ -1340,7 +1357,7 @@ async function testConnection() {
       ? "Connection check timed out after 10 seconds. Click to retry."
       : error.message || "Unable to check the Bitbucket connection.";
   } finally {
-    await animationWindow;
+    clearTimeout(timeout);
     setConnectionStatus(resultState, resultMessage);
     connectionCheckRunning = false;
   }
