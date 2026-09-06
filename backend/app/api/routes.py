@@ -171,6 +171,17 @@ async def hard_retry(value: DeleteRequest, request: Request):
     )
 
 
+@router.get("/activity")
+def activity_log(limit: int = Query(25, ge=1, le=100), offset: int = Query(0, ge=0)):
+    with connection() as db:
+        total = db.execute("SELECT COUNT(*) FROM pull_activity").fetchone()[0]
+        rows = db.execute(
+            "SELECT payload FROM pull_activity ORDER BY started_at DESC, rowid DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    return {"total": total, "items": [json.loads(row[0]) for row in rows]}
+
+
 @router.get("/jobs/latest")
 def latest_job():
     with connection() as db:

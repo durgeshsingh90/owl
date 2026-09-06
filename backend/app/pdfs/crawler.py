@@ -39,7 +39,11 @@ def extract(content):
 
 async def process_pdf(client, project, repo, repository_id, path):
     prefix = client.repo_path(project, repo)
-    data = await client.request(prefix + "/commits", {"path": path, "limit": 1})
+    snapshot = getattr(client, "snapshot_refs", {}).get((project, repo))
+    data = await client.request(
+        prefix + "/commits",
+        {"path": path, "limit": 1, **({"until": snapshot} if snapshot else {})},
+    )
     commits = data.get("values", [])
     commit = commits[0] if commits else {}
     commit_id = commit.get("id") or None
@@ -161,7 +165,11 @@ async def discover_pdfs(client, project, repo, on_folder_error=None):
         visited.add(folder)
         try:
             async for item in client.pages(
-                prefix + "/browse/" + quote(folder, safe="/"), nested="children"
+                prefix + "/browse/" + quote(folder, safe="/"),
+                params={"at": client.snapshot_refs[(project, repo)]}
+                if getattr(client, "snapshot_refs", {}).get((project, repo))
+                else None,
+                nested="children",
             ):
                 path = entry_path(folder, item)
                 if item.get("type") == "DIRECTORY":

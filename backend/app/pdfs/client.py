@@ -15,6 +15,7 @@ class BitbucketError(RuntimeError):
 
 class BitbucketClient:
     def __init__(self, settings):
+        self.snapshot_refs = {}
         self.base = settings.base_url
         self.api = self.base + "/rest/api/1.0"
         event(

@@ -196,7 +196,7 @@ function renderBookmarkTree(filtered) {
     if (!included.has(item.id)) continue;
     const hierarchy = pageHierarchy[item.id];
     const path = hierarchy
-      ? ["Confluence", item.domain, hierarchy.space, ...(item.breadcrumb || [])]
+      ? [hierarchy.space || "Pages", ...(item.breadcrumb || [])]
       : Array.isArray(item.folderPath) && item.folderPath.length
         ? item.folderPath.filter(
             (part) => typeof part === "string" && part.trim(),
@@ -264,7 +264,7 @@ function renderBookmarkTree(filtered) {
           `<li class="nested-bookmark-folder">${folderMarkup(child, childName, [...path, childName], number + "." + (index + 1))}</li>`,
       )
       .join("");
-    return `<details class="tree-space" data-branch="${esc(branch)}" ${collapsedBranches.has(branch) ? "" : "open"}><summary><span class="tree-folder" aria-hidden="true">▱</span><strong>${esc(name)}</strong><span class="tree-count">${folderCount(folder)} bookmarks</span><span class="tree-folder-opens">${folderOpens(folder)} opens</span><span class="tree-folder-label">Folder</span></summary><ul>${children}${roots.map((item, index) => entry(item, number + "." + (folder.children.size + index + 1), folder.pages)).join("")}</ul></details>`;
+    return `<details class="tree-space" data-branch="${esc(branch)}" ${collapsedBranches.has(branch) ? "" : "open"}><summary><span class="tree-number">${number}</span><span class="tree-folder" aria-hidden="true">▱</span><strong>${esc(name)}</strong><span class="tree-count">${folderCount(folder)} bookmarks</span><span class="tree-folder-opens">${folderOpens(folder)} opens</span><span class="tree-folder-label">Folder</span></summary><ul>${children}${roots.map((item, index) => entry(item, number + "." + (folder.children.size + index + 1), folder.pages)).join("")}</ul></details>`;
   }
   document.querySelector("#bookmark-tree").innerHTML = [...folders.children]
     .map(([name, folder], index) =>

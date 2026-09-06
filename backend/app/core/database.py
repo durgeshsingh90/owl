@@ -32,6 +32,9 @@ def initialize(*, recover_jobs=False):
     with connection() as db:
         db.execute("PRAGMA journal_mode=WAL")
         db.executescript("""
+        CREATE TABLE IF NOT EXISTS pull_activity (
+            id TEXT PRIMARY KEY, started_at TEXT NOT NULL, payload TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS tracked_projects (
             id INTEGER PRIMARY KEY, project_url TEXT NOT NULL UNIQUE,
             server TEXT NOT NULL, project TEXT NOT NULL,
@@ -75,6 +78,9 @@ def initialize(*, recover_jobs=False):
             db.execute(
                 "UPDATE repositories SET last_pull_at=last_scanned WHERE last_scanned IS NOT NULL"
             )
+            db.commit()
+        if "last_indexed_commit" not in repository_columns:
+            db.execute("ALTER TABLE repositories ADD COLUMN last_indexed_commit TEXT")
             db.commit()
         # FTS5 cannot add columns in place. Rebuild only its derived index,
         # preserving all documents and saved notes, including older databases.

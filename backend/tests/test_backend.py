@@ -513,6 +513,214 @@ class BackendTests(unittest.TestCase):
         self.assertNotIn("test-secret", logs)
         self.assertNotIn("secret-do-not-log", logs)
 
+    def test_activity_tracks_clone_pull_and_paginated_history(self):
+        self.assertEqual(
+            self.client.get("/api/activity").json(), {"total": 0, "items": []}
+        )
+        self.crawl()
+        history = self.client.get("/api/activity").json()
+        self.assertEqual(history["total"], 1)
+        first = history["items"][0]
+        self.assertTrue(first["started_at"])
+        self.assertTrue(first["completed_at"])
+        self.assertEqual({r["operation"] for r in first["repositories"]}, {"Git clone"})
+        self.assertEqual(sum(r.get("new", 0) for r in first["repositories"]), 4)
+        self.version = 2
+        self.crawl()
+        latest = self.client.get("/api/activity?limit=1").json()
+        self.assertEqual(latest["total"], 2)
+        self.assertEqual(
+            {r["operation"] for r in latest["items"][0]["repositories"]}, {"Git pull"}
+        )
+        self.assertEqual(
+            sum(r.get("updated", 0) for r in latest["items"][0]["repositories"]), 4
+        )
+        self.assertEqual(
+            self.client.get("/api/activity?limit=1&offset=1").json()["items"][0]["id"],
+            first["id"],
+        )
+
+    def test_unchanged_heads_skip_all_pdf_and_folder_requests(self):
+        self.crawl()
+        self.calls.clear()
+        job = self.crawl()
+        self.assertEqual(job["processed"], 0)
+        heads = [httpx.URL(url) for url in self.calls if "/commits" in url]
+        self.assertEqual(len(heads), 2)
+        self.assertTrue(all("path" not in url.params for url in heads))
+        self.assertFalse(
+            any(
+                part in url
+                for url in self.calls
+                for part in ["/browse/", "/raw/", "/compare/"]
+            )
+        )
+        with connection() as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 4
+            )
+
+    def test_delta_pagination_moves_deletes_and_non_pdf_changes(self):
+        self.crawl()
+        self.version = 2
+        original = self.upstream
+        delta_calls = []
+
+        def delta(request):
+            if request.url.path.endswith("/compare/changes"):
+                delta_calls.append(request)
+                start = request.url.params.get("start")
+                changes = (
+                    [
+                        {
+                            "type": "MOVE",
+                            "srcPath": {"toString": "nested/first.pdf"},
+                            "path": {"toString": "renamed.PDF"},
+                        },
+                        {"type": "DELETE", "path": {"toString": "second.pdf"}},
+                    ]
+                    if start == "0"
+                    else [
+                        {"type": "ADD", "path": {"toString": "new.pdf"}},
+                        {"type": "MODIFY", "path": {"toString": "readme.md"}},
+                    ]
+                )
+                return httpx.Response(
+                    200,
+                    json={
+                        "values": changes,
+                        "isLastPage": start != "0",
+                        "nextPageStart": 9,
+                    },
+                )
+            return original(request)
+
+        self.upstream = delta
+        self.calls.clear()
+        job = self.crawl()
+        self.assertEqual(job["processed"], 4)
+        self.assertEqual(len(delta_calls), 4)
+        history = self.client.get("/api/activity").json()["items"][0]
+        self.assertEqual(sum(r.get("deleted", 0) for r in history["repositories"]), 4)
+        self.assertEqual(sum(r.get("new", 0) for r in history["repositories"]), 4)
+        self.assertTrue(
+            all(
+                r.url.params["from"] == "2" and r.url.params["to"] == "1"
+                for r in delta_calls
+            )
+        )
+        self.assertFalse(any("/browse/" in url for url in self.calls))
+        with connection() as db:
+            self.assertEqual(
+                {r[0] for r in db.execute("SELECT path FROM documents")},
+                {"renamed.PDF", "new.pdf"},
+            )
+            self.assertEqual(
+                {
+                    r[0]
+                    for r in db.execute("SELECT last_indexed_commit FROM repositories")
+                },
+                {"2"},
+            )
+
+    def test_failed_delta_processing_keeps_checkpoint_and_retries(self):
+        self.crawl()
+        self.version = 2
+        self.fail = True
+        job = self.crawl()
+        self.assertGreater(job["failed"], 0)
+        with connection() as db:
+            self.assertEqual(
+                {
+                    r[0]
+                    for r in db.execute("SELECT last_indexed_commit FROM repositories")
+                },
+                {"1"},
+            )
+        self.fail = False
+        job = self.crawl()
+        self.assertEqual(job["failed"], 0)
+        with connection() as db:
+            self.assertEqual(
+                {
+                    r[0]
+                    for r in db.execute("SELECT last_indexed_commit FROM repositories")
+                },
+                {"2"},
+            )
+
+    def test_incomplete_delta_preserves_index_and_checkpoint(self):
+        self.crawl()
+        self.version = 2
+        original = self.upstream
+
+        def delta(request):
+            if request.url.path.endswith("/compare/changes"):
+                if request.url.params.get("start") == "0":
+                    return httpx.Response(
+                        200,
+                        json={
+                            "values": [
+                                {"type": "DELETE", "path": {"toString": "second.pdf"}}
+                            ],
+                            "isLastPage": False,
+                            "nextPageStart": 9,
+                        },
+                    )
+                return httpx.Response(403)
+            return original(request)
+
+        self.upstream = delta
+        self.calls.clear()
+        job = self.crawl()
+        self.assertTrue(job["discovery_failed"])
+        self.assertFalse(any("/browse/" in url for url in self.calls))
+        with connection() as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 4
+            )
+            self.assertEqual(
+                {
+                    r[0]
+                    for r in db.execute("SELECT last_indexed_commit FROM repositories")
+                },
+                {"1"},
+            )
+
+    def test_non_pdf_delta_advances_checkpoint_without_processing(self):
+        self.crawl()
+        self.version = 2
+        original = self.upstream
+
+        def delta(request):
+            if request.url.path.endswith("/compare/changes"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "values": [
+                            {"type": "MODIFY", "path": {"toString": "README.md"}}
+                        ],
+                        "isLastPage": True,
+                    },
+                )
+            return original(request)
+
+        self.upstream = delta
+        self.calls.clear()
+        self.assertEqual(self.crawl()["processed"], 0)
+        self.assertFalse(any("/raw/" in url or "/browse/" in url for url in self.calls))
+        with connection() as db:
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 4
+            )
+            self.assertEqual(
+                {
+                    r[0]
+                    for r in db.execute("SELECT last_indexed_commit FROM repositories")
+                },
+                {"2"},
+            )
+
     def upstream(self, r):
         self.calls.append(str(r.url))
         path = r.url.path
@@ -544,6 +752,17 @@ class BackendTests(unittest.TestCase):
                         "isLastPage": bool(nested or start),
                         "nextPageStart": 11,
                     }
+                },
+            )
+        if path.endswith("/compare/changes"):
+            return httpx.Response(
+                200,
+                json={
+                    "values": [
+                        {"type": "MODIFY", "path": {"toString": name}}
+                        for name in ["nested/first.pdf", "second.pdf"]
+                    ],
+                    "isLastPage": True,
                 },
             )
         if path.endswith("/commits"):
@@ -586,6 +805,8 @@ class BackendTests(unittest.TestCase):
 
     def test_empty_repository_is_excluded_but_failed_inventory_is_retained(self):
         self.crawl()  # Existing indexed data must also be removed for the empty repo.
+        with connection() as db:
+            db.execute("UPDATE repositories SET last_indexed_commit=NULL")
         original = self.upstream
 
         def empty_or_failed(request):
@@ -916,7 +1137,7 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(len(job["folder_failures"]), 2)
         for failure in job["folder_failures"]:
             self.assertIn("/rest/api/1.0/projects/DEMO/repos/", failure["request_url"])
-            self.assertIn("/browse/broken?limit=100&start=0", failure["request_url"])
+            self.assertIn("/browse/broken?", failure["request_url"])
             self.assertTrue(failure["url"].endswith("/browse/broken"))
         self.assertTrue(
             all(
@@ -1161,7 +1382,7 @@ class BackendTests(unittest.TestCase):
         self.client.patch(f"/api/document/{identity}/notes", json={"notes": "Keep me"})
         self.client.post(f"/api/document/{identity}/open")
         before = sum("/raw/" in url for url in self.calls)
-        self.assertEqual(self.crawl()["unchanged"], 4)
+        self.assertEqual(self.crawl()["processed"], 0)
         self.assertEqual(before, sum("/raw/" in url for url in self.calls))
         self.version = 2
         self.assertEqual(self.crawl()["updated"], 4)

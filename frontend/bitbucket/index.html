@@ -10,7 +10,7 @@
     <title>Bitbucket PDF Explorer</title>
     <script src="theme.js?v=20260906-crawl-18"></script>
     <script src="sidebars.js?v=20260906-crawl-18"></script>
-    <link rel="stylesheet" href="style.css?v=20260906-column-order-1" />
+    <link rel="stylesheet" href="style.css?v=20260906-initials-1" />
   </head>
   <body>
     <svg
@@ -32,7 +32,16 @@
         </filter>
       </defs>
     </svg>
-    <div class="app-shell">
+    <div id="workspace-loading" class="workspace-loading" role="status" aria-live="polite">
+      <div class="workspace-loading-card">
+        <span class="workspace-loading-spinner" aria-hidden="true"></span>
+        <h2 id="workspace-loading-title">Loading your library</h2>
+        <p id="workspace-loading-message">Getting your repositories and PDFs ready…</p>
+        <button id="workspace-loading-retry" type="button" hidden>Try again</button>
+        <button id="workspace-loading-dismiss" type="button" hidden>Continue to workspace</button>
+      </div>
+    </div>
+    <div class="app-shell" inert aria-busy="true">
       <header class="topbar">
         <a
           class="brand"
@@ -101,6 +110,9 @@
           data-state="connecting"
           data-workspace-url="/bitbucket/workspace/"
         >
+          <button id="activity-button" class="connection-test settings-button" type="button" aria-label="Activity log" title="Activity log">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2 7M3 4v7h7M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+          </button>
           <button
             id="settings-button"
             class="connection-test settings-button"
@@ -272,7 +284,7 @@
               <div class="selection-breadcrumb" id="selection-breadcrumb">
                 PDF index / All repositories
               </div>
-              <h2 id="selection-title">All Repositories</h2>
+              <div class="selection-title-row"><h2 id="selection-title">All Repositories</h2><span id="selection-search-count" role="status" hidden></span></div>
               <p id="selection-description">
                 PDF files across all projects and repositories
               </p>
@@ -571,10 +583,10 @@
           <section
             class="people-bar-favourites"
             id="people-bar-favourites"
-            aria-label="Favourite people"
+            aria-label="People initials"
             hidden
           >
-            <span class="people-bar-favourites-title">Starred people</span>
+            <span class="people-bar-favourites-title">People</span>
             <div id="people-bar-favourite-list"></div>
           </section>
           <div id="people-content">
@@ -1024,12 +1036,20 @@
       <button type="button" id="hard-retry-cancel">Cancel</button>
       <button type="button" id="hard-retry-start" disabled>Delete index and start again</button>
     </dialog>
+    <dialog id="activity-dialog" aria-labelledby="activity-title" style="width:min(1050px,95vw);max-height:85vh;overflow:auto;padding:24px;background:var(--surface);color:var(--text);border-radius:12px">
+      <div style="display:flex;align-items:center;gap:12px"><h2 id="activity-title" style="flex:1">Activity log</h2><button id="activity-refresh" type="button">Refresh</button><button id="activity-close" type="button" aria-label="Close activity log">✕</button></div>
+      <p id="activity-summary" role="status"></p>
+      <p>PDF changes = new + updated + deleted. Times are shown in your local timezone. History starts with this update.</p>
+      <div id="activity-items"></div>
+      <button id="activity-prev" type="button">Previous</button><button id="activity-next" type="button">Next</button>
+    </dialog>
+    <script src="activity.js?v=20260906-1"></script>
     <script src="pull-progress.js?v=20260906-refresh-fix-2"></script>
-    <script src="people-teams.js?v=20260906-refresh-fix-2"></script>
+    <script src="people-teams.js?v=20260906-initials-1"></script>
     <script src="notes.js?v=20260906-crawl-18"></script>
     <script src="advanced-search.js?v=20260906-refresh-fix-2"></script>
-    <script src="script.js?v=20260906-refresh-fix-2"></script>
-    <script src="database.js?v=20260906-refresh-fix-2"></script>
+    <script src="script.js?v=20260906-initials-1"></script>
+    <script src="database.js?v=20260906-loading-1"></script>
     <script src="settings.js?v=20260906-crawl-18"></script>
     <script src="repository-delete.js?v=20260906-refresh-fix-2"></script>
     <script src="hard-retry.js?v=20260906-hard-1"></script>

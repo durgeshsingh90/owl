@@ -90,7 +90,7 @@ class Jobs:
                     ids,
                 )
                 db.execute(
-                    f"UPDATE repositories SET last_scanned=NULL WHERE project_id IN ({placeholders})",
+                    f"UPDATE repositories SET last_scanned=NULL,last_indexed_commit=NULL WHERE project_id IN ({placeholders})",
                     ids,
                 )
             event("crawl.hard_retry_reset", project_ids=ids, backup=str(backup_path))
@@ -356,7 +356,21 @@ class Jobs:
                 r for r in self.repos if r[2] not in self.deleted_ids
             ]
             self.current["checkpoint"]["targets"] = self.targets
+        activity = self.current.setdefault("activity_repositories", {})
+        for key, repository in self.current.get("repository_statuses", {}).items():
+            activity[key] = dict(repository)
+        summary = {
+            "id": self.current["id"],
+            "started_at": self.current["started_at"],
+            "completed_at": self.current.get("completed_at"),
+            "status": self.current["status"],
+            "repositories": list(activity.values()),
+        }
         with connection() as db:
+            db.execute(
+                "INSERT INTO pull_activity VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+                (summary["id"], summary["started_at"], json.dumps(summary)),
+            )
             db.execute(
                 "INSERT INTO jobs VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,progress=excluded.progress",
                 (self.current["id"], self.current["status"], json.dumps(self.current)),
@@ -473,6 +487,8 @@ class Jobs:
             )
 
             partial_repositories = set()
+            incremental_repositories = set()
+            repository_heads = {}
 
             async def discover(project, slug, repository_id):
                 repo_status(repository_id, "scanning")
@@ -550,10 +566,57 @@ class Jobs:
                         for target in selected:
                             found(target["path"])
                     else:
-                        async for path in discover_pdfs(
-                            client, project, slug, on_folder_error=folder_failed
-                        ):
-                            found(path)
+                        from app.pdfs.incremental import plan_changes
+
+                        with connection() as db:
+                            previous = db.execute(
+                                "SELECT last_indexed_commit FROM repositories WHERE id=?",
+                                (repository_id,),
+                            ).fetchone()[0]
+                        head, changed, deleted = await plan_changes(
+                            client, project, slug, previous
+                        )
+                        repository = p["repository_statuses"][str(repository_id)]
+                        repository["operation"] = (
+                            "Rebuild"
+                            if p.get("hard_retry")
+                            else "Git pull"
+                            if previous
+                            else "Git clone"
+                        )
+                        repository["project"] = project
+                        repository["timestamp"] = now()
+                        repository_heads[repository_id] = head
+                        if changed is None:
+                            async for path in discover_pdfs(
+                                client, project, slug, on_folder_error=folder_failed
+                            ):
+                                found(path)
+                        else:
+                            incremental_repositories.add(repository_id)
+                            with connection() as db:
+                                for path in deleted:
+                                    removed = db.execute(
+                                        "DELETE FROM documents WHERE repository_id=? AND path=?",
+                                        (repository_id, path),
+                                    ).rowcount
+                                    repository["deleted"] = (
+                                        repository.get("deleted", 0) + removed
+                                    )
+                                    db.execute(
+                                        "DELETE FROM failed_documents WHERE repository_id=? AND path=?",
+                                        (repository_id, path),
+                                    )
+                                # Retry outstanding saved failures even if HEAD is unchanged.
+                                changed.update(
+                                    row[0]
+                                    for row in db.execute(
+                                        "SELECT path FROM failed_documents WHERE repository_id=?",
+                                        (repository_id,),
+                                    )
+                                )
+                            for path in changed:
+                                found(path)
                     ordered = sorted(paths, key=lambda path: (path.casefold(), path))
                     if repository_id not in partial_repositories:
                         checkpoint["inventories"][str(repository_id)] = ordered
@@ -628,6 +691,8 @@ class Jobs:
                             repository["failed"] += value - p[key]
                         if key == "processed":
                             repository["processed"] += value - p[key]
+                        if key in {"new", "updated", "unchanged"}:
+                            repository[key] = repository.get(key, 0) + value - p[key]
                         p[key] = value
 
                 try:
@@ -711,6 +776,9 @@ class Jobs:
                         p["retry_recovered"] += 1
                         for outcome in ("new", "updated", "unchanged"):
                             p[outcome] += counters[outcome]
+                            retry_repository[outcome] = (
+                                retry_repository.get(outcome, 0) + counters[outcome]
+                            )
                     p["elapsed_seconds"] = round(time.monotonic() - started, 1)
                     p["eta_seconds"] = round(
                         (time.monotonic() - retry_started)
@@ -728,7 +796,11 @@ class Jobs:
 
             async def process_repository(repo):
                 paths = await discover(*repo)
-                if paths == [] and repo[2] not in partial_repositories:
+                if (
+                    paths == []
+                    and repo[2] not in partial_repositories
+                    and repo[2] not in incremental_repositories
+                ):
                     # Only a complete, successful inventory proves a repository empty.
                     # Exclusion retains its URL alone and cascades stale indexed data.
                     with connection() as db:
@@ -757,6 +829,16 @@ class Jobs:
                     try:
                         await scan(*repo, paths)
                         await retry_repository_failures(*repo)
+                        if (
+                            repository["status"] == "succeeded"
+                            and repo[2] not in partial_repositories
+                            and repository_heads.get(repo[2])
+                        ):
+                            with connection() as db:
+                                db.execute(
+                                    "UPDATE repositories SET last_indexed_commit=? WHERE id=?",
+                                    (repository_heads[repo[2]], repo[2]),
+                                )
                     finally:
                         repository["processing_seconds"] = round(
                             time.monotonic() - repo_processing_started, 1

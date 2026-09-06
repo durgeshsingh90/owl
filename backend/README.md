@@ -27,6 +27,8 @@ The frontend server forwards `/api/` and the existing Bitbucket connection/setti
 5. Poll `GET /api/jobs/{id}` for new/updated/unchanged/failed counts, repository progress, elapsed time and estimated remaining time. ETA is unavailable until a repository finishes.
 6. `POST /api/jobs/{id}/cancel` stops a crawl. Completed records remain saved.
 
+Normal Git pull checks the latest commit of every tracked, non-excluded repository. Repositories at their saved commit checkpoint skip folder discovery and PDF processing. For a changed head, the paginated Bitbucket compare changes API selects only added, modified, or renamed PDFs and removes deleted PDFs from the index. Outstanding PDF failures are retried. Checkpoints advance only after successful processing. New repositories and existing repositories without a checkpoint need one baseline scan; hard retry explicitly requests a full rebuild.
+
 A command-line equivalent is available after saving settings:
 
 ```bash

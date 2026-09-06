@@ -132,33 +132,18 @@ function renderTeamFilters() {
       return `<button type="button" data-team-filter="${escapeHtml(filter.id)}" aria-pressed="${activePeopleFilter === filter.id}" aria-label="${escapeHtml(filter.name)}" title="${escapeHtml(filter.name)}"><span aria-hidden="true">${icon}</span></button>`;
     })
     .join("");
-  const favourites = [
-    ...new Map(
-      people
-        .filter((person) => isPersonStarred(personKey(person)))
-        .map((person) => [personKey(person), person]),
-    ).values(),
-  ];
-  document.querySelector("#people-bar-favourites").hidden = !favourites.length;
-  document.querySelector("#people-bar-favourite-list").innerHTML = favourites
-    .map(
-      (person) =>
-        `<button class="people-bar-person" type="button" data-team-filter="person:${escapeHtml(personKey(person))}" aria-pressed="${activePeopleFilter === `person:${personKey(person)}`}" title="${escapeHtml(person.name)}" aria-label="${escapeHtml(person.name)}"><span class="bar-person-initials" aria-hidden="true">${escapeHtml(getInitials(person.name))}</span><span class="bar-person-star author-star" aria-hidden="true">★</span></button>`,
-    )
-    .join("");
-  fitBarFavourites();
   const teamSelected = peoplePreferences.teams.some(
     (team) => team.id === activePeopleFilter,
   );
   document.querySelector("#edit-team").hidden = !teamSelected;
   document.querySelector("#remove-team").hidden = !teamSelected;
 }
-function fitBarFavourites() {
-  const list = document.querySelector("#people-bar-favourite-list");
-  const slots = Math.max(0, Math.floor((list.clientHeight + 6) / 50));
-  [...list.children].forEach((button, index) => {
-    button.hidden = index >= slots;
-  });
+function renderCollapsedPeople(visiblePeople) {
+  document.querySelector("#people-bar-favourites").hidden = !visiblePeople.length;
+  document.querySelector("#people-bar-favourite-list").innerHTML = visiblePeople.map(person => {
+    const key = personKey(person);
+    return `<button class="people-bar-person" type="button" data-team-filter="person:${escapeHtml(key)}" aria-pressed="${activePeopleFilter === `person:${key}`}" title="${escapeHtml(person.name)}" aria-label="Show PDFs by ${escapeHtml(person.name)}"><span class="bar-person-initials" aria-hidden="true">${escapeHtml(getInitials(person.name))}</span>${isPersonStarred(key) ? '<span class="bar-person-star author-star" aria-hidden="true">★</span>' : ''}</button>`;
+  }).join("");
 }
 
 function refreshPeopleFilter() {
@@ -168,8 +153,6 @@ function refreshPeopleFilter() {
 }
 
 (() => {
-  const favouriteList = document.querySelector("#people-bar-favourite-list");
-  new ResizeObserver(fitBarFavourites).observe(favouriteList);
   const dialog = document.querySelector("#team-dialog");
   const form = document.querySelector("#team-form");
   const name = document.querySelector("#team-name");

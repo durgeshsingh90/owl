@@ -1,9 +1,29 @@
 "use strict";
 let workspaceLoadVersion = 0;
+let workspaceReady = false;
+const workspaceLoading = document.getElementById("workspace-loading");
+const workspaceShell = document.querySelector(".app-shell");
+function finishWorkspaceLoading() {
+  workspaceReady = true;
+  workspaceLoading.hidden = true;
+  workspaceShell.inert = false;
+  workspaceShell.setAttribute("aria-busy", "false");
+}
+document.getElementById("workspace-loading-retry").onclick = () => loadDatabaseWorkspace();
+document.getElementById("workspace-loading-dismiss").onclick = finishWorkspaceLoading;
 async function loadDatabaseWorkspace() {
   const version = ++workspaceLoadVersion;
+  if (!workspaceReady) {
+    delete workspaceLoading.dataset.error;
+    document.getElementById("workspace-loading-title").textContent = "Loading your library";
+    document.getElementById("workspace-loading-message").textContent = "Getting your repositories and PDFs ready…";
+    document.getElementById("workspace-loading-retry").hidden = true;
+    document.getElementById("workspace-loading-dismiss").hidden = true;
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
   try {
-    const response = await fetch("/api/workspace", { cache: "no-store" });
+    const response = await fetch("/api/workspace", { cache: "no-store", signal: controller.signal });
     if (!response.ok) throw new Error("Unable to load saved repository data.");
     const data = await response.json();
     if (version !== workspaceLoadVersion) return;
@@ -18,8 +38,20 @@ async function loadDatabaseWorkspace() {
     authorLookup = null;
     renderApp();
     if (state.searchQuery.trim()) scheduleAdvancedSearch();
+    finishWorkspaceLoading();
   } catch (error) {
-    if (version === workspaceLoadVersion) showToast(error.message);
+    if (version === workspaceLoadVersion) {
+      const message = error.name === "AbortError" ? "Loading took too long. Please try again." : error.message;
+      if (!workspaceReady) {
+        workspaceLoading.dataset.error = "true";
+        document.getElementById("workspace-loading-title").textContent = "Couldn’t load your library";
+        document.getElementById("workspace-loading-message").textContent = message;
+        document.getElementById("workspace-loading-retry").hidden = false;
+        document.getElementById("workspace-loading-dismiss").hidden = false;
+      } else showToast(message);
+    }
+  } finally {
+    clearTimeout(timeout);
   }
 }
 void loadDatabaseWorkspace();

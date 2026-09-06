@@ -643,6 +643,20 @@ function renderPdfTable() {
   searchCount.textContent = hasSearch
     ? document.querySelector("#advanced-search-status").textContent || `${formatNumber(filteredPdfs.length)} search matches`
     : "";
+  const headingCount = document.querySelector("#selection-search-count");
+  headingCount.hidden = false;
+  if (hasSearch) {
+    headingCount.textContent = searchCount.textContent;
+  } else {
+    const selectedRepos = projects.flatMap(project =>
+      project.repos.filter(repo =>
+        (!state.selectedProject || project.id === state.selectedProject) &&
+        (!state.selectedRepos.size || state.selectedRepos.has(repositoryKey(project.id, repo.name)))
+      )
+    );
+    const totalPdfs = selectedRepos.reduce((sum, repo) => sum + (Number(repo.pdfCount) || 0), 0);
+    headingCount.textContent = `${formatNumber(totalPdfs)} PDFs · ${formatNumber(selectedRepos.length)} ${selectedRepos.length === 1 ? "repository" : "repositories"}`;
+  }
   const commitRange = getActiveCommitRange();
   const totalPages = Math.max(
     1,
@@ -726,6 +740,7 @@ function renderPeople() {
         `${person.name} ${person.email}`.toLocaleLowerCase().includes(query),
       )
     : scopedPeople;
+  renderCollapsedPeople(visiblePeople);
   elements.peopleCount.textContent = formatNumber(visiblePeople.length);
   elements.peopleEmptyState.hidden = visiblePeople.length > 0;
   elements.peopleEmptyCopy.textContent = query
