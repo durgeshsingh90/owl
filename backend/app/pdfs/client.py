@@ -48,6 +48,21 @@ class BitbucketClient:
         await self.client.aclose()
 
     async def request(self, path, params=None, raw=False):
+        url = str(httpx.URL(self.api + path, params=params))
+        try:
+            return await self._request(path, params, raw)
+        except BitbucketError as error:
+            error.request_url = url
+            event(
+                "bitbucket.request_failed",
+                level=40,
+                path=path,
+                request_url=url,
+                error=str(error),
+            )
+            raise
+
+    async def _request(self, path, params=None, raw=False):
         for attempt in range(3):
             started = time.monotonic()
             event("bitbucket.attempt", path=path, attempt=attempt + 1)

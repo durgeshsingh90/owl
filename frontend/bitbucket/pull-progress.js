@@ -1,5 +1,6 @@
 "use strict";
 const pullProgress = {active: false, completed: new Set(), failed: new Set(), timer: null, repositories: new Map(), found: new Map(), processed: new Map(), failedCounts: new Map()};
+pullProgress.timings = new Map();
 function pullRepoMark(projectId, repoName) {
   const status = pullProgress.repositories.get(JSON.stringify([String(projectId), repoName]));
   const marks = {
@@ -12,9 +13,15 @@ function pullRepoMark(projectId, repoName) {
   const found = pullProgress.found.get(JSON.stringify([String(projectId), repoName]));
   const processed = pullProgress.processed.get(JSON.stringify([String(projectId), repoName]));
   const failed = pullProgress.failedCounts.get(JSON.stringify([String(projectId), repoName]));
-  const label = found == null || status === "queued" ? baseLabel
+  let label = found == null || status === "queued" ? baseLabel
     : status === "scanning" ? `${baseLabel} · ${found} PDFs found`
     : `${baseLabel} · ${processed ?? 0}/${found} PDFs processed · ${failed ?? "—"} failed`;
+  const timing = pullProgress.timings.get(JSON.stringify([String(projectId), repoName]));
+  if (["processing", "retrying"].includes(status)) {
+    label += ` · ETA ${timing?.eta_seconds == null ? "calculating…" : formatEta(timing.eta_seconds)}`;
+  } else if (["succeeded", "failed", "cancelled"].includes(status) && timing?.processing_seconds != null) {
+    label += ` · Processing time ${formatEta(timing.processing_seconds)}`;
+  }
   return `<span class="repo-job-status repo-job-${status}" title="${label}" aria-label="${label}"><span aria-hidden="true">${icon}</span><span class="repo-job-label">${label}</span></span>`;
 }
 function formatEta(seconds) {
@@ -79,6 +86,8 @@ function watchCrawl(job) {
       const statusesChanged = statuses !== lastStatuses;
       if (statusesChanged) {
         lastStatuses = statuses;
+        pullProgress.timings = new Map(Object.values(current.repository_statuses || {}).map(repo =>
+          [JSON.stringify([String(repo.project_id), repo.repo]), repo]));
         pullProgress.failedCounts = new Map(Object.values(current.repository_statuses || {}).map(repo =>
           [JSON.stringify([String(repo.project_id), repo.repo]), repo.failed]));
         pullProgress.processed = new Map(Object.values(current.repository_statuses || {}).map(repo =>

@@ -87,7 +87,7 @@ def initialize(*, recover_jobs=False):
         columns = {
             row["name"] for row in db.execute("PRAGMA table_info(failed_documents)")
         }
-        for column in ("pdf_name", "url"):
+        for column in ("pdf_name", "url", "request_url"):
             if column not in columns:
                 db.execute(
                     f"ALTER TABLE failed_documents ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"

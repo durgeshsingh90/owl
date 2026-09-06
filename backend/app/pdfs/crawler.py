@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 import pymupdf
 from app.core.database import connection
+from app.core.logging import event
 from app.pdfs.client import BitbucketError
 
 
@@ -178,14 +179,28 @@ async def crawl_repository(client, project, repo, repository_id, progress, paths
             outcome = await process_pdf(client, project, repo, repository_id, path)
             progress[outcome] += 1
         except (BitbucketError, ValueError, OverflowError) as error:
+            request_url = getattr(error, "request_url", "")
+            event(
+                "crawl.pdf_failed",
+                level=40,
+                repository_id=repository_id,
+                project=project,
+                repo=repo,
+                path=path,
+                request_url=request_url,
+                url=client.base
+                + client.repo_path(project, repo)
+                + "/browse/"
+                + quote(path, safe="/"),
+            )
             progress["failed"] += 1
             progress["failure"](path)
             with connection() as db:
                 db.execute(
-                    """INSERT INTO failed_documents(repository_id,path,error,last_attempt,pdf_name,url)
-                              VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id,path) DO UPDATE SET
+                    """INSERT INTO failed_documents(repository_id,path,error,last_attempt,pdf_name,url,request_url)
+                              VALUES(?,?,?,?,?,?,?) ON CONFLICT(repository_id,path) DO UPDATE SET
                               error=excluded.error,last_attempt=excluded.last_attempt,attempts=attempts+1,
-                              pdf_name=excluded.pdf_name,url=excluded.url""",
+                              pdf_name=excluded.pdf_name,url=excluded.url,request_url=excluded.request_url""",
                     (
                         repository_id,
                         path,
@@ -198,6 +213,7 @@ async def crawl_repository(client, project, repo, repository_id, progress, paths
                         + client.repo_path(project, repo)
                         + "/browse/"
                         + quote(path, safe="/"),
+                        request_url,
                     ),
                 )
         progress["processed"] += 1

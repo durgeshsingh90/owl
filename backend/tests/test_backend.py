@@ -152,6 +152,7 @@ class BackendTests(unittest.TestCase):
         def fail_once(request):
             path = request.url.path
             if "/raw/" in path:
+                time.sleep(0.04)
                 attempts[path] = attempts.get(path, 0) + 1
                 if attempts[path] == 1:
                     return httpx.Response(403)
@@ -175,6 +176,9 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(next_repo_snapshot)
         self.assertTrue(all(snapshot == (2, 0) for snapshot in next_repo_snapshot))
         self.assertEqual(set(attempts.values()), {2})
+        for repository in job["repository_statuses"].values():
+            self.assertGreaterEqual(repository["processing_seconds"], 0.1)
+            self.assertIsNone(repository["eta_seconds"])
         self.assertEqual(
             [r["failed"] for r in job["repository_statuses"].values()], [0, 0]
         )
@@ -276,6 +280,66 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(
                 {r["path"] for r in db.execute("SELECT path FROM documents")},
                 {full_folder + "/Design #1 & 100%.PDF"},
+            )
+
+    def test_nas_compacted_folder_with_archive(self):
+        original = self.upstream
+        directory = (
+            "Business-Strategy-and-Governance/One-Work-Intake-Service/"
+            "TechOps-Project-Intake-Portal"
+        )
+        filename = "techops-project-intake-portal-ustraditional-tad.pdf"
+        visited = []
+
+        def nas_entries(request):
+            if "/browse/" not in request.url.path:
+                return original(request)
+            folder = request.url.path.split("/browse/", 1)[1]
+            visited.append(folder)
+            entries = {
+                "": [("DIRECTORY", directory)],
+                directory: [
+                    ("DIRECTORY", "Archive"),
+                    ("FILE", filename),
+                    ("FILE", filename.replace(".pdf", ".vsdx")),
+                ],
+                directory + "/Archive": [("FILE", "Previous version.PDF")],
+            }
+            if folder not in entries:
+                return httpx.Response(404)
+            return httpx.Response(
+                200,
+                json={
+                    "children": {
+                        "values": [
+                            {
+                                "type": kind,
+                                "path": {
+                                    "name": path.split("/")[-1],
+                                    "components": path.split("/"),
+                                    "toString": path,
+                                },
+                            }
+                            for kind, path in entries[folder]
+                        ],
+                        "isLastPage": True,
+                    }
+                },
+            )
+
+        self.upstream = nas_entries
+        job = self.crawl()
+        self.assertEqual(job["status"], "succeeded", job)
+        self.assertEqual((job["found"], job["processed"], job["new"]), (4, 4, 4))
+        self.assertEqual(job["folder_failures"], [])
+        self.assertIn(directory + "/Archive", visited)
+        with connection() as db:
+            self.assertEqual(
+                {r["path"] for r in db.execute("SELECT path FROM documents")},
+                {
+                    directory + "/" + filename,
+                    directory + "/Archive/Previous version.PDF",
+                },
             )
 
     def test_entry_path_formats_and_invalid_components(self):
@@ -708,6 +772,10 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(job["failed"], 0)
         self.assertEqual(job["repositories_failed"], 2)
         self.assertEqual(len(job["folder_failures"]), 2)
+        for failure in job["folder_failures"]:
+            self.assertIn("/rest/api/1.0/projects/DEMO/repos/", failure["request_url"])
+            self.assertIn("/browse/broken?limit=100&start=0", failure["request_url"])
+            self.assertTrue(failure["url"].endswith("/browse/broken"))
         self.assertTrue(
             all(
                 f["path"] == "broken" and "404" in f["error"]

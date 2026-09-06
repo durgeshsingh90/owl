@@ -89,7 +89,7 @@ svg {
   inset: 0 0 auto 0;
   z-index: 20;
   display: grid;
-  grid-template-columns: var(--left-width) minmax(160px, 0.7fr) minmax(320px, 1fr) auto;
+  grid-template-columns: var(--left-width) minmax(0, 1fr) auto auto;
   column-gap: 16px;
   align-items: center;
   height: var(--topbar-height);
@@ -223,6 +223,7 @@ svg {
 }
 
 .topbar-status {
+  grid-column: 4;
   display: flex;
   justify-content: flex-end;
   align-items: center;

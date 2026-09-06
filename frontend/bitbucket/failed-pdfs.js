@@ -19,6 +19,15 @@
       for (const failure of job?.folder_failures || []) {
         const item = document.createElement("li");
         item.textContent = `${failure.project} / ${failure.repo} / ${failure.path}: ${failure.error}`;
+        for (const [label, url] of [["Browse URL", failure.url], ["Failed request URL", failure.request_url]]) {
+          if (!url) continue;
+          const line = document.createElement("div");
+          line.textContent = `${label}: ${url} `;
+          line.style.overflowWrap = "anywhere";
+          const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy";
+          copy.onclick = async () => {try {await copyText(url); showToast("URL copied");} catch {showToast("Unable to copy URL", false);}};
+          line.append(copy); item.append(line);
+        }
         folderList.append(item);
       }
       document.querySelector("#failed-folders-section").hidden = !folderList.children.length;
@@ -42,6 +51,13 @@
               catch {showToast("Unable to copy URL", false);}
             };
             cell.replaceChildren(link, document.createElement("br"), copy);
+          }
+          if (key === "url" && failure.request_url) {
+            const request = document.createElement("div");
+            request.textContent = `Failed request URL: ${failure.request_url}`;
+            const copy = document.createElement("button"); copy.type = "button"; copy.textContent = "Copy request URL";
+            copy.onclick = async () => {try {await copyText(failure.request_url); showToast("Request URL copied");} catch {showToast("Unable to copy URL", false);}};
+            cell.append(request, copy);
           }
           cell.style.cssText = "padding:8px;overflow-wrap:anywhere;white-space:normal";
           row.append(cell);

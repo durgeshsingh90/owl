@@ -6,6 +6,7 @@ import sqlite3
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 
 from app.core.config import load_settings
 from app.core.database import connection, database_path, repository_url
@@ -243,11 +244,20 @@ class Jobs:
                         if isinstance(error, BitbucketError)
                         else "Folder discovery failed; check backend logs."
                     )
+                    url = (
+                        client.base
+                        + client.repo_path(project, slug)
+                        + "/browse/"
+                        + quote(folder, safe="/")
+                    )
+                    request_url = getattr(error, "request_url", "")
                     p["folder_failures"].append(
                         {
                             "project": project,
                             "repo": slug,
                             "path": folder or "/",
+                            "url": url,
+                            "request_url": request_url,
                             "error": message,
                         }
                     )
@@ -258,6 +268,8 @@ class Jobs:
                         project=project,
                         repo=slug,
                         path=folder or "/",
+                        url=url,
+                        request_url=request_url,
                         error=message,
                     )
                     self.save()
@@ -447,8 +459,17 @@ class Jobs:
             for repo in repos:
                 paths = await discover(*repo)
                 if paths is not None:
-                    await scan(*repo, paths)
-                    await retry_repository_failures(*repo)
+                    repo_processing_started = time.monotonic()
+                    repository = p["repository_statuses"][str(repo[2])]
+                    try:
+                        await scan(*repo, paths)
+                        await retry_repository_failures(*repo)
+                    finally:
+                        repository["processing_seconds"] = round(
+                            time.monotonic() - repo_processing_started, 1
+                        )
+                        repository["eta_seconds"] = None
+                        self.save()
                     p["repositories_done"] += 1
                     self.save()
             p["discovery_complete"] = True
