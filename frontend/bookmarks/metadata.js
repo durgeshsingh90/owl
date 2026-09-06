@@ -22,7 +22,7 @@ document.querySelector("#bookmark-search-form").addEventListener("submit", async
     }
     bookmarks.push({...data,id:nextBookmarkId(),views:0,lastViewed:null,added:Date.now(),favorite:false,pinned:false,custom:true});
     if (!await persist()) throw Error("Bookmark has not been saved. Reload to resolve a conflicting edit, then add it again.");
-    view="all";domain="";selectedDomainGroup="";selectedPerson="";query="";
+    view="all";domain=data.sourceType === "confluence" ? "" : data.domain;selectedDomainGroup="";selectedPerson="";query="";
     input.value="";button.hidden=true;render();
     toast("Bookmark and page details saved.");
   } catch(error) {toast(error.message);}

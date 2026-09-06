@@ -3,7 +3,7 @@
 from urllib.parse import parse_qs
 
 from app.bookmarks import confluence
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -72,3 +72,105 @@ class BookmarkURL(BaseModel):
 @router.post("/api/bookmarks/resolve")
 async def resolve(value: BookmarkURL):
     return await confluence.metadata(value.url)
+
+
+class FolderDownload(BaseModel):
+    folder_key: str
+    space_key: str = ""
+    root_title: str = ""
+    base_url: str = ""
+    root_ids: list[str] = []
+
+
+@router.get("/api/bookmarks/downloads")
+def folder_downloads():
+    from app.core.database import connection
+
+    with connection() as db:
+        return [dict(row) for row in db.execute("SELECT * FROM bookmark_downloads")]
+
+
+@router.post("/api/bookmarks/downloads", status_code=202)
+async def start_folder_download(
+    value: FolderDownload, background_tasks: BackgroundTasks
+):
+    from app.bookmarks.downloads import download, stamp
+    from app.core.database import connection
+    from fastapi import HTTPException
+
+    settings = confluence.load()
+    if value.base_url and value.base_url.rstrip("/") != settings.base_url.rstrip("/"):
+        raise HTTPException(
+            422, "Configure the Confluence connection for this folder first."
+        )
+    if (
+        not value.folder_key
+        or (not value.space_key and not value.root_ids)
+        or any(not root.isdecimal() for root in value.root_ids)
+    ):
+        raise HTTPException(
+            422, "This folder has no resolvable Confluence page or space."
+        )
+    with connection() as db:
+        row = db.execute(
+            "SELECT status FROM bookmark_downloads WHERE folder_key=?",
+            (value.folder_key,),
+        ).fetchone()
+        if row and row[0] == "running":
+            return {"status": "running"}
+        db.execute(
+            "INSERT OR REPLACE INTO bookmark_downloads VALUES(?,'running',0,NULL,?)",
+            (value.folder_key, stamp()),
+        )
+    background_tasks.add_task(
+        download,
+        settings,
+        value.folder_key,
+        value.space_key,
+        value.root_ids,
+        value.root_title,
+    )
+    return {"status": "running"}
+
+
+@router.get("/api/bookmarks/downloaded-search")
+def downloaded_search(
+    q: str = "",
+    fields: str = "title,url,content,page_id",
+    mode: str = "separate",
+    include_all: bool = False,
+):
+    from app.core.database import connection
+
+    selected = [
+        field
+        for field in fields.split(",")
+        if field in {"title", "url", "content", "page_id"}
+    ]
+    terms = ([q.strip()] if mode == "together" else q.split()) if q.strip() else []
+    if (not terms and not include_all) or (terms and not selected):
+        return {"total": 0, "items": []}
+    clauses, params = [], []
+    for field in selected:
+        for term in terms:
+            clauses.append(f"instr(lower({field}), lower(?)) > 0")
+            params.append(term)
+    condition = " OR ".join(clauses) or "1=1"
+    with connection() as db:
+        rows = db.execute(
+            f"SELECT page_id,title,url,folder_path,folder_key FROM bookmark_downloaded_pages WHERE {condition} ORDER BY title",
+            params,
+        ).fetchall()
+    import json
+
+    unique = {}
+    for row in rows:
+        item = dict(row)
+        item["folderPath"] = json.loads(item.pop("folder_path"))
+        if not item["folderPath"]:
+            try:
+                item["folderPath"] = json.loads(item["folder_key"])[1:]
+            except (ValueError, TypeError):
+                item["folderPath"] = ["Downloaded pages"]
+        unique.setdefault(item["url"], item)
+    return {"total": len(unique), "items": list(unique.values())}

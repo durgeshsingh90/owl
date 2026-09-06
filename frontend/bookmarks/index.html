@@ -4,9 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>OWL · Bookmarks Manager</title>
+    <link rel="icon" type="image/png" href="../bitbucket/assets/owl.png" />
     <script src="../bitbucket/theme.js"></script>
     <link rel="stylesheet" href="../bitbucket/style.css" />
-    <link rel="stylesheet" href="style.css?v=details-width-8" />
+    <link rel="stylesheet" href="style.css?v=tree-search-count-14" />
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&amp;icon_names=settings,sync"
@@ -170,7 +171,7 @@
             <div class="selection-breadcrumb">
               Bookmarks / <span id="view-breadcrumb">All bookmarks</span>
             </div>
-            <h2 id="bookmark-title">Bookmark Tree</h2>
+            <h2 id="bookmark-title">Bookmark Tree <span id="bookmark-search-count" aria-live="polite" hidden></span></h2>
             <p id="bookmark-summary" aria-live="polite"></p>
           </div>
           <span id="bookmark-last-update" class="bookmark-last-update"
@@ -186,6 +187,7 @@
               hidden
             ></span>
             <div class="tree-toolbar-controls">
+              <label title="Reveal downloaded pages without adding them to saved bookmarks"><input id="show-downloaded-pages" type="checkbox"> Show downloaded pages</label>
               <div
                 class="bookmark-bulk"
                 role="group"
@@ -501,9 +503,10 @@
     <div id="bookmark-toast" role="status" aria-live="polite"></div>
     <script src="domain-groups.js"></script>
     <script src="search.js?v=1"></script>
-    <script src="script.js?v=bookmark-tree-roots-2"></script>
-    <script src="database.js?v=confluence-live-2"></script>
-    <script src="metadata.js?v=confluence-live-2"></script>
+    <script src="folder-downloads.js?v=4"></script>
+    <script src="script.js?v=tree-search-count-9"></script>
+    <script src="database.js?v=folder-stars-4"></script>
+    <script src="metadata.js?scope=confluence&v=confluence-live-2"></script>
     <script src="connection.js?v=confluence-live-2"></script>
     <script src="settings.js?v=confluence-live-2"></script>
     <script src="json-transfer.js?v=1"></script>

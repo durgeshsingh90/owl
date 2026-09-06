@@ -21,6 +21,8 @@
             bookmarks,
             groups: domainGroups,
             notes: localPageNotes,
+            starred_people: [...starredConfluencePeople],
+            starred_folders: [...starredBookmarkFolders],
           }),
         });
         if (!response.ok)
@@ -89,6 +91,8 @@
       bookmarks.splice(0, bookmarks.length, ...data.bookmarks);
       domainGroups = data.groups;
       Object.assign(localPageNotes, data.notes);
+      starredBookmarkFolders = new Set(data.starred_folders || []);
+      starredConfluencePeople = new Set((data.starred_people || []).map(confluencePersonKey));
       revision = data.revision;
       ready = true;
       window.bookmarkDatabaseReady = true;

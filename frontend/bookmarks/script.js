@@ -29,30 +29,33 @@ let view = "all",
   selectedPerson = "",
   personRole = "any",
   peopleQuery = "";
+let starredConfluencePeople = new Set();
+let starredBookmarkFolders = new Set();
+function confluencePersonKey(name) {
+  return String(name || "").normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
 function matchesPerson(item) {
   return (
     !selectedPerson ||
-    (personRole !== "updated" && item.author === selectedPerson) ||
-    (personRole !== "written" && item.lastEditor === selectedPerson)
+    (personRole !== "updated" && confluencePersonKey(item.author) === confluencePersonKey(selectedPerson)) ||
+    (personRole !== "written" && confluencePersonKey(item.lastEditor) === confluencePersonKey(selectedPerson))
   );
 }
 function renderConfluencePeople(scoped) {
   const counts = new Map();
   for (const item of scoped) {
-    if (item.author) {
-      const person = counts.get(item.author) || { written: 0, updated: 0 };
-      person.written++;
-      counts.set(item.author, person);
-    }
-    if (item.lastEditor) {
-      const person = counts.get(item.lastEditor) || { written: 0, updated: 0 };
-      person.updated++;
-      counts.set(item.lastEditor, person);
+    for (const [name, role] of [[item.author, "written"], [item.lastEditor, "updated"]]) {
+      const key = confluencePersonKey(name);
+      if (!key) continue;
+      const person = counts.get(key) || { name: String(name).normalize("NFKC").trim().replace(/\s+/g, " "), written: 0, updated: 0 };
+      person[role]++;
+      counts.set(key, person);
     }
   }
-  const people = [...counts]
-    .filter(([name]) => name.toLowerCase().includes(peopleQuery))
-    .sort(([a], [b]) => a.localeCompare(b));
+  const people = [...counts.values()]
+    .filter(person => confluencePersonKey(person.name).includes(confluencePersonKey(peopleQuery)))
+    .sort((a,b) => Number(starredConfluencePeople.has(confluencePersonKey(b.name))) - Number(starredConfluencePeople.has(confluencePersonKey(a.name))) || a.name.localeCompare(b.name))
+    .map(person => [person.name, person]);
   document.querySelector("#confluence-people-count").textContent =
     people.length;
   document
@@ -66,7 +69,7 @@ function renderConfluencePeople(scoped) {
             .split(" ")
             .map((part) => part[0])
             .join(""),
-        )}</span><strong>${esc(name)}</strong></button><div class="person-page-counts"><button data-person="${esc(name)}" data-role="written" aria-pressed="${selectedPerson === name && personRole === "written"}" title="Filter pages written by ${esc(name)}">${counts.written} written</button><button data-person="${esc(name)}" data-role="updated" aria-pressed="${selectedPerson === name && personRole === "updated"}" title="Filter pages whose latest editor is ${esc(name)}">${counts.updated} updated</button></div></article>`,
+        )}</span><strong>${esc(name)}</strong></button><button type="button" class="confluence-person-star" data-star-confluence-person="${esc(confluencePersonKey(name))}" aria-label="${starredConfluencePeople.has(confluencePersonKey(name)) ? "Unstar" : "Star"} ${esc(name)}" aria-pressed="${starredConfluencePeople.has(confluencePersonKey(name))}" title="${starredConfluencePeople.has(confluencePersonKey(name)) ? "Unstar" : "Star"} person">${starredConfluencePeople.has(confluencePersonKey(name)) ? "★" : "☆"}</button><div class="person-page-counts"><button data-person="${esc(name)}" data-role="written" aria-pressed="${selectedPerson === name && personRole === "written"}" title="Filter pages written by ${esc(name)}">${counts.written} written</button><button data-person="${esc(name)}" data-role="updated" aria-pressed="${selectedPerson === name && personRole === "updated"}" title="Filter pages whose latest editor is ${esc(name)}">${counts.updated} updated</button></div></article>`,
     )
     .join("");
   document.querySelector("#confluence-people-empty").hidden = people.length > 0;
@@ -89,6 +92,7 @@ const esc = (value) =>
       ],
   );
 function matches(item, key) {
+  if (item.sourceType !== "confluence") return false;
   return (
     key === "all" ||
     (key === "favorite" && item.favorite) ||
@@ -133,6 +137,22 @@ function confluenceAge(value, asOf = Date.now()) {
   const days = Math.floor((today - then) / day);
   return days === 0 ? "today" : days === 1 ? "1 day ago" : `${days} days ago`;
 }
+function confluenceAgeBadge(value, asOf = Date.now()) {
+  const label = confluenceAge(value, asOf);
+  let tone = "";
+  if (label !== "date unavailable") {
+    const created = new Date(owlCalendarDay(value));
+    const today = owlCalendarDay(asOf);
+    const anniversary = months => {
+      const result = new Date(Date.UTC(created.getUTCFullYear(), created.getUTCMonth() + months, 1));
+      const lastDay = new Date(Date.UTC(result.getUTCFullYear(), result.getUTCMonth() + 1, 0)).getUTCDate();
+      result.setUTCDate(Math.min(created.getUTCDate(), lastDay));
+      return result.getTime();
+    };
+    tone = today < anniversary(3) ? "age-green" : today < anniversary(6) ? "age-orange" : "";
+  }
+  return `<span class="confluence-age ${tone}">${esc(label)}</span>`;
+}
 function bookmarkAgeTag(value, kind, asOf = Date.now()) {
   if (value === null || value === undefined) return "";
   const created = owlCalendarDay(value),
@@ -163,7 +183,9 @@ function bookmarkAgeTag(value, kind, asOf = Date.now()) {
 const pageHierarchy = {};
 const collapsedBranches = new Set();
 let treeFilterKey = "";
-function renderBookmarkTree(filtered) {
+function renderBookmarkTree(filtered, downloaded = [], scheduleSearch = true) {
+  const treeItems = [...bookmarks, ...downloaded];
+  filtered = [...filtered, ...downloaded];
   const key = JSON.stringify([
     view,
     domain,
@@ -192,7 +214,7 @@ function renderBookmarkTree(filtered) {
     }
   }
   const groups = new Map();
-  for (const item of bookmarks) {
+  for (const item of treeItems) {
     if (!included.has(item.id)) continue;
     const hierarchy = pageHierarchy[item.id];
     const path = hierarchy
@@ -209,6 +231,7 @@ function renderBookmarkTree(filtered) {
   }
   const order = new Map(filtered.map((item, index) => [item.id, index]));
   function entry(item, number, list, visited = new Set()) {
+    if (item.searchOnly) return `<li class="tree-node search-only-page"><div class="tree-leaf"><span class="tree-number">${number}</span><span class="tree-page-icon" aria-hidden="true">▤</span><a class="tree-title" href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a><span class="tree-context">Downloaded page</span></div></li>`;
     if (visited.has(item.id)) return "";
     const next = new Set(visited);
     next.add(item.id);
@@ -218,7 +241,7 @@ function renderBookmarkTree(filtered) {
     const context = !matching.has(item.id),
       branch = "page-" + item.id;
     const title = `<span class="tree-row-heading"><span class="tree-name-group"><input class="bookmark-checkbox" type="checkbox" data-select-bookmark="${item.id}" aria-label="Select ${esc(item.title)}" ${selectedBookmarks.has(item.id) ? "checked" : ""} ${context ? "disabled" : ""}><span class="tree-number">${number}</span><span class="tree-page-icon" aria-hidden="true">▤</span><a class="tree-title tree-select" data-open="${item.id}" href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a>${context ? '<span class="tree-context">Parent context</span>' : ""}</span><span class="tree-heading-meta"><span class="bookmark-open-count">${item.views} ${item.views === 1 ? "open" : "opens"}</span>${bookmarkAgeTag(item.added, "new")}${bookmarkAgeTag(item.updatedInOwlAt, "updated")}</span></span>`;
-    const metadata = `<div class="tree-page-content" tabindex="0" aria-label="Show details for ${esc(item.title)}"><div class="bookmark-actions"><button class="bookmark-action" data-favorite="${item.id}" aria-label="${item.favorite ? "Unfavourite" : "Favourite"} ${esc(item.title)}" aria-pressed="${item.favorite}" title="${item.favorite ? "Remove from favourites" : "Add to favourites"}"><svg class="bookmark-star" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.3.9-4.6 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3L3 9.6l6.2-.9L12 3Z"/></svg></button><button class="bookmark-action" data-pin="${item.id}" aria-label="${item.pinned ? "Unpin" : "Pin"} ${esc(item.title)}" aria-pressed="${item.pinned}" title="Pin">♧</button><button class="bookmark-action" data-copy="${item.id}" aria-label="Copy URL for ${esc(item.title)}" title="Copy URL">⧉</button></div>${item.author ? `<div class="tree-authors"><span title="Confluence page created: ${esc(date(item.writtenAt))}">Written by ${esc(item.author)}</span> · <span title="Confluence page last edited: ${esc(date(item.confluenceUpdatedAt))}">Updated by ${esc(item.lastEditor)}</span></div>` : ""}</div>`;
+    const metadata = `<div class="tree-page-content" tabindex="0" aria-label="Show details for ${esc(item.title)}"><div class="bookmark-actions"><button class="bookmark-action" data-favorite="${item.id}" aria-label="${item.favorite ? "Unfavourite" : "Favourite"} ${esc(item.title)}" aria-pressed="${item.favorite}" title="${item.favorite ? "Remove from favourites" : "Add to favourites"}"><svg class="bookmark-star" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.3.9-4.6 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3L3 9.6l6.2-.9L12 3Z"/></svg></button><button class="bookmark-action" data-pin="${item.id}" aria-label="${item.pinned ? "Unpin" : "Pin"} ${esc(item.title)}" aria-pressed="${item.pinned}" title="Pin">♧</button><button class="bookmark-action" data-copy="${item.id}" aria-label="Copy URL for ${esc(item.title)}" title="Copy URL">⧉</button></div>${item.author ? `<div class="tree-authors"><span title="Confluence page created: ${esc(date(item.writtenAt))}">Written by ${esc(item.author)} · ${confluenceAgeBadge(item.writtenAt)}</span> · <span title="Confluence page last edited: ${esc(date(item.confluenceUpdatedAt))}">Updated by ${esc(item.lastEditor || "Unknown")} · ${confluenceAgeBadge(item.confluenceUpdatedAt)}</span></div>` : ""}</div>`;
     return `<li data-bookmark-row="${item.id}" class="tree-node ${selectedBookmarkId === item.id ? "details-selected" : ""} ${context ? "context-node" : ""}">${children.length ? `<details data-branch="${branch}" ${collapsedBranches.has(branch) ? "" : "open"}><summary>${title}</summary>${metadata}<ul>${children.map((child, index) => entry(child, number + "." + (index + 1), list, next)).join("")}</ul></details>` : `<div class="tree-leaf">${title}</div>${metadata}`}</li>`;
   }
   const folders = { children: new Map(), pages: [] };
@@ -250,7 +273,10 @@ function renderBookmarkTree(filtered) {
     );
   }
   function folderMarkup(folder, name, path, number) {
+    const downloadButton = window.bookmarkFolderDownloadButton ? bookmarkFolderDownloadButton(path) : "";
     const branch = "folder-" + JSON.stringify(path);
+    const folderStarred = starredBookmarkFolders.has(branch);
+    const starButton = `<button type="button" class="bookmark-folder-star" data-star-folder="${esc(branch)}" aria-pressed="${folderStarred}" aria-label="${folderStarred ? "Unstar" : "Star"} folder ${esc(name)}" title="${folderStarred ? "Unstar" : "Star"} folder">${folderStarred ? "★" : "☆"}</button>`;
     const roots = folder.pages
       .filter(
         (item) =>
@@ -264,13 +290,14 @@ function renderBookmarkTree(filtered) {
           `<li class="nested-bookmark-folder">${folderMarkup(child, childName, [...path, childName], number + "." + (index + 1))}</li>`,
       )
       .join("");
-    return `<details class="tree-space" data-branch="${esc(branch)}" ${collapsedBranches.has(branch) ? "" : "open"}><summary><span class="tree-number">${number}</span><span class="tree-folder" aria-hidden="true">▱</span><strong>${esc(name)}</strong><span class="tree-count">${folderCount(folder)} bookmarks</span><span class="tree-folder-opens">${folderOpens(folder)} opens</span><span class="tree-folder-label">Folder</span></summary><ul>${children}${roots.map((item, index) => entry(item, number + "." + (folder.children.size + index + 1), folder.pages)).join("")}</ul></details>`;
+    return `<details class="tree-space" data-branch="${esc(branch)}" ${collapsedBranches.has(branch) ? "" : "open"}><summary><span class="tree-number">${number}</span><span class="tree-folder" aria-hidden="true">▱</span><strong>${esc(name)}</strong><span class="tree-count">${folderCount(folder)} bookmarks</span><span class="tree-folder-opens">${folderOpens(folder)} opens</span><span class="tree-folder-label">Folder</span>${starButton}${downloadButton}</summary><ul>${children}${roots.map((item, index) => entry(item, number + "." + (folder.children.size + index + 1), folder.pages)).join("")}</ul></details>`;
   }
   document.querySelector("#bookmark-tree").innerHTML = [...folders.children]
     .map(([name, folder], index) =>
       folderMarkup(folder, name, [name], String(index + 1)),
     )
     .join("");
+  if (scheduleSearch) window.searchDownloadedBookmarkPages?.(filtered);
 }
 let selectedBookmarkId = null;
 const localPageNotes = {};
@@ -385,6 +412,17 @@ document
     }
   });
 document.querySelector("#bookmark-tree").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-star-folder]");
+  if (!button) return;
+  event.preventDefault();
+  if (!window.bookmarkDatabaseReady) { toast("Wait for the database to load."); return; }
+  const key = button.dataset.starFolder;
+  if (starredBookmarkFolders.has(key)) starredBookmarkFolders.delete(key);
+  else starredBookmarkFolders.add(key);
+  void window.saveBookmarkDatabase();
+  render();
+});
+document.querySelector("#bookmark-tree").addEventListener("click", (event) => {
   if (event.target.closest("a,button,input")) return;
   const row = event.target.closest("[data-bookmark-row]");
   if (row) showPageDetails(Number(row.dataset.bookmarkRow));
@@ -422,13 +460,18 @@ document.querySelector("#page-note").addEventListener("blur", () => {
   render();
   if (selectedBookmarkId !== null) showPageDetails(selectedBookmarkId);
 });
+function updateBookmarkSearchCount(total, pending = false) {
+  const badge = document.getElementById("bookmark-search-count");
+  badge.hidden = !query.trim();
+  badge.textContent = `${total.toLocaleString()} ${total === 1 ? "match" : "matches"}${pending ? " · searching…" : ""}`;
+}
 function render() {
   for (const key of Object.keys(pageHierarchy)) delete pageHierarchy[key];
   for (const item of bookmarks) if (item.sourceType === "confluence") pageHierarchy[item.id] = {space:item.space, parent:null};
   document.querySelector("#bookmark-views").innerHTML = views
     .map(
       ([key, label, icon]) =>
-        `<button class="side-link" data-view="${key}" aria-label="${label}" title="${label}" aria-pressed="${view === key}"><span class="nav-symbol" aria-hidden="true">${icon}</span><span class="view-name">${label}</span><span class="count">${bookmarks.filter((item) => matches(item, key)).length}</span></button>`,
+        `<button class="side-link" data-view="${key}" aria-label="${label}" title="${label}" aria-pressed="${view === key && !domain && !selectedDomainGroup}"><span class="nav-symbol" aria-hidden="true">${icon}</span><span class="view-name">${label}</span><span class="count">${bookmarks.filter((item) => matches(item, key)).length}</span></button>`,
     )
     .join("");
   renderDomainGroups();
@@ -444,12 +487,11 @@ function render() {
     .join("");
   document.querySelector("#clear-domain").hidden =
     !domain && !selectedDomainGroup;
-  const label = views.find((item) => item[0] === view)[1];
-  document.querySelector("#bookmark-title").textContent = "Bookmark Tree";
+  const label = domain || (selectedDomainGroup ? domainGroups.find(group => group.id === selectedDomainGroup)?.name : "") || views.find((item) => item[0] === view)[1];
   document.querySelector("#view-breadcrumb").textContent = label;
   const scoped = bookmarks.filter(
     (item) =>
-      matches(item, view) &&
+      ((domain || selectedDomainGroup) ? true : matches(item, view)) &&
       (!domain || item.domain === domain) &&
       matchesDomainGroup(item) &&
       matchesBookmarkSearch(item),
@@ -482,6 +524,7 @@ function render() {
         : view === "never"
           ? "Bookmarks you have not opened yet"
           : "Your saved pages, in one place.";
+  updateBookmarkSearchCount(filtered.length, Boolean(query.trim()));
   renderBookmarkTree(filtered);
   document.querySelector("#bookmark-empty").hidden = filtered.length > 0;
   document.querySelector("#bookmark-total").textContent =
@@ -524,6 +567,16 @@ document
 document
   .querySelector("#confluence-people")
   .addEventListener("click", (event) => {
+    const star = event.target.closest("[data-star-confluence-person]");
+    if (star) {
+      if (!window.bookmarkDatabaseReady) { toast("Wait for the database to load."); return; }
+      const key = star.dataset.starConfluencePerson;
+      if (starredConfluencePeople.has(key)) starredConfluencePeople.delete(key);
+      else starredConfluencePeople.add(key);
+      void window.saveBookmarkDatabase();
+      render();
+      return;
+    }
     const button = event.target.closest("[data-person]");
     if (!button) return;
     selectedPerson = button.dataset.person;
@@ -553,6 +606,8 @@ document.addEventListener("click", async (event) => {
   if (!button) return;
   if (button.dataset.view) {
     view = button.dataset.view;
+    domain = "";
+    selectedDomainGroup = "";
     document.querySelector("#bookmark-sort").value =
       view === "frequent" ? "opens" : view === "recent" ? "viewed" : "added";
     render();
@@ -560,6 +615,8 @@ document.addEventListener("click", async (event) => {
   }
   if (button.dataset.domain) {
     selectedDomainGroup = "";
+    selectedPerson = "";
+    view = "all";
     domain = domain === button.dataset.domain ? "" : button.dataset.domain;
     render();
     return;

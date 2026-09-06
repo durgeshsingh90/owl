@@ -32,6 +32,14 @@ def initialize(*, recover_jobs=False):
     with connection() as db:
         db.execute("PRAGMA journal_mode=WAL")
         db.executescript("""
+        CREATE TABLE IF NOT EXISTS bookmark_downloads (
+            folder_key TEXT PRIMARY KEY, status TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0,
+            error TEXT, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS bookmark_downloaded_pages (
+            folder_key TEXT NOT NULL, page_id TEXT NOT NULL, title TEXT NOT NULL,
+            url TEXT NOT NULL, content TEXT NOT NULL, PRIMARY KEY(folder_key,page_id)
+        );
         CREATE TABLE IF NOT EXISTS pull_activity (
             id TEXT PRIMARY KEY, started_at TEXT NOT NULL, payload TEXT NOT NULL
         );
@@ -70,6 +78,13 @@ def initialize(*, recover_jobs=False):
             id TEXT PRIMARY KEY, status TEXT NOT NULL, progress TEXT NOT NULL
         );
         """)
+        if "folder_path" not in {
+            row["name"]
+            for row in db.execute("PRAGMA table_info(bookmark_downloaded_pages)")
+        }:
+            db.execute(
+                "ALTER TABLE bookmark_downloaded_pages ADD COLUMN folder_path TEXT NOT NULL DEFAULT '[]'"
+            )
         repository_columns = {
             row["name"] for row in db.execute("PRAGMA table_info(repositories)")
         }
@@ -141,6 +156,9 @@ def initialize(*, recover_jobs=False):
                 (PurePosixPath(row["path"]).name, url, row["id"]),
             )
         if recover_jobs:
+            db.execute(
+                "UPDATE bookmark_downloads SET status='failed',error='Download interrupted. Click to retry.' WHERE status='running'"
+            )
             db.execute(
                 "UPDATE jobs SET status='interrupted' WHERE status IN ('queued','running')"
             )

@@ -46,6 +46,143 @@ class BookmarkTests(unittest.TestCase):
         self.env.stop()
         self.temp.cleanup()
 
+    def test_folder_download_keeps_pages_out_of_bookmarks_and_searches_text(self):
+        self.client.post("/bookmarks/settings/save/", data=self.settings)
+        from unittest.mock import AsyncMock
+
+        from app.core.database import connection
+
+        page = {
+            "id": "123",
+            "title": "Guide",
+            "body": {"view": {"value": "<p>azure deployment</p>"}},
+        }
+        with (
+            patch(
+                "app.bookmarks.confluence.resolved_content",
+                new=AsyncMock(return_value=page),
+            ),
+            patch(
+                "app.bookmarks.confluence.get",
+                new=AsyncMock(
+                    side_effect=[
+                        {
+                            "results": [{"id": "123"}],
+                            "_links": {"next": "?start=1&limit=100"},
+                        },
+                        {"results": [{"id": "456"}], "_links": {}},
+                    ]
+                ),
+            ) as listing,
+        ):
+            response = self.client.post(
+                "/api/bookmarks/downloads",
+                json={"folder_key": "test-space", "space_key": "CLOUD"},
+            )
+        self.assertEqual(response.status_code, 202)
+        status = self.client.get("/api/bookmarks/downloads").json()[0]
+        self.assertEqual((status["status"], status["count"]), ("completed", 2))
+        self.assertEqual(listing.call_args_list[1].args[2]["start"], "1")
+        matches = self.client.get(
+            "/api/bookmarks/downloaded-search",
+            params={"q": "azure", "fields": "content"},
+        ).json()
+        self.assertEqual(matches["total"], 2)
+        self.assertEqual(
+            self.client.get("/api/bookmarks/downloaded-search").json()["total"], 0
+        )
+        self.assertEqual(
+            self.client.get(
+                "/api/bookmarks/downloaded-search", params={"include_all": "true"}
+            ).json()["total"],
+            2,
+        )
+        self.assertEqual(
+            self.client.get(
+                "/api/bookmarks/downloaded-search",
+                params={"include_all": "true", "q": "no-match"},
+            ).json()["total"],
+            0,
+        )
+        self.assertEqual(
+            self.client.get(
+                "/api/bookmarks/downloaded-search",
+                params={"q": "azure", "fields": "title"},
+            ).json()["total"],
+            0,
+        )
+        with connection() as db:
+            self.assertEqual(
+                json.loads(
+                    db.execute("SELECT payload FROM bookmark_workspace").fetchone()[0]
+                )["bookmarks"],
+                [],
+            )
+        with patch(
+            "app.bookmarks.confluence.get",
+            new=AsyncMock(side_effect=ValueError("failure")),
+        ):
+            self.client.post(
+                "/api/bookmarks/downloads",
+                json={"folder_key": "test-space", "space_key": "CLOUD"},
+            )
+        self.assertEqual(
+            self.client.get("/api/bookmarks/downloads").json()[0]["status"], "failed"
+        )
+        self.assertEqual(
+            self.client.get(
+                "/api/bookmarks/downloaded-search", params={"q": "azure"}
+            ).json()["total"],
+            2,
+        )
+
+    def test_folder_title_resolves_parent_and_downloads_descendants(self):
+        from unittest.mock import AsyncMock
+
+        self.client.post("/bookmarks/settings/save/", data=self.settings)
+        page = {
+            "title": "Downloaded",
+            "body": {"view": {"value": "<p>search text</p>"}},
+        }
+        with (
+            patch(
+                "app.bookmarks.confluence.resolved_content",
+                new=AsyncMock(return_value=page),
+            ),
+            patch(
+                "app.bookmarks.confluence.get",
+                new=AsyncMock(
+                    side_effect=[
+                        {"results": [{"id": "123"}]},
+                        {"results": [{"id": "456"}], "_links": {}},
+                    ]
+                ),
+            ) as get,
+        ):
+            self.client.post(
+                "/api/bookmarks/downloads",
+                json={
+                    "folder_key": "guides",
+                    "space_key": "CLOUD",
+                    "root_title": "Guides",
+                },
+            )
+        self.assertEqual(get.call_args_list[0].args[2]["title"], "Guides")
+        self.assertEqual(get.call_args_list[1].args[1], "content/123/descendant/page")
+        self.assertEqual(
+            self.client.get("/api/bookmarks/downloads").json()[0]["count"], 2
+        )
+
+    def test_folder_stars_persist_in_workspace(self):
+        data = self.client.get("/api/bookmarks/workspace").json()
+        data["starred_folders"] = ['folder-["Engineering","Guides"]']
+        response = self.client.put("/api/bookmarks/workspace", json=data)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self.client.get("/api/bookmarks/workspace").json()["starred_folders"],
+            data["starred_folders"],
+        )
+
     def upstream(self, request):
         self.calls.append(request)
         if self.code != 200:

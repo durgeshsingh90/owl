@@ -61,6 +61,8 @@ document.addEventListener("DOMContentLoaded", () => {
       const button = event.target.closest("[data-domain-group]");
       if (button) {
         selectedDomainGroup = button.dataset.domainGroup;
+        selectedPerson = "";
+        view = "all";
         domain = "";
         render();
       }

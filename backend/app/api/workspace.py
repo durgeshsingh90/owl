@@ -14,6 +14,8 @@ class BookmarkWorkspace(BaseModel):
     bookmarks: list[dict] = Field(default_factory=list, max_length=50000)
     groups: list[dict] = Field(default_factory=list, max_length=1000)
     notes: dict = Field(default_factory=dict)
+    starred_people: list[str] = Field(default_factory=list, max_length=50000)
+    starred_folders: list[str] = Field(default_factory=list, max_length=50000)
 
 
 @router.get("/bookmarks/workspace")
