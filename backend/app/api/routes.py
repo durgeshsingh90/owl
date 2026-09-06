@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from urllib.parse import quote
 
 from app.core.config import (
     Settings,
@@ -418,8 +419,6 @@ class ImportRequest(BaseModel):
 @router.post("/imports", status_code=202)
 async def import_urls(value: ImportRequest, request: Request):
     jobs = request.app.state.jobs
-    if jobs.active():
-        raise HTTPException(409, "A crawl is already running.")
     settings = load_settings()
     targets = [parse_target(url, settings) for url in value.urls]
     ids = set()
@@ -431,6 +430,26 @@ async def import_urls(value: ImportRequest, request: Request):
                 (target["url"], settings.base_url, target["project"]),
             ).fetchone()
             ids.add(row["id"])
+    if jobs.active() and jobs.current["status"] not in {"queued", "running"}:
+        await jobs.task
+    if jobs.active():
+        expanded = []
+        client = BitbucketClient(settings)
+        try:
+            for target in targets:
+                if target["repo"]:
+                    expanded.append(target)
+                else:
+                    async for repo in client.pages(
+                        "/projects/" + quote(target["project"], safe="") + "/repos"
+                    ):
+                        expanded.append({**target, "repo": repo["slug"]})
+        finally:
+            await client.close()
+        if jobs.active() and jobs.current["status"] not in {"queued", "running"}:
+            await jobs.task
+        if jobs.active():
+            return jobs.enqueue(expanded)
     return jobs.start(list(ids), targets)
 
 

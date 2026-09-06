@@ -9,7 +9,12 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
 from app.core.config import load_settings
-from app.core.database import connection, database_path, repository_url
+from app.core.database import (
+    connection,
+    database_path,
+    exclude_repositories,
+    repository_url,
+)
 from app.core.logging import error_details, event
 from app.pdfs.client import BitbucketClient, BitbucketError
 from app.pdfs.crawler import crawl_repository, discover_pdfs, now
@@ -85,6 +90,8 @@ class Jobs:
                     ids,
                 )
             event("crawl.hard_retry_reset", project_ids=ids, backup=str(backup_path))
+        self.repos = []
+        self.targets = list(targets or [])
         self.current = {
             "id": uuid.uuid4().hex,
             "status": "queued",
@@ -96,6 +103,7 @@ class Jobs:
             "repositories_done": 0,
             "repository_statuses": {},
             "repositories_succeeded": 0,
+            "repositories_auto_excluded": 0,
             "discovery_complete": False,
             "discovery_failed": False,
             "folder_failures": [],
@@ -117,8 +125,50 @@ class Jobs:
         }
         self.save()
         self.task = asyncio.create_task(
-            self.run(settings, projects, targets, auto_retry)
+            self.run(settings, projects, self.targets, auto_retry)
         )
+        return self.current.copy()
+
+    def enqueue(self, targets):
+        """Reserve additional repositories in the running single-worker job."""
+        with connection() as db:
+            for target in sorted(
+                targets, key=lambda t: (t["project"].casefold(), t["repo"].casefold())
+            ):
+                if db.execute(
+                    "SELECT 1 FROM excluded_repositories WHERE url=?",
+                    (
+                        repository_url(
+                            load_settings().base_url, target["project"], target["repo"]
+                        ),
+                    ),
+                ).fetchone():
+                    continue
+                project = db.execute(
+                    "SELECT id FROM tracked_projects WHERE server=? AND project=?",
+                    (
+                        load_settings().base_url,
+                        target["project"],
+                    ),
+                ).fetchone()
+                row = db.execute(
+                    "INSERT INTO repositories(project_id,repo,name) VALUES(?,?,?) "
+                    "ON CONFLICT(project_id,repo) DO UPDATE SET name=excluded.name RETURNING id",
+                    (project["id"], target["repo"], target["repo"]),
+                ).fetchone()
+                if str(row["id"]) in self.current["repository_statuses"]:
+                    continue
+                self.repos.append((target["project"], target["repo"], row["id"]))
+                self.targets.append(target)
+                self.current["repository_statuses"][str(row["id"])] = {
+                    "project_id": str(project["id"]),
+                    "repo": target["repo"],
+                    "status": "queued",
+                    "found": 0,
+                    "failed": 0,
+                }
+        self.current["repositories"] = len(self.repos)
+        self.save()
         return self.current.copy()
 
     def save(self):
@@ -149,7 +199,7 @@ class Jobs:
         self.save()
         event("crawl.started", job_id=p["id"])
         try:
-            repos = []
+            repos = self.repos
             for project in sorted(
                 projects, key=lambda item: (item["project"].casefold(), item["project"])
             ):
@@ -185,6 +235,8 @@ class Jobs:
                             "ON CONFLICT(project_id,repo) DO UPDATE SET name=excluded.name RETURNING id",
                             (project["id"], slug, repo.get("name", slug)),
                         ).fetchone()
+                    if str(row["id"]) in p["repository_statuses"]:
+                        continue
                     repos.append((project["project"], slug, row["id"]))
                     p["repository_statuses"][str(row["id"])] = {
                         "project_id": str(project["id"]),
@@ -458,6 +510,28 @@ class Jobs:
 
             for repo in repos:
                 paths = await discover(*repo)
+                if paths == [] and repo[2] not in partial_repositories:
+                    # Only a complete, successful inventory proves a repository empty.
+                    # Exclusion retains its URL alone and cascades stale indexed data.
+                    with connection() as db:
+                        exclude_repositories(
+                            db,
+                            [
+                                {
+                                    "id": repo[2],
+                                    "server": settings.base_url,
+                                    "project": repo[0],
+                                    "repo": repo[1],
+                                }
+                            ],
+                        )
+                    p["repository_statuses"].pop(str(repo[2]), None)
+                    p["repositories_auto_excluded"] += 1
+                    p["repositories_succeeded"] += 1
+                    p["repositories_done"] += 1
+                    p["detail"] = "Empty repository moved to excluded repositories."
+                    self.save()
+                    continue
                 if paths is not None:
                     repo_processing_started = time.monotonic()
                     repository = p["repository_statuses"][str(repo[2])]

@@ -501,6 +501,10 @@ function isRepositoryInactive(repo, now = new Date()) {
 }
 
 const collapsedProjects = new Set();
+let repositoryStatusFilter = "all";
+function matchesRepositoryFilter(repo) {
+  return repositoryStatusFilter === "all" || isRepositoryInactive(repo) === (repositoryStatusFilter === "inactive");
+}
 
 function repoSelectAllIcon(projectId = null) {
   const scope = projects.filter(project => projectId === null || project.id === projectId);
@@ -546,7 +550,7 @@ function renderProjects() {
     `<button type="button" data-all-repositories aria-label="All repositories" title="All repositories" aria-pressed="${!state.selectedProject && !state.selectedRepos.size}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h7v7H3V4Zm11 0h7v7h-7V4ZM3 15h7v6H3v-6Zm11 0h7v6h-7v-6Z" /></svg></button>` +
     projects
       .flatMap((project) =>
-        project.repos.map((repo) => {
+        project.repos.filter(matchesRepositoryFilter).map((repo) => {
           const initials = repo.name
             .split(/[^\p{L}\p{N}]+/u)
             .filter(Boolean)
@@ -563,11 +567,12 @@ function renderProjects() {
         }),
       )
       .join("");
-  elements.projectList.innerHTML = `<div class="project-expand-controls">${repoSelectAllIcon()}<button type="button" data-project-expand-all>Expand all</button><button type="button" data-project-collapse-all>Collapse all</button></div>` + projects
+  elements.projectList.innerHTML = `<div class="project-expand-controls">${repoSelectAllIcon()}<button type="button" data-project-expand-all title="Expand all" aria-label="Expand all">⊞</button><button type="button" data-project-collapse-all title="Collapse all" aria-label="Collapse all">⊟</button>${["all", "active", "inactive"].map(filter => `<button type="button" data-repo-filter="${filter}" aria-pressed="${repositoryStatusFilter === filter}">${filter[0].toUpperCase() + filter.slice(1)}</button>`).join("")}</div>` + projects
     .map((project) => {
       const projectIsActive =
         state.selectedProject === project.id && !state.selectedRepos.size;
       const repositories = project.repos
+        .filter(matchesRepositoryFilter)
         .map((repo) => {
           const inactive = isRepositoryInactive(repo, now);
           const repoIsActive = state.selectedRepos.has(
@@ -762,7 +767,7 @@ function updateSelectionHeader() {
     : null;
   document.querySelector("#pull-repositories").disabled = pullProgress.active;
   document.querySelector("#retry-failed-pdfs").disabled = pullProgress.active;
-  elements.newProjectButton.disabled = pullProgress.active;
+  elements.newProjectButton.disabled = false;
   document.querySelector("#pull-repositories").title =
     "Git pull all repositories";
   document.querySelector("#repository-selection-status").textContent =
@@ -960,7 +965,6 @@ function showToast(message, success = true) {
 }
 
 function openProjectModal() {
-  if (pullProgress.active) return;
   lastFocusedElement = document.activeElement;
   elements.modal.hidden = false;
   document.body.setAttribute("data-modal-open", "true");
@@ -1023,7 +1027,6 @@ function parseRepositoryUrls(rawValue) {
 
 async function addProject(event) {
   event.preventDefault();
-  if (pullProgress.active) return showFormError("Wait for the current operation to finish.");
   clearFormError();
   const urls = elements.repositoryUrls.value.split(/\n/).map(url => url.trim()).filter(Boolean);
   if (!urls.length) return showFormError("Enter a project, repository or PDF URL.", ["urls"]);
@@ -1032,7 +1035,8 @@ async function addProject(event) {
   try {
     const job = await crawlJson("/api/imports", {urls});
     closeProjectModal();
-    watchCrawl(job);
+    if (!pullProgress.active || pullProgress.jobId !== job.id) watchCrawl(job);
+    else showToast("Added to the crawl queue");
   } catch (error) { showFormError(error.message); }
   finally { button.disabled = false; }
 }
@@ -1061,6 +1065,12 @@ function handleProjectNavigation(event) {
     const id = selectAll.dataset.selectRepos;
     toggleAllRepositorySelection(id || null);
     [...elements.projectList.querySelectorAll("[data-select-repos]")].find(button => button.dataset.selectRepos === id)?.focus();
+    return;
+  }
+  const filter = event.target.closest("[data-repo-filter]");
+  if (filter) {
+    repositoryStatusFilter = filter.dataset.repoFilter;
+    renderProjects();
     return;
   }
   const toggle = event.target.closest("[data-project-toggle]");

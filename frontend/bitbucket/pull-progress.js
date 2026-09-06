@@ -15,7 +15,7 @@ function pullRepoMark(projectId, repoName) {
   const failed = pullProgress.failedCounts.get(JSON.stringify([String(projectId), repoName]));
   let label = found == null || status === "queued" ? baseLabel
     : status === "scanning" ? `${baseLabel} · ${found} PDFs found`
-    : `${baseLabel} · ${processed ?? 0}/${found} PDFs processed · ${failed ?? "—"} failed`;
+    : `${baseLabel} - ${processed ?? 0}/${found}${failed > 0 ? ` · ${failed} failed` : ""}`;
   const timing = pullProgress.timings.get(JSON.stringify([String(projectId), repoName]));
   if (["processing", "retrying"].includes(status)) {
     label += ` · ETA ${timing?.eta_seconds == null ? "calculating…" : formatEta(timing.eta_seconds)}`;

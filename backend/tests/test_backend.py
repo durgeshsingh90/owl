@@ -487,6 +487,47 @@ class BackendTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("Timed out")
 
+    def test_empty_repository_is_excluded_but_failed_inventory_is_retained(self):
+        self.crawl()  # Existing indexed data must also be removed for the empty repo.
+        original = self.upstream
+
+        def empty_or_failed(request):
+            if "/browse/" in request.url.path:
+                if "/repos/one/" in request.url.path:
+                    return httpx.Response(
+                        200, json={"children": {"values": [], "isLastPage": True}}
+                    )
+                return httpx.Response(403)
+            return original(request)
+
+        self.upstream = empty_or_failed
+        job = self.crawl()
+        self.assertEqual(job["repositories_auto_excluded"], 1)
+        self.assertEqual(
+            {r["repo"] for r in job["repository_statuses"].values()}, {"two"}
+        )
+        self.assertEqual(
+            self.client.get("/api/excluded-repositories").json(),
+            [{"url": self.config["base_url"] + "/projects/DEMO/repos/one"}],
+        )
+        with connection() as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM documents WHERE repo='one'"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                {r["repo"] for r in db.execute("SELECT repo FROM repositories")},
+                {"two"},
+            )
+            self.assertIsNotNone(
+                db.execute("SELECT id FROM jobs WHERE id=?", (job["id"],)).fetchone()
+            )
+        self.calls.clear()
+        self.crawl()
+        self.assertFalse(any("/repos/one/" in url for url in self.calls))
+
     def test_project_crawl_visits_every_repo_across_pages_despite_failure(self):
         original = self.upstream
         browsed = set()
@@ -533,7 +574,11 @@ class BackendTests(unittest.TestCase):
         statuses = {r["repo"]: r["status"] for r in job["repository_statuses"].values()}
         self.assertEqual(
             statuses,
-            {slug: "failed" if slug == "repo-0" else "succeeded" for slug in slugs},
+            {
+                slug: "failed" if slug == "repo-0" else "succeeded"
+                for slug in slugs
+                if slug != "repo-1"
+            },
         )
         with connection() as db:
             scanned = {
@@ -545,7 +590,7 @@ class BackendTests(unittest.TestCase):
             indexed = {
                 r["repo"] for r in db.execute("SELECT DISTINCT repo FROM documents")
             }
-        self.assertEqual(scanned, set(slugs[1:]))
+        self.assertEqual(scanned, set(slugs[2:]))
         self.assertEqual(indexed, set(slugs[2:]))
 
     def test_hard_retry_clears_index_and_downloads_unchanged_pdfs(self):
@@ -1132,6 +1177,60 @@ class BackendTests(unittest.TestCase):
                 self.assertEqual(job["new"], 4)
                 self.assertEqual(self.client.get("/api/failed").json(), [])
         self.assertEqual(self.client.post("/api/failed/retry").status_code, 400)
+
+    def test_import_during_crawl_reserves_and_processes_after_current(self):
+        original = self.upstream
+        release = False
+        order = []
+
+        async def paused(request):
+            if request.url.path.endswith("/browse/"):
+                slug = request.url.path.split("/repos/")[1].split("/")[0]
+                if slug not in order:
+                    order.append(slug)
+                if slug == "one":
+                    while not release:
+                        await asyncio.sleep(0.01)
+            return original(request)
+
+        self.upstream = paused
+        root = self.config["base_url"] + "/projects/DEMO/repos/"
+        job = self.client.post("/api/imports", json={"urls": [root + "one"]}).json()
+        try:
+            for _ in range(100):
+                if order:
+                    break
+                time.sleep(0.01)
+            response = self.client.post("/api/imports", json={"urls": [root + "two"]})
+            self.assertEqual(response.status_code, 202, response.text)
+            queued = response.json()
+            self.assertEqual(queued["id"], job["id"])
+            self.assertEqual(queued["repositories"], 2)
+            self.assertEqual(order, ["one"])
+            self.assertEqual(
+                {
+                    r["repo"]: r["status"]
+                    for r in queued["repository_statuses"].values()
+                },
+                {"one": "scanning", "two": "queued"},
+            )
+            duplicate = self.client.post(
+                "/api/imports", json={"urls": [root + "two"]}
+            ).json()
+            self.assertEqual(duplicate["repositories"], 2)
+            self.assertEqual(
+                self.client.get("/api/jobs/latest").json()["job"]["id"], job["id"]
+            )
+        finally:
+            release = True
+        for _ in range(300):
+            current = self.client.get("/api/jobs/" + job["id"]).json()
+            if current["status"] not in ("queued", "running"):
+                break
+            time.sleep(0.01)
+        self.assertEqual(current["status"], "succeeded", current)
+        self.assertEqual(current["processed"], 4)
+        self.assertEqual(order, ["one", "two"])
 
     def test_repository_queue_and_active_status_survive_polling(self):
         async def delayed(*args, **kwargs):
