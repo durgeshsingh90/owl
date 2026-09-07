@@ -77,10 +77,22 @@ class BookmarkTests(unittest.TestCase):
             "title": "Guide",
             "body": {"view": {"value": "<p>azure deployment</p>"}},
         }
+
+        async def fetch_page(*args):
+            self.assertEqual(
+                listing.await_count, 2, "Discover all IDs before fetching content"
+            )
+            with connection() as db:
+                progress = db.execute(
+                    "SELECT total,phase FROM bookmark_downloads WHERE folder_key='test-space'"
+                ).fetchone()
+            self.assertEqual((progress["total"], progress["phase"]), (2, "downloading"))
+            return page
+
         with (
             patch(
                 "app.bookmarks.confluence.resolved_content",
-                new=AsyncMock(return_value=page),
+                new=AsyncMock(side_effect=fetch_page),
             ),
             patch(
                 "app.bookmarks.confluence.get",

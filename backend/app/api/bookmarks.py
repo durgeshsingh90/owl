@@ -119,7 +119,7 @@ async def start_folder_download(
         if row and row[0] == "running":
             return {"status": "running"}
         db.execute(
-            "INSERT OR REPLACE INTO bookmark_downloads VALUES(?,'running',0,NULL,?)",
+            "INSERT OR REPLACE INTO bookmark_downloads (folder_key,status,count,error,updated_at,total,phase) VALUES(?,'running',0,NULL,?,0,'discovering')",
             (value.folder_key, stamp()),
         )
     background_tasks.add_task(

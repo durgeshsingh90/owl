@@ -1986,3 +1986,10 @@ body {
 :root[data-theme="dark"] .bookmark-folder-star[aria-pressed="true"] { color:#ffd36a; }
 
 #bookmark-search-count { font-size:15px; font-weight:500; color:var(--text-muted); margin-left:8px; white-space:nowrap; }
+
+.folder-download-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}

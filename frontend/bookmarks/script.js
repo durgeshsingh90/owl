@@ -231,7 +231,7 @@ function renderBookmarkTree(filtered, downloaded = [], scheduleSearch = true) {
   }
   const order = new Map(filtered.map((item, index) => [item.id, index]));
   function entry(item, number, list, visited = new Set()) {
-    if (item.searchOnly) return `<li class="tree-node search-only-page"><div class="tree-leaf"><span class="tree-number">${number}</span><span class="tree-page-icon" aria-hidden="true">▤</span><a class="tree-title" href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a><span class="tree-context">Downloaded page</span></div></li>`;
+    if (item.searchOnly) return `<li class="tree-node search-only-page"><div class="tree-leaf"><span class="tree-number">${number}</span><span class="tree-page-icon" aria-hidden="true">▤</span><a class="tree-title" href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a><span class="tree-context" title="Downloaded for search; not a saved bookmark">Hidden</span></div></li>`;
     if (visited.has(item.id)) return "";
     const next = new Set(visited);
     next.add(item.id);

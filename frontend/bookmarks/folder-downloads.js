@@ -16,8 +16,8 @@
     const status = statuses.get(key), running = status?.status === 'running', done = status?.status === 'completed';
     const supported = !!(space || roots.length);
     const title = !supported ? 'No Confluence page or space identity available for this folder' :
-      done ? `${status.count} pages downloaded for search. Click to refresh.` : running ? `Downloading: ${status.count} pages` : status?.error || 'Download all pages in this folder for search';
-    return `<button type="button" class="folder-content-download ${done ? 'download-complete' : ''}" data-folder-download="${esc(key)}" title="${esc(title)}" aria-label="${esc(title)}" ${!supported || running ? 'disabled' : ''}>${done ? '✓' : running ? '…' : '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 17v4h16v-4" fill="none" stroke="currentColor" stroke-width="2"/></svg>'}</button>`;
+      done ? `${status.count} pages downloaded for search. Click to refresh.` : running ? (status.phase === "discovering" ? `Finding pages: ${status.total || 0} found` : `Downloading: ${status.count}/${status.total} pages`) : status?.error || 'Download all pages in this folder for search';
+    return `<span class="folder-download-progress"><button type="button" class="folder-content-download ${done ? 'download-complete' : ''}" data-folder-download="${esc(key)}" title="${esc(title)}" aria-label="${esc(title)}" ${!supported || running ? 'disabled' : ''}>${done ? '✓' : running ? '…' : '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 17v4h16v-4" fill="none" stroke="currentColor" stroke-width="2"/></svg>'}</button>${running ? `<span class="tree-context" role="status">${status.phase === 'discovering' ? `Finding pages · ${status.total || 0} found` : `Downloading ${status.count}/${status.total}`}</span>` : ''}</span>`;
   };
   async function refresh() {
     try {
@@ -34,7 +34,7 @@
         const key = button.dataset.folderDownload, scope = scopes.get(key);
         if (!scope) return;
         const path = JSON.parse(key).slice(1);
-        button.outerHTML = bookmarkFolderDownloadButton(path);
+        (button.closest(".folder-download-progress") || button).outerHTML = bookmarkFolderDownloadButton(path);
       });
     } catch {}
   }

@@ -77,8 +77,7 @@ async def download(settings, key, space_key, root_ids, root_title=""):
                 )
             seen.add(page_id)
 
-        for root in root_ids:
-            await save(root)
+        page_ids = dict.fromkeys(str(root) for root in root_ids)
         paths = [("content/" + root + "/descendant/page", {}) for root in root_ids]
         if space_key:
             paths = [
@@ -101,7 +100,15 @@ async def download(settings, key, space_key, root_ids, root_title=""):
                 if not isinstance(results, list):
                     raise TypeError("Confluence returned an invalid page list.")
                 for item in results:
-                    await save(item["id"])
+                    page_id = str(item["id"])
+                    if not page_id.isdecimal():
+                        raise ValueError("Confluence returned an invalid page ID.")
+                    page_ids[page_id] = None
+                with connection() as db:
+                    db.execute(
+                        "UPDATE bookmark_downloads SET total=?,updated_at=? WHERE folder_key=?",
+                        (len(page_ids), stamp(), key),
+                    )
                 if not data.get("_links", {}).get("next"):
                     break
                 if not results:
@@ -109,6 +116,13 @@ async def download(settings, key, space_key, root_ids, root_title=""):
                 paging = dict(parse_qsl(urlsplit(data["_links"]["next"]).query))
                 if not paging:
                     raise ValueError("Confluence returned no next-page cursor.")
+        with connection() as db:
+            db.execute(
+                "UPDATE bookmark_downloads SET total=?,phase='downloading',updated_at=? WHERE folder_key=?",
+                (len(page_ids), stamp(), key),
+            )
+        for page_id in page_ids:
+            await save(page_id)
         with connection() as db:
             existing = db.execute(
                 "SELECT page_id FROM bookmark_downloaded_pages WHERE folder_key=?",

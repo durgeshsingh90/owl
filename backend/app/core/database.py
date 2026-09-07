@@ -85,6 +85,17 @@ def initialize(*, recover_jobs=False):
             db.execute(
                 "ALTER TABLE bookmark_downloaded_pages ADD COLUMN folder_path TEXT NOT NULL DEFAULT '[]'"
             )
+        download_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(bookmark_downloads)")
+        }
+        for column, definition in (
+            ("total", "INTEGER NOT NULL DEFAULT 0"),
+            ("phase", "TEXT NOT NULL DEFAULT 'discovering'"),
+        ):
+            if column not in download_columns:
+                db.execute(
+                    f"ALTER TABLE bookmark_downloads ADD COLUMN {column} {definition}"
+                )
         repository_columns = {
             row["name"] for row in db.execute("PRAGMA table_info(repositories)")
         }
