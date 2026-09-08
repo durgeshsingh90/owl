@@ -47,7 +47,7 @@ def search_documents(q="", project=None, repo=None, author=None, limit=100, offs
 
 
 def matching_document_ids(query, fields, mode):
-    """Search selected FTS columns without truncating the workspace result set."""
+    """Require every term across selected fields of one document, or one phrase."""
     columns = {
         "name": "pdf_name",
         "path": "path",
@@ -65,7 +65,7 @@ def matching_document_ids(query, fields, mode):
         "{"
         + " ".join(selected)
         + "} : ("
-        + " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
+        + " AND ".join('"' + term.replace('"', '""') + '"' for term in terms)
         + ")"
     )
     with connection() as db:

@@ -388,15 +388,28 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             return set(response.json()["ids"])
 
-        self.assertEqual(matches(), set(ids))
-        self.assertEqual(matches(fields=["name"]), {ids[0]})
-        self.assertEqual(matches(fields=["path"]), {ids[1]})
+        self.assertEqual(matches(), set(ids[2:]))
+        self.assertEqual(matches(fields=["name"]), set())
+        self.assertEqual(matches(fields=["path"]), set())
         self.assertEqual(matches(fields=["content"]), set(ids[2:]))
-        self.assertEqual(matches(fields=["name", "path"]), set(ids[:2]))
+        self.assertEqual(matches(fields=["name", "path"]), set())
         self.assertEqual(matches(mode="together"), {ids[2]})
         self.assertEqual(matches(fields=[]), set())
         self.assertEqual(matches(q="AWS AZURE", mode="together"), {ids[2]})
         self.assertEqual(matches(q='" OR *'), set())
+        # Terms may be far apart, reversed, or in different selected fields,
+        # but never distributed across different documents.
+        with connection() as db:
+            db.execute(
+                "UPDATE documents SET pdf_text=? WHERE id=?",
+                ("azure " + "filler " * 500 + "aws", ids[3]),
+            )
+            db.execute("UPDATE documents SET notes='azure' WHERE id=?", (ids[0],))
+        self.assertEqual(matches(fields=["content"]), set(ids[2:]))
+        self.assertEqual(matches(fields=["name", "notes"]), {ids[0]})
+        self.assertEqual(matches(fields=["name"]), set())
+        self.assertEqual(matches(mode="together"), {ids[2]})
+
         self.assertEqual(
             self.client.post(
                 "/api/search/matches", json={"q": "aws", "fields": ["invalid"]}
