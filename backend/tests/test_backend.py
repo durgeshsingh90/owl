@@ -409,6 +409,20 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(matches(fields=["name", "notes"]), {ids[0]})
         self.assertEqual(matches(fields=["name"]), set())
         self.assertEqual(matches(mode="together"), {ids[2]})
+        with connection() as db:
+            db.execute(
+                "UPDATE documents SET notes='legacy old system' WHERE id=?", (ids[2],)
+            )
+        self.assertEqual(matches(q="aws azure -legacy"), {ids[0], ids[3]})
+        self.assertEqual(
+            matches(q="aws azure -LEGACY", fields=["content"]), set(ids[2:])
+        )
+        self.assertEqual(matches(q='aws azure -"old system"'), {ids[0], ids[3]})
+        self.assertEqual(matches(q="-legacy"), set(ids) - {ids[2]})
+        self.assertEqual(matches(q="-legacy -filler"), set(ids[:2]))
+        self.assertEqual(matches(q="aws azure -legacy", mode="together"), set())
+        self.assertEqual(matches(q="aws azure -missing", mode="together"), {ids[2]})
+        self.assertEqual(matches(q="aws -aws"), set())
 
         self.assertEqual(
             self.client.post(
