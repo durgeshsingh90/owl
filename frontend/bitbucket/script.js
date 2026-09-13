@@ -696,7 +696,7 @@ function renderPdfTable() {
       const group = getTimelineGroup(pdf.committedAt, timelineNow);
       const separator =
         group !== previousGroup
-          ? `<tr class="timeline-date-row"><th colspan="11" scope="rowgroup"><span class="timeline-marker" aria-hidden="true"></span><strong>${escapeHtml(group)}</strong><span class="timeline-group-count" title="Matching PDFs in this period across all pages">${formatNumber(groupCounts.get(group))} ${groupCounts.get(group) === 1 ? "PDF" : "PDFs"}</span></th></tr>`
+          ? `<tr class="timeline-date-row"><th colspan="12" scope="rowgroup"><span class="timeline-marker" aria-hidden="true"></span><strong>${escapeHtml(group)}</strong><span class="timeline-group-count" title="Matching PDFs in this period across all pages">${formatNumber(groupCounts.get(group))} ${groupCounts.get(group) === 1 ? "PDF" : "PDFs"}</span></th></tr>`
           : "";
       previousGroup = group;
       return `${separator}
@@ -710,6 +710,7 @@ function renderPdfTable() {
         <td><time class="commit-time" datetime="${escapeHtml(pdf.committedAt)}">${escapeHtml(dateLabel)}<small>${day === null ? "" : escapeHtml(COMMIT_TIME_FORMATTER.format(new Date(pdf.committedAt)))}</small></time></td>
         <td class="commit-author" title="${escapeHtml(pdf.commitAuthor || "Unknown")}">${escapeHtml(pdf.commitAuthor || "Unknown")}${isPersonStarred(pdfAuthorKey(pdf)) ? ' <span class="author-star" role="img" aria-label="Starred person">★</span>' : ""}</td>
         <td class="commit-id">${pdf.commitId ? `<button type="button" class="commit-copy" data-copy-commit="${pdf.id}" title="Copy full commit ID: ${escapeHtml(pdf.commitId)}" aria-label="Copy full commit ID ${escapeHtml(pdf.commitId)}">${escapeHtml(pdf.commitId.slice(0, 7))}</button>` : "—"}</td>
+        <td class="number-column"><button class="commit-copy" type="button" data-commit-history="${pdf.id}" aria-label="View commit history for ${escapeHtml(pdf.name)}" title="View commit history">${pdf.commitCount == null ? "—" : formatNumber(pdf.commitCount)}</button></td>
         <td class="number-column"><span class="open-count">${formatNumber(pdf.openCount)}</span></td>
         <td class="actions-column"><div class="timeline-actions">
           <button class="folder-button" type="button" data-pdf-details="${pdf.id}" aria-label="Details for ${escapeHtml(pdf.name)}" title="Database details">ⓘ</button>

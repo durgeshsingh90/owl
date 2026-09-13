@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -40,11 +41,14 @@ def extract(content):
 async def process_pdf(client, project, repo, repository_id, path):
     prefix = client.repo_path(project, repo)
     snapshot = getattr(client, "snapshot_refs", {}).get((project, repo))
-    data = await client.request(
-        prefix + "/commits",
-        {"path": path, "limit": 1, **({"until": snapshot} if snapshot else {})},
-    )
-    commits = data.get("values", [])
+    commits = [
+        item
+        async for item in client.pages(
+            prefix + "/commits",
+            {"path": path, **({"until": snapshot} if snapshot else {})},
+        )
+    ]
+    commit_count = len({item["id"] for item in commits if item.get("id")})
     commit = commits[0] if commits else {}
     commit_id = commit.get("id") or None
     force = (project, repo, path) in getattr(client, "force_paths", set())
@@ -55,7 +59,8 @@ async def process_pdf(client, project, repo, repository_id, path):
         ).fetchone()
         if old and commit_id and old["commit_id"] == commit_id and not force:
             db.execute(
-                "UPDATE documents SET last_scanned=? WHERE id=?", (now(), old["id"])
+                "UPDATE documents SET last_scanned=?,commit_count=?,commit_history=? WHERE id=?",
+                (now(), commit_count, json.dumps(commits), old["id"]),
             )
             db.execute(
                 "DELETE FROM failed_documents WHERE repository_id=? AND path=?",
@@ -92,6 +97,8 @@ async def process_pdf(client, project, repo, repository_id, path):
         "file_size": len(content),
         "page_count": page_count,
         "commit_id": commit_id,
+        "commit_count": commit_count,
+        "commit_history": json.dumps(commits),
         "commit_message": commit.get("message"),
         "author": (commit.get("author") or {}).get("displayName")
         or (commit.get("author") or {}).get("name"),

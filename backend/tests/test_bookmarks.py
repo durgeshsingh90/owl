@@ -173,6 +173,45 @@ class BookmarkTests(unittest.TestCase):
             2,
         )
 
+    def test_bookmark_subtree_discovers_before_sequential_downloads(self):
+        from unittest.mock import AsyncMock
+
+        self.client.post("/bookmarks/settings/save/", data=self.settings)
+        events = []
+
+        async def listing(settings, path, params):
+            events.append("list")
+            self.assertEqual(path, "content/123/descendant/page")
+            if str(params["start"]) == "0":
+                return {
+                    "results": [{"id": "456"}],
+                    "_links": {"next": "?start=1&limit=100"},
+                }
+            return {"results": [{"id": "789"}, {"id": "456"}], "_links": {}}
+
+        async def content(settings, url, page_id):
+            self.assertEqual(events[:2], ["list", "list"])
+            events.append(page_id)
+            return {"title": page_id, "body": {"view": {"value": "<p>saved</p>"}}}
+
+        with (
+            patch("app.bookmarks.confluence.get", new=AsyncMock(side_effect=listing)),
+            patch(
+                "app.bookmarks.confluence.resolved_content",
+                new=AsyncMock(side_effect=content),
+            ),
+        ):
+            response = self.client.post(
+                "/api/bookmarks/downloads",
+                json={"folder_key": "single-page", "root_ids": ["123"]},
+            )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(events, ["list", "list", "123", "456", "789"])
+        status = self.client.get("/api/bookmarks/downloads").json()[0]
+        self.assertEqual(
+            (status["status"], status["total"], status["count"]), ("completed", 3, 3)
+        )
+
     def test_folder_title_resolves_parent_and_downloads_descendants(self):
         from unittest.mock import AsyncMock
 

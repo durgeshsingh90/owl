@@ -2,6 +2,9 @@
 
 import asyncio
 import json
+import re
+import tempfile
+import zipfile
 from typing import Literal
 from urllib.parse import quote
 
@@ -17,6 +20,7 @@ from app.core.logging import error_details, event, request_id
 from app.pdfs.client import BitbucketClient, BitbucketError
 from app.pdfs.search import matching_document_ids, search_documents
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 router = APIRouter()
@@ -267,6 +271,149 @@ def document(doc_id: int):
     if row is None:
         raise HTTPException(404, "Document not found.")
     return dict(row)
+
+
+@router.get("/document/{doc_id}/commits")
+async def document_commits(doc_id: int):
+    with connection() as db:
+        row = db.execute(
+            "SELECT d.*,p.server FROM documents d "
+            "JOIN repositories r ON r.id=d.repository_id "
+            "JOIN tracked_projects p ON p.id=r.project_id WHERE d.id=?",
+            (doc_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Document not found.")
+    if row["commit_history"] is not None:
+        commits = json.loads(row["commit_history"])
+    else:
+        settings = load_settings()
+        if settings.base_url.rstrip("/") != row["server"].rstrip("/"):
+            raise HTTPException(
+                409, "Connect to this document's Bitbucket server first."
+            )
+        client = BitbucketClient(settings)
+        try:
+            commits = [
+                item
+                async for item in client.pages(
+                    client.repo_path(row["project"], row["repo"]) + "/commits",
+                    {
+                        "path": row["path"],
+                        **({"until": row["commit_id"]} if row["commit_id"] else {}),
+                    },
+                )
+            ]
+        except BitbucketError as exc:
+            raise HTTPException(502, str(exc)) from None
+        finally:
+            await client.close()
+        with connection() as db:
+            db.execute(
+                "UPDATE documents SET commit_history=?,commit_count=? WHERE id=? AND commit_id IS ?",
+                (
+                    json.dumps(commits),
+                    len({c["id"] for c in commits if c.get("id")}),
+                    doc_id,
+                    row["commit_id"],
+                ),
+            )
+    unique = {c["id"]: c for c in commits if c.get("id")}
+    return {
+        "name": row["pdf_name"],
+        "commits": [
+            {
+                "id": c["id"],
+                "author": (c.get("author") or {}).get("displayName")
+                or (c.get("author") or {}).get("name")
+                or "Unknown",
+                "timestamp": c.get("authorTimestamp"),
+                "message": c.get("message") or "",
+            }
+            for c in unique.values()
+        ],
+    }
+
+
+@router.get("/document/{doc_id}/commits/download")
+async def download_commit_versions(doc_id: int, commit_id: str | None = None):
+    history = await document_commits(doc_id)
+    ids = [c["id"] for c in history["commits"]]
+    if commit_id is not None:
+        if commit_id not in ids:
+            raise HTTPException(404, "Commit not found in this file's history.")
+        ids = [commit_id]
+    if not ids:
+        raise HTTPException(404, "No versions available.")
+    with connection() as db:
+        row = db.execute(
+            "SELECT d.*,p.server FROM documents d JOIN repositories r ON r.id=d.repository_id "
+            "JOIN tracked_projects p ON p.id=r.project_id WHERE d.id=?",
+            (doc_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Document not found.")
+    settings = load_settings()
+    if settings.base_url.rstrip("/") != row["server"].rstrip("/"):
+        raise HTTPException(409, "Connect to this document's Bitbucket server first.")
+    stem = (
+        re.sub(r"[^\w .-]", "_", row["pdf_name"][:-4]).strip(". ")[:100] or "document"
+    )
+    output = tempfile.TemporaryFile()  # noqa: SIM115 - closed by response iterator or error handler
+    client = BitbucketClient(settings)
+    try:
+        archive = (
+            zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED)
+            if commit_id is None
+            else None
+        )
+        try:
+            for index, revision in enumerate(ids, 1):
+                content = await client.request(
+                    client.repo_path(row["project"], row["repo"])
+                    + "/raw/"
+                    + quote(row["path"], safe="/"),
+                    {"at": revision},
+                    raw=True,
+                )
+                if b"%PDF-" not in content[:1024]:
+                    raise BitbucketError("This revision did not return a PDF.")
+                suffix = re.sub(r"[^a-zA-Z0-9_-]", "_", revision)[:80]
+                filename = f"{stem}-{index}-{suffix}.pdf"
+                if archive:
+                    archive.writestr(filename, content)
+                else:
+                    output.write(content)
+        finally:
+            if archive:
+                archive.close()
+        output.seek(0)
+    except BaseException as exc:
+        output.close()
+        if isinstance(exc, BitbucketError):
+            raise HTTPException(
+                502, f"Unable to download revision {revision}: {exc}"
+            ) from None
+        raise
+    finally:
+        await client.close()
+
+    def chunks():
+        try:
+            while chunk := output.read(65536):
+                yield chunk
+        finally:
+            output.close()
+
+    download_name = f"{stem}-versions.zip" if commit_id is None else filename
+    return StreamingResponse(
+        chunks(),
+        media_type="application/zip" if commit_id is None else "application/pdf",
+        headers={
+            "Content-Disposition": "attachment; filename*=UTF-8''"
+            + quote(download_name)
+        },
+    )
 
 
 @router.patch("/document/{doc_id}/notes")

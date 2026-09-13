@@ -363,6 +363,117 @@ class BackendTests(unittest.TestCase):
             with self.assertRaises(BitbucketError):
                 entry_path("A", {"path": metadata})
 
+    def test_pdf_commit_count_paginates_and_is_exposed(self):
+        original = self.upstream
+
+        def history(request):
+            if request.url.path.endswith("/commits") and request.url.params.get("path"):
+                if request.url.params.get("start") == "0":
+                    return httpx.Response(
+                        200,
+                        json={
+                            "values": [
+                                {
+                                    "id": "latest",
+                                    "author": {"displayName": "Test Author"},
+                                    "authorTimestamp": 1700000000000,
+                                    "message": "Updated PDF\nDetails",
+                                },
+                                {"id": "older"},
+                            ],
+                            "isLastPage": False,
+                            "nextPageStart": 2,
+                        },
+                    )
+                return httpx.Response(
+                    200, json={"values": [{"id": "oldest"}], "isLastPage": True}
+                )
+            return original(request)
+
+        self.upstream = history
+        self.crawl()
+        with connection() as db:
+            counts = [
+                row[0] for row in db.execute("SELECT commit_count FROM documents")
+            ]
+        self.assertTrue(counts)
+        self.assertEqual(set(counts), {3})
+        workspace = self.client.get("/api/workspace").json()
+        self.assertIn('"commitCount": 3', json.dumps(workspace))
+        identity = workspace["documents"][0]["id"]
+        endpoint = f"/api/document/{identity}/commits"
+        with patch(
+            "app.api.routes.BitbucketClient",
+            side_effect=AssertionError("cached history must not fetch"),
+        ):
+            result = self.client.get(endpoint)
+        self.assertEqual(result.status_code, 200)
+        commits = result.json()["commits"]
+        self.assertEqual([c["id"] for c in commits], ["latest", "older", "oldest"])
+        self.assertEqual(commits[0]["author"], "Test Author")
+        self.assertEqual(commits[0]["timestamp"], 1700000000000)
+        self.assertEqual(commits[0]["message"], "Updated PDF\nDetails")
+        with connection() as db:
+            db.execute(
+                "UPDATE documents SET commit_history=NULL WHERE id=?", (identity,)
+            )
+        self.assertEqual(self.client.get(endpoint).json()["commits"], commits)
+        with connection() as db:
+            self.assertIsNotNone(
+                db.execute(
+                    "SELECT commit_history FROM documents WHERE id=?", (identity,)
+                ).fetchone()[0]
+            )
+        self.assertEqual(
+            self.client.get("/api/document/99999/commits").status_code, 404
+        )
+
+    def test_commit_version_downloads(self):
+        import io
+        import zipfile
+
+        self.crawl()
+        with connection() as db:
+            identity = db.execute("SELECT id FROM documents LIMIT 1").fetchone()[0]
+            db.execute(
+                "UPDATE documents SET commit_history=? WHERE id=?",
+                (json.dumps([{"id": "revision1"}, {"id": "revision2"}]), identity),
+            )
+        original = self.upstream
+        requested = []
+
+        def versions(request):
+            if "/raw/" in request.url.path:
+                revision = request.url.params.get("at")
+                requested.append(revision)
+                return httpx.Response(200, content=b"%PDF-1.7 " + revision.encode())
+            return original(request)
+
+        self.upstream = versions
+        endpoint = f"/api/document/{identity}/commits/download"
+        single = self.client.get(endpoint, params={"commit_id": "revision2"})
+        self.assertEqual(single.status_code, 200)
+        self.assertEqual(single.content, b"%PDF-1.7 revision2")
+        self.assertEqual(single.headers["content-type"], "application/pdf")
+        requested.clear()
+        zipped = self.client.get(endpoint)
+        self.assertEqual(zipped.status_code, 200)
+        with zipfile.ZipFile(io.BytesIO(zipped.content)) as archive:
+            self.assertEqual(len(archive.namelist()), 2)
+            self.assertEqual(
+                {archive.read(name) for name in archive.namelist()},
+                {b"%PDF-1.7 revision1", b"%PDF-1.7 revision2"},
+            )
+        self.assertEqual(requested, ["revision1", "revision2"])
+        self.assertEqual(
+            self.client.get(endpoint, params={"commit_id": "unrelated"}).status_code,
+            404,
+        )
+        self.upstream = lambda request: httpx.Response(404)
+        failed = self.client.get(endpoint)
+        self.assertEqual(failed.status_code, 502)
+        self.assertIn("revision1", failed.json()["detail"])
+
     def test_advanced_search_fields_and_word_modes(self):
         self.crawl()
         with connection() as db:

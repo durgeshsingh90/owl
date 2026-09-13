@@ -13,12 +13,22 @@
     const space = candidates[0]?.spaceKey || '';
     const rootTitle = path.length > 1 ? path[path.length - 1] : '';
     scopes.set(key, {folder_key:key,space_key:space,root_ids:roots,root_title:rootTitle,base_url:base});
-    const status = statuses.get(key), running = status?.status === 'running', done = status?.status === 'completed';
-    const supported = !!(space || roots.length);
-    const title = !supported ? 'No Confluence page or space identity available for this folder' :
-      done ? `${status.count} pages downloaded for search. Click to refresh.` : running ? (status.phase === "discovering" ? `Finding pages: ${status.total || 0} found` : `Downloading: ${status.count}/${status.total} pages`) : status?.error || 'Download all pages in this folder for search';
-    return `<span class="folder-download-progress"><button type="button" class="folder-content-download ${done ? 'download-complete' : ''}" data-folder-download="${esc(key)}" title="${esc(title)}" aria-label="${esc(title)}" ${!supported || running ? 'disabled' : ''}>${done ? '✓' : running ? '…' : '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 17v4h16v-4" fill="none" stroke="currentColor" stroke-width="2"/></svg>'}</button>${running ? `<span class="tree-context" role="status">${status.phase === 'discovering' ? `Finding pages · ${status.total || 0} found` : `Downloading ${status.count}/${status.total}`}</span>` : ''}</span>`;
+    return downloadButton(key, !!(space || roots.length));
   };
+  window.bookmarkPageDownloadButton = item => {
+    if (item.sourceType !== 'confluence') return '';
+    const base = item.confluenceBaseUrl || '';
+    const id = String(item.page_id || '');
+    const key = JSON.stringify([base, 'page', id]);
+    scopes.set(key, {folder_key:key, space_key:'', root_ids:[id], base_url:base, bookmarkId:item.id});
+    return downloadButton(key, /^\d+$/.test(id));
+  };
+  function downloadButton(key, supported) {
+    const status = statuses.get(key), running = status?.status === 'running', done = status?.status === 'completed';
+    const title = !supported ? 'No Confluence page or space identity available for this folder' :
+      done ? `${status.count} pages downloaded for search. Click to refresh.` : running ? (status.phase === "discovering" ? `Finding pages: ${status.total || 0} found` : `Downloading: ${status.count}/${status.total} pages`) : status?.error || 'Download this page and all pages under it for search';
+    return `<span class="folder-download-progress"><button type="button" class="folder-content-download ${done ? 'download-complete' : ''}" data-folder-download="${esc(key)}" title="${esc(title)}" aria-label="${esc(title)}" ${!supported || running ? 'disabled' : ''}>${done ? '✓' : running ? '…' : '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 17v4h16v-4" fill="none" stroke="currentColor" stroke-width="2"/></svg>'}</button>${running ? `<span class="tree-context" role="status">${status.phase === 'discovering' ? `Finding pages · ${status.total || 0} found` : `Downloading ${status.count}/${status.total}`}</span>` : ''}</span>`;
+  }
   async function refresh() {
     try {
       const response = await fetch('/api/bookmarks/downloads');
@@ -33,8 +43,11 @@
       document.querySelectorAll('[data-folder-download]').forEach(button => {
         const key = button.dataset.folderDownload, scope = scopes.get(key);
         if (!scope) return;
-        const path = JSON.parse(key).slice(1);
-        (button.closest(".folder-download-progress") || button).outerHTML = bookmarkFolderDownloadButton(path);
+        const item = scope.bookmarkId === undefined ? null : bookmarks.find(item => item.id === scope.bookmarkId);
+        const markup = scope.bookmarkId === undefined
+          ? bookmarkFolderDownloadButton(JSON.parse(key).slice(1))
+          : item ? bookmarkPageDownloadButton(item) : '';
+        (button.closest(".folder-download-progress") || button).outerHTML = markup;
       });
     } catch {}
   }

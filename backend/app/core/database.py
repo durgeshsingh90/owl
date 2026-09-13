@@ -96,6 +96,14 @@ def initialize(*, recover_jobs=False):
                 db.execute(
                     f"ALTER TABLE bookmark_downloads ADD COLUMN {column} {definition}"
                 )
+        if "commit_count" not in {
+            row["name"] for row in db.execute("PRAGMA table_info(documents)")
+        }:
+            db.execute("ALTER TABLE documents ADD COLUMN commit_count INTEGER")
+        if "commit_history" not in {
+            row["name"] for row in db.execute("PRAGMA table_info(documents)")
+        }:
+            db.execute("ALTER TABLE documents ADD COLUMN commit_history TEXT")
         repository_columns = {
             row["name"] for row in db.execute("PRAGMA table_info(repositories)")
         }
