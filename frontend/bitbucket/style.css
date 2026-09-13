@@ -2979,3 +2979,29 @@ tbody tr.selected td:first-child {
 .commit-history-dialog li { padding: 16px 0; border-bottom: 1px solid #54678c; }
 .commit-history-dialog code { overflow-wrap: anywhere; color: #aaceff; }
 .commit-history-dialog .history-message { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.commit-history-dialog {
+  color-scheme: dark;
+  box-sizing: border-box;
+  scrollbar-color: #7188ae #17243d;
+}
+.commit-history-dialog button {
+  appearance: none;
+  background: #29476f;
+  color: #fff;
+  border: 1px solid #718eb6;
+  border-radius: 7px;
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.commit-history-dialog button:hover { background: #365d90; }
+.commit-history-dialog button:focus-visible { outline: 2px solid #b8d6ff; outline-offset: 3px; }
+.commit-history-dialog button:disabled { background: #28394f; color: #c2cede; cursor: wait; }
+.commit-history-dialog header button { flex: 0 0 auto; padding: 4px 9px; background: transparent; }
+.commit-history-dialog .history-download-all { background: #315d98; }
+.commit-history-dialog .history-status { color: #c8d6eb; margin: 16px 0; }
+.commit-history-dialog li p { margin: 10px 0; line-height: 1.5; }
