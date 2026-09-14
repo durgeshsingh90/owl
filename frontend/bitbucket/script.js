@@ -61,7 +61,6 @@ const state = {
 
 const elements = {
   allRepositories: document.querySelector("#all-repositories"),
-  allRepositoriesMeta: document.querySelector("#all-repositories-meta"),
   commitDateBars: document.querySelector("#commit-date-bars"),
   commitDateSelection: document.querySelector("#commit-date-selection"),
   commitChartContent: document.querySelector("#commit-chart-content"),
@@ -527,21 +526,18 @@ function formatLastPull(value) {
   return new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/Dublin", day: "2-digit", month: "short", year: "numeric",
     hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
-  }).format(date) + " (Dublin)";
+  }).format(date);
 }
 
 function renderProjects() {
   const now = new Date();
-  const repositoryCount = projects.reduce(
-    (sum, project) => sum + project.repos.length,
-    0,
-  );
-  const pdfCount = projects.reduce(
-    (sum, project) => sum + getProjectPdfTotal(project),
-    0,
-  );
+  const pullDates = projects.flatMap(project => project.repos.map(repo => repo.lastPullAt)).filter(value => value && Number.isFinite(Date.parse(value)));
+  const sharedPullAt = pullDates.reduce((latest, value) => !latest || Date.parse(value) > Date.parse(latest) ? value : latest, null);
+  const sharedPullLabel = document.querySelector("#shared-last-pull");
+  sharedPullLabel.hidden = !sharedPullAt;
+  sharedPullLabel.textContent = sharedPullAt ? `Last Git pull: ${formatLastPull(sharedPullAt)}` : "";
+  if (sharedPullAt) document.querySelector(".repository-pull-summary").hidden = false;
   elements.projectCount.textContent = formatNumber(projects.length);
-  elements.allRepositoriesMeta.textContent = `${formatNumber(pdfCount)} PDFs · ${formatNumber(repositoryCount)} repositories`;
   elements.allRepositories.classList.toggle(
     "active",
     !state.selectedProject && !state.selectedRepos.size,
@@ -574,6 +570,8 @@ function renderProjects() {
       .join("");
   elements.projectList.innerHTML = `<div class="project-expand-controls">${repoSelectAllIcon()}<button type="button" data-project-expand-all title="Expand all" aria-label="Expand all">⊞</button><button type="button" data-project-collapse-all title="Collapse all" aria-label="Collapse all">⊟</button>${["all", "active", "inactive"].map(filter => `<button type="button" data-repo-filter="${filter}" aria-pressed="${repositoryStatusFilter === filter}">${filter[0].toUpperCase() + filter.slice(1)}</button>`).join("")}</div>` + projects
     .map((project) => {
+      const inactiveCount = project.repos.filter(repo => isRepositoryInactive(repo, now)).length;
+      const activeCount = project.repos.length - inactiveCount;
       const projectIsActive =
         state.selectedProject === project.id && !state.selectedRepos.size;
       const repositories = project.repos
@@ -593,7 +591,7 @@ function renderProjects() {
               aria-pressed="${repoIsActive}"
             >
               <span class="repo-selection-check" aria-hidden="true">${repoIsActive ? "✓" : ""}</span><span class="repo-name">${escapeHtml(repo.name)}${pullRepoMark(project.id, repo.name)}${inactive ? ' <span class="repo-inactive-label">Inactive</span>' : ""}</span>
-              <span class="repo-date repo-last-pull">Last Git pull: ${escapeHtml(formatLastPull(repo.lastPullAt))}</span>
+              ${sharedPullAt && Date.parse(repo.lastPullAt) === Date.parse(sharedPullAt) ? "" : `<span class="repo-date repo-last-pull">Last Git pull: ${escapeHtml(formatLastPull(repo.lastPullAt))}</span>`}
               <span class="repo-meta">${formatNumber(repo.pdfCount)} PDFs</span>
               <span class="repo-date">Last commit: ${escapeHtml(repo.lastCommit)}</span>
             </button>
@@ -616,8 +614,9 @@ function renderProjects() {
             <span class="project-copy">
               <strong>${escapeHtml(project.name)}</strong>
               <small>${escapeHtml(project.id)}</small>
+              <small class="project-repo-counts">${formatNumber(project.repos.length)} repos · ${formatNumber(activeCount)} active · ${formatNumber(inactiveCount)} inactive</small>
             </span>
-            <span class="project-total">${formatNumber(getProjectPdfTotal(project))}</span>
+            <span class="project-total" title="Total PDFs">${formatNumber(getProjectPdfTotal(project))}</span>
           </button>
           </div>
           <div class="repository-list" ${collapsedProjects.has(project.id) ? "hidden" : ""}>${repositories}</div>
@@ -638,25 +637,22 @@ function renderPdfTable() {
   updateBulkPdfControls(filteredPdfs);
   const scopedRecordCount = getScopedPdfs().length;
   const hasSearch = Boolean(state.searchQuery.trim());
-  const searchCount = document.querySelector("#repository-search-count");
-  searchCount.hidden = !hasSearch;
-  searchCount.textContent = hasSearch
-    ? document.querySelector("#advanced-search-status").textContent || `${formatNumber(filteredPdfs.length)} search matches`
-    : "";
+  const selectedRepos = projects.flatMap(project =>
+    project.repos.filter(repo =>
+      (!state.selectedProject || project.id === state.selectedProject) &&
+      (!state.selectedRepos.size || state.selectedRepos.has(repositoryKey(project.id, repo.name)))
+    )
+  );
   const headingCount = document.querySelector("#selection-search-count");
   headingCount.hidden = false;
   if (hasSearch) {
-    headingCount.textContent = searchCount.textContent;
+    const matches = document.querySelector("#advanced-search-status").textContent || `${formatNumber(filteredPdfs.length)} search matches`;
+    headingCount.textContent = `${matches} · ${formatNumber(selectedRepos.length)} ${selectedRepos.length === 1 ? "repository" : "repositories"} searched`;
   } else {
-    const selectedRepos = projects.flatMap(project =>
-      project.repos.filter(repo =>
-        (!state.selectedProject || project.id === state.selectedProject) &&
-        (!state.selectedRepos.size || state.selectedRepos.has(repositoryKey(project.id, repo.name)))
-      )
-    );
     const totalPdfs = selectedRepos.reduce((sum, repo) => sum + (Number(repo.pdfCount) || 0), 0);
     headingCount.textContent = `${formatNumber(totalPdfs)} PDFs · ${formatNumber(selectedRepos.length)} ${selectedRepos.length === 1 ? "repository" : "repositories"}`;
   }
+  if (window.workspacePartial && hasSearch) headingCount.textContent += " · partial results";
   const commitRange = getActiveCommitRange();
   const totalPages = Math.max(
     1,
@@ -797,8 +793,11 @@ function updateSelectionHeader() {
   document.querySelector("#pull-repositories").disabled = pullProgress.active;
   document.querySelector("#retry-failed-pdfs").disabled = pullProgress.active;
   elements.newProjectButton.disabled = false;
-  document.querySelector("#pull-repositories").title =
-    "Git pull all repositories";
+  const pullButton = document.querySelector("#pull-repositories");
+  pullButton.title = pullProgress.active ? "Git pull running" : selected.length ? `Git pull ${selected.length} selected repositories` : "Git pull all repositories";
+  pullButton.setAttribute("aria-label", pullButton.title);
+  pullButton.setAttribute("aria-busy", String(pullProgress.active));
+  pullButton.classList.toggle("is-running", pullProgress.active);
   document.querySelector("#repository-selection-status").textContent =
     selected.length
       ? `${selected.length} repositories selected · Click again to deselect.`

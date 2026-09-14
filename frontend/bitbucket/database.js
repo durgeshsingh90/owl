@@ -1,6 +1,8 @@
 "use strict";
 let workspaceLoadVersion = 0;
 let workspaceReady = false;
+let workspaceFetching = false;
+const backgroundStatus = document.getElementById("workspace-background-status");
 const workspaceLoading = document.getElementById("workspace-loading");
 const workspaceShell = document.querySelector(".app-shell");
 function finishWorkspaceLoading() {
@@ -13,6 +15,8 @@ document.getElementById("workspace-loading-retry").onclick = () => loadDatabaseW
 document.getElementById("workspace-loading-dismiss").onclick = finishWorkspaceLoading;
 async function loadDatabaseWorkspace() {
   const version = ++workspaceLoadVersion;
+  workspaceFetching = true;
+  const initialLoad = !workspaceReady;
   if (!workspaceReady) {
     delete workspaceLoading.dataset.error;
     document.getElementById("workspace-loading-title").textContent = "Loading your library";
@@ -23,7 +27,7 @@ async function loadDatabaseWorkspace() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
   try {
-    const response = await fetch("/api/workspace", { cache: "no-store", signal: controller.signal });
+    const response = await fetch(initialLoad ? "/api/workspace?limit=1000" : "/api/workspace", { cache: "no-store", signal: controller.signal });
     if (!response.ok) throw new Error("Unable to load saved repository data.");
     const data = await response.json();
     if (version !== workspaceLoadVersion) return;
@@ -35,10 +39,44 @@ async function loadDatabaseWorkspace() {
       target.length = 0;
       for (const item of source) target.push(item);
     }
+    window.workspacePartial = Boolean(data.nextBefore);
+    backgroundStatus.hidden = !window.workspacePartial;
+    backgroundStatus.textContent = "Loading the rest of your PDFs… Search and filters currently show loaded records only.";
     authorLookup = null;
     renderApp();
     if (state.searchQuery.trim()) scheduleAdvancedSearch();
     finishWorkspaceLoading();
+    clearTimeout(timeout);
+    // Let the first page paint before starting the remaining metadata requests.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    let cursor = data.nextBefore;
+    const remaining = [];
+    while (cursor) {
+      if (version !== workspaceLoadVersion) return;
+      const batchController = new AbortController();
+      const batchTimeout = setTimeout(() => batchController.abort(), 30000);
+      let batch;
+      try {
+        const response = await fetch(`/api/workspace?limit=4000&before=${cursor}&summaries=false`, { cache: "no-store", signal: batchController.signal });
+        if (!response.ok) throw new Error("Unable to load the remaining PDFs. Reload to retry.");
+        batch = await response.json();
+      } finally { clearTimeout(batchTimeout); }
+      if (version !== workspaceLoadVersion) return;
+      if (!Array.isArray(batch.documents) || (batch.nextBefore && batch.nextBefore >= cursor)) throw new Error("Invalid PDF batch. Reload to retry.");
+      for (const pdf of batch.documents) remaining.push(pdf);
+      cursor = batch.nextBefore;
+      backgroundStatus.textContent = `Loading PDFs: ${pdfs.length + remaining.length} received. Search and filters currently show the first ${pdfs.length} records only.`;
+    }
+    if (version !== workspaceLoadVersion) return;
+    if (remaining.length) {
+      const knownIds = new Set(pdfs.map(pdf => pdf.id));
+      for (const pdf of remaining) if (!knownIds.has(pdf.id)) pdfs.push(pdf);
+      window.workspacePartial = false;
+      authorLookup = null;
+      renderApp();
+      if (state.searchQuery.trim()) scheduleAdvancedSearch();
+    }
+    backgroundStatus.hidden = true;
   } catch (error) {
     if (version === workspaceLoadVersion) {
       const message = error.name === "AbortError" ? "Loading took too long. Please try again." : error.message;
@@ -48,14 +86,21 @@ async function loadDatabaseWorkspace() {
         document.getElementById("workspace-loading-message").textContent = message;
         document.getElementById("workspace-loading-retry").hidden = false;
         document.getElementById("workspace-loading-dismiss").hidden = false;
-      } else showToast(message);
+      } else {
+        showToast(message);
+        if (window.workspacePartial) {
+          backgroundStatus.hidden = false;
+          backgroundStatus.textContent = "Only part of your library is loaded. Reload to retry loading the remaining PDFs.";
+        }
+      }
     }
   } finally {
     clearTimeout(timeout);
+    if (version === workspaceLoadVersion) workspaceFetching = false;
   }
 }
 void loadDatabaseWorkspace();
-window.addEventListener("focus", loadDatabaseWorkspace);
+window.addEventListener("focus", () => { if (!workspaceFetching) void loadDatabaseWorkspace(); });
 document
   .querySelector("#pdf-table-body")
   .addEventListener("click", async (event) => {

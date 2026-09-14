@@ -32,6 +32,7 @@ class ProjectRequest(BaseModel):
 
 class CrawlRequest(BaseModel):
     project_ids: list[int] | None = None
+    repository_ids: list[int] | None = Field(default=None, max_length=10000)
 
 
 class DeleteRequest(BaseModel):
@@ -124,6 +125,26 @@ def projects():
 async def crawl(value: CrawlRequest, request: Request):
     if request.app.state.jobs.active():
         raise HTTPException(409, "A crawl is already running.")
+    if value.repository_ids:
+        ids = sorted(set(value.repository_ids))
+        with connection() as db:
+            rows = db.execute(
+                "SELECT r.id,r.project_id,r.repo,p.project FROM repositories r "
+                "JOIN tracked_projects p ON p.id=r.project_id WHERE r.id IN ("
+                + ",".join("?" for _ in ids)
+                + ")",
+                ids,
+            ).fetchall()
+        if len(rows) != len(ids):
+            raise HTTPException(
+                404, "One or more selected repositories no longer exist."
+            )
+        targets = [
+            {"project": r["project"], "repo": r["repo"], "path": None} for r in rows
+        ]
+        return request.app.state.jobs.start(
+            sorted({r["project_id"] for r in rows}), targets=targets
+        )
     return request.app.state.jobs.start(value.project_ids)
 
 

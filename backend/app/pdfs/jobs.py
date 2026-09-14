@@ -404,8 +404,8 @@ class Jobs:
             if status in {"scanning", "succeeded", "failed", "cancelled"}:
                 with connection() as db:
                     db.execute(
-                        "UPDATE repositories SET last_pull_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?",
-                        (repository_id,),
+                        "UPDATE repositories SET last_pull_at=? WHERE id=?",
+                        (p["started_at"], repository_id),
                     )
             self.save()
 
@@ -607,6 +607,15 @@ class Jobs:
                                         "DELETE FROM failed_documents WHERE repository_id=? AND path=?",
                                         (repository_id, path),
                                     )
+                                # Backfill pre-feature records without a full folder/PDF scan.
+                                changed.update(
+                                    row[0]
+                                    for row in db.execute(
+                                        "SELECT path FROM documents WHERE repository_id=? "
+                                        "AND (commit_count IS NULL OR commit_history IS NULL)",
+                                        (repository_id,),
+                                    )
+                                )
                                 # Retry outstanding saved failures even if HEAD is unchanged.
                                 changed.update(
                                     row[0]

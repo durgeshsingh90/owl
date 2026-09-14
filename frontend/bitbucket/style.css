@@ -3010,3 +3010,32 @@ tbody tr.selected td:first-child {
 .commit-history-dialog a { color: #b8d6ff; overflow-wrap: anywhere; text-decoration: underline; }
 .commit-history-dialog h4 { font-size: 17px; margin: 0 0 12px; }
 .commit-history-dialog h5 { font-size: 14px; margin: 18px 0 8px; }
+.pull-button.is-running svg { animation: pull-running 1.2s linear infinite; }
+@keyframes pull-running { to { transform: rotate(360deg); } }
+#crawl-repository-count { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.commit-history-dialog .history-list.is-grouped { list-style: none; padding-left: 0; }
+.commit-history-dialog .history-pr-group { border: 1px solid #54678c; border-radius: 8px; margin: 16px 0; padding: 16px; }
+.commit-history-dialog .history-pr-group summary { font-size: 16px; font-weight: 600; cursor: pointer; overflow-wrap: anywhere; }
+.commit-history-dialog .history-pr-group ol { padding-left: 24px; }
+.commit-history-dialog .history-pr-group li:last-child { border-bottom: 0; }
+.project-copy .project-repo-counts { white-space: normal; line-height: 1.5; font-size: 12px; margin-top: 4px; }
+
+/* Keep repository actions aligned, with recovery and deletion visually separated. */
+#projects-content .sidebar-heading { display: block; margin-bottom: 12px; }
+#projects-content .repository-toolbar { display: flex; align-items: center; gap: 6px; width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 10px; box-sizing: border-box; }
+#projects-content .repository-toolbar > .sidebar-count { margin-right: auto; }
+#projects-content .repository-toolbar button { width: 32px; height: 32px; min-width: 32px; padding: 6px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; }
+#projects-content .repository-toolbar button svg { width: 18px; height: 18px; }
+#projects-content .all-repositories-actions { display: flex; gap: 4px; padding-left: 6px; border-left: 1px solid var(--border); }
+#projects-content #delete-selected-repo { margin-left: 4px; }
+#projects-content .all-repositories-row { margin-bottom: 10px; }
+#projects-content .all-repositories-nav { padding: 12px 10px; }
+#projects-content .project-expand-controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; padding: 0 0 12px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+#projects-content .project-expand-controls button { min-height: 30px; border-radius: 6px; }
+#projects-content .project-expand-controls [data-repo-filter] { font-size: 12px; margin-top: 3px; }
+.git-pull-icon { display: block; width: 20px; height: 20px; background: currentColor; mask: url("assets/git-pull.png") center / contain no-repeat; -webkit-mask: url("assets/git-pull.png") center / contain no-repeat; }
+#pull-repositories .git-pull-running { display: none; }
+#pull-repositories.is-running .git-pull-icon { display: none; }
+#pull-repositories.is-running .git-pull-running { display: block; }
+
+#workspace-background-status { margin: 0 0 8px; font-size: 13px; line-height: 1.5; color: inherit; opacity: .8; }

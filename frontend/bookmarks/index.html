@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>OWL · Bookmarks Manager</title>
     <link rel="icon" type="image/png" href="../bitbucket/assets/owl.png?v=owl-1" />
-    <script src="../bitbucket/theme.js"></script>
-    <link rel="stylesheet" href="../bitbucket/style.css" />
-    <link rel="stylesheet" href="style.css?v=readable-text-16" />
+    <script src="../bitbucket/theme.js?v=20260914-current-mode"></script>
+    <link rel="stylesheet" href="../bitbucket/style.css?v=20260914-current-mode" />
+    <link rel="stylesheet" href="style.css?v=20260914-failures" />
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&amp;icon_names=settings,sync"
@@ -166,6 +166,7 @@
         <nav id="bookmark-domains" aria-label="Filter by domain"></nav>
       </aside>
       <section class="main-panel" aria-labelledby="bookmark-title">
+        <div class="bookmark-tree-header">
         <div class="content-header">
           <div class="selection-copy">
             <div class="selection-breadcrumb">
@@ -177,6 +178,11 @@
           <span id="bookmark-last-update" class="bookmark-last-update"
             >Last update all: unavailable</span
           >
+        </div>
+        <section id="bookmark-failures" aria-label="Bookmark failures" hidden>
+          <strong>Bookmark failures</strong>
+          <ul id="bookmark-failure-list" aria-live="polite" aria-relevant="additions"></ul>
+        </section>
         </div>
         <section class="table-panel">
           <div class="tree-heading">
@@ -503,14 +509,15 @@
     <div id="bookmark-toast" role="status" aria-live="polite"></div>
     <script src="domain-groups.js"></script>
     <script src="search.js?v=1"></script>
-    <script src="folder-downloads.js?v=7"></script>
+    <script src="failures.js?v=1"></script>
+    <script src="folder-downloads.js?v=8"></script>
     <script src="script.js?v=page-download-11"></script>
-    <script src="database.js?v=update-timestamp-5"></script>
-    <script src="metadata.js?scope=confluence&v=reveal-added-3"></script>
+    <script src="database.js?v=update-timestamp-6"></script>
+    <script src="metadata.js?scope=confluence&v=reveal-added-4"></script>
     <script src="connection.js?v=confluence-live-2"></script>
     <script src="settings.js?v=confluence-live-2"></script>
     <script src="json-transfer.js?v=1"></script>
-    <script src="import.js?v=3"></script>
+    <script src="import.js?v=4"></script>
     <script src="bulk.js?v=confluence-live-2"></script>
     <script src="refresh.js?v=update-timestamp-3"></script>
   </body>

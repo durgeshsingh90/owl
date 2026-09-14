@@ -3,7 +3,7 @@
 import json
 
 from app.core.database import connection
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/api")
@@ -61,10 +61,18 @@ def save_bookmarks(value: BookmarkWorkspace):
 
 
 @router.get("/workspace")
-def workspace():
+def workspace(
+    limit: int | None = Query(default=None, ge=1, le=5000),
+    before: int | None = Query(default=None, ge=1),
+    summaries: bool = True,
+):
     with connection() as db:
         projects = []
-        for p in db.execute("SELECT * FROM tracked_projects ORDER BY project"):
+        for p in (
+            db.execute("SELECT * FROM tracked_projects ORDER BY project")
+            if summaries
+            else []
+        ):
             repos = []
             for r in db.execute(
                 "SELECT r.*,COUNT(d.id) pdf_count,MAX(d.commit_date) last_commit FROM repositories r "
@@ -91,9 +99,13 @@ def workspace():
                 )
             projects.append({"id": str(p["id"]), "name": p["project"], "repos": repos})
         documents = []
-        contributors = {}
         for row in db.execute(
-            "SELECT d.*,r.project_id FROM documents d JOIN repositories r ON r.id=d.repository_id"
+            "SELECT d.id,d.project,d.file_size,d.page_count,d.commit_id,d.commit_count,"
+            "d.commit_message,d.last_scanned,d.repo,d.pdf_name,d.path,d.url,d.commit_date,"
+            "d.author,d.open_count,d.notes,d.added_at,d.updated_at,r.project_id "
+            "FROM documents d JOIN repositories r ON r.id=d.repository_id "
+            "WHERE (? IS NULL OR d.id < ?) ORDER BY d.id DESC LIMIT ?",
+            (before, before, limit + 1 if limit is not None else -1),
         ):
             d = dict(row)
             documents.append(
@@ -122,22 +134,32 @@ def workspace():
                     "updatedAt": d["updated_at"],
                 }
             )
-            if d["author"]:
-                key = (str(d["project_id"]), d["repo"], d["author"])
-                c = contributors.setdefault(
-                    key,
+        has_more = limit is not None and len(documents) > limit
+        if has_more:
+            documents.pop()
+        people = []
+        if summaries:
+            for row in db.execute(
+                "SELECT r.project_id,d.repo,d.author,COUNT(*) pdf_count,"
+                "COUNT(DISTINCT NULLIF(d.commit_id,'')) commits "
+                "FROM documents d JOIN repositories r ON r.id=d.repository_id "
+                "WHERE d.author IS NOT NULL AND d.author != '' "
+                "GROUP BY r.project_id,d.repo,d.author ORDER BY r.project_id,d.repo,d.author"
+            ):
+                people.append(
                     {
-                        "id": len(contributors) + 1,
-                        "projectId": key[0],
-                        "repo": key[1],
-                        "name": key[2],
+                        "id": len(people) + 1,
+                        "projectId": str(row["project_id"]),
+                        "repo": row["repo"],
+                        "name": row["author"],
                         "email": "",
-                        "pdfCount": 0,
-                        "commits": set(),
-                    },
+                        "pdfCount": row["pdf_count"],
+                        "commits": row["commits"],
+                    }
                 )
-                c["pdfCount"] += 1
-                if d["commit_id"]:
-                    c["commits"].add(d["commit_id"])
-        people = [{**p, "commits": len(p["commits"])} for p in contributors.values()]
-    return {"projects": projects, "documents": documents, "people": people}
+    return {
+        "projects": projects,
+        "documents": documents,
+        "people": people,
+        "nextBefore": documents[-1]["id"] if has_more else None,
+    }

@@ -51,6 +51,29 @@ class BackendTests(unittest.TestCase):
             self.client.post("/api/settings", json=self.config).status_code, 200
         )
 
+    def test_workspace_phases_keep_complete_summaries(self):
+        self.crawl()
+        full = self.client.get("/api/workspace").json()
+        first = self.client.get("/api/workspace?limit=1").json()
+        self.assertEqual(len(first["documents"]), 1)
+        self.assertEqual(first["projects"], full["projects"])
+        self.assertEqual(first["people"], full["people"])
+        records = list(first["documents"])
+        cursor = first["nextBefore"]
+        while cursor:
+            batch = self.client.get(
+                f"/api/workspace?limit=1&before={cursor}&summaries=false"
+            ).json()
+            self.assertEqual(batch["projects"], [])
+            self.assertEqual(batch["people"], [])
+            records.extend(batch["documents"])
+            cursor = batch["nextBefore"]
+        self.assertEqual(records, full["documents"])
+        self.assertEqual(len({d["id"] for d in records}), len(records))
+        self.assertNotIn("pdf_text", records[0])
+        self.assertNotIn("commit_history", records[0])
+        self.assertEqual(self.client.get("/api/workspace?limit=0").status_code, 422)
+
     def tearDown(self):
         self.client.__exit__(None, None, None)
         self.patch.stop()
@@ -474,6 +497,38 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(failed.status_code, 502)
         self.assertIn("revision1", failed.json()["detail"])
 
+    def test_crawl_selected_repository_scope(self):
+        self.crawl()
+        with connection() as db:
+            row = db.execute(
+                "SELECT id,project_id,repo FROM repositories WHERE repo='one'"
+            ).fetchone()
+        with patch.object(
+            self.client.app.state.jobs, "start", return_value={"id": "test"}
+        ) as start:
+            result = self.client.post(
+                "/api/crawl", json={"repository_ids": [row["id"]]}
+            )
+            self.assertEqual(result.status_code, 202)
+            start.assert_called_once_with(
+                [row["project_id"]],
+                targets=[{"project": "DEMO", "repo": "one", "path": None}],
+            )
+        with patch.object(
+            self.client.app.state.jobs, "start", return_value={"id": "all"}
+        ) as start:
+            self.assertEqual(
+                self.client.post("/api/crawl", json={"repository_ids": []}).status_code,
+                202,
+            )
+            start.assert_called_once_with(None)
+        self.assertEqual(
+            self.client.post(
+                "/api/crawl", json={"repository_ids": [99999]}
+            ).status_code,
+            404,
+        )
+
     def test_advanced_search_fields_and_word_modes(self):
         self.crawl()
         with connection() as db:
@@ -697,6 +752,27 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(
                 db.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 4
             )
+
+    def test_pull_backfills_missing_history_with_unchanged_head(self):
+        self.crawl()
+        with connection() as db:
+            ids = [r[0] for r in db.execute("SELECT id FROM documents ORDER BY id")]
+            db.execute("UPDATE documents SET commit_count=NULL WHERE id=?", (ids[0],))
+            db.execute("UPDATE documents SET commit_history=NULL WHERE id=?", (ids[1],))
+        self.calls.clear()
+        job = self.crawl()
+        self.assertEqual(job["processed"], 2)
+        self.assertEqual(job["failed"], 0)
+        self.assertFalse(any("/raw/" in url or "/browse/" in url for url in self.calls))
+        with connection() as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM documents WHERE commit_count IS NULL OR commit_history IS NULL"
+                ).fetchone()[0],
+                0,
+            )
+        self.calls.clear()
+        self.assertEqual(self.crawl()["processed"], 0)
 
     def test_delta_pagination_moves_deletes_and_non_pdf_changes(self):
         self.crawl()

@@ -66,6 +66,39 @@
           };
         }
       }
+      const groups = new Map();
+      for (const [id, row] of commitRows) {
+        const keys = data.commits[id];
+        const memberships = keys == null ? ["__unavailable"] : keys.length ? keys : ["__none"];
+        for (const key of memberships) {
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push(row.parentElement);
+        }
+      }
+      const grouped = document.createDocumentFragment();
+      for (const [key, items] of groups) {
+        const group = document.createElement("li");
+        group.className = "history-pr-group";
+        const section = document.createElement("details");
+        section.open = true;
+        group.append(section);
+        const pr = byKey.get(key);
+        const label = key === "__none" ? "No associated PR" : key === "__unavailable" ? "PR lookup unavailable" :
+          "PR #" + (pr?.id || key) + (pr?.title ? " — " + pr.title : "");
+        textNode("summary", label + " · " + items.length + (items.length === 1 ? " commit" : " commits"), section);
+        const commits = document.createElement("ol");
+        section.append(commits);
+        for (const original of items) {
+          const copy = original.cloneNode(true);
+          // A commit can belong to multiple PRs; preserve actions on each copy.
+          const originals = original.querySelectorAll("button, a");
+          copy.querySelectorAll("button, a").forEach((action, index) => {action.onclick = originals[index].onclick;});
+          commits.append(copy);
+        }
+        grouped.append(group);
+      }
+      list.replaceChildren(grouped);
+      list.classList.add("is-grouped");
       for (const error of data.errors) textNode("p", error, prs);
       for (const pr of data.pull_requests) {
         const card = document.createElement("article");
@@ -120,6 +153,7 @@
     heading.textContent = "Commit history";
     status.textContent = "Loading commit history…";
     list.replaceChildren();
+    list.classList.remove("is-grouped");
     prs.replaceChildren();
     downloadAll.hidden = true;
     if (!dialog.open) dialog.showModal();

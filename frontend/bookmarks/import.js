@@ -154,6 +154,6 @@
       link.href = url; link.download = `owl-bookmarks-${new Date().toISOString().slice(0, 10)}.json`;
       link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
       toast(`Exported ${records.length} bookmarks.`);
-    } catch (error) { toast(error.message); }
+    } catch (error) { showBookmarkFailure(error.message); }
   });
 })();

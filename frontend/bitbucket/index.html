@@ -9,9 +9,9 @@
       content="A frontend prototype for exploring PDF documents across Bitbucket projects and repositories."
     />
     <title>Bitbucket PDF Explorer</title>
-    <script src="theme.js?v=20260906-crawl-18"></script>
+    <script src="theme.js?v=20260914-current-mode"></script>
     <script src="sidebars.js?v=20260906-crawl-18"></script>
-    <link rel="stylesheet" href="style.css?v=20260914-history-prs-3" />
+    <link rel="stylesheet" href="style.css?v=20260914-phased-loading-9" />
   </head>
   <body>
     <svg
@@ -101,6 +101,7 @@
           </button>
           <time id="crawl-elapsed" title="Elapsed crawl time">00h 00m 00s</time>
           <span id="crawl-percentage" aria-label="Repository progress: 0 percent" title="Repositories finished / total repositories">0%</span>
+          <span id="crawl-repository-count" title="Repositories finished / total">0/0</span>
           <button id="crawl-stop" type="button" title="Stop crawl" aria-label="Stop crawl">
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg>
           </button>
@@ -175,7 +176,7 @@
             title="Collapse Projects"
           >
             <span class="sidebar-chevron" aria-hidden="true">‹</span
-            ><span class="sidebar-bar-label" aria-hidden="true">Projects</span>
+            ><span class="sidebar-bar-label" aria-hidden="true"></span>
           </button>
           <div
             class="project-bar-repos"
@@ -185,10 +186,6 @@
           ></div>
           <div id="projects-content">
             <div class="sidebar-heading">
-              <div>
-                <p class="eyebrow">Workspace</p>
-                <h1 id="projects-heading">Projects</h1>
-              </div>
               <div class="repository-toolbar">
                 <span
                   class="sidebar-count"
@@ -214,10 +211,17 @@
                   aria-label="Git pull all repositories"
                   title="Git pull all repositories"
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4" />
-                  </svg>
+                  <span class="git-pull-icon" aria-hidden="true"></span>
+                  <svg class="git-pull-running" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1" /></svg>
                 </button>
+              <div class="all-repositories-actions">
+                <button type="button" id="hard-retry-open" class="repo-action-icon" aria-label="Hard retry all repositories" title="Hard retry: clear and rebuild the PDF index">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6M12 8v8m-4-4h8"/></svg>
+                </button>
+                <button type="button" id="retry-failed-pdfs" class="repo-action-icon" aria-label="Retry failed PDFs" title="Retry only failed PDFs">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6M12 7v6m0 3v1"/></svg>
+                </button>
+              </div>
                 <button
                   class="single-repo-delete"
                   id="delete-selected-repo"
@@ -258,21 +262,10 @@
                 </span>
                 <span>
                   <strong>All Repositories</strong>
-                  <small id="repository-search-count" role="status" hidden></small>
-                  <small id="all-repositories-meta"
-                    >0 PDFs · 0 repositories</small
-                  >
                 </span>
                 <span class="nav-arrow" aria-hidden="true">›</span>
               </button>
-              <div class="all-repositories-actions">
-                <button type="button" id="hard-retry-open" class="repo-action-icon" aria-label="Hard retry all repositories" title="Hard retry: clear and rebuild the PDF index">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6M12 8v8m-4-4h8"/></svg>
-                </button>
-                <button type="button" id="retry-failed-pdfs" class="repo-action-icon" aria-label="Retry failed PDFs" title="Retry only failed PDFs">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6M12 7v6m0 3v1"/></svg>
-                </button>
-              </div>
+
               </div>
               <div class="project-list" id="project-list"></div>
             </nav>
@@ -285,6 +278,7 @@
               <div class="selection-breadcrumb" id="selection-breadcrumb">
                 PDF index / All repositories
               </div>
+              <p id="workspace-background-status" role="status" hidden></p>
               <div class="selection-title-row"><h2 id="selection-title">All Repositories</h2><span id="selection-search-count" role="status" hidden></span></div>
               <p id="selection-description">
                 PDF files across all projects and repositories
@@ -299,8 +293,9 @@
             >
               <span id="repository-pull-status"></span>
               <div class="repository-pull-counts">
+                <span id="shared-last-pull" hidden></span>
                 <span class="pull-updating-count"
-                  >Updating
+                  >Updated
                   <strong id="repository-pull-updating">0</strong></span
                 >
                 <span
@@ -308,11 +303,11 @@
                   title="Available when backend Git pull is connected"
                   >New <strong id="repository-pull-new">—</strong></span
                 >
-                <span title="Available when backend Git pull is connected"
+                <span hidden
                   >No change
                   <strong id="repository-pull-unchanged">—</strong></span
                 >
-                <span class="pull-failed-count"
+                <span class="pull-failed-count" hidden
                   >Failed <strong id="repository-pull-failed">—</strong></span
                 >
               </div>
@@ -1046,14 +1041,14 @@
       <button id="activity-prev" type="button">Previous</button><button id="activity-next" type="button">Next</button>
     </dialog>
     <script src="activity.js?v=20260906-1"></script>
-    <script src="pull-progress.js?v=20260906-refresh-fix-2"></script>
+    <script src="pull-progress.js?v=20260914-count-visibility"></script>
     <script src="people-teams.js?v=20260906-initials-1"></script>
     <script src="notes.js?v=20260906-crawl-18"></script>
     <script src="advanced-search.js?v=20260906-refresh-fix-2"></script>
-    <script src="script.js?v=20260914-commit-count-1"></script>
-    <script src="commit-history.js?v=3"></script>
+    <script src="script.js?v=20260914-phased-loading"></script>
+    <script src="commit-history.js?v=4"></script>
     <script src="search-history.js?v=1"></script>
-    <script src="database.js?v=20260906-loading-1"></script>
+    <script src="database.js?v=20260914-phased-loading"></script>
     <script src="settings.js?v=20260906-crawl-18"></script>
     <script src="repository-delete.js?v=20260906-refresh-fix-2"></script>
     <script src="hard-retry.js?v=20260906-hard-1"></script>

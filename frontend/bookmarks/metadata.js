@@ -42,6 +42,6 @@ document.querySelector("#bookmark-search-form").addEventListener("submit", async
     } else {
       toast("Bookmark and page details saved.");
     }
-  } catch(error) {toast(error.message);}
+  } catch(error) {showBookmarkFailure(error.message);}
   finally {button.disabled=false;}
 });

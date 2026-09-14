@@ -36,7 +36,7 @@
       }
       return true;
     } catch (error) {
-      toast(error.message);
+      showBookmarkFailure(error.message);
       return false;
     } finally {
       saving = false;
@@ -101,7 +101,7 @@
       window.bookmarkDatabaseReady = true;
       render();
     } catch {
-      toast("Unable to load bookmarks from the database. Refresh to retry.");
+      showBookmarkFailure("Unable to load bookmarks from the database. Refresh to retry.");
     }
   }
   document.addEventListener(

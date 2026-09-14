@@ -99,6 +99,7 @@ function watchCrawl(job) {
       const doneRepos = Math.min(totalRepos, Math.max(0, Number(current.repositories_done) || 0));
       const percentage = totalRepos ? Math.floor(doneRepos / totalRepos * 100) : 0;
       const progress = document.querySelector("#crawl-percentage");
+      document.querySelector("#crawl-repository-count").textContent = `${doneRepos}/${totalRepos}`;
       progress.textContent = `${percentage}%`;
       progress.title = `${doneRepos}/${totalRepos} repositories finished (including failures and empty repositories)`;
       progress.setAttribute("aria-label", `${percentage}% complete: ${doneRepos} of ${totalRepos} repositories finished`);
@@ -109,8 +110,13 @@ function watchCrawl(job) {
       }
       updatePullSummary(current.status.replaceAll("_", " "));
       document.querySelector("#repository-pull-new").textContent = current.new;
-      document.querySelector("#repository-pull-unchanged").textContent = current.unchanged;
-      document.querySelector("#repository-pull-failed").textContent = current.failed + current.repositories_failed;
+      const unchangedCount = Number(current.unchanged) || 0;
+      const failedCount = (Number(current.failed) || 0) + (Number(current.repositories_failed) || 0);
+      for (const [selector, count] of [["#repository-pull-unchanged", unchangedCount], ["#repository-pull-failed", failedCount]]) {
+        const element = document.querySelector(selector);
+        element.textContent = count;
+        element.parentElement.hidden = count <= 1;
+      }
       document.querySelector("#repository-pull-updating").textContent = current.updated;
       const statuses = JSON.stringify(current.repository_statuses || {});
       const statusesChanged = statuses !== lastStatuses;
@@ -153,10 +159,13 @@ function watchCrawl(job) {
 async function startPullPreview(targetProjects = projects) {
   if (pullProgress.active) return;
   pullProgress.active = true;
+  updateSelectionHeader();
   try {
-    const job = await crawlJson("/api/crawl", {project_ids: targetProjects.map(project => Number(project.id))});
+    const selected = selectedRepositories();
+    const scope = selected.length ? {repository_ids: selected.map(repo => Number(repo.id))} : {project_ids: targetProjects.map(project => Number(project.id))};
+    const job = await crawlJson("/api/crawl", scope);
     watchCrawl(job);
-  } catch (error) { pullProgress.active = false; showToast(error.message); }
+  } catch (error) { pullProgress.active = false; updateSelectionHeader(); showToast(error.message); }
 }
 async function reconnectCrawl() {
   if (pullProgress.active) return;

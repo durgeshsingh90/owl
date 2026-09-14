@@ -35,8 +35,8 @@
       if (!response.ok) return;
       const updated = new Map((await response.json()).map(item => [item.folder_key,item]));
       for (const [key, status] of updated) {
-        if (status.status === 'failed' && statuses.get(key)?.status === 'running') {
-          toast(status.error || 'Folder download failed.');
+        if (status.status === 'failed' && (statuses.get(key)?.status !== 'failed' || statuses.get(key)?.error !== status.error)) {
+          showBookmarkFailure('Download failed: ' + (status.error || 'Folder download failed.'), key + ':' + status.error);
         }
       }
       statuses = updated;
@@ -62,7 +62,7 @@
       if (!response.ok) throw Error((await response.json()).detail || 'Download could not start.');
       await refresh();
       toast('Downloading folder pages for search.');
-    } catch(error) {button.disabled=false;toast(error.message);}
+    } catch(error) {button.disabled=false;showBookmarkFailure('Download could not start: ' + error.message);}
   });
   window.searchDownloadedBookmarkPages = (savedMatches = []) => {
     clearTimeout(searchTimer);
@@ -93,7 +93,7 @@
         document.getElementById('bookmark-empty').hidden=matches.length+downloaded.length>0;
         document.getElementById('bookmark-summary').textContent=`${matches.length} bookmarks · ${downloaded.length} downloaded pages${query.trim() ? " matching search" : ""}`;
         document.getElementById('bookmark-total').textContent=`Showing ${matches.length} saved bookmarks and ${downloaded.length} downloaded pages`;
-      } catch {if(sequence===searchSequence){updateBookmarkSearchCount(savedMatches.length);document.getElementById('bookmark-search-count').textContent += ' · saved bookmarks only';toast('Could not search downloaded pages.');}}
+      } catch {if(sequence===searchSequence){updateBookmarkSearchCount(savedMatches.length);document.getElementById('bookmark-search-count').textContent += ' · saved bookmarks only';showBookmarkFailure('Could not search downloaded pages. Saved bookmarks are still shown.');}}
     },250);
   };
   document.addEventListener('DOMContentLoaded', () => {

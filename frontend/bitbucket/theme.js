@@ -14,10 +14,10 @@
     document.documentElement.dataset.theme = theme;
     const button = document.querySelector("#theme-toggle");
     if (button) {
-      const label = `Switch to ${theme === "dark" ? "light" : "dark"} mode`;
+      const label = `${theme === "dark" ? "Dark" : "Light"} mode; switch to ${theme === "dark" ? "light" : "dark"} mode`;
       button.setAttribute("aria-label", label);
       button.title = label;
-      button.querySelector("span").textContent = theme === "dark" ? "☀" : "☾";
+      button.querySelector("span").textContent = theme === "dark" ? "☾" : "☀";
     }
   }
   applyTheme();
