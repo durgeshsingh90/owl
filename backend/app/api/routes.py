@@ -335,6 +335,30 @@ async def document_commits(doc_id: int):
     }
 
 
+@router.get("/document/{doc_id}/pull-requests")
+async def document_pull_requests(doc_id: int):
+    from app.pdfs.pull_requests import trace
+
+    history = await document_commits(doc_id)
+    with connection() as db:
+        row = db.execute(
+            "SELECT d.project,d.repo,p.server FROM documents d "
+            "JOIN repositories r ON r.id=d.repository_id "
+            "JOIN tracked_projects p ON p.id=r.project_id WHERE d.id=?",
+            (doc_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Document not found.")
+    settings = load_settings()
+    if settings.base_url.rstrip("/") != row["server"].rstrip("/"):
+        raise HTTPException(409, "Connect to this document's Bitbucket server first.")
+    client = BitbucketClient(settings)
+    try:
+        return await trace(client, row["project"], row["repo"], history["commits"])
+    finally:
+        await client.close()
+
+
 @router.get("/document/{doc_id}/commits/download")
 async def download_commit_versions(doc_id: int, commit_id: str | None = None):
     history = await document_commits(doc_id)

@@ -3005,3 +3005,8 @@ tbody tr.selected td:first-child {
 .commit-history-dialog .history-download-all { background: #315d98; }
 .commit-history-dialog .history-status { color: #c8d6eb; margin: 16px 0; }
 .commit-history-dialog li p { margin: 10px 0; line-height: 1.5; }
+.commit-history-dialog .history-prs { border-top: 2px solid #718eb6; margin-top: 24px; padding-top: 16px; }
+.commit-history-dialog .history-prs article { padding: 16px; margin: 16px 0; border: 1px solid #54678c; border-radius: 8px; }
+.commit-history-dialog a { color: #b8d6ff; overflow-wrap: anywhere; text-decoration: underline; }
+.commit-history-dialog h4 { font-size: 17px; margin: 0 0 12px; }
+.commit-history-dialog h5 { font-size: 14px; margin: 18px 0 8px; }
