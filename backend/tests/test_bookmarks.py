@@ -540,3 +540,169 @@ class BookmarkTests(unittest.TestCase):
         self.assertEqual(saved["contentText"], data["contentText"])
         self.assertEqual(saved["ancestors"], data["ancestors"])
         self.assertNotIn("private-test-pat", json.dumps(saved))
+
+    def test_descendant_server_error_falls_back_to_paginated_children(self):
+        self.configure()
+        original = self.upstream
+        paths = []
+
+        def upstream(request):
+            path = request.url.path
+            paths.append(path)
+            if path.endswith("/descendant/page"):
+                return httpx.Response(500, json={})
+            if path.endswith("/123/child/page"):
+                if request.url.params.get("start") == "1":
+                    return httpx.Response(200, json={"results": [{"id": "456"}]})
+                return httpx.Response(
+                    200,
+                    json={
+                        "results": [{"id": "234"}],
+                        "_links": {"next": "?start=1&limit=100"},
+                    },
+                )
+            if path.endswith("/234/child/page"):
+                return httpx.Response(
+                    200, json={"results": [{"id": "789"}, {"id": "123"}]}
+                )
+            if path.endswith("/child/page"):
+                return httpx.Response(200, json={"results": []})
+            data = original(request).json()
+            data["id"] = path.rsplit("/", 1)[-1]
+            return httpx.Response(200, json=data)
+
+        self.upstream = upstream
+        response = self.client.post(
+            "/api/bookmarks/downloads", json={"folder_key": "tree", "root_ids": ["123"]}
+        )
+        self.assertEqual(response.status_code, 202)
+        status = self.client.get("/api/bookmarks/downloads").json()[0]
+        self.assertEqual((status["status"], status["count"]), ("completed", 4))
+        self.assertEqual(sum(path.endswith("/123/child/page") for path in paths), 2)
+        self.assertEqual(
+            self.client.get(
+                "/api/bookmarks/downloaded-search", params={"include_all": "true"}
+            ).json()["total"],
+            4,
+        )
+
+    def test_permission_failure_not_retried_via_children_and_request_not_duplicated(
+        self,
+    ):
+        self.configure()
+        self.code = 403
+        response = self.client.post(
+            "/api/bookmarks/downloads", json={"folder_key": "tree", "root_ids": ["123"]}
+        )
+        self.assertEqual(response.status_code, 202)
+        status = self.client.get("/api/bookmarks/downloads").json()[0]
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["error"].count("Request:"), 1)
+        self.assertIn("HTTP 403", status["error"])
+        self.assertFalse(
+            any("/child/page" in request.url.path for request in self.calls)
+        )
+
+    def test_download_dismissal_persists_and_is_scoped_to_failure_attempt(self):
+        from app.core.database import connection, initialize
+
+        with connection() as db:
+            db.execute(
+                "INSERT INTO bookmark_downloads(folder_key,status,error,updated_at) VALUES('tree','failed','Error','first')"
+            )
+        payload = {"folder_key": "tree", "updated_at": "first"}
+        self.assertEqual(
+            self.client.post(
+                "/api/bookmarks/downloads/dismiss", json=payload
+            ).status_code,
+            200,
+        )
+        initialize(recover_jobs=True)
+        self.assertEqual(
+            self.client.get("/api/bookmarks/downloads").json()[0]["dismissed_at"],
+            "first",
+        )
+        with connection() as db:
+            db.execute(
+                "UPDATE bookmark_downloads SET updated_at='second' WHERE folder_key='tree'"
+            )
+        self.client.post("/api/bookmarks/downloads/dismiss", json=payload)
+        status = self.client.get("/api/bookmarks/downloads").json()[0]
+        self.assertNotEqual(status["dismissed_at"], status["updated_at"])
+
+    def test_numeric_page_id_resolves_using_configured_confluence(self):
+        self.configure()
+        original = self.upstream
+
+        def upstream(request):
+            data = original(request).json()
+            data["id"] = "1600383846"
+            return httpx.Response(200, json=data)
+
+        self.upstream = upstream
+        response = self.client.post(
+            "/api/bookmarks/resolve", json={"url": " 1600383846 "}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["url"],
+            self.settings["base_url"] + "/pages/viewpage.action?pageId=1600383846",
+        )
+        self.assertTrue(
+            any(
+                request.url.path.endswith("/content/1600383846")
+                for request in self.calls
+            )
+        )
+
+    def test_numeric_page_id_reuses_saved_bookmark_only_on_configured_server(self):
+        self.configure()
+        payload = self.client.get("/api/bookmarks/workspace").json()
+        current = {
+            "id": 2,
+            "url": self.settings["base_url"] + "/spaces/CLOUD/pages/123/Guide",
+            "page_id": "123",
+            "title": "Saved guide",
+        }
+        payload["bookmarks"] = [
+            {
+                "id": 1,
+                "url": "https://another.test/pages/123",
+                "page_id": "123",
+                "title": "Other server",
+            },
+            current,
+        ]
+        self.client.put("/api/bookmarks/workspace", json=payload)
+        count = len(self.calls)
+        response = self.client.post("/api/bookmarks/resolve", json={"url": "123"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], 2)
+        self.assertEqual(len(self.calls), count)
+        payload = self.client.get("/api/bookmarks/workspace").json()
+        payload["bookmarks"] = payload["bookmarks"][:1]
+        self.client.put("/api/bookmarks/workspace", json=payload)
+        response = self.client.post("/api/bookmarks/resolve", json={"url": "123"})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["url"].startswith(self.settings["base_url"]))
+        self.assertGreater(len(self.calls), count)
+
+    def test_numeric_page_id_requires_configuration_and_reports_missing_page(self):
+        response = self.client.post("/api/bookmarks/resolve", json={"url": "123"})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("settings", response.json()["detail"].lower())
+        self.configure()
+        for value in ("0", "1" * 21):
+            self.assertEqual(
+                self.client.post(
+                    "/api/bookmarks/resolve", json={"url": value}
+                ).status_code,
+                422,
+            )
+        self.code = 404
+        response = self.client.post("/api/bookmarks/resolve", json={"url": "123"})
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("404", response.json()["detail"])
+        self.assertEqual(
+            self.client.get("/api/bookmarks/workspace").json()["bookmarks"], []
+        )

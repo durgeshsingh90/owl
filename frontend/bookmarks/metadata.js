@@ -27,15 +27,16 @@ function revealSavedBookmark(item) {
 document.querySelector("#bookmark-search-form").addEventListener("submit", async event => {
   event.preventDefault();
   const input = document.querySelector("#bookmark-search"), url = parseBookmarkUrl(input.value);
-  if (!url || !window.bookmarkDatabaseReady) return;
+  const pageId = /^[0-9]+$/.test(input.value.trim()) ? input.value.trim() : null;
+  if ((!url && !pageId) || !window.bookmarkDatabaseReady) return;
   const button = document.querySelector("#add-bookmark");
   if (button.disabled) return;
   button.disabled = true;
   try {
-    const existing = bookmarks.find(item => bookmarkMatchesUrl(item, url.href));
+    const existing = url && bookmarks.find(item => bookmarkMatchesUrl(item, url.href));
     if (existing) { revealSavedBookmark(existing); return; }
     toast("Checking page and fetching details…");
-    const data = await resolveBookmark(url.href);
+    const data = await resolveBookmark(url ? url.href : pageId);
     // Recheck after the network request to avoid duplicate submissions.
     const resolvedExisting = bookmarks.find(item => bookmarkMatchesUrl(item, data.url) || (data.page_id && String(item.page_id) === String(data.page_id) && item.confluenceBaseUrl === data.confluenceBaseUrl));
     if (resolvedExisting) { revealSavedBookmark(resolvedExisting); return; }

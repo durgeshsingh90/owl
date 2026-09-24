@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections import deque
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl, urlsplit
 
@@ -86,7 +87,10 @@ async def download(settings, key, space_key, root_ids, root_title=""):
                     {"spaceKey": space_key, "type": "page", "status": "current"},
                 )
             ]
-        for path, params in paths:
+
+        async def discover(path, params):
+            nonlocal request_url
+            discovered = []
             paging = {"start": 0, "limit": 100}
             visited = set()
             while True:
@@ -104,6 +108,11 @@ async def download(settings, key, space_key, root_ids, root_title=""):
                     if not page_id.isdecimal():
                         raise ValueError("Confluence returned an invalid page ID.")
                     page_ids[page_id] = None
+                    discovered.append(page_id)
+                    if len(page_ids) > 50000:
+                        raise ValueError(
+                            "Folder exceeds the 50,000 page download limit."
+                        )
                 with connection() as db:
                     db.execute(
                         "UPDATE bookmark_downloads SET total=?,updated_at=? WHERE folder_key=?",
@@ -116,6 +125,29 @@ async def download(settings, key, space_key, root_ids, root_title=""):
                 paging = dict(parse_qsl(urlsplit(data["_links"]["next"]).query))
                 if not paging:
                     raise ValueError("Confluence returned no next-page cursor.")
+            return discovered
+
+        for path, params in paths:
+            try:
+                await discover(path, params)
+            except confluence.ConfluenceRequestError as error:
+                if not path.endswith(
+                    "/descendant/page"
+                ) or error.upstream_status not in {404, 405, 500, 501, 502, 503, 504}:
+                    raise
+                # Some servers fail the bulk descendant listing. Walk direct
+                # children instead, retaining pagination and cycle protection.
+                pending = deque([path.split("/")[1]])
+                traversed = set()
+                while pending:
+                    parent = pending.popleft()
+                    if parent in traversed:
+                        continue
+                    traversed.add(parent)
+                    children = await discover("content/" + parent + "/child/page", {})
+                    pending.extend(
+                        child for child in children if child not in traversed
+                    )
         with connection() as db:
             db.execute(
                 "UPDATE bookmark_downloads SET total=?,phase='downloading',updated_at=? WHERE folder_key=?",
@@ -149,7 +181,10 @@ async def download(settings, key, space_key, root_ids, root_title=""):
         token = settings.token.get_secret_value()
         if token:
             reason = reason.replace(token, "[redacted]")
-        message = f"Downloaded {len(seen)} pages before failure. {reason} Request: {request_url}"
+        request_detail = "" if "Request:" in reason else f" Request: {request_url}"
+        message = (
+            f"Downloaded {len(seen)} pages before failure. {reason}{request_detail}"
+        )
         logging.getLogger(__name__).error("%s %s", stamp(), message)
         with connection() as db:
             db.execute(

@@ -1,6 +1,26 @@
 "use strict";
 (() => {
   let statuses = new Map(), scopes = new Map(), searchSequence = 0, searchTimer;
+  const displayedFailures = new Map();
+  let refreshing = false;
+  async function dismissFailure(key, status) {
+    try {
+      const response = await fetch('/api/bookmarks/downloads/dismiss', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({folder_key:key, updated_at:status.updated_at}),
+      });
+      if (!response.ok) throw Error();
+    } catch {
+      showBookmarkFailure('Dismissed in this browser, but OWL could not save the dismissal. Check the backend connection.');
+    }
+  }
+  function downloadLabel(key) {
+    try {
+      const path = JSON.parse(key);
+      if (!Array.isArray(path)) return key;
+      return path[1] === 'page' ? `Page ${path[2]}` : path.slice(1).join(' / ');
+    } catch { return key; }
+  }
   window.bookmarkFolderDownloadButton = path => {
     const candidates = bookmarks.filter(item => item.sourceType === 'confluence' &&
       JSON.stringify([item.space || 'Pages', ...(item.breadcrumb || [])].slice(0, path.length)) === JSON.stringify(path));
@@ -30,13 +50,25 @@
     return `<span class="folder-download-progress"><button type="button" class="folder-content-download ${done ? 'download-complete' : ''}" data-folder-download="${esc(key)}" title="${esc(title)}" aria-label="${esc(title)}" ${!supported || running ? 'disabled' : ''}>${done ? '✓' : running ? '…' : '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M4 17v4h16v-4" fill="none" stroke="currentColor" stroke-width="2"/></svg>'}</button>${running ? `<span class="tree-context" role="status">${status.phase === 'discovering' ? `Finding pages · ${status.total || 0} found` : `Downloading ${status.count}/${status.total}`}</span>` : ''}</span>`;
   }
   async function refresh() {
+    if (refreshing) return;
+    refreshing = true;
     try {
       const response = await fetch('/api/bookmarks/downloads');
       if (!response.ok) return;
       const updated = new Map((await response.json()).map(item => [item.folder_key,item]));
+      for (const [key, failureKey] of displayedFailures) {
+        const status = updated.get(key);
+        const currentKey = status && key + ':' + status.updated_at + ':' + status.error;
+        if (status?.status !== 'failed' || status.dismissed_at === status.updated_at || currentKey !== failureKey) {
+          removeBookmarkFailure(failureKey);
+          displayedFailures.delete(key);
+        }
+      }
       for (const [key, status] of updated) {
-        if (status.status === 'failed' && (statuses.get(key)?.status !== 'failed' || statuses.get(key)?.error !== status.error || statuses.get(key)?.updated_at !== status.updated_at)) {
-          showBookmarkFailure('Download failed: ' + (status.error || 'Folder download failed.'), key + ':' + status.updated_at + ':' + status.error, true);
+        if (status.status === 'failed' && status.dismissed_at !== status.updated_at) {
+          const failureKey = key + ':' + status.updated_at + ':' + status.error;
+          showBookmarkFailure('Download failed (' + downloadLabel(key) + '): ' + (status.error || 'Folder download failed.'), failureKey, true, () => { void dismissFailure(key, status); });
+          displayedFailures.set(key, failureKey);
         }
       }
       statuses = updated;
@@ -49,7 +81,7 @@
           : item ? bookmarkPageDownloadButton(item) : '';
         (button.closest(".folder-download-progress") || button).outerHTML = markup;
       });
-    } catch {}
+    } catch {} finally { refreshing = false; }
   }
   document.addEventListener('click', async event => {
     const button = event.target.closest('[data-folder-download]');
@@ -88,11 +120,26 @@
           if(saved) {if(!matches.some(b=>b.id===saved.id))matches.push(saved);continue;}
           downloaded.push({...item,id:'downloaded:'+item.url,domain:host,views:0,searchOnly:true});
         }
-        renderBookmarkTree(matches,downloaded,false);
+        const downloadedContext = [];
+        if (showSearchBranches && query.trim() && view === 'all' && !selectedPerson) {
+          const contextResponse = await fetch('/api/bookmarks/downloaded-search?include_all=true');
+          if (!contextResponse.ok) throw Error();
+          const contextData = await contextResponse.json();
+          if (sequence !== searchSequence) return;
+          const shown = new Set(downloaded.map(item => item.url));
+          for (const item of contextData.items) {
+            const host = new URL(item.url).hostname;
+            if (shown.has(item.url) || (domain && host !== domain)) continue;
+            if (selectedDomainGroup && !domainGroups.find(group => group.id === selectedDomainGroup)?.domains.includes(host)) continue;
+            if (bookmarks.some(saved => bookmarkMatchesUrl(saved, item.url))) continue;
+            downloadedContext.push({...item,id:'downloaded:'+item.url,domain:host,views:0,searchOnly:true});
+          }
+        }
+        renderBookmarkTree(matches,downloaded,false,downloadedContext);
         updateBookmarkSearchCount(matches.length + downloaded.length);
         document.getElementById('bookmark-empty').hidden=matches.length+downloaded.length>0;
         document.getElementById('bookmark-summary').textContent=`${matches.length} bookmarks · ${downloaded.length} downloaded pages${query.trim() ? " matching search" : ""}`;
-        document.getElementById('bookmark-total').textContent=`Showing ${matches.length} saved bookmarks and ${downloaded.length} downloaded pages`;
+        document.getElementById('bookmark-total').textContent=`Showing ${matches.length} saved bookmarks and ${downloaded.length} downloaded pages${showSearchBranches && query.trim() ? ' · plus branch context' : ''}`;
       } catch {if(sequence===searchSequence){updateBookmarkSearchCount(savedMatches.length);document.getElementById('bookmark-search-count').textContent += ' · saved bookmarks only';showBookmarkFailure('Could not search downloaded pages. Saved bookmarks are still shown.');}}
     },250);
   };

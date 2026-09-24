@@ -33,3 +33,27 @@ for (const resolved of [false, true]) test(`saved bookmark is revealed ${resolve
  assert.equal(shown,7);assert.equal(branch.open,true);assert.equal(context.collapsedBranches.size,0);
  assert.equal(focused,true);assert.equal(scrolled,true);assert.equal(renders,1);
 });
+
+for (const scenario of ['saved', 'new', 'missing']) test(`numeric Confluence page ID: ${scenario}`, async()=>{
+ const item={id:7,title:'Cloud guide',page_id:'1600383846',url:'https://wiki.test/pages/viewpage.action?pageId=1600383846',sourceType:'confluence',confluenceBaseUrl:'https://wiki.test'};
+ const input={value:' 1600383846 '},button={disabled:false};
+ let submit,persisted=0,error='',sent;
+ const context={
+  document:{querySelector:selector=>selector==='#bookmark-search-form'?{addEventListener:(_,fn)=>submit=fn}:selector==='#bookmark-search'?input:selector==='#add-bookmark'?button:null},
+  fetch:async(_,options)=>{sent=JSON.parse(options.body);return {ok:scenario!=='missing',json:async()=>scenario==='missing'?{detail:'Confluence HTTP 404'}:item};},
+  parseBookmarkUrl:()=>null,bookmarkMatchesUrl:matchesUrl,
+  bookmarks:scenario==='saved'?[item]:[],bookmarkDatabaseReady:true,
+  render:()=>{},toast:()=>{},showBookmarkFailure:message=>error=message,
+  nextBookmarkId:()=>8,persist:async()=>{persisted++;return true;},
+  view:'all',domain:'',selectedDomainGroup:'',selectedPerson:'',query:input.value,
+ };
+ context.window=context;
+ vm.runInNewContext(source,context);
+ await submit({preventDefault(){}});
+ assert.equal(sent.url,'1600383846');
+ assert.equal(persisted,scenario==='new'?1:0);
+ assert.equal(context.bookmarks.length,scenario==='missing'?0:1);
+ assert.equal(button.disabled,false);
+ if(scenario==='missing') assert.match(error,/404/);
+ else {assert.equal(error,'');assert.equal(input.value,'');}
+});

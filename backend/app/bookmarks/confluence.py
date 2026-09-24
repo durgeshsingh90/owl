@@ -106,6 +106,12 @@ class TextContent(HTMLParser):
         )
 
 
+class ConfluenceRequestError(HTTPException):
+    def __init__(self, upstream_status, detail):
+        super().__init__(502, detail)
+        self.upstream_status = upstream_status
+
+
 async def get(settings, path, params=None):
     url = settings.base_url + "/rest/api/" + path
     try:
@@ -126,8 +132,8 @@ async def get(settings, path, params=None):
                 403: "access denied",
                 404: "page or endpoint not found",
             }.get(response.status_code, "request failed")
-            raise HTTPException(
-                502,
+            raise ConfluenceRequestError(
+                response.status_code,
                 f"Confluence HTTP {response.status_code}: {explanation}. Request: {url}",
             )
         data = response.json()

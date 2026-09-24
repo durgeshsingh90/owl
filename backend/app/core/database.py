@@ -99,6 +99,7 @@ def initialize(*, recover_jobs=False):
         for column, definition in (
             ("total", "INTEGER NOT NULL DEFAULT 0"),
             ("phase", "TEXT NOT NULL DEFAULT 'discovering'"),
+            ("dismissed_at", "TEXT NOT NULL DEFAULT ''"),
         ):
             if column not in download_columns:
                 db.execute(

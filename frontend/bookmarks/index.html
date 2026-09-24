@@ -55,8 +55,8 @@
         <input
           id="bookmark-search"
           type="search"
-          placeholder="Search bookmarks or paste a URL to add…"
-          aria-label="Search bookmarks or paste a URL to add"
+          placeholder="Search or paste a URL / Confluence page ID…"
+          aria-label="Search bookmarks or paste a URL or Confluence page ID to add"
           autocomplete="off"
         /><button id="add-bookmark" type="submit" hidden>Add bookmark ↵</button>
       <button id="advanced-search-toggle" type="button" aria-label="Advanced search" title="Advanced search" aria-expanded="false" aria-controls="advanced-search-panel">⚙</button>
@@ -194,6 +194,7 @@
               hidden
             ></span>
             <div class="tree-toolbar-controls">
+              <button id="show-search-branches" type="button" aria-pressed="false" hidden title="Show all saved and downloaded subfolders under the branches containing search matches">Show branch subfolders</button>
               <label title="Reveal downloaded pages without adding them to saved bookmarks"><input id="show-downloaded-pages" type="checkbox"> Show downloaded pages</label>
               <div
                 class="bookmark-bulk"
@@ -510,11 +511,12 @@
     <div id="bookmark-toast" role="status" aria-live="polite"></div>
     <script src="domain-groups.js"></script>
     <script src="search.js?v=3"></script>
-    <script src="failures.js?v=2"></script>
-    <script src="folder-downloads.js?v=20260914-dismiss"></script>
-    <script src="script.js?v=page-download-12"></script>
+    <script src="failures.js?v=3"></script>
+    <script src="folder-downloads.js?v=20260924-branches"></script>
+    <script src="tree-numbering.js?v=2"></script>
+    <script src="script.js?v=page-download-15"></script>
     <script src="database.js?v=update-timestamp-7"></script>
-    <script src="metadata.js?scope=confluence&v=reveal-added-5"></script>
+    <script src="metadata.js?scope=confluence&v=reveal-added-6"></script>
     <script src="connection.js?v=confluence-live-2"></script>
     <script src="settings.js?v=confluence-live-2"></script>
     <script src="json-transfer.js?v=1"></script>

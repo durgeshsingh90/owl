@@ -1,9 +1,11 @@
 """Bookmark metadata and independent Confluence settings."""
 
+import json
+import re
 from urllib.parse import parse_qs
 
 from app.bookmarks import confluence
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -78,7 +80,30 @@ class BookmarkURL(BaseModel):
 
 @router.post("/api/bookmarks/resolve")
 async def resolve(value: BookmarkURL):
-    return await confluence.metadata(value.url)
+    target = value.url.strip()
+    if re.fullmatch(r"[0-9]+", target):
+        if len(target) > 20 or int(target) == 0:
+            raise HTTPException(422, "Enter a valid Confluence page ID.")
+        page_id = str(int(target))
+        settings = confluence.load()
+        from app.core.database import connection
+
+        with connection() as db:
+            payload = json.loads(
+                db.execute(
+                    "SELECT payload FROM bookmark_workspace WHERE id=1"
+                ).fetchone()[0]
+            )
+        for item in payload["bookmarks"]:
+            saved_id = str(
+                item.get("page_id") or next(iter(confluence.named_ids(item["url"])), "")
+            )
+            if saved_id == page_id and confluence.belongs_to_server(
+                settings, item["url"]
+            ):
+                return item
+        target = settings.base_url + "/pages/viewpage.action?pageId=" + page_id
+    return await confluence.metadata(target)
 
 
 class FolderDownload(BaseModel):
@@ -95,6 +120,25 @@ def folder_downloads():
 
     with connection() as db:
         return [dict(row) for row in db.execute("SELECT * FROM bookmark_downloads")]
+
+
+class DownloadDismissal(BaseModel):
+    folder_key: str
+    updated_at: str
+
+
+@router.post("/api/bookmarks/downloads/dismiss")
+def dismiss_download_failure(value: DownloadDismissal):
+    from app.core.database import connection
+
+    with connection() as db:
+        # A dismissal of an old attempt must never hide a new failure.
+        db.execute(
+            "UPDATE bookmark_downloads SET dismissed_at=updated_at "
+            "WHERE folder_key=? AND status='failed' AND updated_at=?",
+            (value.folder_key, value.updated_at),
+        )
+    return {"ok": True}
 
 
 @router.post("/api/bookmarks/downloads", status_code=202)
