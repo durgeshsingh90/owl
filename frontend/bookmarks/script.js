@@ -586,7 +586,7 @@ document
 document
   .querySelector("#bookmark-search")
   .addEventListener("input", (event) => {
-    query = event.target.value.trim().toLowerCase();
+    query = event.target.value.trim();
     const url = parseBookmarkUrl(event.target.value);
     document.querySelector("#add-bookmark").hidden =
       !url ||

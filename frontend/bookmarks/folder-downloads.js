@@ -35,8 +35,8 @@
       if (!response.ok) return;
       const updated = new Map((await response.json()).map(item => [item.folder_key,item]));
       for (const [key, status] of updated) {
-        if (status.status === 'failed' && (statuses.get(key)?.status !== 'failed' || statuses.get(key)?.error !== status.error)) {
-          showBookmarkFailure('Download failed: ' + (status.error || 'Folder download failed.'), key + ':' + status.error);
+        if (status.status === 'failed' && (statuses.get(key)?.status !== 'failed' || statuses.get(key)?.error !== status.error || statuses.get(key)?.updated_at !== status.updated_at)) {
+          showBookmarkFailure('Download failed: ' + (status.error || 'Folder download failed.'), key + ':' + status.updated_at + ':' + status.error, true);
         }
       }
       statuses = updated;

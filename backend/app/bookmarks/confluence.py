@@ -134,10 +134,15 @@ async def get(settings, path, params=None):
         if not isinstance(data, dict):
             raise HTTPException(502, "Confluence returned an unexpected response.")
         return data
-    except httpx.RequestError:
+    except httpx.TimeoutException:
         raise HTTPException(
             502,
-            f"Cannot connect to Confluence. Check network, base URL and SSL settings. Request: {url}",
+            f"Confluence request timed out. Check VPN/network access and retry. Request: {url}",
+        ) from None
+    except httpx.RequestError as error:
+        raise HTTPException(
+            502,
+            f"Cannot connect to Confluence ({type(error).__name__}). Check VPN/network, base URL and SSL settings. Request: {url}",
         ) from None
     except (ValueError, json.JSONDecodeError):
         raise HTTPException(

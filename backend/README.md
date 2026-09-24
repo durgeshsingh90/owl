@@ -154,3 +154,21 @@ HTML imports attempt the same metadata lookup and retain failed entries for retr
 
 Validation uses mocked Confluence responses and an isolated SQLite database;
 corporate connectivity must be tested through the settings gear on your network.
+
+### Automatic Confluence updates
+
+While the OWL backend is running, saved bookmarks and downloaded page copies on
+its configured Confluence server refresh automatically. The first attempt runs
+on startup after installing this feature. After a fully successful run, the next
+run is scheduled seven days later. Connection failures and incomplete updates
+retry every two hours without a retry limit. The schedule persists in SQLite;
+overdue work resumes on startup. This does not wake a sleeping computer or start
+OWL when it is closed.
+
+The bookmark page displays update progress and the next attempt. Use **Reload
+updated pages** when background updates are available in an already-open tab.
+Workspace revision checks prevent stale tabs from overwriting newer updates;
+notes, stars, groups and other local bookmark fields are preserved. Pages outside
+the configured Confluence server and ordinary web bookmarks are not refreshed by
+this schedule. Existing downloaded pages are refreshed, without discovering new
+pages or adding them to the saved bookmarks.

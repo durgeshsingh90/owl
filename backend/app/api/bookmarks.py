@@ -9,6 +9,13 @@ from pydantic import BaseModel
 router = APIRouter()
 
 
+@router.get("/api/bookmarks/refresh-schedule")
+def refresh_schedule():
+    from app.bookmarks.refresh import status
+
+    return status()
+
+
 @router.get("/bookmarks/settings/workspace/")
 def settings_workspace():
     try:

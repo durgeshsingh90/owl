@@ -33,6 +33,7 @@
               : "Database save failed. Keep this page open and retry.",
           );
         revision = (await response.json()).revision;
+        window.bookmarkDatabaseRevision = revision;
       }
       return true;
     } catch (error) {
@@ -97,6 +98,7 @@
       window.bookmarkLastUpdateAll = data.last_update_all || null;
       document.querySelector("#bookmark-last-update").textContent = "Last update all: " + (window.bookmarkLastUpdateAll ? new Date(window.bookmarkLastUpdateAll).toLocaleString() : "unavailable");
       revision = data.revision;
+      window.bookmarkDatabaseRevision = revision;
       ready = true;
       window.bookmarkDatabaseReady = true;
       render();

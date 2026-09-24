@@ -2033,3 +2033,16 @@ body {
   gap: 6px;
   flex-wrap: wrap;
 }
+
+.bookmark-failures-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+#dismiss-bookmark-failures { background:transparent; color:inherit; border:0; font-size:24px; cursor:pointer; padding:0 4px; }
+
+.bookmark-auto-refresh {
+  margin: 0 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.bookmark-auto-refresh button {
+  margin-left: 8px;
+  cursor: pointer;
+}

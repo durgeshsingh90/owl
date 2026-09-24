@@ -73,6 +73,14 @@ def initialize(*, recover_jobs=False):
         CREATE TABLE IF NOT EXISTS bookmark_workspace (
             id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS bookmark_refresh_schedule (
+            id INTEGER PRIMARY KEY CHECK(id=1), next_run REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'scheduled', last_attempt REAL,
+            last_success REAL, owner TEXT, lease_until REAL NOT NULL DEFAULT 0,
+            completed INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0,
+            failed INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT ''
+        );
+        INSERT OR IGNORE INTO bookmark_refresh_schedule(id) VALUES(1);
         INSERT OR IGNORE INTO bookmark_workspace(id,payload) VALUES(1,'{"bookmarks":[],"groups":[],"notes":{}}');
         CREATE TABLE IF NOT EXISTS jobs (
             id TEXT PRIMARY KEY, status TEXT NOT NULL, progress TEXT NOT NULL

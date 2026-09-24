@@ -6,8 +6,8 @@
     <title>OWL · Bookmarks Manager</title>
     <link rel="icon" type="image/png" href="../bitbucket/assets/owl.png?v=owl-1" />
     <script src="../bitbucket/theme.js?v=20260914-current-mode"></script>
-    <link rel="stylesheet" href="../bitbucket/style.css?v=20260914-current-mode" />
-    <link rel="stylesheet" href="style.css?v=20260914-failures" />
+    <link rel="stylesheet" href="../bitbucket/style.css?v=20260914-dismiss" />
+    <link rel="stylesheet" href="style.css?v=20260924-auto-refresh" />
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&amp;icon_names=settings,sync"
@@ -180,9 +180,10 @@
           >
         </div>
         <section id="bookmark-failures" aria-label="Bookmark failures" hidden>
-          <strong>Bookmark failures</strong>
+          <div class="bookmark-failures-heading"><strong>Bookmark failures</strong><button id="dismiss-bookmark-failures" type="button" aria-label="Dismiss all bookmark failures" title="Dismiss all bookmark failures">×</button></div>
           <ul id="bookmark-failure-list" aria-live="polite" aria-relevant="additions"></ul>
         </section>
+        <p class="bookmark-auto-refresh" aria-live="polite"><span id="bookmark-auto-refresh-status">Automatic Confluence updates: weekly; retry every 2 hours after failure.</span> <button id="bookmark-auto-refresh-reload" type="button" hidden>Reload updated pages</button></p>
         </div>
         <section class="table-panel">
           <div class="tree-heading">
@@ -508,17 +509,18 @@
     </dialog>
     <div id="bookmark-toast" role="status" aria-live="polite"></div>
     <script src="domain-groups.js"></script>
-    <script src="search.js?v=1"></script>
-    <script src="failures.js?v=1"></script>
-    <script src="folder-downloads.js?v=8"></script>
-    <script src="script.js?v=page-download-11"></script>
-    <script src="database.js?v=update-timestamp-6"></script>
-    <script src="metadata.js?scope=confluence&v=reveal-added-4"></script>
+    <script src="search.js?v=3"></script>
+    <script src="failures.js?v=2"></script>
+    <script src="folder-downloads.js?v=20260914-dismiss"></script>
+    <script src="script.js?v=page-download-12"></script>
+    <script src="database.js?v=update-timestamp-7"></script>
+    <script src="metadata.js?scope=confluence&v=reveal-added-5"></script>
     <script src="connection.js?v=confluence-live-2"></script>
     <script src="settings.js?v=confluence-live-2"></script>
     <script src="json-transfer.js?v=1"></script>
     <script src="import.js?v=4"></script>
     <script src="bulk.js?v=confluence-live-2"></script>
-    <script src="refresh.js?v=update-timestamp-3"></script>
+    <script src="refresh.js?v=update-timestamp-4"></script>
+    <script src="auto-refresh.js?v=1"></script>
   </body>
 </html>

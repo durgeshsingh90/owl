@@ -2,6 +2,7 @@
 (() => {
   const button=document.querySelector("#update-all-bookmarks"), status=document.querySelector("#bookmark-refresh-status");
   button.addEventListener("click", async()=>{
+    if (window.bookmarkAutoRefreshRunning) { toast("Automatic Confluence update is running."); return; }
     if (!window.bookmarkDatabaseReady || button.disabled) return;
     button.disabled=true;status.hidden=false;
     let done=0,failed=0;

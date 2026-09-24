@@ -3030,9 +3030,9 @@ tbody tr.selected td:first-child {
 #projects-content #delete-selected-repo { margin-left: 4px; }
 #projects-content .all-repositories-row { margin-bottom: 10px; }
 #projects-content .all-repositories-nav { padding: 12px 10px; }
-#projects-content .project-expand-controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; padding: 0 0 12px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
-#projects-content .project-expand-controls button { min-height: 30px; border-radius: 6px; }
-#projects-content .project-expand-controls [data-repo-filter] { font-size: 12px; margin-top: 3px; }
+#projects-content .project-expand-controls { display: grid; grid-template-columns: repeat(3, 28px) repeat(3, auto); gap: 4px; padding: 0 0 12px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+#projects-content .project-expand-controls button { min-width: 0; height: 28px; min-height: 28px; padding: 3px 4px; border-radius: 5px; white-space: nowrap; }
+#projects-content .project-expand-controls [data-repo-filter] { font-size: 11px; margin-top: 0; }
 .git-pull-icon { display: block; width: 20px; height: 20px; background: currentColor; mask: url("assets/git-pull.png") center / contain no-repeat; -webkit-mask: url("assets/git-pull.png") center / contain no-repeat; }
 #pull-repositories .git-pull-running { display: none; }
 #pull-repositories.is-running .git-pull-icon { display: none; }

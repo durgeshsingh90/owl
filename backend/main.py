@@ -1,11 +1,13 @@
 """OWL FastAPI entry point: API, managed crawl lifecycle, and static UI."""
 
+import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from app.api.routes import router
+from app.bookmarks.refresh import run_scheduler
 from app.core.database import initialize
 from app.core.logging import configure_logging, error_details, event, request_id
 from app.pdfs.jobs import Jobs
@@ -22,7 +24,13 @@ async def lifespan(app):
     event("backend.starting", verify_ssl=False)
     initialize(recover_jobs=True)
     app.state.jobs = Jobs()
+    refresh_task = asyncio.create_task(run_scheduler())
     yield
+    refresh_task.cancel()
+    try:
+        await refresh_task
+    except asyncio.CancelledError:
+        pass
     await app.state.jobs.shutdown()
     app.state.jobs.extractor.shutdown(wait=False, cancel_futures=True)
     event("backend.stopped")

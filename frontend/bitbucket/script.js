@@ -60,7 +60,6 @@ const state = {
 };
 
 const elements = {
-  allRepositories: document.querySelector("#all-repositories"),
   commitDateBars: document.querySelector("#commit-date-bars"),
   commitDateSelection: document.querySelector("#commit-date-selection"),
   commitChartContent: document.querySelector("#commit-chart-content"),
@@ -538,15 +537,6 @@ function renderProjects() {
   sharedPullLabel.textContent = sharedPullAt ? `Last Git pull: ${formatLastPull(sharedPullAt)}` : "";
   if (sharedPullAt) document.querySelector(".repository-pull-summary").hidden = false;
   elements.projectCount.textContent = formatNumber(projects.length);
-  elements.allRepositories.classList.toggle(
-    "active",
-    !state.selectedProject && !state.selectedRepos.size,
-  );
-  elements.allRepositories.setAttribute(
-    "aria-current",
-    !state.selectedProject && !state.selectedRepos.size ? "page" : "false",
-  );
-
   document.querySelector("#project-bar-repos").innerHTML =
     `<button type="button" data-all-repositories aria-label="All repositories" title="All repositories" aria-pressed="${!state.selectedProject && !state.selectedRepos.size}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h7v7H3V4Zm11 0h7v7h-7V4ZM3 15h7v6H3v-6Zm11 0h7v6h-7v-6Z" /></svg></button>` +
     projects
@@ -568,7 +558,7 @@ function renderProjects() {
         }),
       )
       .join("");
-  elements.projectList.innerHTML = `<div class="project-expand-controls">${repoSelectAllIcon()}<button type="button" data-project-expand-all title="Expand all" aria-label="Expand all">⊞</button><button type="button" data-project-collapse-all title="Collapse all" aria-label="Collapse all">⊟</button>${["all", "active", "inactive"].map(filter => `<button type="button" data-repo-filter="${filter}" aria-pressed="${repositoryStatusFilter === filter}">${filter[0].toUpperCase() + filter.slice(1)}</button>`).join("")}</div>` + projects
+  elements.projectList.innerHTML = `<div class="project-expand-controls">${repoSelectAllIcon()}<button type="button" data-project-expand-all title="Expand all" aria-label="Expand all">⊞</button><button type="button" data-project-collapse-all title="Collapse all" aria-label="Collapse all">⊟</button>${["all", "active", "inactive"].map(filter => `<button type="button" data-repo-filter="${filter}" title="Show ${filter} repositories" aria-label="Show ${filter} repositories" aria-pressed="${repositoryStatusFilter === filter}">${filter[0].toUpperCase() + filter.slice(1)}</button>`).join("")}</div>` + projects
     .map((project) => {
       const inactiveCount = project.repos.filter(repo => isRepositoryInactive(repo, now)).length;
       const activeCount = project.repos.length - inactiveCount;
@@ -1218,7 +1208,6 @@ function bindEvents() {
     .addEventListener("click", () =>
       document.querySelector("#pull-dialog").close(),
     );
-  elements.allRepositories.addEventListener("click", selectAllRepositories);
   elements.projectList.addEventListener("click", handleProjectNavigation);
   document
     .querySelector("#project-bar-repos")
