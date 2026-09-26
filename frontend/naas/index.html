@@ -6,9 +6,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="A frontend prototype for exploring PDF documents across Bitbucket projects and repositories."
+      content="Track YAML and README files across your selected Bitbucket repositories."
     />
-    <title>Bitbucket PDF Explorer</title>
+    <title>NAAS Update</title>
     <script src="theme.js?v=20260914-current-mode"></script>
     <script src="sidebars.js?v=20260906-crawl-18"></script>
     <link rel="stylesheet" href="style.css?v=20260914-single-row-10" />
@@ -37,7 +37,7 @@
       <div class="workspace-loading-card">
         <span class="workspace-loading-spinner" aria-hidden="true"></span>
         <h2 id="workspace-loading-title">Loading your library</h2>
-        <p id="workspace-loading-message">Getting your repositories and PDFs ready…</p>
+        <p id="workspace-loading-message">Getting your repositories and files ready…</p>
         <button id="workspace-loading-retry" type="button" hidden>Try again</button>
         <button id="workspace-loading-dismiss" type="button" hidden>Continue to workspace</button>
       </div>
@@ -59,7 +59,7 @@
           />
           <span class="brand-copy">
             <span class="brand-kicker">OWL</span>
-            <span class="brand-name">Bitbucket PDF Explorer</span>
+            <span class="brand-name">NAAS Update</span>
           </span>
         </a>
 
@@ -73,8 +73,8 @@
             id="search-input"
             type="search"
             autocomplete="off"
-            placeholder="Search PDFs, paths, repositories..."
-            aria-label="Search PDF files"
+            placeholder="Search files, paths, repositories..."
+            aria-label="Search YAML and README files"
           />
           <button id="advanced-search-toggle" type="button" aria-label="Advanced search" title="Advanced search" aria-expanded="false" aria-controls="advanced-search-panel">⚙</button>
           <section id="advanced-search-panel" hidden aria-label="Advanced search">
@@ -112,7 +112,7 @@
           class="topbar-status"
           id="connection-status"
           data-state="connecting"
-          data-workspace-url="/bitbucket/workspace/"
+          data-workspace-url="/naas/bitbucket/workspace/"
         >
           <button id="activity-button" class="connection-test settings-button" type="button" aria-label="Activity log" title="Activity log">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2 7M3 4v7h7M12 7v5l3 2" fill="none" stroke="currentColor" stroke-width="2"/></svg>
@@ -255,12 +255,12 @@
           <div class="content-header">
             <div class="selection-copy">
               <div class="selection-breadcrumb" id="selection-breadcrumb">
-                PDF index / All repositories
+                File index / All repositories
               </div>
               <p id="workspace-background-status" role="status" hidden></p>
               <div class="selection-title-row"><h2 id="selection-title">All Repositories</h2><span id="selection-search-count" role="status" hidden></span></div>
               <p id="selection-description">
-                PDF files across all projects and repositories
+                YAML and README files across all projects and repositories
               </p>
             </div>
             <div
@@ -293,11 +293,11 @@
             </div>
           </div>
 
-          <section class="table-panel" aria-label="PDF documents">
+          <section class="table-panel" aria-label="YAML and README files">
             <section class="commit-chart" aria-labelledby="commit-chart-title">
               <div class="commit-chart-heading">
                 <h4 id="commit-chart-title">Commit date</h4>
-                <button type="button" id="show-failed-pdfs" class="repo-action-icon" aria-label="View failed PDFs" title="View failed PDFs" aria-haspopup="dialog" aria-controls="failed-pdfs-dialog">
+                <button type="button" id="show-failed-pdfs" class="repo-action-icon" aria-label="View failed files" title="View failed files" aria-haspopup="dialog" aria-controls="failed-pdfs-dialog">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H5v18h14V8l-5-5Zm0 0v5h5M12 11v4m0 3h.01"/></svg>
                 </button>
                 <span
@@ -317,11 +317,11 @@
                 <div
                   class="bulk-pdf-controls"
                   role="group"
-                  aria-label="Selected PDF actions"
+                  aria-label="Selected File actions"
                 >
-                  <label title="Select all matching PDFs across pages"
+                  <label title="Select all matching files across pages"
                     ><input id="select-all-pdfs" type="checkbox" />All
-                    PDFs</label
+                    files</label
                   >
                   <span id="selected-pdf-count" aria-live="polite"
                     >0 selected</span
@@ -330,8 +330,8 @@
                     class="folder-button"
                     id="copy-selected-pdfs"
                     type="button"
-                    title="Copy selected PDF URLs"
-                    aria-label="Copy selected PDF URLs"
+                    title="Copy selected File URLs"
+                    aria-label="Copy selected File URLs"
                     disabled
                   >
                     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -342,8 +342,8 @@
                     class="folder-button"
                     id="open-selected-pdfs"
                     type="button"
-                    title="Open selected PDFs"
-                    aria-label="Open selected PDFs"
+                    title="Open selected files"
+                    aria-label="Open selected files"
                     disabled
                   >
                     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -354,13 +354,13 @@
                 <div
                   class="pagination-controls"
                   role="navigation"
-                  aria-label="Top PDF pagination"
+                  aria-label="Top File pagination"
                 >
                   <span class="page-size">1,000 per page</span>
                   <button
                     id="previous-page-top"
                     type="button"
-                    aria-label="Previous PDF page"
+                    aria-label="Previous File page"
                     disabled
                   >
                     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -376,7 +376,7 @@
                   <button
                     id="next-page-top"
                     type="button"
-                    aria-label="Next PDF page"
+                    aria-label="Next File page"
                     disabled
                   >
                     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -432,7 +432,7 @@
                     ></select>
                   </label>
                   <span class="commit-chart-caption" id="commit-chart-caption"
-                    >PDFs by commit date</span
+                    >files by commit date</span
                   >
                 </div>
                 <form class="custom-date-range" id="custom-date-range">
@@ -456,7 +456,7 @@
                   class="commit-date-bars"
                   id="commit-date-bars"
                   role="group"
-                  aria-label="Filter PDFs by commit date"
+                  aria-label="Filter files by commit date"
                 ></div>
                 <p class="commit-chart-help" id="commit-chart-help">
                   Dublin time · Weeks start Monday · Periods overlap.
@@ -475,7 +475,7 @@
                       <span class="visually-hidden">Select</span>
                     </th>
                     <th scope="col">Sl No.</th>
-                    <th scope="col">PDF name</th>
+                    <th scope="col">File name</th>
                     <th scope="col">Project</th>
                     <th scope="col">Repo</th>
                     <th scope="col">Path</th>
@@ -498,21 +498,21 @@
                     <path d="M14 5v4h4" />
                   </svg>
                 </div>
-                <h4>No PDF records found</h4>
+                <h4>No File records found</h4>
                 <p id="pdf-empty-copy">
                   Try adjusting the search or choose another repository.
                 </p>
               </div>
             </div>
 
-            <footer class="pagination-bar" aria-label="PDF pagination">
-              <span id="pagination-summary">Showing 0 of 0 PDFs</span>
+            <footer class="pagination-bar" aria-label="File pagination">
+              <span id="pagination-summary">Showing 0 of 0 files</span>
               <div class="pagination-controls">
                 <span class="page-size">1,000 per page</span>
                 <button
                   id="previous-page"
                   type="button"
-                  aria-label="Previous PDF page"
+                  aria-label="Previous File page"
                   disabled
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -525,7 +525,7 @@
                 <button
                   id="next-page"
                   type="button"
-                  aria-label="Next PDF page"
+                  aria-label="Next File page"
                   disabled
                 >
                   <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -591,7 +591,7 @@
                 class="team-filter-list"
                 id="team-filter-list"
                 role="group"
-                aria-label="Filter PDFs by people or team"
+                aria-label="Filter files by people or team"
               ></div>
               <div class="team-edit-actions">
                 <button class="date-text-button" id="create-team" type="button">
@@ -669,7 +669,7 @@
         <form id="project-form" novalidate>
           <div class="form-field">
             <div class="field-label-row">
-              <label for="repository-urls">Bitbucket Project, Repository or PDF URLs</label>
+              <label for="repository-urls">Bitbucket repository or YAML/README file URLs</label>
               <span>HTTPS</span>
             </div>
             <textarea
@@ -679,7 +679,7 @@
               placeholder="https://bitbucket.org/company/payment-services&#10;https://bitbucket.org/company/payment-api&#10;https://bitbucket.org/company/payment-documents"
             ></textarea>
             <p class="helper-text">
-              Enter one URL per line. Projects scan all repositories; PDF URLs import that file.
+              Enter one URL per line. Repository URLs scan YAML and README files; file URLs import one file.
             </p>
           </div>
 
@@ -799,7 +799,7 @@
       <form id="delete-repo-form" class="delete-repo-form">
         <p id="delete-repo-description"></p>
         <p class="helper-text">
-          Removes the selected repositories and all their PDF metadata, extracted text, search entries, PDF notes, view counts and failure records. Contributors derived from those PDFs disappear. Project registrations and bookmarks are kept. The remote Bitbucket repositories are not deleted. Only the repository URL is retained in Excluded repositories. Future crawls skip it until you restore it.
+          Removes the selected repositories and all their File metadata, extracted text, search entries, File notes, view counts and failure records. Contributors derived from those files disappear. Project registrations and bookmarks are kept. The remote Bitbucket repositories are not deleted. Only the repository URL is retained in Excluded repositories. Future crawls skip it until you restore it.
         </p>
         <label class="delete-unlock"
           ><input id="delete-repo-unlock" type="checkbox" /> Unlock deletion for
@@ -863,7 +863,7 @@
       <div class="modal-header">
         <div>
           <p class="eyebrow">Personal notes</p>
-          <h2 id="notes-title">PDF notes</h2>
+          <h2 id="notes-title">File notes</h2>
           <p id="notes-filename"></p>
         </div>
         <button
@@ -882,10 +882,10 @@
             id="pdf-notes"
             rows="8"
             maxlength="20000"
-            placeholder="Add reminders, context, or comments about this PDF…"
+            placeholder="Add reminders, context, or comments about this File…"
           ></textarea>
           <p class="helper-text">
-            Saved in this browser for this PDF. Leave blank and save to remove a
+            Saved in this browser for this File. Leave blank and save to remove a
             note.
           </p>
         </div>
@@ -978,34 +978,34 @@
       </form>
     </dialog>
     <dialog id="pdf-details-dialog" aria-labelledby="pdf-details-title" style="width:min(850px,90vw);max-height:85vh;overflow:auto;padding:24px;background:var(--panel-bg,#182535);color:inherit;border:1px solid #536278;border-radius:12px">
-      <h2 id="pdf-details-title">Saved PDF details</h2>
-      <div style="display:flex;align-items:center;gap:8px"><button type="button" id="pdf-details-close">Close</button><button type="button" id="pdf-details-copy" title="Copy saved PDF details" aria-label="Copy saved PDF details" disabled><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H4v13h4"/></svg></button></div>
+      <h2 id="pdf-details-title">Saved File details</h2>
+      <div style="display:flex;align-items:center;gap:8px"><button type="button" id="pdf-details-close">Close</button><button type="button" id="pdf-details-copy" title="Copy saved File details" aria-label="Copy saved File details" disabled><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H4v13h4"/></svg></button></div>
       <p id="pdf-details-status" role="status"></p>
       <dl id="pdf-details-fields" style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;overflow-wrap:anywhere"></dl>
       <div style="display:flex;align-items:center;gap:8px"><h3>Extracted text</h3><button type="button" id="pdf-text-copy" title="Copy extracted text" aria-label="Copy extracted text" disabled><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H4v13h4"/></svg></button></div>
       <pre id="pdf-details-text" style="white-space:pre-wrap;max-height:40vh;overflow:auto"></pre>
     </dialog>
     <dialog id="failed-pdfs-dialog" aria-labelledby="failed-pdfs-title" style="width:min(1000px,94vw);max-height:85vh;overflow:auto;padding:24px;background:#182535;color:#e5edf7;border-radius:12px">
-      <h2 id="failed-pdfs-title">Failed PDFs</h2>
+      <h2 id="failed-pdfs-title">Failed files</h2>
       <button type="button" id="failed-pdfs-close">Close</button>
       <button type="button" id="failed-pdfs-refresh">Refresh</button>
-      <button type="button" id="failed-pdfs-retry">Retry all failed PDFs</button>
+      <button type="button" id="failed-pdfs-retry">Retry all failed files</button>
       <section id="failed-folders-section" hidden>
         <h3>Folders that could not be scanned (latest crawl)</h3>
-        <p>Accessible PDFs are still processed. Retry failed PDFs retries known PDF failures only; use the normal crawl button to rescan these folders.</p>
+        <p>Accessible files are still processed. Retry failed files retries known File failures only; use the normal crawl button to rescan these folders.</p>
         <ul id="failed-folders-list" style="overflow-wrap:anywhere"></ul>
       </section>
       <p id="failed-pdfs-status" role="status"></p>
       <p>Retry applies to the configured Bitbucket server after the current crawl finishes.</p>
-      <div style="overflow:auto"><table style="width:100%;text-align:left"><thead><tr><th>Project</th><th>Repository</th><th>PDF name</th><th>PDF URL</th><th>PDF path</th><th>Error</th><th>Attempts</th><th>Last attempt</th></tr></thead><tbody id="failed-pdfs-rows"></tbody></table></div>
+      <div style="overflow:auto"><table style="width:100%;text-align:left"><thead><tr><th>Project</th><th>Repository</th><th>File name</th><th>File URL</th><th>File path</th><th>Error</th><th>Attempts</th><th>Last attempt</th></tr></thead><tbody id="failed-pdfs-rows"></tbody></table></div>
       <button type="button" id="failed-pdfs-prev">Previous</button>
       <button type="button" id="failed-pdfs-next">Next</button>
     </dialog>
     <dialog id="hard-retry-dialog" aria-labelledby="hard-retry-title" style="width:min(620px,94vw);padding:24px;background:var(--surface);color:var(--text);border-radius:12px">
       <h2 id="hard-retry-title">Hard retry all repositories</h2>
       <p id="hard-retry-scope" role="status"></p>
-      <p>This first deletes the existing PDF records, extracted text, search entries, PDF notes, view counts and failed-PDF records for these projects. A database backup is saved before deletion.</p>
-      <p>Every repository is discovered again. Every PDF is downloaded and extracted again, including unchanged files. New results appear as they are saved. If stopped or unsuccessful, the index remains incomplete.</p>
+      <p>This first deletes the existing File records, extracted text, search entries, File notes, view counts and failed-File records for these projects. A database backup is saved before deletion.</p>
+      <p>Every repository is discovered again. Every File is downloaded and extracted again, including unchanged files. New results appear as they are saved. If stopped or unsuccessful, the index remains incomplete.</p>
       <p>Project registrations, repository registrations, settings and bookmarks are kept.</p>
       <label>Type HARD RETRY to confirm <input id="hard-retry-confirmation" autocomplete="off"></label>
       <p id="hard-retry-error" role="alert"></p>
@@ -1015,7 +1015,7 @@
     <dialog id="activity-dialog" aria-labelledby="activity-title" style="width:min(1050px,95vw);max-height:85vh;overflow:auto;padding:24px;background:var(--surface);color:var(--text);border-radius:12px">
       <div style="display:flex;align-items:center;gap:12px"><h2 id="activity-title" style="flex:1">Activity log</h2><button id="activity-refresh" type="button">Refresh</button><button id="activity-close" type="button" aria-label="Close activity log">✕</button></div>
       <p id="activity-summary" role="status"></p>
-      <p>PDF changes = new + updated + deleted. Times are shown in your local timezone. History starts with this update.</p>
+      <p>File changes = new + updated + deleted. Times are shown in your local timezone. History starts with this update.</p>
       <div id="activity-items"></div>
       <button id="activity-prev" type="button">Previous</button><button id="activity-next" type="button">Next</button>
     </dialog>

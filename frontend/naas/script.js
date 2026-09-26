@@ -1,6 +1,6 @@
 "use strict";
 
-const PDFS_PER_PAGE = 1000;
+const FILES_PER_PAGE = 1000;
 const COMMIT_TIME_ZONE = "Europe/Dublin";
 const CALENDAR_DAY_MS = 24 * 60 * 60 * 1000;
 const COMMIT_CALENDAR_FORMATTER = new Intl.DateTimeFormat("en-GB", {
@@ -411,7 +411,7 @@ function renderCommitChart() {
           : range.label;
       const dates = `${CALENDAR_LABEL_FORMATTER.format(range.start)} – ${CALENDAR_LABEL_FORMATTER.format(range.end - CALENDAR_DAY_MS)}`;
       return `<button type="button" class="commit-date-bar" data-commit-range="${range.id}"
-      aria-pressed="${activeRange?.id === range.id}" aria-label="${escapeHtml(range.label)}: ${formatNumber(count)} ${count === 1 ? "PDF" : "PDFs"}"
+      aria-pressed="${activeRange?.id === range.id}" aria-label="${escapeHtml(range.label)}: ${formatNumber(count)} ${count === 1 ? "File" : "files"}"
       title="${escapeHtml(range.label)} · ${dates} · Europe/Dublin">
       <span>${escapeHtml(label)}</span><strong>${formatNumber(count)}</strong>
       <span class="commit-bar-track" aria-hidden="true"><span class="commit-bar-fill" style="--bar-width: ${(count / maximum) * 100}%"></span></span>
@@ -419,14 +419,14 @@ function renderCommitChart() {
     })
     .join("");
   const missingDates = dates.filter(({ day }) => day === null).length;
-  elements.commitChartCaption.textContent = `${formatNumber(records.length)} ${records.length === 1 ? "PDF" : "PDFs"}`;
+  elements.commitChartCaption.textContent = `${formatNumber(records.length)} ${records.length === 1 ? "File" : "files"}`;
   const help = calendarView
-    ? "Dublin time · Select a year, then a month. Counts reflect PDFs by commit date."
+    ? "Dublin time · Select a year, then a month. Counts reflect files by commit date."
     : "Dublin time · Monday-start weeks · Periods overlap; 3/6 months and 2/3 years are rolling windows.";
   elements.commitChartHelp.textContent =
     help +
     (missingDates
-      ? ` ${formatNumber(missingDates)} PDFs have no commit date.`
+      ? ` ${formatNumber(missingDates)} files have no commit date.`
       : "");
 }
 
@@ -580,8 +580,8 @@ function renderProjects() {
               aria-pressed="${repoIsActive}"
             >
               <span class="repo-selection-check" aria-hidden="true">${repoIsActive ? "✓" : ""}</span><span class="repo-name">${escapeHtml(repo.name)}${pullRepoMark(project.id, repo.name)}${inactive ? ' <span class="repo-inactive-icon" title="Inactive for over three months" aria-label="Inactive for over three months">◷</span>' : ""}</span>
-              <span class="repo-meta" title="Total PDFs">▤ ${formatNumber(repo.pdfCount)}</span>
-              <span class="repo-date" title="Last indexed PDF commit date">${escapeHtml(repo.lastCommit)}</span>
+              <span class="repo-meta" title="Total files">▤ ${formatNumber(repo.pdfCount)}</span>
+              <span class="repo-date" title="Last indexed File commit date">${escapeHtml(repo.lastCommit)}</span>
             </button>
             </div>
           `;
@@ -603,7 +603,7 @@ function renderProjects() {
               <strong>${escapeHtml(project.name)}</strong>
               <small class="project-repo-counts"><span title="${activeCount} active / ${project.repos.length} total repositories" aria-label="${activeCount} active of ${project.repos.length} repositories">● ${formatNumber(activeCount)}/${formatNumber(project.repos.length)}</span><span title="${inactiveCount} inactive repositories" aria-label="${inactiveCount} inactive repositories">◷ ${formatNumber(inactiveCount)}</span></small>
             </span>
-            <span class="project-total" title="Total PDFs">▤ ${formatNumber(getProjectPdfTotal(project))}</span>
+            <span class="project-total" title="Total files">▤ ${formatNumber(getProjectPdfTotal(project))}</span>
           </button>
           </div>
           <div class="repository-list" ${collapsedProjects.has(project.id) ? "hidden" : ""}>${repositories}</div>
@@ -637,21 +637,21 @@ function renderPdfTable() {
     headingCount.textContent = `${matches} · ${formatNumber(selectedRepos.length)} ${selectedRepos.length === 1 ? "repository" : "repositories"} searched`;
   } else {
     const totalPdfs = selectedRepos.reduce((sum, repo) => sum + (Number(repo.pdfCount) || 0), 0);
-    headingCount.textContent = `${formatNumber(totalPdfs)} PDFs · ${formatNumber(selectedRepos.length)} ${selectedRepos.length === 1 ? "repository" : "repositories"}`;
+    headingCount.textContent = `${formatNumber(totalPdfs)} files · ${formatNumber(selectedRepos.length)} ${selectedRepos.length === 1 ? "repository" : "repositories"}`;
   }
   if (window.workspacePartial && hasSearch) headingCount.textContent += " · partial results";
   const commitRange = getActiveCommitRange();
   const totalPages = Math.max(
     1,
-    Math.ceil(filteredPdfs.length / PDFS_PER_PAGE),
+    Math.ceil(filteredPdfs.length / FILES_PER_PAGE),
   );
   state.currentPage = Math.min(state.currentPage, totalPages);
-  const pageStart = (state.currentPage - 1) * PDFS_PER_PAGE;
-  const pagePdfs = filteredPdfs.slice(pageStart, pageStart + PDFS_PER_PAGE);
+  const pageStart = (state.currentPage - 1) * FILES_PER_PAGE;
+  const pagePdfs = filteredPdfs.slice(pageStart, pageStart + FILES_PER_PAGE);
   const visibleStart = filteredPdfs.length ? pageStart + 1 : 0;
   const visibleEnd = Math.min(pageStart + pagePdfs.length, filteredPdfs.length);
 
-  elements.paginationSummary.textContent = `Showing ${formatNumber(visibleStart)}–${formatNumber(visibleEnd)} of ${formatNumber(filteredPdfs.length)} PDFs`;
+  elements.paginationSummary.textContent = `Showing ${formatNumber(visibleStart)}–${formatNumber(visibleEnd)} of ${formatNumber(filteredPdfs.length)} files`;
   elements.currentPage.textContent = `${formatNumber(state.currentPage)} / ${formatNumber(totalPages)}`;
   elements.previousPage.disabled = state.currentPage === 1;
   elements.nextPage.disabled = state.currentPage === totalPages;
@@ -679,17 +679,17 @@ function renderPdfTable() {
       const group = getTimelineGroup(pdf.committedAt, timelineNow);
       const separator =
         group !== previousGroup
-          ? `<tr class="timeline-date-row"><th colspan="12" scope="rowgroup"><span class="timeline-marker" aria-hidden="true"></span><strong>${escapeHtml(group)}</strong><span class="timeline-group-count" title="Matching PDFs in this period across all pages">${formatNumber(groupCounts.get(group))} ${groupCounts.get(group) === 1 ? "PDF" : "PDFs"}</span></th></tr>`
+          ? `<tr class="timeline-date-row"><th colspan="12" scope="rowgroup"><span class="timeline-marker" aria-hidden="true"></span><strong>${escapeHtml(group)}</strong><span class="timeline-group-count" title="Matching files in this period across all pages">${formatNumber(groupCounts.get(group))} ${groupCounts.get(group) === 1 ? "File" : "files"}</span></th></tr>`
           : "";
       previousGroup = group;
       return `${separator}
       <tr class="timeline-document ${state.selectedPdfs.has(pdf.id) ? "selected" : ""}" data-pdf-id="${pdf.id}">
         <td class="select-column"><input class="row-radio" type="checkbox" name="selected-pdf" value="${pdf.id}" aria-label="Select ${escapeHtml(pdf.name)}" ${state.selectedPdfs.has(pdf.id) ? "checked" : ""} /></td>
         <td class="serial-number">${formatNumber(pageStart + index + 1)}</td>
-        <td><a class="timeline-file pdf-link" href="${escapeHtml(pdf.pdfUrl)}" data-open-pdf="${pdf.id}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(pdf.name)}"><span class="timeline-pdf-icon" aria-hidden="true">PDF</span><span>${escapeHtml(pdf.name)}</span></a></td>
+        <td><a class="timeline-file pdf-link" href="${escapeHtml(pdf.pdfUrl)}" data-open-pdf="${pdf.id}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(pdf.name)}"><span class="timeline-pdf-icon" aria-hidden="true">${/\.ya?ml$/i.test(pdf.name) ? "YAML" : "MD"}</span><span>${escapeHtml(pdf.name)}</span></a></td>
         <td><span class="badge project-badge">${escapeHtml(pdf.project || pdf.projectId)}</span></td>
         <td><span class="badge" title="${escapeHtml(pdf.repo)}">${escapeHtml(pdf.repo)}</span></td>
-        <td><button class="path-button" type="button" data-copy-path="${pdf.id}" title="Copy PDF URL: ${escapeHtml(pdf.pdfUrl)}" aria-label="Copy complete URL for ${escapeHtml(pdf.name)}">${escapeHtml(pdf.path)}</button></td>
+        <td><button class="path-button" type="button" data-copy-path="${pdf.id}" title="Copy File URL: ${escapeHtml(pdf.pdfUrl)}" aria-label="Copy complete URL for ${escapeHtml(pdf.name)}">${escapeHtml(pdf.path)}</button></td>
         <td><time class="commit-time" datetime="${escapeHtml(pdf.committedAt)}">${escapeHtml(dateLabel)}<small>${day === null ? "" : escapeHtml(COMMIT_TIME_FORMATTER.format(new Date(pdf.committedAt)))}</small></time></td>
         <td class="commit-author" title="${escapeHtml(pdf.commitAuthor || "Unknown")}">${escapeHtml(pdf.commitAuthor || "Unknown")}${isPersonStarred(pdfAuthorKey(pdf)) ? ' <span class="author-star" role="img" aria-label="Starred person">★</span>' : ""}</td>
         <td class="commit-id">${pdf.commitId ? `<button type="button" class="commit-copy" data-copy-commit="${pdf.id}" title="Copy full commit ID: ${escapeHtml(pdf.commitId)}" aria-label="Copy full commit ID ${escapeHtml(pdf.commitId)}">${escapeHtml(pdf.commitId.slice(0, 7))}</button>` : "—"}</td>
@@ -709,8 +709,8 @@ function renderPdfTable() {
   if (!filteredPdfs.length) {
     elements.pdfEmptyCopy.textContent =
       scopedRecordCount === 0
-        ? "This selection has no PDF records loaded yet."
-        : `No PDFs match ${hasSearch ? `“${state.searchQuery.trim()}”` : "the current selection"}${commitRange ? ` in ${commitRange.label}` : ""}. Try another period or clear the filters.`;
+        ? "This selection has no File records loaded yet."
+        : `No files match ${hasSearch ? `“${state.searchQuery.trim()}”` : "the current selection"}${commitRange ? ` in ${commitRange.label}` : ""}. Try another period or clear the filters.`;
   }
 }
 
@@ -739,12 +739,12 @@ function renderPeople() {
         <article class="person-card">
           <div class="avatar avatar-tone-${(index % 3) + 1}" aria-hidden="true">${escapeHtml(getInitials(person.name))}</div>
           <div class="person-main">
-            <div class="person-name-row"><button type="button" class="person-name person-filter-button" data-team-filter="person:${escapeHtml(personKey(person))}" aria-pressed="${activePeopleFilter === `person:${personKey(person)}`}" title="Show PDFs by ${escapeHtml(person.name)}">${escapeHtml(person.name)}</button><button class="person-star" type="button" data-star-person="${escapeHtml(personKey(person))}" aria-label="${isPersonStarred(personKey(person)) ? "Unstar" : "Star"} ${escapeHtml(person.name)}" aria-pressed="${isPersonStarred(personKey(person))}">${isPersonStarred(personKey(person)) ? "★" : "☆"}</button></div>
+            <div class="person-name-row"><button type="button" class="person-name person-filter-button" data-team-filter="person:${escapeHtml(personKey(person))}" aria-pressed="${activePeopleFilter === `person:${personKey(person)}`}" title="Show files by ${escapeHtml(person.name)}">${escapeHtml(person.name)}</button><button class="person-star" type="button" data-star-person="${escapeHtml(personKey(person))}" aria-label="${isPersonStarred(personKey(person)) ? "Unstar" : "Star"} ${escapeHtml(person.name)}" aria-pressed="${isPersonStarred(personKey(person))}">${isPersonStarred(personKey(person)) ? "★" : "☆"}</button></div>
             <span class="person-email" title="${escapeHtml(person.email)}">${escapeHtml(person.email)}</span>
             <div class="person-metrics">
               <span><strong>${formatNumber(person.repoCount)}</strong> ${person.repoCount === 1 ? "repo" : "repos"}</span>
               <span><strong>${formatNumber(person.commits)}</strong> commits</span>
-              <span><strong>${formatNumber(person.pdfCount)}</strong> PDFs</span>
+              <span><strong>${formatNumber(person.pdfCount)}</strong> files</span>
             </div>
           </div>
         </article>
@@ -799,15 +799,15 @@ function updateSelectionHeader() {
         : `${selected.length} repositories selected`;
     elements.selectionDescription.textContent = "";
     elements.selectionBreadcrumb.textContent =
-      "PDF index / Selected repositories";
+      "File index / Selected repositories";
   } else {
     elements.selectionTitle.textContent = project?.name || "All Repositories";
     elements.selectionDescription.textContent = project
-      ? `PDF files across all repositories in ${project.name}`
-      : "PDF files across all projects and repositories";
+      ? `YAML and README files across all repositories in ${project.name}`
+      : "YAML and README files across all projects and repositories";
     elements.selectionBreadcrumb.textContent = project
-      ? `PDF index / ${project.id}`
-      : "PDF index / All repositories";
+      ? `File index / ${project.id}`
+      : "File index / All repositories";
   }
 }
 
@@ -946,7 +946,7 @@ async function copyPath(pdfId, button) {
   try {
     await copyText(pdf.pdfUrl);
   } catch {
-    showToast("Unable to copy PDF URL", false);
+    showToast("Unable to copy File URL", false);
     return;
   }
 
@@ -1047,11 +1047,11 @@ async function addProject(event) {
   event.preventDefault();
   clearFormError();
   const urls = elements.repositoryUrls.value.split(/\n/).map(url => url.trim()).filter(Boolean);
-  if (!urls.length) return showFormError("Enter a project, repository or PDF URL.", ["urls"]);
+  if (!urls.length) return showFormError("Enter a repository or YAML/README file URL.", ["urls"]);
   const button = elements.projectForm.querySelector('button[type="submit"]');
   button.disabled = true;
   try {
-    const job = await crawlJson("/api/imports", {urls});
+    const job = await crawlJson("/naas/api/imports", {urls});
     closeProjectModal();
     if (!pullProgress.active || pullProgress.jobId !== job.id) watchCrawl(job);
     else {
@@ -1290,7 +1290,7 @@ function bindEvents() {
   elements.nextPage.addEventListener("click", () => {
     const totalPages = Math.max(
       1,
-      Math.ceil(filterPdfs().length / PDFS_PER_PAGE),
+      Math.ceil(filterPdfs().length / FILES_PER_PAGE),
     );
     if (state.currentPage >= totalPages) return;
     state.currentPage += 1;
@@ -1462,9 +1462,9 @@ document
     if (!selected.length) return;
     try {
       await copyText(selected.map((pdf) => pdf.pdfUrl).join("\n"));
-      showToast(`Copied ${selected.length} PDF URLs`);
+      showToast(`Copied ${selected.length} File URLs`);
     } catch {
-      showToast("Unable to copy PDF URLs. Please try again.", false);
+      showToast("Unable to copy File URLs. Please try again.", false);
     }
   });
 document.querySelector("#open-selected-pdfs").addEventListener("click", () => {
@@ -1473,6 +1473,6 @@ document.querySelector("#open-selected-pdfs").addEventListener("click", () => {
     window.open(pdf.pdfUrl, "_blank", "noopener,noreferrer");
   if (selected.length)
     showToast(
-      "PDF tabs requested. If any are missing, allow pop-ups for this site.",
+      "File tabs requested. If any are missing, allow pop-ups for this site.",
     );
 });

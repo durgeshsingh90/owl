@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 import pymupdf
 from app.core.database import connection
+from app.core.library import extract_text, is_naas, supported_file
 from app.core.logging import event
 from app.pdfs.client import BitbucketError
 
@@ -78,7 +79,7 @@ async def process_pdf(client, project, repo, repository_id, path):
     else:
         # One shared background thread extracts PDFs serially, without child processes.
         page_count, text = await asyncio.get_running_loop().run_in_executor(
-            client.extractor, extract, content
+            client.extractor, extract_text if is_naas() else extract, content
         )
     stamp = now()
     timestamp = commit.get("authorTimestamp")
@@ -181,7 +182,7 @@ async def discover_pdfs(client, project, repo, on_folder_error=None):
                 path = entry_path(folder, item)
                 if item.get("type") == "DIRECTORY":
                     folders.append(path)
-                elif item.get("type") == "FILE" and path.lower().endswith(".pdf"):
+                elif item.get("type") == "FILE" and supported_file(path):
                     yield path
         except BitbucketError as error:
             if not folder or on_folder_error is None:
@@ -191,6 +192,8 @@ async def discover_pdfs(client, project, repo, on_folder_error=None):
 
 async def crawl_repository(client, project, repo, repository_id, progress, paths):
     for path in paths:
+        if gate := getattr(client, "wait_unpaused", None):
+            await gate()
         if callback := getattr(client, "on_pdf_started", None):
             callback(project, repo, repository_id, path)
         succeeded = False

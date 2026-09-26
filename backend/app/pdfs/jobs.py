@@ -15,6 +15,7 @@ from app.core.database import (
     exclude_repositories,
     repository_url,
 )
+from app.core.library import is_naas
 from app.core.logging import error_details, event
 from app.pdfs.client import BitbucketClient, BitbucketError
 from app.pdfs.crawler import crawl_repository, discover_pdfs, now
@@ -28,6 +29,32 @@ def remaining_eta(elapsed, processed, total):
     return round(max(0, elapsed) / processed * (total - processed))
 
 
+def sync_eta(progress):
+    if not progress.get("checkpoint", {}).get("enumeration_complete"):
+        return None
+    rows = progress.get("repository_statuses", {})
+    history = progress.get("repository_averages", {})
+    samples = [
+        r["total_seconds"] for r in rows.values() if r.get("total_seconds") is not None
+    ]
+    if not samples:
+        samples = [history[k] for k in rows if k in history]
+    fallback = sum(samples) / len(samples) if samples else None
+    remaining = 0
+    for key, row in rows.items():
+        if row.get("status") in {"succeeded", "failed", "cancelled"}:
+            continue
+        elapsed = row.get("elapsed_seconds", 0)
+        expected = history.get(key, fallback)
+        if row.get("processed", 0) > 0 and row.get("found", 0) > row["processed"]:
+            observed = elapsed * row["found"] / row["processed"]
+            expected = observed if expected is None else (expected + observed) / 2
+        if expected is None:
+            return None
+        remaining += max(1, expected - elapsed)
+    return round(remaining)
+
+
 class Jobs:
     def __init__(self):
         self.task = None
@@ -35,15 +62,44 @@ class Jobs:
         self.repository_task = None
         self.repository_id = None
         self.deleted_ids = set()
+        self.pause_event = asyncio.Event()
+        self.pause_event.set()
+        self.paused_at = None
+        self.paused_seconds = 0
+        self.repo_clocks = {}
+        self.run_clock = None
         self.extractor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="owl-pdf")
+
+    def clock(self):
+        return (
+            self.paused_at if self.paused_at is not None else time.monotonic()
+        ) - self.paused_seconds
+
+    async def wait_unpaused(self):
+        await self.pause_event.wait()
+
+    def pause(self):
+        if not self.active() or self.current["status"] not in {"queued", "running"}:
+            raise ValueError("No running sync to pause.")
+        self.paused_at = time.monotonic()
+        self.pause_event.clear()
+        self.current["status"] = "paused"
+        self.save()
+        return self.current.copy()
 
     def active(self):
         return self.task is not None and not self.task.done()
 
     def start(self, project_ids=None, targets=None, auto_retry=True, hard_retry=False):
+
         if self.active():
             raise ValueError("A crawl is already running.")
         self.deleted_ids = set()
+        self.pause_event.set()
+        self.paused_at = None
+        self.paused_seconds = 0
+        self.repo_clocks = {}
+        self.run_clock = None
         settings = load_settings()
         with connection() as db:
             projects = [
@@ -94,6 +150,17 @@ class Jobs:
                     ids,
                 )
             event("crawl.hard_retry_reset", project_ids=ids, backup=str(backup_path))
+        if is_naas() and not targets:
+            with connection() as db:
+                targets = [
+                    {"project": row["project"], "repo": row["repo"], "path": None}
+                    for row in db.execute(
+                        "SELECT r.repo,p.project,p.id FROM repositories r JOIN tracked_projects p ON p.id=r.project_id"
+                    )
+                    if row["id"] in {p["id"] for p in projects}
+                ]
+            if not targets:
+                raise ValueError("Add a repository URL before syncing NAAS.")
         self.repos = []
         self.targets = list(targets or [])
         self.current = {
@@ -136,6 +203,13 @@ class Jobs:
             "detail": "Queued",
             "bitbucket_connected": False,
         }
+        with connection() as db:
+            self.current["repository_averages"] = {
+                str(row["repository_id"]): row["total_seconds"] / row["samples"]
+                for row in db.execute(
+                    "SELECT * FROM repository_sync_timings WHERE samples>0"
+                )
+            }
         self.save()
         self.task = asyncio.create_task(
             self.run(settings, projects, self.targets, auto_retry)
@@ -143,6 +217,18 @@ class Jobs:
         return self.current.copy()
 
     def resume(self, job_id):
+        if (
+            self.active()
+            and self.current["id"] == job_id
+            and self.current["status"] == "paused"
+        ):
+            self.paused_seconds += time.monotonic() - self.paused_at
+            self.paused_at = None
+            self.current["paused_seconds"] = self.paused_seconds
+            self.current["status"] = "running"
+            self.pause_event.set()
+            self.save()
+            return self.current.copy()
         if self.active():
             raise ValueError("Stop the current crawl before resuming another one.")
         with connection() as db:
@@ -154,7 +240,7 @@ class Jobs:
         previous = json.loads(row["progress"])
         checkpoint = previous.get("checkpoint")
         if (
-            row["status"] not in {"cancelled", "interrupted", "failed"}
+            row["status"] not in {"cancelled", "interrupted", "failed", "paused"}
             or not checkpoint
         ):
             raise ValueError("This crawl has no resumable checkpoint.")
@@ -351,6 +437,28 @@ class Jobs:
             self.save()
 
     def save(self):
+        if is_naas() and self.current.get("detail"):
+            self.current["detail"] = (
+                self.current["detail"].replace("PDFs", "files").replace("PDF", "file")
+            )
+        if self.run_clock is not None and self.current.get("status") in {
+            "running",
+            "paused",
+        }:
+            self.current["elapsed_seconds"] = round(
+                max(0, self.clock() - self.run_clock), 1
+            )
+        for key, started in self.repo_clocks.items():
+            repository = self.current.get("repository_statuses", {}).get(key)
+            if repository and repository.get("status") in {
+                "scanning",
+                "processing",
+                "retrying",
+            }:
+                repository["elapsed_seconds"] = max(0, self.clock() - started)
+        if self.current.get("status") in {"running", "paused"}:
+            self.current["eta_seconds"] = sync_eta(self.current)
+            self.current["eta_updated_at"] = now()
         if self.current.get("checkpoint"):
             self.current["checkpoint"]["repos"] = [
                 r for r in self.repos if r[2] not in self.deleted_ids
@@ -379,7 +487,9 @@ class Jobs:
     async def run(self, settings, projects, targets=None, auto_retry=True):
         client = BitbucketClient(settings)
         client.extractor = self.extractor
-        started = time.monotonic()
+        client.wait_unpaused = self.wait_unpaused
+        started = self.clock()
+        self.run_clock = started
         p = self.current
         checkpoint = p["checkpoint"]
         client.force_paths = {tuple(path) for path in p.get("force_paths", [])}
@@ -401,12 +511,6 @@ class Jobs:
 
         def repo_status(repository_id, status):
             p["repository_statuses"][str(repository_id)]["status"] = status
-            if status in {"scanning", "succeeded", "failed", "cancelled"}:
-                with connection() as db:
-                    db.execute(
-                        "UPDATE repositories SET last_pull_at=? WHERE id=?",
-                        (p["started_at"], repository_id),
-                    )
             self.save()
 
         def connected():
@@ -415,7 +519,8 @@ class Jobs:
                 self.save()
 
         client.on_connected = connected
-        p["status"] = "running"
+        if p["status"] != "paused":
+            p["status"] = "running"
         p["detail"] = "Discovering repositories"
         self.save()
         event("crawl.started", job_id=p["id"])
@@ -429,7 +534,7 @@ class Jobs:
                 ]
 
                 async def repositories(selected=selected, project=project):
-                    if selected and all(t["repo"] for t in selected):
+                    if is_naas() or (selected and all(t["repo"] for t in selected)):
                         for slug in dict.fromkeys(t["repo"] for t in selected):
                             yield {"slug": slug}
                     else:
@@ -507,7 +612,7 @@ class Jobs:
                     p["detail"] = (
                         f"Finding PDFs in {project}/{slug}: {len(paths)} found"
                     )
-                    p["elapsed_seconds"] = round(time.monotonic() - started, 1)
+                    p["elapsed_seconds"] = round(self.clock() - started, 1)
                     event(
                         "crawl.pdf_found",
                         repository_id=repository_id,
@@ -648,17 +753,15 @@ class Jobs:
                 self.save()
                 return None
 
-            processing_started = time.monotonic()
+            processing_started = self.clock()
             self.save()
 
             def progress_save():
-                p["elapsed_seconds"] = round(time.monotonic() - started, 1)
+                p["elapsed_seconds"] = round(self.clock() - started, 1)
                 if p["processed"]:
                     remaining = p["found"] - p["processed"]
                     p["eta_seconds"] = round(
-                        (time.monotonic() - processing_started)
-                        / p["processed"]
-                        * remaining
+                        (self.clock() - processing_started) / p["processed"] * remaining
                     )
                 self.save()
 
@@ -670,14 +773,14 @@ class Jobs:
                 p["detail"] = f"Indexing {project}/{slug}"
                 local_failed = repository_id in partial_repositories
                 repository = p["repository_statuses"][str(repository_id)]
-                repo_started = time.monotonic()
+                repo_started = self.clock()
                 repository.update(
                     processed=0, eta_seconds=remaining_eta(0, 0, len(paths))
                 )
 
                 def repo_progress():
                     repository["eta_seconds"] = remaining_eta(
-                        time.monotonic() - repo_started,
+                        self.clock() - repo_started,
                         repository["processed"],
                         len(paths),
                     )
@@ -747,11 +850,11 @@ class Jobs:
                     return
                 p["retry_active"] = True
                 p["retry_total"] += len(paths)
-                retry_started = time.monotonic()
+                retry_started = self.clock()
                 self.save()
                 repo_status(repository_id, "retrying")
                 remaining_failures = len(paths)
-                retry_repo_started = time.monotonic()
+                retry_repo_started = self.clock()
                 retry_repository = p["repository_statuses"][str(repository_id)]
                 retry_repository.update(
                     retry_processed=0, retry_total=len(paths), eta_seconds=None
@@ -774,7 +877,7 @@ class Jobs:
                     p["retry_processed"] += 1
                     retry_repository["retry_processed"] += 1
                     retry_repository["eta_seconds"] = remaining_eta(
-                        time.monotonic() - retry_repo_started,
+                        self.clock() - retry_repo_started,
                         retry_repository["retry_processed"],
                         len(paths),
                     )
@@ -788,9 +891,9 @@ class Jobs:
                             retry_repository[outcome] = (
                                 retry_repository.get(outcome, 0) + counters[outcome]
                             )
-                    p["elapsed_seconds"] = round(time.monotonic() - started, 1)
+                    p["elapsed_seconds"] = round(self.clock() - started, 1)
                     p["eta_seconds"] = round(
-                        (time.monotonic() - retry_started)
+                        (self.clock() - retry_started)
                         / retry_repository["retry_processed"]
                         * (p["retry_total"] - p["retry_processed"])
                     )
@@ -804,9 +907,12 @@ class Jobs:
                 p["retry_active"] = False
 
             async def process_repository(repo):
+                await self.wait_unpaused()
+                self.repo_clocks[str(repo[2])] = self.clock()
                 paths = await discover(*repo)
                 if (
-                    paths == []
+                    not is_naas()
+                    and paths == []
                     and repo[2] not in partial_repositories
                     and repo[2] not in incremental_repositories
                 ):
@@ -833,7 +939,7 @@ class Jobs:
                     self.save()
                     return
                 if paths is not None:
-                    repo_processing_started = time.monotonic()
+                    repo_processing_started = self.clock()
                     repository = p["repository_statuses"][str(repo[2])]
                     try:
                         await scan(*repo, paths)
@@ -850,10 +956,29 @@ class Jobs:
                                 )
                     finally:
                         repository["processing_seconds"] = round(
-                            time.monotonic() - repo_processing_started, 1
+                            self.clock() - repo_processing_started, 1
                         )
                         repository["eta_seconds"] = None
                         self.save()
+                    await self.wait_unpaused()
+                    repository["total_seconds"] = max(
+                        0, self.clock() - self.repo_clocks[str(repo[2])]
+                    )
+                    if (
+                        repository["status"] == "succeeded"
+                        and not p.get("hard_retry")
+                        and not p.get("resumed_from")
+                        and not any(
+                            t.get("path")
+                            for t in (targets or [])
+                            if t["project"] == repo[0] and t["repo"] == repo[1]
+                        )
+                    ):
+                        with connection() as db:
+                            db.execute(
+                                "INSERT INTO repository_sync_timings(repository_id,total_seconds,samples) VALUES(?,?,1) ON CONFLICT(repository_id) DO UPDATE SET total_seconds=total_seconds+excluded.total_seconds,samples=samples+1",
+                                (repo[2], repository["total_seconds"]),
+                            )
                     checkpoint["finished"].append(str(repo[2]))
                     p["repositories_done"] += 1
                     self.save()
@@ -874,6 +999,7 @@ class Jobs:
                 finally:
                     self.repository_task = None
                     self.repository_id = None
+            await self.wait_unpaused()
             p["discovery_complete"] = True
             self.save()
 
@@ -905,7 +1031,21 @@ class Jobs:
                     )
             await client.close()
             p["completed_at"] = now()
-            p["elapsed_seconds"] = round(time.monotonic() - started, 1)
+            if p["status"] in {"succeeded", "succeeded_with_errors"}:
+                with connection() as db:
+                    db.execute(
+                        "INSERT INTO sync_metadata(id,last_completed_at) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET last_completed_at=excluded.last_completed_at",
+                        (p["completed_at"],),
+                    )
+                    db.executemany(
+                        "UPDATE repositories SET last_pull_at=? WHERE id=?",
+                        [
+                            (p["completed_at"], r[2])
+                            for r in self.repos
+                            if r[2] not in self.deleted_ids
+                        ],
+                    )
+            p["elapsed_seconds"] = round(self.clock() - started, 1)
             p["eta_seconds"] = None
             event(
                 "crawl.completed",

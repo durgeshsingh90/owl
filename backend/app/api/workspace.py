@@ -1,6 +1,7 @@
 """Database-backed frontend workspace payloads."""
 
 import json
+from datetime import datetime, timezone
 
 from app.core.database import connection
 from fastapi import APIRouter, HTTPException, Query
@@ -65,8 +66,17 @@ def workspace(
     limit: int | None = Query(default=None, ge=1, le=5000),
     before: int | None = Query(default=None, ge=1),
     summaries: bool = True,
+    current_month: bool = False,
 ):
+    month = datetime.now(timezone.utc).strftime("%Y-%m") if current_month else None
     with connection() as db:
+        completed = db.execute(
+            "SELECT last_completed_at FROM sync_metadata WHERE id=1"
+        ).fetchone()
+        if completed is None:
+            completed = db.execute(
+                "SELECT json_extract(progress, '$.completed_at') FROM jobs WHERE status IN ('succeeded','succeeded_with_errors') ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
         projects = []
         for p in (
             db.execute("SELECT * FROM tracked_projects ORDER BY project")
@@ -104,8 +114,8 @@ def workspace(
             "d.commit_message,d.last_scanned,d.repo,d.pdf_name,d.path,d.url,d.commit_date,"
             "d.author,d.open_count,d.notes,d.added_at,d.updated_at,r.project_id "
             "FROM documents d JOIN repositories r ON r.id=d.repository_id "
-            "WHERE (? IS NULL OR d.id < ?) ORDER BY d.id DESC LIMIT ?",
-            (before, before, limit + 1 if limit is not None else -1),
+            "WHERE (? IS NULL OR d.id < ?) AND (? IS NULL OR strftime('%Y-%m', d.commit_date)=?) ORDER BY d.id DESC LIMIT ?",
+            (before, before, month, month, limit + 1 if limit is not None else -1),
         ):
             d = dict(row)
             documents.append(
@@ -162,4 +172,6 @@ def workspace(
         "documents": documents,
         "people": people,
         "nextBefore": documents[-1]["id"] if has_more else None,
+        "backgroundAll": current_month,
+        "lastCompletedPull": completed[0] if completed else None,
     }

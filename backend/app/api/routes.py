@@ -5,6 +5,7 @@ import json
 import re
 import tempfile
 import zipfile
+from pathlib import PurePosixPath
 from typing import Literal
 from urllib.parse import quote
 
@@ -16,6 +17,7 @@ from app.core.config import (
     save_settings,
 )
 from app.core.database import connection, repository_url
+from app.core.library import extract_text, is_naas
 from app.core.logging import error_details, event, request_id
 from app.pdfs.client import BitbucketClient, BitbucketError
 from app.pdfs.search import matching_document_ids, search_documents
@@ -228,12 +230,21 @@ def job(job_id: str):
 @router.post("/jobs/{job_id}/resume", status_code=202)
 async def resume_job(job_id: str, request: Request):
     jobs = request.app.state.jobs
-    if jobs.active():
-        raise HTTPException(409, "A crawl is already running.")
     try:
         return jobs.resume(job_id)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
+
+
+@router.post("/jobs/{job_id}/pause")
+async def pause_job(job_id: str, request: Request):
+    jobs = request.app.state.jobs
+    if jobs.current is None or jobs.current["id"] != job_id:
+        raise HTTPException(404, "Active job not found.")
+    try:
+        return jobs.pause()
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
 
 
 @router.post("/jobs/{job_id}/cancel")
@@ -402,7 +413,8 @@ async def download_commit_versions(doc_id: int, commit_id: str | None = None):
     if settings.base_url.rstrip("/") != row["server"].rstrip("/"):
         raise HTTPException(409, "Connect to this document's Bitbucket server first.")
     stem = (
-        re.sub(r"[^\w .-]", "_", row["pdf_name"][:-4]).strip(". ")[:100] or "document"
+        re.sub(r"[^\w .-]", "_", PurePosixPath(row["pdf_name"]).stem).strip(". ")[:100]
+        or "document"
     )
     output = tempfile.TemporaryFile()  # noqa: SIM115 - closed by response iterator or error handler
     client = BitbucketClient(settings)
@@ -421,10 +433,15 @@ async def download_commit_versions(doc_id: int, commit_id: str | None = None):
                     {"at": revision},
                     raw=True,
                 )
-                if b"%PDF-" not in content[:1024]:
+                if is_naas():
+                    extract_text(content)
+                elif b"%PDF-" not in content[:1024]:
                     raise BitbucketError("This revision did not return a PDF.")
                 suffix = re.sub(r"[^a-zA-Z0-9_-]", "_", revision)[:80]
-                filename = f"{stem}-{index}-{suffix}.pdf"
+                extension = (
+                    PurePosixPath(row["pdf_name"]).suffix if is_naas() else ".pdf"
+                )
+                filename = f"{stem}-{index}-{suffix}{extension}"
                 if archive:
                     archive.writestr(filename, content)
                 else:
@@ -453,7 +470,9 @@ async def download_commit_versions(doc_id: int, commit_id: str | None = None):
     download_name = f"{stem}-versions.zip" if commit_id is None else filename
     return StreamingResponse(
         chunks(),
-        media_type="application/zip" if commit_id is None else "application/pdf",
+        media_type="application/zip"
+        if commit_id is None
+        else ("text/plain" if is_naas() else "application/pdf"),
         headers={
             "Content-Disposition": "attachment; filename*=UTF-8''"
             + quote(download_name)
@@ -706,6 +725,8 @@ async def import_urls(value: ImportRequest, request: Request):
     jobs = request.app.state.jobs
     settings = load_settings()
     targets = [parse_target(url, settings) for url in value.urls]
+    if is_naas() and any(not target["repo"] for target in targets):
+        raise HTTPException(400, "Enter repository or YAML/README file URLs for NAAS.")
     ids = set()
     with connection() as db:
         for target in targets:

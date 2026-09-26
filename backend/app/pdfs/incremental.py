@@ -1,5 +1,6 @@
 """Plan PDF work from a repository's saved snapshot and current head."""
 
+from app.core.library import supported_file
 from app.pdfs.client import BitbucketError
 from app.pdfs.crawler import entry_path
 
@@ -34,13 +35,13 @@ async def plan_changes(client, project, repo, previous):
             )
         path = entry_path("", {"path": change.get("path", {})})
         if change["type"] == "DELETE":
-            if path.lower().endswith(".pdf"):
+            if supported_file(path):
                 deleted.add(path)
         else:
-            if path.lower().endswith(".pdf"):
+            if supported_file(path):
                 paths.add(path)
             if change["type"] == "MOVE":
                 source = entry_path("", {"path": change.get("srcPath", {})})
-                if source.lower().endswith(".pdf"):
+                if supported_file(source):
                     deleted.add(source)
     return head, paths, deleted - paths

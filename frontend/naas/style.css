@@ -2811,7 +2811,7 @@ tbody tr.selected td:first-child {
   margin: 0;
 }
 
-/* Explicit widths keep the expanded PDF columns aligned. */
+/* Explicit widths keep the expanded File columns aligned. */
 .timeline-table { min-width: 1480px; }
 .timeline-table thead th:nth-child(2) { width: 60px; }
 .timeline-table thead th:nth-child(3) { width: 340px; }

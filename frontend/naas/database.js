@@ -20,21 +20,21 @@ async function loadDatabaseWorkspace() {
   if (!workspaceReady) {
     delete workspaceLoading.dataset.error;
     document.getElementById("workspace-loading-title").textContent = "Loading your library";
-    document.getElementById("workspace-loading-message").textContent = "Getting your repositories and PDFs ready…";
+    document.getElementById("workspace-loading-message").textContent = "Getting your repositories and files ready…";
     document.getElementById("workspace-loading-retry").hidden = true;
     document.getElementById("workspace-loading-dismiss").hidden = true;
   }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
   try {
-    const response = await fetch(initialLoad ? "/api/workspace?limit=200&current_month=true" : "/api/workspace?limit=1000", { cache: "no-store", signal: controller.signal });
+    const response = await fetch(initialLoad ? "/naas/api/workspace?limit=200&current_month=true" : "/naas/api/workspace?limit=1000", { cache: "no-store", signal: controller.signal });
     if (!response.ok) throw new Error("Unable to load saved repository data.");
     const data = await response.json();
     if (version !== workspaceLoadVersion) return;
     if (!Array.isArray(data.projects) || !Array.isArray(data.documents) || !Array.isArray(data.people)) {
       throw new Error("Invalid workspace response; keeping the last loaded data.");
     }
-    // Avoid spreading large PDF libraries into function arguments (browser limit).
+    // Avoid spreading large File libraries into function arguments (browser limit).
     for (const [target, source] of [[projects, data.projects], [pdfs, data.documents], [people, data.people]]) {
       target.length = 0;
       for (const item of source) target.push(item);
@@ -42,7 +42,7 @@ async function loadDatabaseWorkspace() {
     window.workspaceLastPull = data.lastCompletedPull;
     window.workspacePartial = Boolean(data.backgroundAll || data.nextBefore);
     backgroundStatus.hidden = !window.workspacePartial;
-    backgroundStatus.textContent = "Loading the rest of your PDFs… Search and filters currently show loaded records only.";
+    backgroundStatus.textContent = "Loading the rest of your files… Search and filters currently show loaded records only.";
     authorLookup = null;
     renderApp();
     if (state.searchQuery.trim()) scheduleAdvancedSearch();
@@ -59,16 +59,16 @@ async function loadDatabaseWorkspace() {
       const batchTimeout = setTimeout(() => batchController.abort(), 30000);
       let batch;
       try {
-        const response = await fetch(`/api/workspace?limit=1000${cursor ? "&before="+cursor : ""}&summaries=false`, { cache: "no-store", signal: batchController.signal });
-        if (!response.ok) throw new Error("Unable to load the remaining PDFs. Reload to retry.");
+        const response = await fetch(`/naas/api/workspace?limit=1000${cursor ? "&before="+cursor : ""}&summaries=false`, { cache: "no-store", signal: batchController.signal });
+        if (!response.ok) throw new Error("Unable to load the remaining files. Reload to retry.");
         batch = await response.json();
       } finally { clearTimeout(batchTimeout); }
       if (version !== workspaceLoadVersion) return;
-      if (!Array.isArray(batch.documents) || (cursor && batch.nextBefore && batch.nextBefore >= cursor)) throw new Error("Invalid PDF batch. Reload to retry.");
+      if (!Array.isArray(batch.documents) || (cursor && batch.nextBefore && batch.nextBefore >= cursor)) throw new Error("Invalid File batch. Reload to retry.");
       for (const pdf of batch.documents) remaining.push(pdf);
       cursor = batch.nextBefore;
       loadAll = false;
-      backgroundStatus.textContent = `Loading PDFs: ${pdfs.length + remaining.length} received. Search and filters currently show the first ${pdfs.length} records only.`;
+      backgroundStatus.textContent = `Loading files: ${pdfs.length + remaining.length} received. Search and filters currently show the first ${pdfs.length} records only.`;
     }
     if (version !== workspaceLoadVersion) return;
     if (remaining.length) {
@@ -94,7 +94,7 @@ async function loadDatabaseWorkspace() {
         showToast(message);
         if (window.workspacePartial) {
           backgroundStatus.hidden = false;
-          backgroundStatus.textContent = "Only part of your library is loaded. Reload to retry loading the remaining PDFs.";
+          backgroundStatus.textContent = "Only part of your library is loaded. Reload to retry loading the remaining files.";
         }
       }
     }
@@ -112,7 +112,7 @@ document
     if (!link) return;
     const pdf = pdfs.find((item) => item.pdfUrl === link.href);
     if (!pdf) return;
-    const response = await fetch(`/api/document/${pdf.id}/open`, {
+    const response = await fetch(`/naas/api/document/${pdf.id}/open`, {
       method: "POST",
     });
     if (response.ok) {
@@ -139,7 +139,7 @@ document
       if (sequence === current) status.textContent = "Could not copy. Please select and copy the text manually.";
     }
   }
-  copyDetails.onclick = () => copySaved(savedDetails, "Saved PDF details");
+  copyDetails.onclick = () => copySaved(savedDetails, "Saved File details");
   copyExtracted.onclick = () => copySaved(extractedText, "Extracted text");
   document.querySelector("#pdf-details-close").onclick = () => dialog.close();
   dialog.addEventListener("close", () => { sequence++; });
@@ -154,13 +154,13 @@ document
     status.textContent = "Loading saved record…";
     dialog.showModal();
     try {
-      const response = await fetch(`/api/document/${button.dataset.pdfDetails}`, {cache: "no-store"});
-      if (!response.ok) throw new Error("Could not load the saved PDF record.");
+      const response = await fetch(`/naas/api/document/${button.dataset.pdfDetails}`, {cache: "no-store"});
+      if (!response.ok) throw new Error("Could not load the saved File record.");
       const record = await response.json();
       if (current !== sequence) return;
       const labels = {
-        pdf_name: "PDF name", project: "Project", repo: "Repository", path: "Path",
-        url: "Bitbucket URL", file_size: "File size (bytes)", page_count: "Pages",
+        pdf_name: "File name", project: "Project", repo: "Repository", path: "Path",
+        url: "Bitbucket URL", file_size: "File size (bytes)", page_count: "Lines",
         author: "Commit author", commit_id: "Commit ID", commit_message: "Commit message",
         commit_date: "Commit date", added_at: "Saved at", updated_at: "Updated at",
         last_scanned: "Last scanned", pdf_hash: "SHA-256", open_count: "Open count", notes: "Notes",
@@ -177,7 +177,7 @@ document
         value.style.margin = "0";
         fields.append(title, value);
       }
-      text.textContent = record.pdf_text || "No text was extracted from this PDF.";
+      text.textContent = record.pdf_text || "No text was extracted from this File.";
       status.textContent = "Loaded from the database.";
     } catch (error) { if (current === sequence) status.textContent = error.message; }
   });

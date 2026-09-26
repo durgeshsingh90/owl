@@ -65,6 +65,8 @@ class BitbucketClient:
 
     async def _request(self, path, params=None, raw=False):
         for attempt in range(3):
+            if gate := getattr(self, "wait_unpaused", None):
+                await gate()
             started = time.monotonic()
             event("bitbucket.attempt", path=path, attempt=attempt + 1)
             try:

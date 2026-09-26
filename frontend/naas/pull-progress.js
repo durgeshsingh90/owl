@@ -48,7 +48,7 @@ function watchCrawl(job) {
   const pause = document.querySelector("#crawl-pause");
   pause.onclick = async () => {
     pause.disabled = true;
-    try { await crawlJson(`/api/jobs/${job.id}/pause`, {}); }
+    try { await crawlJson(`/naas/api/jobs/${job.id}/pause`, {}); }
     catch(error) { showToast(error.message); }
     finally { pause.disabled = false; }
   };
@@ -58,7 +58,7 @@ function watchCrawl(job) {
   resume.onclick = async () => {
     resume.disabled = true;
     try {
-      const resumed = await crawlJson(`/api/jobs/${job.id}/resume`, {});
+      const resumed = await crawlJson(`/naas/api/jobs/${job.id}/resume`, {});
       watchCrawl(resumed);
     } catch (error) { resume.disabled = false; showToast(error.message); }
   };
@@ -67,7 +67,7 @@ function watchCrawl(job) {
   stop.disabled = false;
   stop.onclick = async () => {
     stop.disabled = true;
-    try { await crawlJson(`/api/jobs/${job.id}/cancel`, {}); }
+    try { await crawlJson(`/naas/api/jobs/${job.id}/cancel`, {}); }
     catch (error) { showToast(error.message); }
     finally { stop.disabled = false; }
   };
@@ -78,7 +78,7 @@ function watchCrawl(job) {
   let lastRecovered = -1;
   async function poll() {
     try {
-      const current = await crawlJson(`/api/jobs/${job.id}`);
+      const current = await crawlJson(`/naas/api/jobs/${job.id}`);
       const running = ["queued", "running"].includes(current.status);
       const paused = current.status === "paused";
       pullProgress.active = running || paused;
@@ -157,14 +157,14 @@ async function startPullPreview(targetProjects = projects) {
   try {
     const selected = selectedRepositories();
     const scope = selected.length ? {repository_ids: selected.map(repo => Number(repo.id))} : {project_ids: targetProjects.map(project => Number(project.id))};
-    const job = await crawlJson("/api/crawl", scope);
+    const job = await crawlJson("/naas/api/crawl", scope);
     watchCrawl(job);
   } catch (error) { pullProgress.active = false; updateSelectionHeader(); showToast(error.message); }
 }
 async function reconnectCrawl() {
   if (pullProgress.active) return;
   try {
-    const {job} = await crawlJson("/api/jobs/latest");
+    const {job} = await crawlJson("/naas/api/jobs/latest");
     if (job && job.id !== pullProgress.dismissedId) watchCrawl(job);
   } catch (error) { updatePullSummary(`Cannot load crawl status: ${error.message}`); }
 }

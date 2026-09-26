@@ -199,3 +199,35 @@ only changes already received by the browser. Notifications are in-app badges.
 
 Tracker validation uses isolated databases and mocked Confluence responses. A live
 corporate-server sync requires your network/VPN and configured connection.
+
+### Bitbucket sync controls and loading
+
+The sidebar shows PDF counts and indexed-PDF commit dates with icon tooltips.
+Repository completion ticks are transient and displayed only during an active
+sync. The shared last-pull timestamp advances after all repositories finish,
+including a completed run with reported errors; stopping does not advance it.
+
+Pause holds the next upstream request or PDF operation after the current operation
+finishes. Resume continues the same job. Stop saves its existing recovery checkpoint.
+Paused time is excluded from timing measurements. A restart converts a paused job
+into an interrupted, resumable job.
+
+`repository_sync_timings` persists the sum and count of successful normal sync
+durations per repository, including discovery. Hard retries and partial-file
+recovery runs do not skew these averages. The total ETA combines those averages
+with observed progress and completed repository durations in the current run.
+It shows “calculating” until enough information is available and is an estimate,
+especially when the number of changed PDFs or network speed varies.
+
+The library and home overview initially load at most 200 PDFs committed during
+the current UTC month, retaining complete repository totals. The remaining PDF
+metadata loads in background batches of 1,000 with ID deduplication; older records
+remain available after loading. A visible message identifies a partial library.
+The hard-retry entry uses a lock icon and still requires typing HARD RETRY in its
+confirmation dialog. The separate retry-failed toolbar shortcut is removed.
+
+### NAAS Update
+
+Open `/naas/` from OWL Home to track `.yaml`, `.yml`, and README files (`README`, `.md`, `.markdown`, `.rst`, `.txt`, `.adoc`, case insensitive). Add Bitbucket repository or individual file URLs. NAAS copies the PDF explorer interface and uses the same incremental sync, search, notes, metadata, commit/version downloads, filters, pause/resume, ETA and retry controls. YAML is indexed as text, never executed. UTF-8 and UTF-16 text are supported.
+
+NAAS has its own database (`owl-naas.db` beside `owl.db`, overridable with `OWL_NAAS_DB_PATH`), jobs and browser preferences. It initially uses the saved Bitbucket connection; saving NAAS settings creates an independent encrypted connection under the config directory's `naas/` folder. All-repository sync and hard retry stay within the repositories added to NAAS. Empty repositories remain tracked for future additions. No local Git checkout is created.

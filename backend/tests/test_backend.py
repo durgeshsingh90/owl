@@ -51,6 +51,104 @@ class BackendTests(unittest.TestCase):
             self.client.post("/api/settings", json=self.config).status_code, 200
         )
 
+    def test_pause_resume_holds_requests_and_keeps_last_completed_date(self):
+        baseline = self.crawl()
+        previous = self.client.get("/api/workspace").json()["lastCompletedPull"]
+        self.assertEqual(previous, baseline["completed_at"])
+        original = self.upstream
+        entered = False
+
+        async def slow(request):
+            nonlocal entered
+            if "/repos/one/commits" in request.url.path:
+                entered = True
+                await asyncio.sleep(0.15)
+            return original(request)
+
+        self.upstream = slow
+        job = self.client.post("/api/crawl", json={}).json()
+        for _ in range(100):
+            if entered:
+                break
+            time.sleep(0.01)
+        self.assertTrue(entered)
+        url = "/api/jobs/" + job["id"]
+        paused = self.client.post(url + "/pause").json()
+        self.assertEqual(paused["status"], "paused")
+        time.sleep(0.2)  # The in-flight request may finish; new requests must wait.
+        count = len(self.calls)
+        time.sleep(0.05)
+        self.assertEqual(len(self.calls), count)
+        self.assertEqual(self.client.get(url).json()["status"], "paused")
+        self.assertEqual(
+            self.client.get("/api/workspace").json()["lastCompletedPull"], previous
+        )
+        resumed = self.client.post(url + "/resume").json()
+        self.assertEqual(resumed["id"], job["id"])
+        for _ in range(200):
+            result = self.client.get(url).json()
+            if result["status"] not in {"queued", "running"}:
+                break
+            time.sleep(0.01)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(
+            self.client.get("/api/workspace").json()["lastCompletedPull"],
+            result["completed_at"],
+        )
+        with connection() as db:
+            timings = db.execute("SELECT * FROM repository_sync_timings").fetchall()
+        self.assertTrue(timings)
+        self.assertTrue(
+            all(row["samples"] == 2 and row["total_seconds"] >= 0 for row in timings)
+        )
+
+    def test_current_month_first_keeps_old_records_available_in_background(self):
+        from datetime import datetime, timezone
+
+        self.crawl()
+        with connection() as db:
+            first = db.execute("SELECT MIN(id) FROM documents").fetchone()[0]
+            db.execute("UPDATE documents SET commit_date='2020-01-01T00:00:00Z'")
+            db.execute(
+                "UPDATE documents SET commit_date=? WHERE id=?",
+                (datetime.now(timezone.utc).isoformat(), first),
+            )
+        recent = self.client.get("/api/workspace?limit=200&current_month=true").json()
+        self.assertEqual([d["id"] for d in recent["documents"]], [first])
+        self.assertTrue(recent["backgroundAll"])
+        all_pages = self.client.get("/api/workspace?limit=1000&summaries=false").json()
+        self.assertGreater(len(all_pages["documents"]), 1)
+        self.assertEqual(
+            sum(r["pdfCount"] for p in recent["projects"] for r in p["repos"]),
+            len(all_pages["documents"]),
+        )
+
+    def test_eta_uses_repository_history_and_current_observations(self):
+        from app.pdfs.jobs import sync_eta
+
+        progress = {
+            "checkpoint": {"enumeration_complete": True},
+            "repository_averages": {"1": 100, "2": 200},
+            "repository_statuses": {
+                "1": {
+                    "status": "processing",
+                    "elapsed_seconds": 20,
+                    "processed": 2,
+                    "found": 10,
+                },
+                "2": {"status": "queued"},
+            },
+        }
+        self.assertEqual(sync_eta(progress), 280)
+        progress["repository_statuses"]["1"].update(
+            status="succeeded", total_seconds=120
+        )
+        self.assertEqual(sync_eta(progress), 200)
+        progress["repository_averages"] = {}
+        self.assertEqual(sync_eta(progress), 120)
+        progress["repository_statuses"]["1"].pop("total_seconds")
+        self.assertIsNone(sync_eta(progress))
+
     def test_workspace_phases_keep_complete_summaries(self):
         self.crawl()
         full = self.client.get("/api/workspace").json()

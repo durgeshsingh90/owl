@@ -2,7 +2,7 @@
 (async () => {
   let overviewData;
   try {
-    const response = await fetch("/api/workspace", { cache: "no-store" });
+    const response = await fetch("/api/workspace?limit=200&current_month=true", { cache: "no-store" });
     if (!response.ok) throw new Error("Database unavailable");
     overviewData = await response.json();
   } catch {
@@ -49,7 +49,9 @@
     const date = new Date(`${repo.lastCommit} 00:00:00 GMT`);
     return Number.isFinite(date.getTime()) && date < cutoff;
   }).length;
-  const metrics = [
+  let metrics;
+  function renderMetrics() {
+  metrics = [
     ["PDF library", total, "Across saved repositories"],
     [
       "Repositories",
@@ -77,6 +79,8 @@
         `<div class="metric"><p>${label}</p><strong>${number(value)}</strong><small>${detail}</small></div>`,
     )
     .join("");
+  }
+  renderMetrics();
   const projectTotals = projects
     .map((project) => ({
       ...project,
@@ -360,4 +364,28 @@
   window.dayMs = dayMs;
   window.calendarValue = calendarValue;
   window.dispatchEvent(new Event("owl-database-ready"));
+
+  const loadStatus = document.createElement("p");
+  loadStatus.setAttribute("role", "status");
+  loadStatus.textContent = "Showing recent PDFs while the complete history loads…";
+  document.querySelector("#metrics").before(loadStatus);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  try {
+    let cursor = null;
+    const known = new Set(documents.map(item => item.id));
+    do {
+      const response = await fetch(`/api/workspace?limit=1000&summaries=false${cursor ? "&before="+cursor : ""}`, {cache:"no-store", signal:AbortSignal.timeout(30000)});
+      if (!response.ok) throw Error("Loading failed");
+      const batch = await response.json();
+      if (!Array.isArray(batch.documents) || (cursor && batch.nextBefore && batch.nextBefore >= cursor)) throw Error("Invalid batch");
+      for (const item of batch.documents) if (!known.has(item.id)) { known.add(item.id); documents.push(item); }
+      cursor = batch.nextBefore;
+      await new Promise(resolve => setTimeout(resolve, 0));
+    } while(cursor);
+    renderMetrics();
+    applyPeriod();
+    loadStatus.remove();
+  } catch {
+    loadStatus.textContent = "Only part of the PDF history is loaded. Refresh to retry.";
+  }
 })();

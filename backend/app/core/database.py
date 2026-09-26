@@ -6,13 +6,21 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
+from app.core.library import is_naas
+
 
 def database_path():
-    return Path(
+    path = Path(
         os.environ.get(
             "OWL_DB_PATH", Path(__file__).resolve().parents[2] / "data/owl.db"
         )
     )
+
+    if is_naas():
+        return Path(
+            os.environ.get("OWL_NAAS_DB_PATH", path.with_name(path.stem + "-naas.db"))
+        )
+    return path
 
 
 @contextmanager
@@ -67,6 +75,13 @@ def initialize(*, recover_jobs=False):
         CREATE TABLE IF NOT EXISTS bookmark_downloaded_pages (
             folder_key TEXT NOT NULL, page_id TEXT NOT NULL, title TEXT NOT NULL,
             url TEXT NOT NULL, content TEXT NOT NULL, PRIMARY KEY(folder_key,page_id)
+        );
+        CREATE TABLE IF NOT EXISTS repository_sync_timings (
+            repository_id INTEGER PRIMARY KEY REFERENCES repositories(id) ON DELETE CASCADE,
+            total_seconds REAL NOT NULL DEFAULT 0, samples INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS sync_metadata (
+            id INTEGER PRIMARY KEY CHECK(id=1), last_completed_at TEXT
         );
         CREATE TABLE IF NOT EXISTS pull_activity (
             id TEXT PRIMARY KEY, started_at TEXT NOT NULL, payload TEXT NOT NULL
@@ -216,7 +231,7 @@ def initialize(*, recover_jobs=False):
                 "UPDATE bookmark_downloads SET status='failed',error='Download interrupted. Click to retry.' WHERE status='running'"
             )
             db.execute(
-                "UPDATE jobs SET status='interrupted' WHERE status IN ('queued','running')"
+                "UPDATE jobs SET status='interrupted' WHERE status IN ('queued','running','paused')"
             )
 
 

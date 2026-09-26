@@ -5,6 +5,7 @@ from urllib.parse import parse_qs
 from app.api.routes import test_value
 from app.core.config import Settings, load_settings, save_settings
 from app.core.database import connection
+from app.core.library import is_naas
 from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter()
@@ -35,8 +36,8 @@ def workspace():
         "credentials": credentials,
         "repositories": repositories,
         "csrfToken": "",
-        "settingsTestUrl": "/bitbucket/settings/test/",
-        "settingsSaveUrl": "/bitbucket/settings/save/",
+        "settingsTestUrl": ("/naas" if is_naas() else "") + "/bitbucket/settings/test/",
+        "settingsSaveUrl": ("/naas" if is_naas() else "") + "/bitbucket/settings/save/",
     }
 
 

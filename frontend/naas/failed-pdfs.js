@@ -11,11 +11,11 @@
     retry.disabled = true;
     status.textContent = "Loading failures from the database…";
     try {
-      const failures = await crawlJson(`/api/failed?limit=100&offset=${offset}`);
+      const failures = await crawlJson(`/naas/api/failed?limit=100&offset=${offset}`);
       rows.replaceChildren();
       const folderList = document.querySelector("#failed-folders-list");
       folderList.replaceChildren();
-      const {job} = await crawlJson("/api/jobs/latest");
+      const {job} = await crawlJson("/naas/api/jobs/latest");
       for (const failure of job?.folder_failures || []) {
         const item = document.createElement("li");
         item.textContent = `${failure.project} / ${failure.repo} / ${failure.path}: ${failure.error}`;
@@ -47,7 +47,7 @@
             copy.type = "button";
             copy.textContent = "Copy URL";
             copy.onclick = async () => {
-              try {await copyText(failure.url); showToast("Failed PDF URL copied");}
+              try {await copyText(failure.url); showToast("Failed File URL copied");}
               catch {showToast("Unable to copy URL", false);}
             };
             cell.replaceChildren(link, document.createElement("br"), copy);
@@ -64,7 +64,7 @@
         }
         rows.append(row);
       }
-      status.textContent = failures.length ? `Showing ${offset + 1}–${offset + failures.length}. ${pullProgress.active ? "Wait for the crawl to finish before retrying." : "Ready to retry."}` : "No failed PDFs on this page.";
+      status.textContent = failures.length ? `Showing ${offset + 1}–${offset + failures.length}. ${pullProgress.active ? "Wait for the crawl to finish before retrying." : "Ready to retry."}` : "No failed files on this page.";
       document.querySelector("#failed-pdfs-prev").disabled = offset === 0;
       document.querySelector("#failed-pdfs-next").disabled = failures.length < 100;
       retry.disabled = pullProgress.active || !failures.length;
@@ -78,11 +78,11 @@
   document.querySelector("#failed-pdfs-next").onclick = () => {if (!loading) {offset += 100; void load();}};
   const directRetry = document.querySelector("#retry-failed-pdfs");
   async function retryFailedPdfs() {
-    if (pullProgress.active) {showToast("Wait for the current crawl to finish before retrying failed PDFs."); return;}
+    if (pullProgress.active) {showToast("Wait for the current crawl to finish before retrying failed files."); return;}
     retry.disabled = true;
     if (directRetry) directRetry.disabled = true;
     try {
-      const job = await crawlJson("/api/failed/retry", {});
+      const job = await crawlJson("/naas/api/failed/retry", {});
       dialog.close();
       watchCrawl(job);
     } catch (error) {
