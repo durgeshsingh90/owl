@@ -12,6 +12,7 @@ from app.core.database import initialize
 from app.core.library import LibraryMiddleware, library
 from app.core.logging import configure_logging, error_details, event, request_id
 from app.pdfs.jobs import Jobs
+from app.pdfs.schedule import run_scheduler as run_bitbucket_scheduler
 from app.tracker.service import run_scheduler as run_tracker_scheduler
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -34,7 +35,13 @@ async def lifespan(app):
         library.reset(token)
     refresh_task = asyncio.create_task(run_scheduler())
     tracker_task = asyncio.create_task(run_tracker_scheduler())
+    bitbucket_task = asyncio.create_task(run_bitbucket_scheduler(app.state.jobs))
     yield
+    bitbucket_task.cancel()
+    try:
+        await bitbucket_task
+    except asyncio.CancelledError:
+        pass
     refresh_task.cancel()
     try:
         await refresh_task

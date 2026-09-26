@@ -119,6 +119,34 @@ def parse_project(url, settings):
 
 
 def parse_target(url, settings):
+    # HTTPS clone URLs use /scm/KEY/repo.git, unlike browser /projects/KEY/repos/repo.
+    parsed = urlsplit(url.strip())
+    base = urlsplit(settings.base_url)
+    clone_prefix = base.path.rstrip("/") + "/scm/"
+    if parsed.path.startswith(clone_prefix):
+        if (
+            (parsed.scheme, parsed.netloc) != (base.scheme, base.netloc)
+            or parsed.username
+            or parsed.password
+        ):
+            raise ValueError(
+                "Repository URL must belong to the configured Bitbucket server."
+            )
+        clone = re.fullmatch(
+            r"([^/]+)/([^/]+?)(?:\.git)?/?", parsed.path[len(clone_prefix) :]
+        )
+        if not clone:
+            raise ValueError("Invalid Bitbucket repository clone URL.")
+        path = (
+            base.path.rstrip("/")
+            + "/projects/"
+            + clone[1].upper()
+            + "/repos/"
+            + clone[2]
+        )
+        url = urlunsplit(
+            (parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment)
+        )
     project, canonical = parse_project(url, settings)
     parsed = urlsplit(url.strip())
     if parsed.query or parsed.fragment:

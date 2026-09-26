@@ -64,7 +64,7 @@ function renderConfluencePeople(scoped) {
   document.querySelector("#confluence-people").innerHTML = people
     .map(
       ([name, counts]) =>
-        `<article class="confluence-person ${selectedPerson === name ? "active" : ""}" data-person="${esc(name)}" data-role="any"><button class="person-name" data-person="${esc(name)}" data-role="any" aria-pressed="${selectedPerson === name && personRole === "any"}"><span class="person-initials">${esc(
+        `<article class="confluence-person ${selectedPerson === name ? "active" : ""}" data-person="${esc(name)}" data-role="any"><button class="person-name" title="${esc(name)} · ${counts.written} written · ${counts.updated} updated" aria-label="${esc(name)}" data-person="${esc(name)}" data-role="any" aria-pressed="${selectedPerson === name && personRole === "any"}"><span class="person-initials">${esc(
           name
             .split(" ")
             .map((part) => part[0])
@@ -316,14 +316,18 @@ function renderBookmarkTree(filtered, downloaded = [], scheduleSearch = true, do
         folder.pages.some(item => item.favorite) ||
         [...folder.children].some(([name, child]) => hasStar(child, [...path, name]));
     }
-    navigation.innerHTML = [...folders.children].map(([name, folder], index) => {
+    const sort = document.querySelector("#bookmark-navigation-sort").value;
+    const roots = [...folders.children].map(([name, folder], index) => ({name, folder, index, number: searchNumbers?.folders.get(JSON.stringify([name])) || String(index + 1)}));
+    roots.sort((a, b) => sort === "count" ? folderCount(b.folder) - folderCount(a.folder) || a.index-b.index : sort === "alpha" ? a.name.localeCompare(b.name, undefined, {numeric:true}) : a.number.localeCompare(b.number, undefined, {numeric:true}));
+    navigation.innerHTML = roots.map(({name, folder, index, number}) => {
       const starred = hasStar(folder, [name]);
-      return `<button type="button" class="bookmark-root-link" data-root-index="${index}" title="Go to ${esc(name)}"><span class="bookmark-root-name">${esc(name)}${starred ? '<span class="bookmark-root-star" role="img" aria-label="Contains a starred folder or favourite bookmark" title="Contains a starred folder or favourite bookmark">★</span>' : ''}</span><span class="bookmark-root-counts">${folderCount(folder)} bookmarks · ${folderOpens(folder)} opens</span></button>`;
+      return `<button type="button" class="bookmark-root-link" data-root-index="${index}" title="Go to ${esc(name)}"><span class="bookmark-root-name"><span class="tree-number">${esc(number)}</span>${esc(name)}${starred ? '<span class="bookmark-root-star" role="img" aria-label="Contains a starred folder or favourite bookmark" title="Contains a starred folder or favourite bookmark">★</span>' : ''}</span><span class="bookmark-root-counts">${folderCount(folder)} bookmarks · ${folderOpens(folder)} opens</span></button>`;
     }).join("") || '<p class="bookmark-root-empty">No bookmark trees in this view.</p>';
   }
   if (scheduleSearch) window.searchDownloadedBookmarkPages?.(filtered);
 }
 let selectedBookmarkId = null;
+document.querySelector("#bookmark-navigation-sort").addEventListener("change", () => render());
 document.querySelector("#bookmark-root-links")?.addEventListener("click", event => {
   const button = event.target.closest("[data-root-index]");
   if (!button) return;
@@ -341,6 +345,7 @@ const localPageNotes = {};
 function showPageDetails(id) {
   const item = bookmarks.find((item) => item.id === id);
   if (!item) return;
+  if (selectedBookmarkId !== id) window.openBookmarkDetails?.();
   selectedBookmarkId = id;
   document.querySelector("#page-details-empty").hidden = true;
   document.querySelector("#page-details-content").hidden = false;
@@ -462,7 +467,7 @@ document.querySelector("#bookmark-tree").addEventListener("click", (event) => {
 document.querySelector("#bookmark-tree").addEventListener("click", (event) => {
   if (event.target.closest("a,button,input")) return;
   const row = event.target.closest("[data-bookmark-row]");
-  if (row) showPageDetails(Number(row.dataset.bookmarkRow));
+  if (row) { window.openBookmarkDetails?.(); showPageDetails(Number(row.dataset.bookmarkRow)); }
 });
 document
   .querySelector("#bookmark-tree")
@@ -473,6 +478,7 @@ document
     )
       return;
     event.preventDefault();
+    window.openBookmarkDetails?.();
     showPageDetails(
       Number(event.target.closest("[data-bookmark-row]").dataset.bookmarkRow),
     );

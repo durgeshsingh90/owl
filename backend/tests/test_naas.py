@@ -149,8 +149,12 @@ class NaasTests(unittest.TestCase):
                 self.assertEqual(job["status"], "succeeded", job)
                 return job
 
-            url = settings["base_url"] + "/projects/DEMO/repos/config"
-            finish(client.post("/naas/api/imports", json={"urls": [url]}))
+            finish(
+                client.post(
+                    "/naas/api/imports",
+                    json={"urls": [settings["base_url"] + "/scm/demo/config.git"]},
+                )
+            )
             workspace = client.get("/naas/api/workspace").json()
             self.assertEqual(
                 {d["name"] for d in workspace["documents"]},

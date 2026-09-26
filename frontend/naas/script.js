@@ -528,12 +528,17 @@ function formatLastPull(value) {
   }).format(date);
 }
 
+function pullAge(value) {
+  const days = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 86400000));
+  return `${days} ${days === 1 ? "day" : "days"} ago`;
+}
+
 function renderProjects() {
   const now = new Date();
   const sharedPullAt = window.workspaceLastPull || null;
   const sharedPullLabel = document.querySelector("#shared-last-pull");
   sharedPullLabel.hidden = !sharedPullAt;
-  sharedPullLabel.textContent = sharedPullAt ? `Last Git pull: ${formatLastPull(sharedPullAt)}` : "";
+  sharedPullLabel.textContent = sharedPullAt ? `Last Git pull: ${formatLastPull(sharedPullAt)} · ${pullAge(sharedPullAt)}` : "";
   if (sharedPullAt) document.querySelector(".repository-pull-summary").hidden = false;
   elements.projectCount.textContent = formatNumber(projects.length);
   document.querySelector("#project-bar-repos").innerHTML =
@@ -557,7 +562,7 @@ function renderProjects() {
         }),
       )
       .join("");
-  elements.projectList.innerHTML = `<div class="project-expand-controls">${repoSelectAllIcon()}<button type="button" data-project-expand-all title="Expand all" aria-label="Expand all">⊞</button><button type="button" data-project-collapse-all title="Collapse all" aria-label="Collapse all">⊟</button>${["all", "active", "inactive"].map(filter => `<button type="button" data-repo-filter="${filter}" title="Show ${filter} repositories" aria-label="Show ${filter} repositories" aria-pressed="${repositoryStatusFilter === filter}">${filter[0].toUpperCase() + filter.slice(1)}</button>`).join("")}</div>` + projects
+  elements.projectList.innerHTML = `<div class="project-expand-controls">${repoSelectAllIcon()}<button type="button" data-project-expand-all title="Expand all" aria-label="Expand all">⊞</button><button type="button" data-project-collapse-all title="Collapse all" aria-label="Collapse all">⊟</button>${["all", "active", "inactive"].map(filter => `<button type="button" data-repo-filter="${filter}" title="Show ${filter} repositories" aria-label="Show ${filter} repositories" aria-pressed="${repositoryStatusFilter === filter}">${{all:"▦",active:"●",inactive:"◷"}[filter]}</button>`).join("")}</div>` + projects
     .map((project) => {
       const inactiveCount = project.repos.filter(repo => isRepositoryInactive(repo, now)).length;
       const activeCount = project.repos.length - inactiveCount;

@@ -14,10 +14,10 @@ function fixture() {
   {id:5, title:'Child page', breadcrumb:['Target'], added:5},
  ].map(item=>({...item, url:'https://wiki.test/'+item.id, views:item.id, lastViewed:item.id}));
  const hierarchy={3:{space:'Team',parent:null},5:{space:'Team',parent:3}};
- const tree={innerHTML:''},navigation={innerHTML:''},sort={value:'added'};
- const context={...numbering,showSearchBranches:false,bookmarkInCurrentView:()=>true,matchesPerson:()=>true,bookmarks:items,pageHierarchy:hierarchy,view:'all',domain:'',selectedDomainGroup:'',query:'',selectedPerson:'',personRole:'any',treeFilterKey:'',collapsedBranches:new Set(),selectedBookmarks:new Set(),starredBookmarkFolders:new Set(),selectedBookmarkId:null,window:{},document:{querySelector:selector=>selector==='#bookmark-sort'?sort:selector==='#bookmark-root-links'?navigation:tree},esc:value=>String(value),bookmarkAgeTag:()=>'',confluenceAgeBadge:()=>'',date:()=>''};
+ const tree={innerHTML:''},navigation={innerHTML:''},sort={value:'added'},navSort={value:'number'};
+ const context={...numbering,showSearchBranches:false,bookmarkInCurrentView:()=>true,matchesPerson:()=>true,bookmarks:items,pageHierarchy:hierarchy,view:'all',domain:'',selectedDomainGroup:'',query:'',selectedPerson:'',personRole:'any',treeFilterKey:'',collapsedBranches:new Set(),selectedBookmarks:new Set(),starredBookmarkFolders:new Set(),selectedBookmarkId:null,window:{},document:{querySelector:selector=>selector==='#bookmark-navigation-sort'?navSort:selector==='#bookmark-sort'?sort:selector==='#bookmark-root-links'?navigation:tree},esc:value=>String(value),bookmarkAgeTag:()=>'',confluenceAgeBadge:()=>'',date:()=>''};
  vm.createContext(context);vm.runInContext(renderer,context);
- return {items,context,sort,navigation,render(filtered=items,query='',downloaded=[]){
+ return {items,context,sort,navSort,navigation,render(filtered=items,query='',downloaded=[]){
   context.query=query;
   context.renderBookmarkTree([...filtered].sort((a,b)=>numbering.compareBookmarkOrder(a,b,sort.value)),downloaded,false);
   return new Map([...tree.innerHTML.matchAll(/data-bookmark-row="(\d+)"[\s\S]*?<span class="tree-number">([^<]+)<\/span>/g)].map(match=>[Number(match[1]),match[2]]));
@@ -94,4 +94,15 @@ test('root navigation shows aggregate counts and nested favourites alongside mat
  assert.match(f.navigation.innerHTML,/1 bookmarks · 4 opens/);
  f.render([],'missing');
  assert.match(f.navigation.innerHTML,/No bookmark trees in this view/);
+});
+
+test('navigation sorting preserves root targets and assigned numbers',()=>{
+ const app=fixture();app.render();
+ app.navSort.value='count';app.render();
+ assert.match(app.navigation.innerHTML,/data-root-index="1"[^]*?<span class="tree-number">2<\/span>Team/);
+ assert.ok(app.navigation.innerHTML.indexOf('data-root-index="1"') < app.navigation.innerHTML.indexOf('data-root-index="0"'));
+ app.navSort.value='number';app.render();
+ assert.ok(app.navigation.innerHTML.indexOf('data-root-index="0"') < app.navigation.innerHTML.indexOf('data-root-index="1"'));
+ const full=app.render();app.render([app.items[3]],'Needle');
+ assert.match(app.navigation.innerHTML,/<span class="tree-number">2<\/span>Team/);
 });

@@ -6,6 +6,7 @@
     <title>OWL · Bookmarks Manager</title>
     <link rel="icon" type="image/png" href="../bitbucket/assets/owl.png?v=owl-1" />
     <script src="../bitbucket/theme.js?v=20260914-current-mode"></script>
+    <script src="sidebar.js?v=2"></script>
     <link rel="stylesheet" href="../bitbucket/style.css?v=20260914-dismiss" />
     <link rel="stylesheet" href="style.css?v=20260924-auto-refresh" />
     <link
@@ -144,6 +145,7 @@
         id="bookmark-sidebar"
         aria-label="Bookmark navigation"
       >
+        <button id="toggle-bookmark-sidebar" type="button" aria-label="Expand bookmarks">›</button>
         <div class="sidebar-heading">
           <div>
             <p class="eyebrow">Workspace</p>
@@ -167,7 +169,10 @@
       </aside>
       <aside class="bookmark-root-navigation" aria-labelledby="bookmark-root-navigation-title">
         <h2 id="bookmark-root-navigation-title">Navigation</h2>
-        <p>Root trees in this view</p>
+        <label for="bookmark-navigation-sort">Sort</label>
+        <select id="bookmark-navigation-sort" aria-label="Sort navigation">
+          <option value="number">Number</option><option value="alpha">Alphabetical</option><option value="count">Most bookmarks</option>
+        </select>
         <nav id="bookmark-root-links" aria-label="Jump to bookmark tree"></nav>
       </aside>
       <section class="main-panel" aria-labelledby="bookmark-title">
@@ -306,6 +311,7 @@
         id="bookmark-details-sidebar"
         aria-labelledby="page-details-heading"
       >
+        <button id="toggle-bookmark-details" class="panel-collapse-toggle" type="button" aria-label="Close page details">×</button>
         <div class="page-details-heading">
           <p class="eyebrow">Selected bookmark</p>
           <h2 id="page-details-heading">Page details</h2>
@@ -342,6 +348,7 @@
         id="bookmark-people-sidebar"
         aria-labelledby="confluence-people-title"
       >
+        <button id="toggle-bookmark-people" class="panel-collapse-toggle" type="button" aria-label="Expand people">‹</button>
         <div class="confluence-people-heading">
           <div>
             <p class="eyebrow">Confluence</p>

@@ -1,9 +1,9 @@
 "use strict";
 (() => {
   const key = "owl-bookmark-sidebar-collapsed";
-  let collapsed = false;
+  let collapsed = true;
   try {
-    collapsed = localStorage.getItem(key) === "true";
+    collapsed = localStorage.getItem(key) !== "false";
   } catch {}
   function apply() {
     document.documentElement.dataset.bookmarkSidebarCollapsed =
@@ -49,19 +49,23 @@
     },
   ];
   for (const panel of panels) {
-    let collapsed = false;
+    let collapsed = true;
     try {
-      collapsed = localStorage.getItem(panel.key) === "true";
+      collapsed = localStorage.getItem(panel.key) !== "false";
     } catch {}
     function apply() {
       document.documentElement.dataset[panel.attribute] = String(collapsed);
       const button = document.getElementById(panel.id);
       if (!button) return;
-      button.textContent = collapsed ? panel.icon : "›";
+      button.textContent = collapsed ? panel.icon : (panel.name === "Page details" ? "×" : "›");
       button.setAttribute("aria-expanded", String(!collapsed));
-      button.title = `${collapsed ? "Expand" : "Collapse"} ${panel.name}`;
+      button.title = `${collapsed ? "Expand" : panel.name === "Page details" ? "Close" : "Collapse"} ${panel.name}`;
       button.setAttribute("aria-label", button.title);
     }
+    if (panel.name === "Page details") window.openBookmarkDetails = () => {
+      collapsed = false;
+      apply();
+    };
     apply();
     document.addEventListener("DOMContentLoaded", () => {
       apply();

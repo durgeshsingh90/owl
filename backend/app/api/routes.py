@@ -127,6 +127,10 @@ def projects():
 async def crawl(value: CrawlRequest, request: Request):
     if request.app.state.jobs.active():
         raise HTTPException(409, "A crawl is already running.")
+    if not is_naas():
+        await test_value(load_settings())
+        if request.app.state.jobs.active():
+            raise HTTPException(409, "A crawl is already running.")
     if value.repository_ids:
         ids = sorted(set(value.repository_ids))
         with connection() as db:
