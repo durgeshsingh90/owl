@@ -1,0 +1,1 @@
+"""Independent Confluence page tracker."""

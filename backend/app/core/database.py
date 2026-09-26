@@ -36,6 +36,34 @@ def initialize(*, recover_jobs=False):
             folder_key TEXT PRIMARY KEY, status TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0,
             error TEXT, updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS confluence_tracker_roots (
+            id INTEGER PRIMARY KEY, base_url TEXT NOT NULL, page_id TEXT NOT NULL,
+            url TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued',
+            total INTEGER NOT NULL DEFAULT 0, completed INTEGER NOT NULL DEFAULT 0,
+            failed INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL, last_attempt TEXT, last_success TEXT,
+            next_run REAL NOT NULL DEFAULT 0, owner TEXT, lease_until REAL NOT NULL DEFAULT 0,
+            UNIQUE(base_url,page_id)
+        );
+        CREATE TABLE IF NOT EXISTS confluence_tracker_pages (
+            root_id INTEGER NOT NULL REFERENCES confluence_tracker_roots(id) ON DELETE CASCADE,
+            page_id TEXT NOT NULL, parent_id TEXT, metadata TEXT NOT NULL,
+            fingerprint TEXT NOT NULL, previous_content TEXT, first_seen TEXT NOT NULL,
+            last_checked TEXT NOT NULL, changed_at TEXT NOT NULL, change_kind TEXT NOT NULL,
+            present INTEGER NOT NULL DEFAULT 1, opens INTEGER NOT NULL DEFAULT 0, last_opened TEXT,
+            PRIMARY KEY(root_id,page_id)
+        );
+        CREATE TABLE IF NOT EXISTS confluence_tracker_changes (
+            id INTEGER PRIMARY KEY, root_id INTEGER NOT NULL REFERENCES confluence_tracker_roots(id) ON DELETE CASCADE,
+            page_id TEXT NOT NULL, kind TEXT NOT NULL, detected_at TEXT NOT NULL,
+            summary TEXT NOT NULL, reviewed INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS tracker_changes_root ON confluence_tracker_changes(root_id,reviewed,id);
+        CREATE TABLE IF NOT EXISTS confluence_tracker_scan_pages (
+            root_id INTEGER NOT NULL REFERENCES confluence_tracker_roots(id) ON DELETE CASCADE,
+            page_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', error TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(root_id,page_id)
+        );
         CREATE TABLE IF NOT EXISTS bookmark_downloaded_pages (
             folder_key TEXT NOT NULL, page_id TEXT NOT NULL, title TEXT NOT NULL,
             url TEXT NOT NULL, content TEXT NOT NULL, PRIMARY KEY(folder_key,page_id)

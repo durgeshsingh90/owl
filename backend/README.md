@@ -172,3 +172,30 @@ notes, stars, groups and other local bookmark fields are preserved. Pages outsid
 the configured Confluence server and ordinary web bookmarks are not refreshed by
 this schedule. Existing downloaded pages are refreshed, without discovering new
 pages or adding them to the saved bookmarks.
+
+### Confluence Tracker
+
+Open **Confluence Tracker** on the OWL home screen, or `/confluence-tracker/`.
+It shares Bookmark Manager's Confluence connection. Add a root page URL or numeric
+page ID. Each scan discovers all descendant IDs first (including pagination and
+the direct-child fallback), then downloads page content and metadata sequentially.
+The initial scan establishes the baseline. Subsequent scans flag new, changed,
+returned, or no-longer-listed pages, retaining cached content and change history.
+An absent page may have moved or become inaccessible; it is not treated as deleted.
+
+Each root syncs automatically once every 24 hours after a successful run. A failed
+or incomplete run retries after two hours, repeatedly until successful. The next
+daily run is then scheduled 24 hours after that success. SQLite stores the schedule
+and a worker lease prevents overlapping runs. **Check now** starts an explicit
+manual check. OWL's backend must be running; overdue work resumes on startup.
+
+The sidebar filters by page subtree. The list supports search, unreviewed changes,
+updated/created/detected date selection, relative ranges, month/year archives, and
+inclusive custom date ranges in the browser's local timezone. Page titles open
+Confluence in a new tab; open counts record clicks through this app, not global
+Confluence analytics. **Details** shows returned metadata, cached page text, the
+text before the latest change, and the latest 50 change records. Review clears
+only changes already received by the browser. Notifications are in-app badges.
+
+Tracker validation uses isolated databases and mocked Confluence responses. A live
+corporate-server sync requires your network/VPN and configured connection.

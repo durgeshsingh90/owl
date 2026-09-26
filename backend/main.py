@@ -11,6 +11,7 @@ from app.bookmarks.refresh import run_scheduler
 from app.core.database import initialize
 from app.core.logging import configure_logging, error_details, event, request_id
 from app.pdfs.jobs import Jobs
+from app.tracker.service import run_scheduler as run_tracker_scheduler
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -25,10 +26,16 @@ async def lifespan(app):
     initialize(recover_jobs=True)
     app.state.jobs = Jobs()
     refresh_task = asyncio.create_task(run_scheduler())
+    tracker_task = asyncio.create_task(run_tracker_scheduler())
     yield
     refresh_task.cancel()
     try:
         await refresh_task
+    except asyncio.CancelledError:
+        pass
+    tracker_task.cancel()
+    try:
+        await tracker_task
     except asyncio.CancelledError:
         pass
     await app.state.jobs.shutdown()
@@ -102,10 +109,12 @@ async def validation_error(request, error):
 
 from app.api.bookmarks import router as bookmarks_router
 from app.api.compat import router as compat_router
+from app.api.tracker import router as tracker_router
 from app.api.workspace import router as workspace_router
 
 app.include_router(bookmarks_router)
 app.include_router(workspace_router)
+app.include_router(tracker_router)
 app.include_router(compat_router)
 app.include_router(router)
 app.include_router(router, prefix="/api")
@@ -117,5 +126,5 @@ def home():
 
 
 frontend = Path(__file__).resolve().parent.parent / "frontend"
-for name in ("home", "bitbucket", "bookmarks"):
+for name in ("home", "bitbucket", "bookmarks", "confluence-tracker"):
     app.mount("/" + name, StaticFiles(directory=frontend / name, html=True), name=name)

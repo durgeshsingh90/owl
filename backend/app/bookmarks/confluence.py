@@ -315,7 +315,7 @@ async def resolved_content(settings, url, page_id):
     )
 
 
-async def metadata(url):
+async def metadata(url, *, settings=None, include_raw=False):
     parsed = valid_url(url)
     result = {
         "url": url,
@@ -325,7 +325,7 @@ async def metadata(url):
         "description": "Saved web bookmark",
     }
     try:
-        settings = load()
+        settings = settings or load()
     except ValueError:
         if "confluence" in parsed.hostname.lower():
             raise ValueError(
@@ -413,4 +413,6 @@ async def metadata(url):
         lastRefreshed=stamp,
         updatedInOwlAt=stamp,
     )
+    if include_raw:
+        result["rawMetadata"] = data
     return result

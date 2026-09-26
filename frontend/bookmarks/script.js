@@ -309,9 +309,34 @@ function renderBookmarkTree(filtered, downloaded = [], scheduleSearch = true, do
       folderMarkup(folder, name, [name], String(index + 1)),
     )
     .join("");
+  const navigation = document.querySelector("#bookmark-root-links");
+  if (navigation) {
+    function hasStar(folder, path) {
+      return starredBookmarkFolders.has("folder-" + JSON.stringify(path)) ||
+        folder.pages.some(item => item.favorite) ||
+        [...folder.children].some(([name, child]) => hasStar(child, [...path, name]));
+    }
+    navigation.innerHTML = [...folders.children].map(([name, folder], index) => {
+      const starred = hasStar(folder, [name]);
+      return `<button type="button" class="bookmark-root-link" data-root-index="${index}" title="Go to ${esc(name)}"><span class="bookmark-root-name">${esc(name)}${starred ? '<span class="bookmark-root-star" role="img" aria-label="Contains a starred folder or favourite bookmark" title="Contains a starred folder or favourite bookmark">★</span>' : ''}</span><span class="bookmark-root-counts">${folderCount(folder)} bookmarks · ${folderOpens(folder)} opens</span></button>`;
+    }).join("") || '<p class="bookmark-root-empty">No bookmark trees in this view.</p>';
+  }
   if (scheduleSearch) window.searchDownloadedBookmarkPages?.(filtered);
 }
 let selectedBookmarkId = null;
+document.querySelector("#bookmark-root-links")?.addEventListener("click", event => {
+  const button = event.target.closest("[data-root-index]");
+  if (!button) return;
+  const root = document.querySelector("#bookmark-tree").children[Number(button.dataset.rootIndex)];
+  if (!root) return;
+  root.open = true;
+  collapsedBranches.delete(root.dataset.branch);
+  document.querySelectorAll(".bookmark-root-link").forEach(link => link.removeAttribute("aria-current"));
+  button.setAttribute("aria-current", "location");
+  const heading = root.querySelector("summary");
+  heading.focus({preventScroll: true});
+  heading.scrollIntoView({block: "start", inline: "nearest", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"});
+});
 const localPageNotes = {};
 function showPageDetails(id) {
   const item = bookmarks.find((item) => item.id === id);

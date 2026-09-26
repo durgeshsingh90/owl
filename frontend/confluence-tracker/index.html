@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>OWL · Confluence Tracker</title>
+  <link rel="icon" href="../bitbucket/assets/owl.png">
+  <script src="../bitbucket/theme.js?v=20260914-current-mode"></script>
+  <link rel="stylesheet" href="style.css?v=1">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="../home/" aria-label="OWL home"><img src="../bitbucket/assets/owl.png" alt=""><span>OWL<small>Confluence Tracker</small></span></a>
+  <span class="daily-note">Daily sync · retry after 2 hours</span>
+  <nav><a href="../bookmarks/">Bookmarks ↗</a><button id="connection-settings">Connection settings</button><button id="theme-toggle"><span>◐</span></button></nav>
+</header>
+<div class="workspace">
+<aside class="sidebar" aria-label="Confluence page tree">
+  <div class="sidebar-heading"><div><span class="eyebrow">TRACKED CONTENT</span><h2>Page tree</h2></div><button id="add-root" class="primary" title="Track a root page">＋ Add root</button></div>
+  <label class="root-select">Root page<select id="root-select"><option value="">No tracked roots</option></select></label>
+  <div class="tree-tools"><button id="all-pages">All pages</button><button id="collapse-tree">Collapse tree</button></div>
+  <div id="page-tree" class="page-tree"></div>
+  <p class="sidebar-foot">Choose a branch to filter the list. Page links open Confluence in a new tab.</p>
+</aside>
+<main>
+  <div class="heading"><div><span class="eyebrow">CONFLUENCE / PAGE TRACKER</span><h1 id="root-title">Track what changes.</h1><p id="root-description">Start with a root page. Keep its entire subtree in view.</p></div><button id="check-now" class="primary" disabled>↻ Check now</button></div>
+  <p id="error" role="alert" hidden></p>
+  <section id="empty-state" class="empty-state"><div class="empty-icon">▱</div><h2>A clear view of your Confluence pages</h2><p>Add a root page URL or page ID. OWL first discovers every child page ID, then downloads the pages one by one. Daily checks highlight new pages and changes.</p><button id="empty-add-root" class="primary">Track a root page</button><small>Uses your existing OWL Confluence connection. OWL must be running to sync.</small></section>
+  <div id="tracker-content" hidden>
+    <section class="metrics" aria-label="Tracker summary"><div><span>Tracked pages</span><strong id="total-pages">0</strong></div><div><span>Unreviewed changes</span><strong id="unread-count">0</strong></div><div><span>Last successful sync</span><strong id="last-sync">Not yet</strong></div><div><span>Next automatic check</span><strong id="next-sync">Shortly</strong></div></section>
+    <section class="sync-panel" aria-live="polite"><div><strong id="sync-state"></strong><span id="sync-detail"></span></div><progress id="sync-progress" max="1" value="0"></progress><p id="sync-error" hidden></p></section>
+    <div class="filters">
+      <label class="search"><span class="sr-only">Search tracked pages</span><input id="page-search" type="search" placeholder="Search page name, ID or person…"></label>
+      <label>Show<select id="change-filter"><option value="all">All pages</option><option value="unread">Unreviewed changes</option><option value="new">New pages</option><option value="updated">Updated pages</option><option value="failed">Download failures</option><option value="missing">Not in latest subtree</option></select></label>
+      <label>Date field<select id="date-field"><option value="confluenceUpdatedAt">Last updated</option><option value="writtenAt">Created</option><option value="changed_at">Change detected</option></select></label>
+      <details id="range-picker" class="range-picker"><summary id="range-label">All time ▾</summary><div class="range-popover"><label>Quick range<select id="range-preset"><option value="all">All time</option><option value="today">Today</option><option value="yesterday">Yesterday</option><option value="before-yesterday">Day before yesterday</option><option value="week">This week</option><option value="last7">Last 7 days</option><option value="month">This month</option><option value="last30">Last 30 days</option><option value="year">This year</option></select></label><label>Month or year<select id="archive-range"><option value="">Choose a month or year…</option></select></label><form id="custom-range"><label>From<input id="range-start" type="date" required></label><label>Through<input id="range-end" type="date" required></label><button class="primary" type="submit">Apply range</button><p id="range-error" role="alert"></p></form></div></details>
+      <button id="review-changes" disabled>Mark changes reviewed</button>
+    </div>
+    <div class="list-caption"><span id="result-count"></span><button id="clear-branch" hidden>Clear branch filter ×</button><span>Opens are counted in this app</span></div>
+    <div class="table-scroll"><table><thead><tr><th>Page name</th><th>Page ID</th><th>Change</th><th>Opens</th><th>Last updated</th><th>Created</th><th>Updated by</th><th>Created by</th><th>Version</th><th>Space</th><th>Metadata</th></tr></thead><tbody id="page-list"></tbody></table></div>
+    <p id="no-results" class="no-results" hidden>No pages match these filters.</p><button id="load-more" hidden>Show more pages</button>
+    <p class="footnote">The first successful scan establishes a baseline. Later scans report new pages, updates and pages no longer found in the subtree. Dates use your browser’s local time.</p>
+  </div>
+</main>
+</div>
+<dialog id="root-dialog"><form id="root-form"><div class="dialog-heading"><h2>Track a root page</h2><button type="button" data-close="root-dialog" aria-label="Close">×</button></div><p>Track this page and every page beneath it.</p><label>Confluence page URL or page ID<input id="root-input" required placeholder="https://…/pages/12345 or 12345" autocomplete="off"></label><p>Automatic sync: daily. Failed syncs retry every two hours until they succeed.</p><p id="root-feedback" role="status"></p><button id="root-submit" class="primary">Start tracking</button></form></dialog>
+<dialog id="settings-dialog"><form id="settings-form"><div class="dialog-heading"><h2>Confluence connection</h2><button type="button" data-close="settings-dialog" aria-label="Close">×</button></div><p>Shared with Bookmark Manager. Existing tracked roots stay tied to their original server.</p><label>Base URL<input name="base_url" id="base-url" type="url" required placeholder="https://confluence.example.com"></label><label>Personal access token<input name="personal_access_token" type="password" id="pat" autocomplete="off" placeholder="Leave blank to keep the saved token"></label><label class="inline"><input name="verify_ssl" id="verify-ssl" type="checkbox" checked> Verify SSL certificate</label><p id="connection-feedback" role="status"></p><button class="primary" id="save-connection">Test and save connection</button></form></dialog>
+<dialog id="metadata-dialog" class="metadata-dialog"><div class="dialog-heading"><h2 id="metadata-title">Page metadata</h2><button data-close="metadata-dialog" aria-label="Close">×</button></div><div id="metadata-content"></div></dialog>
+<script src="ranges.js?v=1"></script><script src="script.js?v=1"></script>
+</body></html>
