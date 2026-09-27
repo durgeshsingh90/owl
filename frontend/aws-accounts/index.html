@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>OWL · AWS Accounts</title>
+  <link rel="icon" href="../bitbucket/assets/owl.png">
+  <link rel="stylesheet" href="style.css?v=2">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <filter id="connection-remove-white" color-interpolation-filters="sRGB"><feColorMatrix in="SourceGraphic" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  -10 -10 -10 0 30" result="whiteRemoved"/><feComposite in="whiteRemoved" in2="SourceGraphic" operator="in"/></filter>
+</defs></svg>
+<header class="topbar">
+  <a class="brand" href="../home/" aria-label="OWL home"><img src="../bitbucket/assets/owl.png" alt=""><span>OWL<small>AWS Accounts</small></span></a>
+  <span id="file-note" class="file-note"></span>
+  <nav>
+    <a href="../home/">Home ↗</a>
+    <button id="import-button" type="button" title="Import accounts JSON">⇪ Import</button>
+    <a id="export-button" class="button" href="/api/aws-accounts/export" download="aws_accounts_by_category.json" title="Export accounts JSON" hidden>⇩ Export</a>
+    <div id="connection-status" class="connection" data-state="connecting">
+      <button id="connection-open" class="connection-button" type="button" title="Checking AWS connection…">
+        <img id="connection-image" src="../bitbucket/assets/no-connection.gif" width="36" height="36" alt="">
+        <span class="connection-text"><strong id="connection-label">Checking…</strong><small id="connection-timer"></small></span>
+      </button>
+      <button id="connection-login" class="primary" type="button" hidden>Connect</button>
+    </div>
+  </nav>
+</header>
+<input id="file-input" type="file" accept=".json,application/json" hidden>
+<main>
+  <p id="error" role="alert" hidden></p>
+  <section id="empty-state" class="empty-state" hidden>
+    <div class="empty-icon">☁</div>
+    <h1>All your AWS accounts, sorted by category</h1>
+    <p>Import the JSON file that groups your accounts into categories. OWL saves it locally, so the page is ready next time you open it.</p>
+    <button id="empty-import" class="primary" type="button">Choose JSON file</button>
+    <small>Or drop the file anywhere on this page. Expected shape: <code>{"categories": {"Data": [{"profile": "…", "account_id": "…"}]}}</code></small>
+  </section>
+  <div id="content" hidden>
+    <div class="heading">
+      <div><span class="eyebrow">AWS / ACCOUNT INVENTORY</span><h1>AWS accounts <span id="total" class="total"></span></h1><p id="summary"></p></div>
+      <div id="roles" class="roles" aria-label="Common roles"></div>
+    </div>
+    <div class="filters">
+      <label class="search"><span class="sr-only">Search accounts</span><input id="search" type="search" placeholder="Search account name or account ID…  ( / )" autocomplete="off"></label>
+      <div id="env-filter" class="env-filter" role="group" aria-label="Environment"></div>
+    </div>
+    <section id="frequent" class="frequent" hidden><span class="eyebrow">MOST COPIED</span><div id="frequent-list"></div></section>
+    <nav id="category-nav" class="category-nav" aria-label="Categories"></nav>
+    <p class="hint">Click an account name, account ID or role to copy it. ⧉ shows how many times you have copied it. Star a category to keep it first.</p>
+    <section id="categories" class="categories" aria-live="polite"></section>
+    <p id="no-results" class="no-results" hidden>No accounts match these filters.</p>
+  </div>
+</main>
+<dialog id="connection-dialog">
+  <div class="dialog-heading"><h2>AWS connection</h2><button type="button" data-close aria-label="Close">×</button></div>
+  <div class="connection-state">
+    <img id="dialog-image" src="../bitbucket/assets/no-connection.gif" width="44" height="44" alt="">
+    <div><strong id="dialog-status">Checking…</strong><p id="dialog-detail"></p></div>
+  </div>
+  <div id="session" class="session" hidden>
+    <div class="session-times"><div><span>Active for</span><strong id="session-active">—</strong></div><div><span>Expires in</span><strong id="session-left">—</strong></div><div><span>Expires at</span><strong id="session-expires">—</strong></div></div>
+    <progress id="session-progress" max="1" value="0"></progress>
+  </div>
+  <div id="login-pending" class="login-pending" hidden>
+    <p>A browser tab opened for AWS SSO. Approve the request there — OWL marks the connection as approved automatically.</p>
+    <p id="login-link" hidden>No tab? <a id="login-url" target="_blank" rel="noopener">Open the approval page ↗</a> <span id="login-code"></span></p>
+  </div>
+  <p id="dialog-error" class="dialog-error" hidden></p>
+  <form id="profile-form" class="profile-form">
+    <label>Check profile<input id="profile-input" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]*" autocomplete="off"></label>
+    <button type="submit">Save profile</button>
+  </form>
+  <p class="commands">Check: <code id="check-command"></code><br>Connect: <code id="login-command"></code></p>
+  <div class="dialog-actions"><button id="check-now" type="button">↻ Check now</button><button id="dialog-login" class="primary" type="button">Connect with aws sso login</button></div>
+</dialog>
+<div id="drop-overlay" class="drop-overlay" hidden><div>Drop the JSON file to import</div></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="connection.js?v=1"></script>
+<script src="script.js?v=2"></script>
+</body>
+</html>

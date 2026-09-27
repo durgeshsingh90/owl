@@ -116,6 +116,20 @@ def initialize(*, recover_jobs=False):
         CREATE TABLE IF NOT EXISTS bookmark_workspace (
             id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS aws_accounts (
+            id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL, imported_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS aws_account_copies (
+            kind TEXT NOT NULL, value TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0,
+            last_copied TEXT NOT NULL, PRIMARY KEY(kind,value)
+        );
+        CREATE TABLE IF NOT EXISTS aws_connection (
+            id INTEGER PRIMARY KEY CHECK(id=1), profile TEXT NOT NULL DEFAULT 'mc-stablecoinsecurity-nonp',
+            status TEXT NOT NULL DEFAULT 'unknown', identity TEXT, error TEXT NOT NULL DEFAULT '',
+            checked_at REAL, approved_at REAL, expires_at REAL, source TEXT NOT NULL DEFAULT '',
+            login_status TEXT NOT NULL DEFAULT 'idle', login_started REAL, login_url TEXT, login_code TEXT
+        );
+        INSERT OR IGNORE INTO aws_connection(id) VALUES(1);
         CREATE TABLE IF NOT EXISTS bookmark_refresh_schedule (
             id INTEGER PRIMARY KEY CHECK(id=1), next_run REAL NOT NULL DEFAULT 0,
             status TEXT NOT NULL DEFAULT 'scheduled', last_attempt REAL,

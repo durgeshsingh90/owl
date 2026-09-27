@@ -127,11 +127,13 @@ async def validation_error(request, error):
     )
 
 
+from app.api.aws_accounts import router as aws_accounts_router
 from app.api.bookmarks import router as bookmarks_router
 from app.api.compat import router as compat_router
 from app.api.tracker import router as tracker_router
 from app.api.workspace import router as workspace_router
 
+app.include_router(aws_accounts_router)
 app.include_router(bookmarks_router)
 app.include_router(workspace_router)
 app.include_router(tracker_router)
@@ -146,7 +148,7 @@ def home():
 
 
 frontend = Path(__file__).resolve().parent.parent / "frontend"
-for name in ("home", "bitbucket", "bookmarks", "confluence-tracker"):
+for name in ("home", "bitbucket", "bookmarks", "confluence-tracker", "aws-accounts"):
     app.mount("/" + name, StaticFiles(directory=frontend / name, html=True), name=name)
 
 
