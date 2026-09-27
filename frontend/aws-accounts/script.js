@@ -3,7 +3,7 @@
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
   const displayDate = value => value && Number.isFinite(new Date(value).getTime()) ? new Date(value).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'}) : '—';
-  const PIN_KEY = 'owl-aws-accounts-pinned', SELECTED_KEY = 'owl-aws-accounts-category';
+  const PIN_KEY = 'owl-aws-accounts-pinned', SELECTED_KEY = 'owl-aws-accounts-category', SORT_KEY = 'owl-aws-accounts-sort';
   // Trailing environment token, optionally followed by an account-number suffix (mc-x-nonp-216989139306).
   const ENV_PATTERN = /-(prod|production|prd|nonp|nonprod|nonprd|work|mtf|dev|develop|development|test|testing|qa|uat|sit|stage|staging|stg|preprod|pre|perf|sandbox|sbx|demo|poc|lab|dr)(?:-\d+)?$/i;
   const ENV_CLASS = {prod:'prod',production:'prod',prd:'prod',nonp:'nonp',nonprod:'nonp',nonprd:'nonp',work:'work'};
@@ -11,10 +11,11 @@
   // Known environments first, then any other environment alphabetically, then accounts without one.
   const envRank = env => env === '' ? 1e6 : ENV_FIRST.includes(env) ? ENV_FIRST.indexOf(env) : 100;
   const envSort = (a, b) => envRank(a) - envRank(b) || a.localeCompare(b);
-  let data = null, envFilter = 'all', pinned = new Set(), selected = null, toastTimer = 0;
+  let data = null, envFilter = 'all', pinned = new Set(), selected = null, sortMode = 'az', toastTimer = 0;
   try {
     pinned = new Set(JSON.parse(localStorage.getItem(PIN_KEY) || '[]'));
     selected = localStorage.getItem(SELECTED_KEY);
+    sortMode = ['az', 'count', 'file'].includes(localStorage.getItem(SORT_KEY)) ? localStorage.getItem(SORT_KEY) : 'az';
   } catch { /* Pins and the selected category stay for this page only. */ }
   const store = (key, value) => { try { value == null ? localStorage.removeItem(key) : localStorage.setItem(key, value); } catch { /* Per-page only. */ } };
   const label = name => name.replace(/_/g, ' ');
@@ -22,6 +23,9 @@
   const COMPACT = 45;
   const STARRED = '__starred__';
   const starredSet = () => new Set(data?.stars || []);
+  const PROJECT = 'project:';
+  const projectKey = project => PROJECT + project.id;
+  const projectFor = key => key?.startsWith(PROJECT) ? (data?.projects || []).find(project => projectKey(project) === key) : null;
 
   function error(message) { $('error').textContent = message; $('error').hidden = !message; }
   async function api(path, options = {}) {
@@ -73,8 +77,11 @@
     return esc(text.slice(0, index)) + '<mark>' + esc(text.slice(index, index + query.length)) + '</mark>' + esc(text.slice(index + query.length));
   }
 
+  // Pinned categories first, then A–Z, most accounts first, or the file's order.
   function orderedCategories() {
     const names = Object.keys(data.categories);
+    if (sortMode === 'az') names.sort((a, b) => label(a).localeCompare(label(b), undefined, {sensitivity: 'base', numeric: true}));
+    if (sortMode === 'count') names.sort((a, b) => data.categories[b].length - data.categories[a].length || label(a).localeCompare(label(b)));
     return [...names.filter(name => pinned.has(name)), ...names.filter(name => !pinned.has(name))];
   }
 
@@ -111,21 +118,26 @@
       `<button class="id" type="button" data-copy="${esc(ids.get(profile))}" data-account="${esc(profile)}" data-label="Account ID" title="Copy account ID"><span class="text">${esc(ids.get(profile))}</span></button>${accountBadge(profile, ids.get(profile))}</div>`).join('');
   }
 
-  const row = (item, query, next, stars) => `<div class="row${!next || next.base !== item.base ? ' group-end' : ''}">
+  const row = (item, query, next, stars, project) => `<div class="row${!next || next.base !== item.base ? ' group-end' : ''}" draggable="true" data-profile="${esc(item.profile)}">
     <button class="star-account" type="button" data-star="${esc(item.profile)}" aria-pressed="${stars.has(item.profile)}" title="${stars.has(item.profile) ? 'Unstar' : 'Star'} ${esc(item.profile)}">${stars.has(item.profile) ? '★' : '☆'}</button>
     <button class="name" type="button" data-copy="${esc(item.profile)}" data-account="${esc(item.profile)}" data-label="Account name" title="Copy account name · ${esc(item.profile)}"><span class="text">${highlight(item.profile, query)}</span></button>
     <span class="env ${ENV_CLASS[item.env] || 'other'}">${esc(item.env)}</span>
     <button class="id" type="button" data-copy="${esc(item.account_id)}" data-account="${esc(item.profile)}" data-label="Account ID" title="Copy account ID"><span class="text">${highlight(String(item.account_id), query)}</span></button>
-    <span class="count-cell">${accountBadge(item.profile, item.account_id)}</span>
+    <span class="count-cell">${accountBadge(item.profile, item.account_id)}<button class="row-action" type="button" data-add-menu="${esc(item.profile)}" title="Add ${esc(item.profile)} to a project" aria-label="Add to a project">⊕</button>${project ? `<button class="row-action remove" type="button" data-remove="${esc(item.profile)}" data-project="${project.id}" title="Remove from ${esc(project.name)}" aria-label="Remove from project">×</button>` : ''}</span>
   </div>`;
 
   function render() {
     const query = $('search').value.trim().toLowerCase();
     const stars = starredSet();
-    if (selected && !(selected in data.categories) && !(selected === STARRED && stars.size)) selected = null;
+    if (selected && !(selected in data.categories) && !(selected === STARRED && stars.size) && !projectFor(selected)) selected = null;
     const keep = item => (envFilter === 'all' || item.env === envFilter) &&
       (!query || item.profile.toLowerCase().includes(query) || String(item.account_id).toLowerCase().includes(query));
     const matches = new Map();
+    const byProfile = new Map();
+    for (const account of Object.values(data.categories).flat()) if (!byProfile.has(account.profile)) byProfile.set(account.profile, account);
+    for (const project of data.projects || []) {
+      matches.set(projectKey(project), groups(project.accounts.map(profile => byProfile.get(profile)).filter(Boolean)).filter(keep));
+    }
     if (stars.size) {
       // Starred accounts, once each, even when a profile appears in several categories.
       const seen = new Set();
@@ -134,20 +146,39 @@
       matches.set(STARRED, groups(starred).filter(keep));
     }
     for (const name of orderedCategories()) matches.set(name, groups(data.categories[name]).filter(keep));
-    const everything = [...matches].filter(([name]) => name !== STARRED).reduce((sum, [, items]) => sum + items.length, 0);
+    const extra = name => name === STARRED || name.startsWith(PROJECT);
+    const everything = [...matches].filter(([name]) => !extra(name)).reduce((sum, [, items]) => sum + items.length, 0);
     const navItem = (name, count, text, isPinned) => `<button type="button" data-select="${esc(name)}" aria-current="${(name || null) === selected}" class="${isPinned ? 'pinned' : ''}${count ? '' : ' empty'}">
       <span class="nav-name">${isPinned ? '<span class="star">★</span>' : ''}${esc(text)}</span><span class="nav-count">${count}</span></button>`;
     lastInView = null;
+    const projects = data.projects || [];
+    $('project-nav').innerHTML = projects.map(project => navItem(projectKey(project), matches.get(projectKey(project)).length, project.name, false)
+      .replace('<button ', `<button data-drop-project="${project.id}" `).replace('<span class="nav-name">', '<span class="nav-name"><span class="folder">▣</span>')).join('');
+    $('project-hint').hidden = projects.length > 0;
     $('category-nav').innerHTML = navItem('', everything, 'All accounts', false) +
-      [...matches].map(([name, items]) => name === STARRED
+      [...matches].filter(([name]) => !name.startsWith(PROJECT)).map(([name, items]) => name === STARRED
         ? navItem(name, items.length, 'Starred accounts', true).replace('class="pinned', 'class="starred-nav pinned')
         : navItem(name, items.length, label(name), pinned.has(name))).join('');
     const sections = [];
     let shown = 0;
+    const filtering = Boolean(query) || envFilter !== 'all';
     for (const [name, items] of matches) {
       if (selected && name !== selected) continue;
+      const project = projectFor(name);
+      // Empty projects stay visible as drop targets unless a search or filter is active.
+      if (!items.length && !(project && !filtering)) continue;
+      if (!extra(name) || selected === name) shown += items.length;
+      if (project) {
+        sections.push({compact: !selected && items.length <= COMPACT, html: `<section class="category project${!selected && items.length <= COMPACT ? ' compact' : ''}" data-category="${esc(name)}" data-drop-project="${project.id}">
+          <header><h2><span class="folder">▣</span>${esc(project.name)}</h2><span class="count">${items.length} account${items.length === 1 ? '' : 's'}</span>
+            <button class="pin" type="button" data-rename-project="${project.id}" title="Rename ${esc(project.name)}">✎</button>
+            <button class="pin" type="button" data-delete-project="${project.id}" title="Delete project ${esc(project.name)}">🗑</button></header>
+          ${items.length ? `<div class="rows">${items.map((item, index) => row(item, query, items[index + 1], stars, project)).join('')}</div>`
+            : '<div class="drop-zone">Drag accounts here, or use ⊕ on any account row</div>'}
+        </section>`});
+        continue;
+      }
       if (!items.length) continue;
-      if (name !== STARRED || selected === STARRED) shown += items.length;
       const isStarred = name === STARRED;
       const isPinned = isStarred || pinned.has(name);
       const compact = !selected && items.length <= COMPACT;
@@ -165,7 +196,8 @@
       while (index < sections.length && sections[index].compact) boxes.push(sections[index++].html);
       html.push(`<div class="compact-grid">${boxes.join('')}</div>`);
     }
-    $('title').firstChild.textContent = selected === STARRED ? 'Starred accounts ' : selected ? `${label(selected)} ` : 'AWS accounts ';
+    $('title').firstChild.textContent = selected === STARRED ? 'Starred accounts ' : projectFor(selected) ? `${projectFor(selected).name} ` : selected ? `${label(selected)} ` : 'AWS accounts ';
+    document.querySelectorAll('[data-sort]').forEach(button => button.setAttribute('aria-pressed', button.dataset.sort === sortMode));
     $('total').textContent = shown.toLocaleString();
     $('categories').innerHTML = html.join('');
     $('no-results').hidden = shown > 0;
@@ -189,7 +221,7 @@
     if (key === lastInView) return;
     lastInView = key;
     let first = null;
-    document.querySelectorAll('#category-nav [data-select]').forEach(button => {
+    document.querySelectorAll('.sidebar [data-select]').forEach(button => {
       const inView = names.has(button.dataset.select);
       button.classList.toggle('in-view', inView);
       if (inView && !first) first = button;
@@ -291,6 +323,134 @@
     }
   }
 
+  // Projects: personal groupings of accounts. Accounts stay in their categories too.
+  let dialogProject = null, dialogProfile = null;
+  function openProjectDialog(project = null, profile = null) {
+    dialogProject = project; dialogProfile = profile;
+    $('project-dialog-title').textContent = project ? 'Rename project' : 'New project';
+    $('project-save').textContent = project ? 'Save' : profile ? 'Create and add' : 'Create project';
+    $('project-name').value = project?.name || '';
+    $('project-dialog-note').textContent = profile ? `${profile} will be added to the new project.` : '';
+    $('project-dialog-note').hidden = !profile;
+    $('project-error').hidden = true;
+    $('project-dialog').showModal();
+    $('project-name').select();
+  }
+  $('project-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const name = $('project-name').value.trim();
+    if (!name) return;
+    try {
+      if (dialogProject) {
+        await api(`/api/aws-accounts/projects/${dialogProject.id}`, {method:'PATCH', body:JSON.stringify({name})});
+        dialogProject.name = name.replace(/\s+/g, ' ');
+        toast(`Renamed to ${dialogProject.name}`);
+      } else {
+        const project = await api('/api/aws-accounts/projects', {method:'POST', body:JSON.stringify({name})});
+        (data.projects ||= []).push(project);
+        if (dialogProfile) await addToProject(project.id, dialogProfile, false);
+        toast(`Created ${project.name}${dialogProfile ? ` with ${dialogProfile}` : ''}`);
+      }
+      $('project-dialog').close();
+      render();
+    } catch (failure) {
+      $('project-error').textContent = failure.message;
+      $('project-error').hidden = false;
+    }
+  });
+  document.querySelectorAll('[data-close-project]').forEach(button => button.addEventListener('click', () => $('project-dialog').close()));
+
+  async function addToProject(id, profile, announce = true) {
+    const project = data.projects.find(item => item.id === id);
+    if (!project) return;
+    if (project.accounts.includes(profile)) { if (announce) toast(`${profile} is already in ${project.name}`); return; }
+    try {
+      await api(`/api/aws-accounts/projects/${id}/accounts`, {method:'PUT', body:JSON.stringify({profile})});
+      project.accounts.push(profile);
+      if (announce) { toast(`Added ${profile} to ${project.name}`); render(); }
+    } catch (failure) { error(`Could not add to ${project.name}: ${failure.message}`); }
+  }
+  async function removeFromProject(id, profile) {
+    const project = data.projects.find(item => item.id === id);
+    try {
+      await api(`/api/aws-accounts/projects/${id}/accounts?profile=${encodeURIComponent(profile)}`, {method:'DELETE'});
+      project.accounts = project.accounts.filter(value => value !== profile);
+      toast(`Removed ${profile} from ${project.name}`);
+      render();
+    } catch (failure) { error(`Could not remove from ${project.name}: ${failure.message}`); }
+  }
+  async function deleteProject(id) {
+    const project = data.projects.find(item => item.id === id);
+    if (!confirm(`Delete project "${project.name}"? Its ${project.accounts.length} account(s) stay in their categories.`)) return;
+    try {
+      await api(`/api/aws-accounts/projects/${id}`, {method:'DELETE'});
+      data.projects = data.projects.filter(item => item.id !== id);
+      if (selected === projectKey(project)) { selected = null; store(SELECTED_KEY, null); }
+      toast(`Deleted project ${project.name}`);
+      render();
+    } catch (failure) { error(`Could not delete ${project.name}: ${failure.message}`); }
+  }
+
+  function openMenu(anchor, profile) {
+    const menu = $('project-menu');
+    const projects = data.projects || [];
+    menu.innerHTML = `<div class="menu-title">Add ${esc(profile)} to</div>` + projects.map(project => {
+      const inside = project.accounts.includes(profile);
+      return `<button type="button" role="menuitem" data-add-to="${project.id}" data-profile="${esc(profile)}"${inside ? ' disabled' : ''}>▣ ${esc(project.name)}${inside ? ' <small>added</small>' : ''}</button>`;
+    }).join('') + `<button type="button" role="menuitem" class="menu-new" data-add-to="new" data-profile="${esc(profile)}">＋ New project…</button>`;
+    menu.hidden = false;
+    const box = anchor.getBoundingClientRect();
+    menu.style.top = `${Math.min(box.bottom + 4, window.innerHeight - menu.offsetHeight - 8)}px`;
+    menu.style.left = `${Math.max(8, Math.min(box.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - 8))}px`;
+    menu.querySelector('button:not([disabled])')?.focus();
+  }
+  function closeMenu() { $('project-menu').hidden = true; }
+  window.addEventListener('scroll', closeMenu, {passive: true});
+
+  // Drag an account row onto a project (sidebar item or project box), or onto "New".
+  const ACCOUNT_TYPE = 'application/x-owl-aws-account';
+  const isAccountDrag = event => [...(event.dataTransfer?.types || [])].includes(ACCOUNT_TYPE);
+  let dropTarget = null;
+  const setDropTarget = element => {
+    if (dropTarget === element) return;
+    dropTarget?.classList.remove('drop-over');
+    dropTarget = element;
+    dropTarget?.classList.add('drop-over');
+  };
+  document.addEventListener('dragstart', event => {
+    const source = event.target.closest?.('.row[data-profile]');
+    if (!source) return;
+    event.dataTransfer.setData(ACCOUNT_TYPE, source.dataset.profile);
+    event.dataTransfer.setData('text/plain', source.dataset.profile);
+    event.dataTransfer.effectAllowed = 'copy';
+    source.classList.add('dragging');
+    document.body.classList.add('dragging-account');
+    closeMenu();
+  });
+  document.addEventListener('dragend', event => {
+    event.target.closest?.('.row')?.classList.remove('dragging');
+    document.body.classList.remove('dragging-account');
+    setDropTarget(null);
+  });
+  document.addEventListener('dragover', event => {
+    if (!isAccountDrag(event)) return;
+    const target = event.target.closest('[data-drop-project],[data-drop-new]');
+    setDropTarget(target);
+    if (target) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; }
+  });
+  document.addEventListener('drop', event => {
+    if (!isAccountDrag(event)) return;
+    const target = event.target.closest('[data-drop-project],[data-drop-new]');
+    setDropTarget(null);
+    document.body.classList.remove('dragging-account');
+    if (!target) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const profile = event.dataTransfer.getData(ACCOUNT_TYPE);
+    if (target.dataset.dropNew !== undefined) openProjectDialog(null, profile);
+    else addToProject(Number(target.dataset.dropProject), profile);
+  }, true);
+
   function toast(message) {
     $('toast').textContent = message;
     $('toast').classList.add('show');
@@ -299,8 +459,23 @@
   }
 
   document.addEventListener('click', event => {
-    const target = event.target.closest('[data-copy],[data-pin],[data-star],[data-env],[data-select]');
+    if (!event.target.closest('#project-menu,[data-add-menu]')) closeMenu();
+    const target = event.target.closest('[data-copy],[data-pin],[data-star],[data-env],[data-select],[data-sort],[data-add-menu],[data-add-to],[data-remove],[data-rename-project],[data-delete-project],#new-project');
     if (!target) return;
+    if (target.id === 'new-project') return openProjectDialog();
+    if (target.dataset.sort) {
+      sortMode = target.dataset.sort;
+      store(SORT_KEY, sortMode);
+      return render();
+    }
+    if (target.dataset.addMenu !== undefined) return openMenu(target, target.dataset.addMenu);
+    if (target.dataset.addTo !== undefined) {
+      closeMenu();
+      return target.dataset.addTo === 'new' ? openProjectDialog(null, target.dataset.profile) : addToProject(Number(target.dataset.addTo), target.dataset.profile);
+    }
+    if (target.dataset.remove !== undefined) return removeFromProject(Number(target.dataset.project), target.dataset.remove);
+    if (target.dataset.renameProject) return openProjectDialog(data.projects.find(project => project.id === Number(target.dataset.renameProject)));
+    if (target.dataset.deleteProject) return deleteProject(Number(target.dataset.deleteProject));
     if (target.dataset.copy !== undefined) return copy(target.dataset.copy, target.dataset.label || 'Value', target.dataset.kind, target.dataset.account);
     if (target.dataset.star !== undefined) return toggleStar(target.dataset.star);
     if (target.dataset.pin !== undefined) {
@@ -363,6 +538,7 @@
   document.addEventListener('keydown', event => {
     if (event.key === '/' && !['INPUT','TEXTAREA'].includes(document.activeElement.tagName) && data) { event.preventDefault(); $('search').focus(); }
     if (event.key === 'Escape' && document.activeElement === $('search')) { $('search').value = ''; render(); }
+    if (event.key === 'Escape') closeMenu();
   });
   let dragDepth = 0;
   const hasFile = event => [...(event.dataTransfer?.types || [])].includes('Files');

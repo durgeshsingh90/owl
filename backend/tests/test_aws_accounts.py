@@ -185,11 +185,16 @@ class AwsCopiesExportConnectionTests(unittest.TestCase):
             self.assertTrue(client.get("/api/aws-accounts").json()["imported"])
 
             client.put("/api/aws-accounts/stars", json={"profile": "mc-databricks-prod", "starred": True})
-            response = delete_all(client)
-            self.assertEqual(response.json(), {"ok": True, "inventory": 1, "copies": 1, "stars": 1})
+            pid = client.post("/api/aws-accounts/projects", json={"name": "Stablecoin Project"}).json()["id"]
+            client.put(f"/api/aws-accounts/projects/{pid}/accounts", json={"profile": "mc-databricks-prod"})
+            self.assertEqual(
+                delete_all(client).json(),
+                {"ok": True, "inventory": 1, "copies": 1, "stars": 1, "projects": 1},
+            )
             saved = client.get("/api/aws-accounts").json()
             self.assertFalse(saved["imported"])
             self.assertEqual(saved["copies"]["profile"], {})
+            self.assertEqual((saved["stars"], saved["projects"]), ([], []))
             state = client.get("/api/aws-accounts/connection").json()
             self.assertEqual(state["profile"], "mc-stablecoinsecurity-nonp")
             self.assertEqual((state["status"], state["approved_at"], state["identity"]), ("unknown", None, None))
@@ -215,3 +220,35 @@ class AwsCopiesExportConnectionTests(unittest.TestCase):
             client.put("/api/aws-accounts", json=INVENTORY)
             self.assertEqual(client.get("/api/aws-accounts").json()["stars"], ["mc-databricks-prod"])
             self.assertNotIn("stars", client.get("/api/aws-accounts/export").json())
+
+    def test_projects(self):
+        with TestClient(app) as client:
+            client.put("/api/aws-accounts", json=INVENTORY)
+            project = client.post("/api/aws-accounts/projects", json={"name": "  Stablecoin   Project "}).json()
+            self.assertEqual(project["name"], "Stablecoin Project")
+            pid = project["id"]
+            for payload, status in (({"name": "stablecoin project"}, 409), ({"name": "   "}, 422)):
+                self.assertEqual(client.post("/api/aws-accounts/projects", json=payload).status_code, status)
+            other = client.post("/api/aws-accounts/projects", json={"name": "Payments"}).json()["id"]
+            url = f"/api/aws-accounts/projects/{pid}/accounts"
+            for profile in ("mc-networking-work", "mc-databricks-prod", "mc-networking-work"):
+                self.assertEqual(client.put(url, json={"profile": profile}).status_code, 200)
+            client.put(f"/api/aws-accounts/projects/{other}/accounts", json={"profile": "mc-databricks-prod"})
+            projects = client.get("/api/aws-accounts").json()["projects"]
+            self.assertEqual(
+                projects,
+                [
+                    {"id": pid, "name": "Stablecoin Project", "accounts": ["mc-networking-work", "mc-databricks-prod"]},
+                    {"id": other, "name": "Payments", "accounts": ["mc-databricks-prod"]},
+                ],
+            )
+            client.delete(url, params={"profile": "mc-networking-work"})
+            self.assertEqual(client.patch(f"/api/aws-accounts/projects/{pid}", json={"name": "Payments"}).status_code, 409)
+            self.assertEqual(client.patch(f"/api/aws-accounts/projects/{pid}", json={"name": "Stablecoin"}).status_code, 200)
+            projects = client.get("/api/aws-accounts").json()["projects"]
+            self.assertEqual(projects[0], {"id": pid, "name": "Stablecoin", "accounts": ["mc-databricks-prod"]})
+            self.assertEqual(client.delete(f"/api/aws-accounts/projects/{other}").status_code, 200)
+            self.assertEqual(client.delete(f"/api/aws-accounts/projects/{other}").status_code, 404)
+            self.assertEqual(client.put(f"/api/aws-accounts/projects/{other}/accounts", json={"profile": "x"}).status_code, 404)
+            self.assertEqual([p["id"] for p in client.get("/api/aws-accounts").json()["projects"]], [pid])
+            self.assertNotIn("projects", client.get("/api/aws-accounts/export").json())

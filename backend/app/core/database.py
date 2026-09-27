@@ -126,6 +126,13 @@ def initialize(*, recover_jobs=False):
         CREATE TABLE IF NOT EXISTS aws_account_stars (
             profile TEXT PRIMARY KEY, starred_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS aws_projects (
+            id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS aws_project_accounts (
+            project_id INTEGER NOT NULL REFERENCES aws_projects(id) ON DELETE CASCADE,
+            profile TEXT NOT NULL, added_at TEXT NOT NULL, PRIMARY KEY(project_id,profile)
+        );
         CREATE TABLE IF NOT EXISTS aws_connection (
             id INTEGER PRIMARY KEY CHECK(id=1), profile TEXT NOT NULL DEFAULT 'mc-stablecoinsecurity-nonp',
             status TEXT NOT NULL DEFAULT 'unknown', identity TEXT, error TEXT NOT NULL DEFAULT '',

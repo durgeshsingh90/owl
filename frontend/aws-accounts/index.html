@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>OWL · AWS Accounts</title>
   <link rel="icon" href="../bitbucket/assets/owl.png">
-  <link rel="stylesheet" href="style.css?v=7">
+  <link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
@@ -38,10 +38,15 @@
     <small>Or drop the file anywhere on this page. Expected shape: <code>{"categories": {"Data": [{"profile": "…", "account_id": "…"}]}}</code></small>
   </section>
   <div id="content" class="layout" hidden>
-    <aside class="sidebar" aria-label="Categories">
-      <span class="eyebrow">CATEGORIES</span>
-      <nav id="category-nav" class="category-nav"></nav>
-      <p class="sidebar-foot">☆ on an account adds it to Starred accounts. ☆ on a category pins it to the top.</p>
+    <aside class="sidebar" aria-label="Projects and categories">
+      <div class="side-heading"><span class="eyebrow">PROJECTS</span><button id="new-project" class="mini" type="button" data-drop-new title="Create a project (or drop an account here)">＋ New</button></div>
+      <nav id="project-nav" class="category-nav" aria-label="Projects"></nav>
+      <p id="project-hint" class="side-hint">Create a project, then drag accounts onto it.</p>
+      <div class="side-heading"><span class="eyebrow">CATEGORIES</span>
+        <div id="sort" class="sort" role="group" aria-label="Sort categories"><button type="button" data-sort="az" title="Sort A to Z">A–Z</button><button type="button" data-sort="count" title="Most accounts first">Count</button><button type="button" data-sort="file" title="Order in the JSON file">File</button></div>
+      </div>
+      <nav id="category-nav" class="category-nav" aria-label="Categories"></nav>
+      <p class="sidebar-foot">Drag an account onto a project, or use ⊕ on its row. ☆ on an account adds it to Starred accounts. ☆ on a category pins it to the top.</p>
     </aside>
     <div class="main-column">
       <div class="heading">
@@ -53,7 +58,7 @@
         <div id="env-filter" class="env-filter" role="group" aria-label="Environment"></div>
       </div>
       <section id="frequent" class="frequent" hidden><span class="eyebrow">MOST COPIED</span><div id="frequent-list"></div></section>
-      <p class="hint">☆ stars an account · click an account name, account ID or role to copy it · <span class="copies">⧉ 3</span> = times copied</p>
+      <p class="hint">Drag accounts into projects · ☆ stars an account · click a name, ID or role to copy it · <span class="copies">⧉ 3</span> = times copied</p>
       <div id="categories" aria-live="polite"></div>
       <p id="no-results" class="no-results" hidden>No accounts match these filters.</p>
     </div>
@@ -87,7 +92,7 @@
     <p>This permanently deletes <strong>every record</strong> in AWS Accounts and cannot be undone:</p>
     <ul>
       <li><strong id="delete-count"></strong> imported accounts and all categories</li>
-      <li>All copy counts and starred accounts</li>
+      <li>All copy counts, starred accounts and projects</li>
       <li>The saved AWS connection, 12-hour session timer and profile</li>
       <li>Starred categories in this browser</li>
     </ul>
@@ -98,9 +103,20 @@
     <div class="dialog-actions"><button type="button" data-close-delete>Cancel</button><button type="submit" class="danger" id="delete-confirm" disabled>🔒 Delete all</button></div>
   </form>
 </dialog>
+<dialog id="project-dialog" class="project-dialog">
+  <form id="project-form">
+    <div class="dialog-heading"><h2 id="project-dialog-title">New project</h2><button type="button" data-close-project aria-label="Close">×</button></div>
+    <label for="project-name">Project name</label>
+    <input id="project-name" maxlength="100" autocomplete="off" required placeholder="e.g. Stablecoin Project">
+    <p id="project-dialog-note" class="project-note" hidden></p>
+    <p id="project-error" class="dialog-error" hidden></p>
+    <div class="dialog-actions"><button type="button" data-close-project>Cancel</button><button type="submit" class="primary" id="project-save">Create project</button></div>
+  </form>
+</dialog>
+<div id="project-menu" class="project-menu" role="menu" hidden></div>
 <div id="drop-overlay" class="drop-overlay" hidden><div>Drop the JSON file to import</div></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script src="connection.js?v=2"></script>
-<script src="script.js?v=8"></script>
+<script src="script.js?v=9"></script>
 </body>
 </html>
