@@ -85,15 +85,17 @@
     return esc(text.slice(0, index)) + '<mark>' + esc(text.slice(index, index + query.length)) + '</mark>' + esc(text.slice(index + query.length));
   }
 
-  // Pinned categories first, then by category name, account count or file order, in the chosen direction.
+  // Strictly by category name, account count or file order, in the chosen direction.
+  // Names compare without leading spaces, emoji or punctuation ("☁ Platform" sorts under P).
+  const sortName = name => label(name).replace(/^[^\p{L}\p{N}]+/u, '') || label(name);
   function orderedCategories() {
-    const byName = (a, b) => label(a).localeCompare(label(b), undefined, {sensitivity: 'base', numeric: true});
+    const byName = (a, b) => sortName(a).localeCompare(sortName(b), undefined, {sensitivity: 'base', numeric: true});
     const direction = sortDir === 'asc' ? 1 : -1;
     const names = Object.keys(data.categories);
     if (sortMode === 'az') names.sort((a, b) => direction * byName(a, b));
     if (sortMode === 'count') names.sort((a, b) => direction * (data.categories[a].length - data.categories[b].length) || byName(a, b));
     if (sortMode === 'file' && sortDir === 'desc') names.reverse();
-    return [...names.filter(name => pinned.has(name)), ...names.filter(name => !pinned.has(name))];
+    return names;
   }
 
   function renderHeader() {
@@ -195,7 +197,7 @@
       const compact = !selected && items.length <= COMPACT;
       sections.push({compact, html: `<section class="category${isPinned ? ' pinned' : ''}${isStarred ? ' starred' : ''}${compact ? ' compact' : ''}" data-category="${esc(name)}">
         <header><h2>${isStarred ? '★ Starred accounts' : esc(label(name))}</h2><span class="count">${items.length} account${items.length === 1 ? '' : 's'}</span>
-          ${isStarred ? '' : `<button class="pin" type="button" data-pin="${esc(name)}" aria-pressed="${isPinned}" title="${isPinned ? 'Unpin' : 'Pin'} category ${esc(label(name))} to the top">${isPinned ? '★' : '☆'}</button>`}</header>
+          ${isStarred ? '' : `<button class="pin" type="button" data-pin="${esc(name)}" aria-pressed="${isPinned}" title="${isPinned ? 'Remove highlight from' : 'Highlight'} category ${esc(label(name))}">${isPinned ? '★' : '☆'}</button>`}</header>
         <div class="rows">${items.map((item, index) => row(item, query, items[index + 1], stars)).join('')}</div>
       </section>`});
     }
