@@ -3,7 +3,14 @@
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
   const displayDate = value => value && Number.isFinite(new Date(value).getTime()) ? new Date(value).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'}) : '—';
-  const PIN_KEY = 'owl-aws-accounts-pinned', SELECTED_KEY = 'owl-aws-accounts-category', SORT_KEY = 'owl-aws-accounts-sort';
+  const PIN_KEY = 'owl-aws-accounts-pinned', SELECTED_KEY = 'owl-aws-accounts-category', SORT_KEY = 'owl-aws-accounts-sort', SORT_DIR_KEY = 'owl-aws-accounts-sort-direction';
+  // Each sort starts in its natural direction; clicking the active one again reverses it.
+  const SORT_DEFAULT = {az: 'asc', count: 'desc', file: 'asc'};
+  const SORT_LABEL = {
+    az: {asc: ['A–Z', 'Category name A to Z'], desc: ['Z–A', 'Category name Z to A']},
+    count: {desc: ['Count ↓', 'Most accounts first'], asc: ['Count ↑', 'Fewest accounts first']},
+    file: {asc: ['File ↓', 'Order in the JSON file'], desc: ['File ↑', 'Reverse of the JSON file order']},
+  };
   // Trailing environment token, optionally followed by an account-number suffix (mc-x-nonp-216989139306).
   const ENV_PATTERN = /-(prod|production|prd|nonp|nonprod|nonprd|work|mtf|dev|develop|development|test|testing|qa|uat|sit|stage|staging|stg|preprod|pre|perf|sandbox|sbx|demo|poc|lab|dr)(?:-\d+)?$/i;
   const ENV_CLASS = {prod:'prod',production:'prod',prd:'prod',nonp:'nonp',nonprod:'nonp',nonprd:'nonp',work:'work'};
@@ -11,11 +18,12 @@
   // Known environments first, then any other environment alphabetically, then accounts without one.
   const envRank = env => env === '' ? 1e6 : ENV_FIRST.includes(env) ? ENV_FIRST.indexOf(env) : 100;
   const envSort = (a, b) => envRank(a) - envRank(b) || a.localeCompare(b);
-  let data = null, envFilter = 'all', pinned = new Set(), selected = null, sortMode = 'az', toastTimer = 0;
+  let data = null, envFilter = 'all', pinned = new Set(), selected = null, sortMode = 'az', sortDir = 'asc', toastTimer = 0;
   try {
     pinned = new Set(JSON.parse(localStorage.getItem(PIN_KEY) || '[]'));
     selected = localStorage.getItem(SELECTED_KEY);
     sortMode = ['az', 'count', 'file'].includes(localStorage.getItem(SORT_KEY)) ? localStorage.getItem(SORT_KEY) : 'az';
+    sortDir = ['asc', 'desc'].includes(localStorage.getItem(SORT_DIR_KEY)) ? localStorage.getItem(SORT_DIR_KEY) : SORT_DEFAULT[sortMode];
   } catch { /* Pins and the selected category stay for this page only. */ }
   const store = (key, value) => { try { value == null ? localStorage.removeItem(key) : localStorage.setItem(key, value); } catch { /* Per-page only. */ } };
   const label = name => name.replace(/_/g, ' ');
@@ -77,11 +85,14 @@
     return esc(text.slice(0, index)) + '<mark>' + esc(text.slice(index, index + query.length)) + '</mark>' + esc(text.slice(index + query.length));
   }
 
-  // Pinned categories first, then A–Z, most accounts first, or the file's order.
+  // Pinned categories first, then by category name, account count or file order, in the chosen direction.
   function orderedCategories() {
+    const byName = (a, b) => label(a).localeCompare(label(b), undefined, {sensitivity: 'base', numeric: true});
+    const direction = sortDir === 'asc' ? 1 : -1;
     const names = Object.keys(data.categories);
-    if (sortMode === 'az') names.sort((a, b) => label(a).localeCompare(label(b), undefined, {sensitivity: 'base', numeric: true}));
-    if (sortMode === 'count') names.sort((a, b) => data.categories[b].length - data.categories[a].length || label(a).localeCompare(label(b)));
+    if (sortMode === 'az') names.sort((a, b) => direction * byName(a, b));
+    if (sortMode === 'count') names.sort((a, b) => direction * (data.categories[a].length - data.categories[b].length) || byName(a, b));
+    if (sortMode === 'file' && sortDir === 'desc') names.reverse();
     return [...names.filter(name => pinned.has(name)), ...names.filter(name => !pinned.has(name))];
   }
 
@@ -197,7 +208,13 @@
       html.push(`<div class="compact-grid">${boxes.join('')}</div>`);
     }
     $('title').firstChild.textContent = selected === STARRED ? 'Starred accounts ' : projectFor(selected) ? `${projectFor(selected).name} ` : selected ? `${label(selected)} ` : 'AWS accounts ';
-    document.querySelectorAll('[data-sort]').forEach(button => button.setAttribute('aria-pressed', button.dataset.sort === sortMode));
+    document.querySelectorAll('[data-sort]').forEach(button => {
+      const active = button.dataset.sort === sortMode;
+      const [text, title] = SORT_LABEL[button.dataset.sort][active ? sortDir : SORT_DEFAULT[button.dataset.sort]];
+      button.setAttribute('aria-pressed', active);
+      button.textContent = text;
+      button.title = active ? `${title} · click to reverse` : title;
+    });
     $('total').textContent = shown.toLocaleString();
     $('categories').innerHTML = html.join('');
     $('no-results').hidden = shown > 0;
@@ -464,8 +481,10 @@
     if (!target) return;
     if (target.id === 'new-project') return openProjectDialog();
     if (target.dataset.sort) {
+      sortDir = target.dataset.sort === sortMode ? (sortDir === 'asc' ? 'desc' : 'asc') : SORT_DEFAULT[target.dataset.sort];
       sortMode = target.dataset.sort;
       store(SORT_KEY, sortMode);
+      store(SORT_DIR_KEY, sortDir);
       return render();
     }
     if (target.dataset.addMenu !== undefined) return openMenu(target, target.dataset.addMenu);
