@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>OWL · AWS Accounts</title>
   <link rel="icon" href="../bitbucket/assets/owl.png">
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
@@ -36,20 +36,26 @@
     <button id="empty-import" class="primary" type="button">Choose JSON file</button>
     <small>Or drop the file anywhere on this page. Expected shape: <code>{"categories": {"Data": [{"profile": "…", "account_id": "…"}]}}</code></small>
   </section>
-  <div id="content" hidden>
-    <div class="heading">
-      <div><span class="eyebrow">AWS / ACCOUNT INVENTORY</span><h1>AWS accounts <span id="total" class="total"></span></h1><p id="summary"></p></div>
-      <div id="roles" class="roles" aria-label="Common roles"></div>
+  <div id="content" class="layout" hidden>
+    <aside class="sidebar" aria-label="Categories">
+      <span class="eyebrow">CATEGORIES</span>
+      <nav id="category-nav" class="category-nav"></nav>
+      <p class="sidebar-foot">Star a category to keep it first.</p>
+    </aside>
+    <div class="main-column">
+      <div class="heading">
+        <div><span class="eyebrow">AWS / ACCOUNT INVENTORY</span><h1 id="title">AWS accounts <span id="total" class="total"></span></h1><p id="summary"></p></div>
+      </div>
+      <section id="roles" class="roles" aria-label="Common roles"></section>
+      <div class="toolbar">
+        <label class="search"><span class="sr-only">Search accounts</span><input id="search" type="search" placeholder="Search account name or account ID" autocomplete="off"><kbd>/</kbd></label>
+        <div id="env-filter" class="env-filter" role="group" aria-label="Environment"></div>
+      </div>
+      <section id="frequent" class="frequent" hidden><span class="eyebrow">MOST COPIED</span><div id="frequent-list"></div></section>
+      <p class="hint">Click an account name, account ID or role to copy it · <span class="copies">⧉ 3</span> = times copied</p>
+      <div id="categories" aria-live="polite"></div>
+      <p id="no-results" class="no-results" hidden>No accounts match these filters.</p>
     </div>
-    <div class="filters">
-      <label class="search"><span class="sr-only">Search accounts</span><input id="search" type="search" placeholder="Search account name or account ID…  ( / )" autocomplete="off"></label>
-      <div id="env-filter" class="env-filter" role="group" aria-label="Environment"></div>
-    </div>
-    <section id="frequent" class="frequent" hidden><span class="eyebrow">MOST COPIED</span><div id="frequent-list"></div></section>
-    <nav id="category-nav" class="category-nav" aria-label="Categories"></nav>
-    <p class="hint">Click an account name, account ID or role to copy it. ⧉ shows how many times you have copied it. Star a category to keep it first.</p>
-    <section id="categories" class="categories" aria-live="polite"></section>
-    <p id="no-results" class="no-results" hidden>No accounts match these filters.</p>
   </div>
 </main>
 <dialog id="connection-dialog">
@@ -77,6 +83,6 @@
 <div id="drop-overlay" class="drop-overlay" hidden><div>Drop the JSON file to import</div></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script src="connection.js?v=1"></script>
-<script src="script.js?v=2"></script>
+<script src="script.js?v=3"></script>
 </body>
 </html>

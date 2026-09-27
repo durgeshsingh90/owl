@@ -3,14 +3,19 @@
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
   const displayDate = value => value && Number.isFinite(new Date(value).getTime()) ? new Date(value).toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'}) : '—';
-  const PIN_KEY = 'owl-aws-accounts-pinned';
+  const PIN_KEY = 'owl-aws-accounts-pinned', SELECTED_KEY = 'owl-aws-accounts-category';
   // Trailing environment token, optionally followed by an account-number suffix (mc-x-nonp-216989139306).
   const ENV_PATTERN = /-(prod|production|nonp|nonprod|work|mtf|dev|test|qa|uat|stage|staging|preprod|sandbox)(?:-\d+)?$/i;
   const ENV_CLASS = {prod:'prod',production:'prod',nonp:'nonp',nonprod:'nonp',work:'work'};
   const ENV_ORDER = ['prod','nonp','work','other'];
   const ENV_LABEL = {all:'All',prod:'prod',nonp:'nonp',work:'work',other:'other'};
-  let data = null, envFilter = 'all', pinned = new Set(), toastTimer = 0;
-  try { pinned = new Set(JSON.parse(localStorage.getItem(PIN_KEY) || '[]')); } catch { /* Pins stay for this page only. */ }
+  let data = null, envFilter = 'all', pinned = new Set(), selected = null, toastTimer = 0;
+  try {
+    pinned = new Set(JSON.parse(localStorage.getItem(PIN_KEY) || '[]'));
+    selected = localStorage.getItem(SELECTED_KEY);
+  } catch { /* Pins and the selected category stay for this page only. */ }
+  const store = (key, value) => { try { value == null ? localStorage.removeItem(key) : localStorage.setItem(key, value); } catch { /* Per-page only. */ } };
+  const label = name => name.replace(/_/g, ' ');
 
   function error(message) { $('error').textContent = message; $('error').hidden = !message; }
   async function api(path, options = {}) {
@@ -38,7 +43,9 @@
       if (!map.has(info.base)) map.set(info.base, []);
       map.get(info.base).push({...account, ...info});
     }
-    return [...map.values()].map(items => items.sort((a, b) => ENV_ORDER.indexOf(a.kind) - ENV_ORDER.indexOf(b.kind)));
+    return [...map.values()].flatMap(items => items
+      .sort((a, b) => ENV_ORDER.indexOf(a.kind) - ENV_ORDER.indexOf(b.kind))
+      .map((item, index) => ({...item, last: index === items.length - 1})));
   }
 
   const copyCount = (kind, value) => data?.copies?.[kind]?.[value] || 0;
@@ -54,7 +61,6 @@
     return esc(text.slice(0, index)) + '<mark>' + esc(text.slice(index, index + query.length)) + '</mark>' + esc(text.slice(index + query.length));
   }
 
-  const slug = name => 'category-' + encodeURIComponent(name).replace(/%/g, '_');
   function orderedCategories() {
     const names = Object.keys(data.categories);
     return [...names.filter(name => pinned.has(name)), ...names.filter(name => !pinned.has(name))];
@@ -69,8 +75,8 @@
     $('summary').textContent = `${categories.toLocaleString()} categories · generated ${displayDate(data.generated_at)} · imported ${displayDate(data.imported_at)}${mismatch}`;
     $('file-note').textContent = `${count.toLocaleString()} accounts · imported ${displayDate(data.imported_at)}`;
     const roles = Object.entries(data.common_roles || {});
-    $('roles').innerHTML = roles.length ? '<span class="eyebrow">COMMON ROLES · CLICK TO COPY</span><div class="role-list">' + roles.map(([name, value]) =>
-      `<button class="role" type="button" data-copy="${esc(value)}" data-kind="role" data-label="${esc(name.replace(/_/g, ' '))}" title="Copy ${esc(name.replace(/_/g, ' '))}"><span>${esc(name.replace(/_/g, ' '))} ${badge('role', value)}</span><code>${esc(value)}</code></button>`).join('') + '</div>' : '';
+    $('roles').innerHTML = roles.length ? '<span class="eyebrow">COMMON ROLES</span>' + roles.map(([name, value]) =>
+      `<button class="role" type="button" data-copy="${esc(value)}" data-kind="role" data-label="${esc(label(name))}" title="Copy ${esc(label(name))}"><span class="role-name">${esc(label(name))}</span><code>${esc(value)}</code>${badge('role', value)}<span class="copy-icon" aria-hidden="true">⧉</span></button>`).join('') : '';
     $('roles').hidden = !roles.length;
     const counts = {all: count, prod: 0, nonp: 0, work: 0, other: 0};
     for (const account of all) counts[environment(account.profile).kind] += 1;
@@ -84,36 +90,46 @@
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 10);
     $('frequent').hidden = !top.length;
     $('frequent-list').innerHTML = top.map(([profile]) =>
-      `<div class="chip"><button class="profile" type="button" data-copy="${esc(profile)}" data-kind="profile" data-label="Account name" title="Copy account name">${esc(profile)} ${badge('profile', profile)}</button>` +
-      `<button class="account-id" type="button" data-copy="${esc(ids.get(profile))}" data-kind="account_id" data-label="Account ID" title="Copy account ID">${esc(ids.get(profile))}</button></div>`).join('');
+      `<div class="chip"><button class="name" type="button" data-copy="${esc(profile)}" data-kind="profile" data-label="Account name" title="Copy account name"><span class="text">${esc(profile)}</span>${badge('profile', profile)}</button>` +
+      `<button class="id" type="button" data-copy="${esc(ids.get(profile))}" data-kind="account_id" data-label="Account ID" title="Copy account ID"><span class="text">${esc(ids.get(profile))}</span></button></div>`).join('');
   }
+
+  const row = (item, query, next) => `<div class="row${!next || next.base !== item.base ? ' group-end' : ''}">
+    <button class="name" type="button" data-copy="${esc(item.profile)}" data-kind="profile" data-label="Account name" title="Copy account name · ${esc(item.profile)}"><span class="text">${highlight(item.profile, query)}</span>${badge('profile', item.profile)}</button>
+    <span class="env ${item.kind}">${esc(item.env)}</span>
+    <button class="id" type="button" data-copy="${esc(item.account_id)}" data-kind="account_id" data-label="Account ID" title="Copy account ID"><span class="text">${highlight(String(item.account_id), query)}</span>${badge('account_id', String(item.account_id))}</button>
+  </div>`;
 
   function render() {
     const query = $('search').value.trim().toLowerCase();
-    const nav = [], cards = [];
-    let shown = 0;
+    if (selected && !(selected in data.categories)) selected = null;
+    const matches = new Map();
     for (const name of orderedCategories()) {
-      const sets = groups(data.categories[name]).map(items => items.filter(item =>
+      matches.set(name, groups(data.categories[name]).filter(item =>
         (envFilter === 'all' || item.kind === envFilter) &&
-        (!query || item.profile.toLowerCase().includes(query) || String(item.account_id).toLowerCase().includes(query))
-      )).filter(items => items.length);
-      const total = sets.reduce((sum, items) => sum + items.length, 0);
-      if (!total) continue;
-      shown += total;
-      const isPinned = pinned.has(name);
-      nav.push(`<a href="#${slug(name)}" class="${isPinned ? 'pinned' : ''}">${isPinned ? '★ ' : ''}${esc(name)}<small>${total}</small></a>`);
-      cards.push(`<article class="category${isPinned ? ' pinned' : ''}" id="${slug(name)}">
-        <header><h2>${esc(name)}</h2><span class="count">${total} account${total === 1 ? '' : 's'}</span>
-          <button class="pin" type="button" data-pin="${esc(name)}" aria-pressed="${isPinned}" title="${isPinned ? 'Unstar' : 'Star'} ${esc(name)}">${isPinned ? '★' : '☆'}</button></header>
-        ${sets.map(items => `<div class="group">${items.map(item => `<div class="account">
-          <button class="profile" type="button" data-copy="${esc(item.profile)}" data-kind="profile" data-label="Account name" title="Copy account name">${highlight(item.profile, query)} ${badge('profile', item.profile)}</button>
-          ${item.env ? `<span class="env ${item.kind}">${esc(item.env)}</span>` : ''}
-          <button class="account-id" type="button" data-copy="${esc(item.account_id)}" data-kind="account_id" data-label="Account ID" title="Copy account ID">${highlight(String(item.account_id), query)} ${badge('account_id', String(item.account_id))}</button>
-        </div>`).join('')}</div>`).join('')}
-      </article>`);
+        (!query || item.profile.toLowerCase().includes(query) || String(item.account_id).toLowerCase().includes(query))));
     }
-    $('category-nav').innerHTML = nav.join('');
-    $('categories').innerHTML = cards.join('');
+    const everything = [...matches.values()].reduce((sum, items) => sum + items.length, 0);
+    const navItem = (name, count, text, isPinned) => `<button type="button" data-select="${esc(name)}" aria-current="${(name || null) === selected}" class="${isPinned ? 'pinned' : ''}${count ? '' : ' empty'}">
+      <span class="nav-name">${isPinned ? '<span class="star">★</span>' : ''}${esc(text)}</span><span class="nav-count">${count}</span></button>`;
+    $('category-nav').innerHTML = navItem('', everything, 'All accounts', false) +
+      [...matches].map(([name, items]) => navItem(name, items.length, label(name), pinned.has(name))).join('');
+    const sections = [];
+    let shown = 0;
+    for (const [name, items] of matches) {
+      if (selected && name !== selected) continue;
+      if (!items.length) continue;
+      shown += items.length;
+      const isPinned = pinned.has(name);
+      sections.push(`<section class="category${isPinned ? ' pinned' : ''}">
+        <header><h2>${esc(label(name))}</h2><span class="count">${items.length} account${items.length === 1 ? '' : 's'}</span>
+          <button class="pin" type="button" data-pin="${esc(name)}" aria-pressed="${isPinned}" title="${isPinned ? 'Unstar' : 'Star'} ${esc(label(name))}">${isPinned ? '★' : '☆'}</button></header>
+        <div class="rows">${items.map((item, index) => row(item, query, items[index + 1])).join('')}</div>
+      </section>`);
+    }
+    $('title').firstChild.textContent = selected ? `${label(selected)} ` : 'AWS accounts ';
+    $('total').textContent = shown.toLocaleString();
+    $('categories').innerHTML = sections.join('');
     $('no-results').hidden = shown > 0;
   }
 
@@ -194,13 +210,13 @@
   }
 
   document.addEventListener('click', event => {
-    const target = event.target.closest('[data-copy],[data-pin],[data-env],.category-nav a');
+    const target = event.target.closest('[data-copy],[data-pin],[data-env],[data-select]');
     if (!target) return;
     if (target.dataset.copy !== undefined) return copy(target.dataset.copy, target.dataset.label || 'Value', target.dataset.kind);
     if (target.dataset.pin !== undefined) {
       const name = target.dataset.pin;
       pinned.has(name) ? pinned.delete(name) : pinned.add(name);
-      try { localStorage.setItem(PIN_KEY, JSON.stringify([...pinned])); } catch { /* Keep pins for this page. */ }
+      store(PIN_KEY, JSON.stringify([...pinned]));
       return render();
     }
     if (target.dataset.env) {
@@ -208,12 +224,10 @@
       document.querySelectorAll('[data-env]').forEach(button => button.setAttribute('aria-pressed', button.dataset.env === envFilter));
       return render();
     }
-    const card = document.getElementById(target.hash.slice(1));
-    if (card) {
-      event.preventDefault();
-      card.scrollIntoView({behavior:'smooth', block:'start'});
-      card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash');
-    }
+    selected = target.dataset.select || null;
+    store(SELECTED_KEY, selected);
+    render();
+    window.scrollTo({top: 0});
   });
   $('search').addEventListener('input', render);
   $('import-button').addEventListener('click', () => $('file-input').click());
