@@ -119,6 +119,16 @@ def state():
     return row
 
 
+def reset():
+    """Forget the saved session and profile; used by Delete all."""
+    with _lock:
+        if _login is not None and _login.poll() is None:
+            raise ValueError("Wait for the current AWS login to finish.")
+    with connection() as db:
+        db.execute("DELETE FROM aws_connection WHERE id=1")
+        db.execute("INSERT INTO aws_connection(id) VALUES(1)")
+
+
 def set_profile(profile):
     if not PROFILE.match(profile):
         raise ValueError("Profile names may contain letters, digits, '.', '_' and '-'.")

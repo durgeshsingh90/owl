@@ -23,6 +23,10 @@ INVENTORY = {
 }
 
 
+def delete_all(client):
+    return client.request("DELETE", "/api/aws-accounts", json={"confirmation": "delete all"})
+
+
 class AwsAccountsTests(unittest.TestCase):
     def test_import_roundtrip_replace_and_clear(self):
         with (
@@ -47,9 +51,8 @@ class AwsAccountsTests(unittest.TestCase):
                 self.assertEqual(client.put("/api/aws-accounts", json=replacement).status_code, 200)
                 saved = client.get("/api/aws-accounts").json()
                 self.assertEqual(list(saved["categories"]), ["Security"])
-                self.assertEqual(client.delete("/api/aws-accounts").status_code, 200)
+                self.assertEqual(delete_all(client).status_code, 200)
                 self.assertEqual(client.get("/api/aws-accounts").json()["imported"], False)
-                self.assertEqual(client.delete("/api/aws-accounts").status_code, 404)
 
     def test_rejects_invalid_files(self):
         with (
@@ -166,3 +169,49 @@ class AwsCopiesExportConnectionTests(unittest.TestCase):
             self.assertEqual(state["source"], "login")
             self.assertEqual(state["login_url"], "https://device.sso.example.com/?user_code=ABCD-EFGH")
             self.assertEqual(state["login_code"], "ABCD-EFGH")
+
+    def test_delete_all_is_locked_and_removes_every_record(self):
+        from app.aws import connection as aws
+
+        identity = {"Account": "1", "Arn": "arn"}
+        with TestClient(app) as client:
+            client.put("/api/aws-accounts", json=INVENTORY)
+            client.post("/api/aws-accounts/copies", json={"kind": "profile", "value": "mc-databricks-prod"})
+            with patch.object(aws, "run_sts", return_value=(identity, None)):
+                client.put("/api/aws-accounts/connection", json={"profile": "other"})
+            for body in (None, {}, {"confirmation": "DELETE ALL"}, {"confirmation": "delete"}):
+                response = client.request("DELETE", "/api/aws-accounts", json=body)
+                self.assertIn(response.status_code, (400, 422), body)
+            self.assertTrue(client.get("/api/aws-accounts").json()["imported"])
+
+            client.put("/api/aws-accounts/stars", json={"profile": "mc-databricks-prod", "starred": True})
+            response = delete_all(client)
+            self.assertEqual(response.json(), {"ok": True, "inventory": 1, "copies": 1, "stars": 1})
+            saved = client.get("/api/aws-accounts").json()
+            self.assertFalse(saved["imported"])
+            self.assertEqual(saved["copies"]["profile"], {})
+            state = client.get("/api/aws-accounts/connection").json()
+            self.assertEqual(state["profile"], "mc-stablecoinsecurity-nonp")
+            self.assertEqual((state["status"], state["approved_at"], state["identity"]), ("unknown", None, None))
+            self.assertEqual(delete_all(client).json()["inventory"], 0)
+
+    def test_account_stars(self):
+        with TestClient(app) as client:
+            client.put("/api/aws-accounts", json=INVENTORY)
+            self.assertEqual(client.get("/api/aws-accounts").json()["stars"], [])
+            for profile in ("mc-networking-work", "mc-databricks-prod", "mc-networking-work"):
+                response = client.put("/api/aws-accounts/stars", json={"profile": profile, "starred": True})
+                self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                client.get("/api/aws-accounts").json()["stars"],
+                ["mc-networking-work", "mc-databricks-prod"],
+            )
+            client.put("/api/aws-accounts/stars", json={"profile": "mc-networking-work", "starred": False})
+            self.assertEqual(client.get("/api/aws-accounts").json()["stars"], ["mc-databricks-prod"])
+            self.assertEqual(
+                client.put("/api/aws-accounts/stars", json={"profile": "", "starred": True}).status_code, 422
+            )
+            # Re-importing keeps stars; export stays in the original format.
+            client.put("/api/aws-accounts", json=INVENTORY)
+            self.assertEqual(client.get("/api/aws-accounts").json()["stars"], ["mc-databricks-prod"])
+            self.assertNotIn("stars", client.get("/api/aws-accounts/export").json())

@@ -123,6 +123,9 @@ def initialize(*, recover_jobs=False):
             kind TEXT NOT NULL, value TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0,
             last_copied TEXT NOT NULL, PRIMARY KEY(kind,value)
         );
+        CREATE TABLE IF NOT EXISTS aws_account_stars (
+            profile TEXT PRIMARY KEY, starred_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS aws_connection (
             id INTEGER PRIMARY KEY CHECK(id=1), profile TEXT NOT NULL DEFAULT 'mc-stablecoinsecurity-nonp',
             status TEXT NOT NULL DEFAULT 'unknown', identity TEXT, error TEXT NOT NULL DEFAULT '',

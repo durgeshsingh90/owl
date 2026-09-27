@@ -9,7 +9,8 @@
   const duration = seconds => {
     seconds = Math.max(0, Math.floor(seconds));
     const h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60), s = seconds % 60;
-    return h ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m ${String(s).padStart(2, '0')}s`;
+    const pad = value => String(value).padStart(2, '0');
+    return h ? `${h}h ${pad(m)}m ${pad(s)}s` : `${m}m ${pad(s)}s`;
   };
   const clock = seconds => new Date(seconds * 1000).toLocaleString(undefined, {dateStyle:'medium', timeStyle:'short'});
   const now = () => Date.now() / 1000 + offset;
@@ -130,5 +131,6 @@
   }, 1000);
   setInterval(() => { if (current?.login_status !== 'pending') load(true); }, CHECK_EVERY);
   document.addEventListener('visibilitychange', () => { if (!document.hidden && current?.login_status !== 'pending') load(true); });
+  window.owlRefreshConnection = () => load(true);
   load(true);
 })();

@@ -51,16 +51,21 @@ def inventory():
             "SELECT payload,imported_at FROM aws_accounts WHERE id=1"
         ).fetchone()
         copies = db.execute("SELECT kind,value,count FROM aws_account_copies").fetchall()
+        stars = [
+            row[0]
+            for row in db.execute("SELECT profile FROM aws_account_stars ORDER BY starred_at")
+        ]
     counts = {"profile": {}, "account_id": {}, "role": {}}
     for copy in copies:
         counts[copy["kind"]][copy["value"]] = copy["count"]
     if row is None:
-        return {"imported": False, "copies": counts}
+        return {"imported": False, "copies": counts, "stars": stars}
     return {
         "imported": True,
         "imported_at": row["imported_at"],
         **json.loads(row["payload"]),
         "copies": counts,
+        "stars": stars,
     }
 
 
@@ -96,6 +101,24 @@ def record_copy(value: Copy):
             (value.kind, value.value),
         ).fetchone()[0]
     return {"count": count}
+
+
+class Star(BaseModel):
+    profile: str = Field(min_length=1, max_length=500)
+    starred: bool
+
+
+@router.put("/aws-accounts/stars")
+def star_account(value: Star):
+    with connection() as db:
+        if value.starred:
+            db.execute(
+                "INSERT OR IGNORE INTO aws_account_stars(profile,starred_at) VALUES(?,?)",
+                (value.profile, datetime.now(timezone.utc).isoformat()),
+            )
+        else:
+            db.execute("DELETE FROM aws_account_stars WHERE profile=?", (value.profile,))
+    return {"ok": True, "starred": value.starred}
 
 
 class Profile(BaseModel):
@@ -137,9 +160,18 @@ def import_inventory(value: Inventory):
     }
 
 
+class DeleteAll(BaseModel):
+    confirmation: str = ""
+
+
 @router.delete("/aws-accounts")
-def clear_inventory():
+def delete_all(value: DeleteAll):
+    """Delete every AWS Accounts record: inventory, copy counts, stars and saved session."""
+    if value.confirmation != "delete all":
+        raise HTTPException(400, 'Type "delete all" to confirm.')
+    aws.reset()
     with connection() as db:
-        if not db.execute("DELETE FROM aws_accounts WHERE id=1").rowcount:
-            raise HTTPException(404, "No AWS accounts have been imported.")
-    return {"ok": True}
+        accounts = db.execute("DELETE FROM aws_accounts").rowcount
+        copies = db.execute("DELETE FROM aws_account_copies").rowcount
+        stars = db.execute("DELETE FROM aws_account_stars").rowcount
+    return {"ok": True, "inventory": accounts, "copies": copies, "stars": stars}
