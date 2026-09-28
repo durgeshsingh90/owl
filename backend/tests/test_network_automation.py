@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import httpx
+from app.core.config import Settings, parse_target
 from app.core.library import library, supported_file
 from fastapi.testclient import TestClient
 from main import app
@@ -23,6 +24,48 @@ class NetworkAutomationTests(unittest.TestCase):
                 self.assertTrue(supported_file(name))
             for name in ["config.yaml", "guide.pdf", "data.jsonl", "code.py"]:
                 self.assertFalse(supported_file(name))
+        finally:
+            library.reset(token)
+
+    def test_any_repository_url_scans_whole_repository(self):
+        settings = Settings(
+            base_url="https://bitbucket.example.test/stash",
+            username="test",
+            token="secret",
+        )
+        base = settings.base_url + "/projects/NET/repos/devices"
+        urls = [
+            base,
+            base + "/browse",
+            base + "/browse/sites/core",
+            base + "/browse/sites/core/devices.json",
+            base + "/browse/main.py?at=refs%2Fheads%2Fdevelop",
+            base + "/commits",
+            settings.base_url + "/scm/net/devices.git",
+        ]
+        token = library.set("network")
+        try:
+            for url in urls:
+                self.assertEqual(
+                    parse_target(url, settings),
+                    {
+                        "project": "NET",
+                        "url": settings.base_url + "/projects/NET",
+                        "repo": "devices",
+                        "path": None,
+                    },
+                    url,
+                )
+        finally:
+            library.reset(token)
+        # NAAS keeps single-file imports and URL validation.
+        token = library.set("naas")
+        try:
+            self.assertEqual(
+                parse_target(base + "/browse/app.yaml", settings)["path"], "app.yaml"
+            )
+            with self.assertRaises(ValueError):
+                parse_target(base + "/browse/sites/core", settings)
         finally:
             library.reset(token)
 
@@ -131,13 +174,8 @@ class NetworkAutomationTests(unittest.TestCase):
             self.assertIn(".json", downloaded.headers["content-disposition"])
             rejected = client.post(
                 "/network-automation/api/imports",
-                json={
-                    "urls": [
-                        settings["base_url"]
-                        + "/projects/NET/repos/devices/browse/config.yaml"
-                    ]
-                },
+                json={"urls": [settings["base_url"] + "/projects/NET"]},
             )
             self.assertEqual(rejected.status_code, 400)
-            self.assertIn("JSON", rejected.text)
+            self.assertIn("repository", rejected.text)
             self.assertIn("Network Automation", client.get("/network-automation/").text)

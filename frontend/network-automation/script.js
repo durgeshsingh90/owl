@@ -1052,7 +1052,7 @@ async function addProject(event) {
   event.preventDefault();
   clearFormError();
   const urls = elements.repositoryUrls.value.split(/\n/).map(url => url.trim()).filter(Boolean);
-  if (!urls.length) return showFormError("Enter a repository or JSON/README file URL.", ["urls"]);
+  if (!urls.length) return showFormError("Enter a Bitbucket repository URL.", ["urls"]);
   const button = elements.projectForm.querySelector('button[type="submit"]');
   button.disabled = true;
   try {

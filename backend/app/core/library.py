@@ -12,6 +12,8 @@ TEXT_LIBRARIES = {
         "prefix": "/network-automation",
         "suffixes": (".json",),
         "label": "JSON",
+        # Any URL inside a repository (folder, file, branch) scans the whole repository.
+        "whole_repository": True,
     },
 }
 README_NAMES = {
@@ -30,6 +32,10 @@ def is_text_library():
 
 def library_prefix():
     return TEXT_LIBRARIES.get(library.get(), {}).get("prefix", "")
+
+
+def scans_whole_repository():
+    return TEXT_LIBRARIES.get(library.get(), {}).get("whole_repository", False)
 
 
 def library_label():

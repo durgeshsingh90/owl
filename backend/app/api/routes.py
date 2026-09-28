@@ -17,7 +17,12 @@ from app.core.config import (
     save_settings,
 )
 from app.core.database import connection, repository_url
-from app.core.library import extract_text, is_text_library, library_label
+from app.core.library import (
+    extract_text,
+    is_text_library,
+    library_label,
+    scans_whole_repository,
+)
 from app.core.logging import error_details, event, request_id
 from app.pdfs.client import BitbucketClient, BitbucketError
 from app.pdfs.search import matching_document_ids, search_documents
@@ -731,7 +736,10 @@ async def import_urls(value: ImportRequest, request: Request):
     targets = [parse_target(url, settings) for url in value.urls]
     if is_text_library() and any(not target["repo"] for target in targets):
         raise HTTPException(
-            400, f"Enter repository or {library_label()} file URLs."
+            400,
+            "Enter Bitbucket repository URLs."
+            if scans_whole_repository()
+            else f"Enter repository or {library_label()} file URLs.",
         )
     ids = set()
     with connection() as db:

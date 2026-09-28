@@ -7,7 +7,13 @@ import tempfile
 from pathlib import Path
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-from app.core.library import is_text_library, library, library_label, supported_file
+from app.core.library import (
+    is_text_library,
+    library,
+    library_label,
+    scans_whole_repository,
+    supported_file,
+)
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
@@ -149,11 +155,20 @@ def parse_target(url, settings):
         )
     project, canonical = parse_project(url, settings)
     parsed = urlsplit(url.strip())
-    if parsed.query or parsed.fragment:
+    whole_repository = scans_whole_repository()
+    if (parsed.query or parsed.fragment) and not whole_repository:
         raise ValueError("Use a URL without query parameters or a fragment.")
     tail = parsed.path[len(urlsplit(canonical).path) :].strip("/")
     if not tail:
         return {"project": project, "url": canonical, "repo": None, "path": None}
+    if whole_repository:
+        match = re.fullmatch(r"repos/([^/]+)(?:/.*)?", tail)
+        if not match:
+            raise ValueError("Enter a Bitbucket repository URL.")
+        repo = unquote(match[1])
+        if not re.fullmatch(r"[A-Za-z0-9_.~-]+", repo):
+            raise ValueError("Invalid repository slug.")
+        return {"project": project, "url": canonical, "repo": repo, "path": None}
     match = re.fullmatch(r"repos/([^/]+)(?:/(?:browse|raw)(?:/(.+))?)?", tail)
     if not match:
         raise ValueError("Enter a Bitbucket project, repository or PDF browse URL.")
