@@ -808,3 +808,138 @@ main > .insight {
 .weekday-commits { margin: 20px 0; }
 .weekday-commits > p { font-size: 13px; color: var(--muted); line-height: 1.5; }
 #weekday-commit-bars { display: grid; gap: 12px; margin-top: 18px; }
+
+/* Sticky "Jump to" bar for app statistics. */
+.stats-nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 -8px 24px;
+  padding: 10px 8px;
+  background: var(--bg);
+  border-bottom: 1px solid transparent;
+}
+.stats-nav.stuck {
+  border-bottom-color: var(--line);
+  box-shadow: 0 6px 16px -12px rgba(16, 31, 49, 0.35);
+}
+.stats-nav-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-right: 4px;
+}
+.stats-nav a {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.stats-nav a:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.stats-nav a[aria-current] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.stats-nav small {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.stats-nav small:empty {
+  display: none;
+}
+.stats-nav a[aria-current] small {
+  color: rgba(255, 255, 255, 0.8);
+}
+.stats-section {
+  scroll-margin-top: 80px;
+}
+.app-stats {
+  margin: 8px 0 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+.app-stats-loading,
+.app-stats-empty {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+.app-stats-blank {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 22px 24px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.app-stats-blank p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.app-stats-blank a {
+  color: var(--accent);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.app-stats .bar-title span:last-child {
+  color: var(--muted);
+}
+@media (max-width: 700px) {
+  .stats-nav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+  .app-stats-blank {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+.app-stats .metrics {
+  grid-template-columns: repeat(3, 1fr);
+}
+.app-stats .metric {
+  border-right: 1px solid var(--line);
+  border-bottom: 0;
+}
+.app-stats .metric:nth-child(3n) {
+  border-right: 0;
+}
+.app-stats .metric:nth-child(-n + 3) {
+  border-bottom: 1px solid var(--line);
+}
+@media (max-width: 700px) {
+  .app-stats .metrics {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .app-stats .metric:nth-child(3n) {
+    border-right: 1px solid var(--line);
+  }
+  .app-stats .metric:nth-child(2n) {
+    border-right: 0;
+  }
+  .app-stats .metric:nth-child(-n + 4) {
+    border-bottom: 1px solid var(--line);
+  }
+}

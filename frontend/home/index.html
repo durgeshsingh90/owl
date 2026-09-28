@@ -10,7 +10,7 @@
       content="Your OWL apps, repository insights and document activity in one place."
     />
     <script src="../bitbucket/theme.js?v=20260914-current-mode"></script>
-    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="style.css?v=app-stats-2" />
   </head>
   <body>
     <aside class="rail">
@@ -118,8 +118,18 @@
           <h2>Workspace statistics</h2>
           <span>Grouped by app</span>
         </div>
+        <nav id="stats-nav" class="stats-nav" aria-label="Jump to app statistics">
+          <span class="stats-nav-label">Jump to</span>
+          <a href="#stats-bitbucket" data-stats-link="bitbucket">Bitbucket<small data-stats-figure="bitbucket"></small></a>
+          <a href="#stats-bookmarks" data-stats-link="bookmarks">Bookmarks<small data-stats-figure="bookmarks"></small></a>
+          <a href="#stats-naas" data-stats-link="naas">NAAS Update<small data-stats-figure="naas"></small></a>
+          <a href="#stats-network" data-stats-link="network">Network Automation<small data-stats-figure="network"></small></a>
+          <a href="#stats-aws" data-stats-link="aws">AWS Accounts<small data-stats-figure="aws"></small></a>
+          <a href="#stats-tracker" data-stats-link="tracker">Confluence Tracker<small data-stats-figure="tracker"></small></a>
+        </nav>
         <section
-          class="app-statistics"
+          class="app-statistics stats-section"
+          id="stats-bitbucket"
           aria-labelledby="bitbucket-statistics-title"
         >
           <div class="statistics-app-heading">
@@ -226,7 +236,8 @@
           </section>
         </section>
         <section
-          class="bookmarks-statistics"
+          class="bookmarks-statistics stats-section"
+          id="stats-bookmarks"
           aria-labelledby="bookmarks-statistics-title"
         >
           <div class="statistics-app-heading">
@@ -273,6 +284,34 @@
             </article>
           </section>
         </section>
+        <section class="app-stats stats-section" id="stats-naas" aria-labelledby="stats-naas-title">
+          <div class="statistics-app-heading">
+            <h2 id="stats-naas-title">NAAS Update statistics</h2>
+            <span class="sample-badge">YAML &amp; README files</span><a class="bookmark-app-link" href="../naas/">Open app ↗</a>
+          </div>
+          <div id="stats-naas-body" class="app-stats-body"><p class="app-stats-loading">Loading statistics…</p></div>
+        </section>
+        <section class="app-stats stats-section" id="stats-network" aria-labelledby="stats-network-title">
+          <div class="statistics-app-heading">
+            <h2 id="stats-network-title">Network Automation statistics</h2>
+            <span class="sample-badge">JSON &amp; README files</span><a class="bookmark-app-link" href="../network-automation/">Open app ↗</a>
+          </div>
+          <div id="stats-network-body" class="app-stats-body"><p class="app-stats-loading">Loading statistics…</p></div>
+        </section>
+        <section class="app-stats stats-section" id="stats-aws" aria-labelledby="stats-aws-title">
+          <div class="statistics-app-heading">
+            <h2 id="stats-aws-title">AWS Accounts statistics</h2>
+            <span class="sample-badge">Imported inventory</span><a class="bookmark-app-link" href="../aws-accounts/">Open app ↗</a>
+          </div>
+          <div id="stats-aws-body" class="app-stats-body"><p class="app-stats-loading">Loading statistics…</p></div>
+        </section>
+        <section class="app-stats stats-section" id="stats-tracker" aria-labelledby="stats-tracker-title">
+          <div class="statistics-app-heading">
+            <h2 id="stats-tracker-title">Confluence Tracker statistics</h2>
+            <span class="sample-badge">Daily page sync</span><a class="bookmark-app-link" href="../confluence-tracker/">Open app ↗</a>
+          </div>
+          <div id="stats-tracker-body" class="app-stats-body"><p class="app-stats-loading">Loading statistics…</p></div>
+        </section>
         <footer>
           OWL <span>Designed for a clearer view of your work.</span
           ><span>OWL workspace</span>
@@ -283,5 +322,6 @@
     <script src="commit-stats.js?v=1"></script>
     <script src="script.js?v=weekday-commits-1"></script>
     <script src="bookmark-stats.js"></script>
+    <script src="app-stats.js?v=3"></script>
   </body>
 </html>
