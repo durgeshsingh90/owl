@@ -228,13 +228,13 @@ confirmation dialog. The separate retry-failed toolbar shortcut is removed.
 
 ### NAAS Update
 
-Open `/naas/` from OWL Home to track `.yaml`, `.yml`, and README files (`README`, `.md`, `.markdown`, `.rst`, `.txt`, `.adoc`, case insensitive). Add Bitbucket repository or individual file URLs. NAAS copies the PDF explorer interface and uses the same incremental sync, search, notes, metadata, commit/version downloads, filters, pause/resume, ETA and retry controls. YAML is indexed as text, never executed. UTF-8 and UTF-16 text are supported.
+Open `/naas/` from OWL Home to track `.yaml`, `.yml`, and README files (`README`, `.md`, `.markdown`, `.rst`, `.txt`, `.adoc`, case insensitive). Any URL inside a repository (clone, browse, folder, file, branch or commits link) scans the entire repository for these files; project URLs are rejected, so add each repository. NAAS copies the PDF explorer interface and uses the same incremental sync, search, notes, metadata, commit/version downloads, filters, pause/resume, ETA and retry controls. YAML is indexed as text, never executed. UTF-8 and UTF-16 text are supported.
 
 NAAS has its own database (`owl-naas.db` beside `owl.db`, overridable with `OWL_NAAS_DB_PATH`), jobs and browser preferences. It initially uses the saved Bitbucket connection; saving NAAS settings creates an independent encrypted connection under the config directory's `naas/` folder. All-repository sync and hard retry stay within the repositories added to NAAS. Empty repositories remain tracked for future additions. No local Git checkout is created.
 
 ### Network Automation
 
-Open `/network-automation/` from OWL Home to track `.json` and README files. It is a copy of NAAS Update with JSON in place of YAML: the same explorer, sync, search, notes, history and retry controls. JSON is indexed as text, so files that fail to parse are still searchable. Any URL inside a repository (clone, browse, folder, file, branch or commits link) scans the entire repository for JSON files; project URLs are rejected, so add each repository. It has its own database (`owl-network.db`, overridable with `OWL_NETWORK_DB_PATH`), jobs and browser preferences, and saved settings go under the config directory's `network/` folder, falling back to the main Bitbucket connection until then.
+Open `/network-automation/` from OWL Home to track `.json` and README files. It is a copy of NAAS Update with JSON in place of YAML: the same URL handling, explorer, sync, search, notes, history and retry controls. JSON is indexed as text, so files that fail to parse are still searchable. Any URL inside a repository (clone, browse, folder, file, branch or commits link) scans the entire repository for JSON files; project URLs are rejected, so add each repository. It has its own database (`owl-network.db`, overridable with `OWL_NETWORK_DB_PATH`), jobs and browser preferences, and saved settings go under the config directory's `network/` folder, falling back to the main Bitbucket connection until then.
 
 ### Automatic Bitbucket pulls
 

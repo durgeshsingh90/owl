@@ -58,14 +58,19 @@ class NetworkAutomationTests(unittest.TestCase):
                 )
         finally:
             library.reset(token)
-        # NAAS keeps single-file imports and URL validation.
+        # NAAS works the same way for YAML/YML repositories.
         token = library.set("naas")
         try:
-            self.assertEqual(
-                parse_target(base + "/browse/app.yaml", settings)["path"], "app.yaml"
-            )
-            with self.assertRaises(ValueError):
-                parse_target(base + "/browse/sites/core", settings)
+            for url in [
+                base + "/browse/app.yaml",
+                base + "/browse/app.yml",
+                base + "/browse/sites/core",
+                base + "/browse/README.md?at=refs%2Fheads%2Fmain",
+            ]:
+                self.assertEqual(parse_target(url, settings)["repo"], "devices", url)
+                self.assertIsNone(parse_target(url, settings)["path"], url)
+            self.assertTrue(supported_file("sites/core/router.yml"))
+            self.assertTrue(supported_file("sites/core/router.YAML"))
         finally:
             library.reset(token)
 

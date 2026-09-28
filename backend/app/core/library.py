@@ -7,7 +7,13 @@ library = ContextVar("owl_library", default="pdf")
 
 # Text libraries reuse the Bitbucket explorer with their own data, URL prefix and files.
 TEXT_LIBRARIES = {
-    "naas": {"prefix": "/naas", "suffixes": (".yaml", ".yml"), "label": "YAML"},
+    "naas": {
+        "prefix": "/naas",
+        "suffixes": (".yaml", ".yml"),
+        "label": "YAML/YML",
+        # Any URL inside a repository (folder, file, branch) scans the whole repository.
+        "whole_repository": True,
+    },
     "network": {
         "prefix": "/network-automation",
         "suffixes": (".json",),

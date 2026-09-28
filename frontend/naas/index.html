@@ -669,7 +669,7 @@
         <form id="project-form" novalidate>
           <div class="form-field">
             <div class="field-label-row">
-              <label for="repository-urls">Bitbucket repository or YAML/README file URLs</label>
+              <label for="repository-urls">Bitbucket repository URLs</label>
               <span>HTTPS</span>
             </div>
             <textarea
@@ -679,7 +679,7 @@
               placeholder="https://bitbucket.org/company/payment-services&#10;https://bitbucket.org/company/payment-api&#10;https://bitbucket.org/company/payment-documents"
             ></textarea>
             <p class="helper-text">
-              Enter one URL per line. Repository URLs scan YAML and README files; file URLs import one file.
+              Enter one URL per line. Any link inside a repository (clone, browse, folder, file or branch URL) scans the entire repository for .yaml, .yml and README files.
             </p>
           </div>
 
