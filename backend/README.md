@@ -232,6 +232,10 @@ Open `/naas/` from OWL Home to track `.yaml`, `.yml`, and README files (`README`
 
 NAAS has its own database (`owl-naas.db` beside `owl.db`, overridable with `OWL_NAAS_DB_PATH`), jobs and browser preferences. It initially uses the saved Bitbucket connection; saving NAAS settings creates an independent encrypted connection under the config directory's `naas/` folder. All-repository sync and hard retry stay within the repositories added to NAAS. Empty repositories remain tracked for future additions. No local Git checkout is created.
 
+### Network Automation
+
+Open `/network-automation/` from OWL Home to track `.json` and README files. It is a copy of NAAS Update with JSON in place of YAML: the same explorer, sync, search, notes, history and retry controls. JSON is indexed as text, so files that fail to parse are still searchable. It has its own database (`owl-network.db`, overridable with `OWL_NETWORK_DB_PATH`), jobs and browser preferences, and saved settings go under the config directory's `network/` folder, falling back to the main Bitbucket connection until then.
+
 ### Automatic Bitbucket pulls
 
 The PDF explorer checks for a scheduled pull every minute while OWL is running. The next regular run is three Monday–Friday days after a completed scheduled pull (weekdays counted in UTC). On first setup it uses the last completed pull date, or waits three weekdays if no pull exists. Each automatic attempt tests the configured connection before starting. Failed connection checks, partial failures, interrupted jobs and cancellations retry after two hours until a complete success. The schedule and current job are stored in SQLite, survive restart, and never overlap an active manual pull. There is no scheduler for NAAS in this change.

@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-from app.core.library import is_naas, supported_file
+from app.core.library import is_text_library, library, library_label, supported_file
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
@@ -60,7 +60,7 @@ def config_dir():
         os.environ.get("OWL_CONFIG_DIR", Path(__file__).resolve().parents[2] / "data")
     )
 
-    return directory / "naas" if is_naas() else directory
+    return directory / library.get() if is_text_library() else directory
 
 
 def atomic_private(path, data):
@@ -91,7 +91,7 @@ def save_settings(settings):
 def load_settings():
     directory = config_dir()
     path = directory / "settings.enc"
-    if not path.exists() and is_naas():
+    if not path.exists() and is_text_library():
         directory = directory.parent
         path = directory / "settings.enc"
     if not path.exists():
@@ -166,8 +166,8 @@ def parse_target(url, settings):
         or any(part in ("", ".", "..") for part in path.split("/"))
     ):
         raise ValueError(
-            "The file URL must point to YAML or README."
-            if is_naas()
+            f"The file URL must point to {library_label().replace('/', ' or ')}."
+            if is_text_library()
             else "The file URL must point to a PDF."
         )
     return {"project": project, "url": canonical, "repo": repo, "path": path}

@@ -17,7 +17,7 @@ from app.core.config import (
     save_settings,
 )
 from app.core.database import connection, repository_url
-from app.core.library import extract_text, is_naas
+from app.core.library import extract_text, is_text_library, library_label
 from app.core.logging import error_details, event, request_id
 from app.pdfs.client import BitbucketClient, BitbucketError
 from app.pdfs.search import matching_document_ids, search_documents
@@ -127,7 +127,7 @@ def projects():
 async def crawl(value: CrawlRequest, request: Request):
     if request.app.state.jobs.active():
         raise HTTPException(409, "A crawl is already running.")
-    if not is_naas():
+    if not is_text_library():
         await test_value(load_settings())
         if request.app.state.jobs.active():
             raise HTTPException(409, "A crawl is already running.")
@@ -437,13 +437,13 @@ async def download_commit_versions(doc_id: int, commit_id: str | None = None):
                     {"at": revision},
                     raw=True,
                 )
-                if is_naas():
+                if is_text_library():
                     extract_text(content)
                 elif b"%PDF-" not in content[:1024]:
                     raise BitbucketError("This revision did not return a PDF.")
                 suffix = re.sub(r"[^a-zA-Z0-9_-]", "_", revision)[:80]
                 extension = (
-                    PurePosixPath(row["pdf_name"]).suffix if is_naas() else ".pdf"
+                    PurePosixPath(row["pdf_name"]).suffix if is_text_library() else ".pdf"
                 )
                 filename = f"{stem}-{index}-{suffix}{extension}"
                 if archive:
@@ -476,7 +476,7 @@ async def download_commit_versions(doc_id: int, commit_id: str | None = None):
         chunks(),
         media_type="application/zip"
         if commit_id is None
-        else ("text/plain" if is_naas() else "application/pdf"),
+        else ("text/plain" if is_text_library() else "application/pdf"),
         headers={
             "Content-Disposition": "attachment; filename*=UTF-8''"
             + quote(download_name)
@@ -729,8 +729,10 @@ async def import_urls(value: ImportRequest, request: Request):
     jobs = request.app.state.jobs
     settings = load_settings()
     targets = [parse_target(url, settings) for url in value.urls]
-    if is_naas() and any(not target["repo"] for target in targets):
-        raise HTTPException(400, "Enter repository or YAML/README file URLs for NAAS.")
+    if is_text_library() and any(not target["repo"] for target in targets):
+        raise HTTPException(
+            400, f"Enter repository or {library_label()} file URLs."
+        )
     ids = set()
     with connection() as db:
         for target in targets:

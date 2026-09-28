@@ -5,23 +5,42 @@ from pathlib import PurePosixPath
 
 library = ContextVar("owl_library", default="pdf")
 
+# Text libraries reuse the Bitbucket explorer with their own data, URL prefix and files.
+TEXT_LIBRARIES = {
+    "naas": {"prefix": "/naas", "suffixes": (".yaml", ".yml"), "label": "YAML"},
+    "network": {
+        "prefix": "/network-automation",
+        "suffixes": (".json",),
+        "label": "JSON",
+    },
+}
+README_NAMES = {
+    "readme",
+    "readme.md",
+    "readme.markdown",
+    "readme.rst",
+    "readme.txt",
+    "readme.adoc",
+}
 
-def is_naas():
-    return library.get() == "naas"
+
+def is_text_library():
+    return library.get() in TEXT_LIBRARIES
+
+
+def library_prefix():
+    return TEXT_LIBRARIES.get(library.get(), {}).get("prefix", "")
+
+
+def library_label():
+    return TEXT_LIBRARIES[library.get()]["label"] + "/README"
 
 
 def supported_file(path):
     name = PurePosixPath(path).name.lower()
-    if not is_naas():
+    if not is_text_library():
         return name.endswith(".pdf")
-    return name.endswith((".yaml", ".yml")) or name in {
-        "readme",
-        "readme.md",
-        "readme.markdown",
-        "readme.rst",
-        "readme.txt",
-        "readme.adoc",
-    }
+    return name.endswith(TEXT_LIBRARIES[library.get()]["suffixes"]) or name in README_NAMES
 
 
 def extract_text(content):
@@ -40,11 +59,12 @@ def extract_text(content):
 
 
 class LibraryMiddleware:
-    def __init__(self, app):
+    def __init__(self, app, name="naas"):
         self.app = app
+        self.name = name
 
     async def __call__(self, scope, receive, send):
-        token = library.set("naas")
+        token = library.set(self.name)
         try:
             await self.app(scope, receive, send)
         finally:

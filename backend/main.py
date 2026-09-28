@@ -9,7 +9,7 @@ from pathlib import Path
 from app.api.routes import router
 from app.bookmarks.refresh import run_scheduler
 from app.core.database import initialize
-from app.core.library import LibraryMiddleware, library
+from app.core.library import TEXT_LIBRARIES, LibraryMiddleware, library
 from app.core.logging import configure_logging, error_details, event, request_id
 from app.pdfs.jobs import Jobs
 from app.pdfs.schedule import run_scheduler as run_bitbucket_scheduler
@@ -27,12 +27,13 @@ async def lifespan(app):
     event("backend.starting", verify_ssl=False)
     initialize(recover_jobs=True)
     app.state.jobs = Jobs()
-    token = library.set("naas")
-    try:
-        initialize(recover_jobs=True)
-        naas.state.jobs = Jobs()
-    finally:
-        library.reset(token)
+    for name, sub_app in text_apps.items():
+        token = library.set(name)
+        try:
+            initialize(recover_jobs=True)
+            sub_app.state.jobs = Jobs()
+        finally:
+            library.reset(token)
     refresh_task = asyncio.create_task(run_scheduler())
     tracker_task = asyncio.create_task(run_tracker_scheduler())
     bitbucket_task = asyncio.create_task(run_bitbucket_scheduler(app.state.jobs))
@@ -54,12 +55,13 @@ async def lifespan(app):
         pass
     await app.state.jobs.shutdown()
     app.state.jobs.extractor.shutdown(wait=False, cancel_futures=True)
-    token = library.set("naas")
-    try:
-        await naas.state.jobs.shutdown()
-        naas.state.jobs.extractor.shutdown(wait=False, cancel_futures=True)
-    finally:
-        library.reset(token)
+    for name, sub_app in text_apps.items():
+        token = library.set(name)
+        try:
+            await sub_app.state.jobs.shutdown()
+            sub_app.state.jobs.extractor.shutdown(wait=False, cancel_futures=True)
+        finally:
+            library.reset(token)
     event("backend.stopped")
 
 
@@ -152,15 +154,23 @@ for name in ("home", "bitbucket", "bookmarks", "confluence-tracker", "aws-accoun
     app.mount("/" + name, StaticFiles(directory=frontend / name, html=True), name=name)
 
 
-naas = FastAPI(title="NAAS Update")
-naas.add_middleware(LibraryMiddleware)
-naas.add_exception_handler(ValueError, invalid_value)
-naas.add_exception_handler(ValidationError, validation_error)
-naas.add_exception_handler(RequestValidationError, validation_error)
-naas.include_router(router, prefix="/api")
-naas.include_router(compat_router)
 from app.api.workspace import workspace as library_workspace
 
-naas.add_api_route("/api/workspace", library_workspace, methods=["GET"])
-naas.mount("/", StaticFiles(directory=frontend / "naas", html=True), name="naas-ui")
-app.mount("/naas", naas)
+text_apps = {}
+for name, title in (("naas", "NAAS Update"), ("network", "Network Automation")):
+    sub_app = FastAPI(title=title)
+    sub_app.add_middleware(LibraryMiddleware, name=name)
+    sub_app.add_exception_handler(ValueError, invalid_value)
+    sub_app.add_exception_handler(ValidationError, validation_error)
+    sub_app.add_exception_handler(RequestValidationError, validation_error)
+    sub_app.include_router(router, prefix="/api")
+    sub_app.include_router(compat_router)
+    sub_app.add_api_route("/api/workspace", library_workspace, methods=["GET"])
+    prefix = TEXT_LIBRARIES[name]["prefix"]
+    sub_app.mount(
+        "/",
+        StaticFiles(directory=frontend / prefix.strip("/"), html=True),
+        name=name + "-ui",
+    )
+    app.mount(prefix, sub_app)
+    text_apps[name] = sub_app

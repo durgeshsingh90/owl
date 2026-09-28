@@ -15,7 +15,7 @@ from app.core.database import (
     exclude_repositories,
     repository_url,
 )
-from app.core.library import is_naas
+from app.core.library import is_text_library
 from app.core.logging import error_details, event
 from app.pdfs.client import BitbucketClient, BitbucketError
 from app.pdfs.crawler import crawl_repository, discover_pdfs, now
@@ -150,7 +150,7 @@ class Jobs:
                     ids,
                 )
             event("crawl.hard_retry_reset", project_ids=ids, backup=str(backup_path))
-        if is_naas() and not targets:
+        if is_text_library() and not targets:
             with connection() as db:
                 targets = [
                     {"project": row["project"], "repo": row["repo"], "path": None}
@@ -160,7 +160,7 @@ class Jobs:
                     if row["id"] in {p["id"] for p in projects}
                 ]
             if not targets:
-                raise ValueError("Add a repository URL before syncing NAAS.")
+                raise ValueError("Add a repository URL before syncing.")
         self.repos = []
         self.targets = list(targets or [])
         self.current = {
@@ -437,7 +437,7 @@ class Jobs:
             self.save()
 
     def save(self):
-        if is_naas() and self.current.get("detail"):
+        if is_text_library() and self.current.get("detail"):
             self.current["detail"] = (
                 self.current["detail"].replace("PDFs", "files").replace("PDF", "file")
             )
@@ -534,7 +534,7 @@ class Jobs:
                 ]
 
                 async def repositories(selected=selected, project=project):
-                    if is_naas() or (selected and all(t["repo"] for t in selected)):
+                    if is_text_library() or (selected and all(t["repo"] for t in selected)):
                         for slug in dict.fromkeys(t["repo"] for t in selected):
                             yield {"slug": slug}
                     else:
@@ -911,7 +911,7 @@ class Jobs:
                 self.repo_clocks[str(repo[2])] = self.clock()
                 paths = await discover(*repo)
                 if (
-                    not is_naas()
+                    not is_text_library()
                     and paths == []
                     and repo[2] not in partial_repositories
                     and repo[2] not in incremental_repositories

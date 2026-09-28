@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
-from app.core.library import is_naas
+from app.core.library import library
 
 
 def database_path():
@@ -16,9 +16,12 @@ def database_path():
         )
     )
 
-    if is_naas():
+    name = library.get()
+    if name != "pdf":
         return Path(
-            os.environ.get("OWL_NAAS_DB_PATH", path.with_name(path.stem + "-naas.db"))
+            os.environ.get(
+                f"OWL_{name.upper()}_DB_PATH", path.with_name(f"{path.stem}-{name}.db")
+            )
         )
     return path
 

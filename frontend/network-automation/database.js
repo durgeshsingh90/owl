@@ -1,0 +1,184 @@
+"use strict";
+let workspaceLoadVersion = 0;
+let workspaceReady = false;
+let workspaceFetching = false;
+const backgroundStatus = document.getElementById("workspace-background-status");
+const workspaceLoading = document.getElementById("workspace-loading");
+const workspaceShell = document.querySelector(".app-shell");
+function finishWorkspaceLoading() {
+  workspaceReady = true;
+  workspaceLoading.hidden = true;
+  workspaceShell.inert = false;
+  workspaceShell.setAttribute("aria-busy", "false");
+}
+document.getElementById("workspace-loading-retry").onclick = () => loadDatabaseWorkspace();
+document.getElementById("workspace-loading-dismiss").onclick = finishWorkspaceLoading;
+async function loadDatabaseWorkspace() {
+  const version = ++workspaceLoadVersion;
+  workspaceFetching = true;
+  const initialLoad = !workspaceReady;
+  if (!workspaceReady) {
+    delete workspaceLoading.dataset.error;
+    document.getElementById("workspace-loading-title").textContent = "Loading your library";
+    document.getElementById("workspace-loading-message").textContent = "Getting your repositories and files ready…";
+    document.getElementById("workspace-loading-retry").hidden = true;
+    document.getElementById("workspace-loading-dismiss").hidden = true;
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(initialLoad ? "/network-automation/api/workspace?limit=200&current_month=true" : "/network-automation/api/workspace?limit=1000", { cache: "no-store", signal: controller.signal });
+    if (!response.ok) throw new Error("Unable to load saved repository data.");
+    const data = await response.json();
+    if (version !== workspaceLoadVersion) return;
+    if (!Array.isArray(data.projects) || !Array.isArray(data.documents) || !Array.isArray(data.people)) {
+      throw new Error("Invalid workspace response; keeping the last loaded data.");
+    }
+    // Avoid spreading large File libraries into function arguments (browser limit).
+    for (const [target, source] of [[projects, data.projects], [pdfs, data.documents], [people, data.people]]) {
+      target.length = 0;
+      for (const item of source) target.push(item);
+    }
+    window.workspaceLastPull = data.lastCompletedPull;
+    window.workspacePartial = Boolean(data.backgroundAll || data.nextBefore);
+    backgroundStatus.hidden = !window.workspacePartial;
+    backgroundStatus.textContent = "Loading the rest of your files… Search and filters currently show loaded records only.";
+    authorLookup = null;
+    renderApp();
+    if (state.searchQuery.trim()) scheduleAdvancedSearch();
+    finishWorkspaceLoading();
+    clearTimeout(timeout);
+    // Let the first page paint before starting the remaining metadata requests.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    let cursor = data.backgroundAll ? null : data.nextBefore;
+    let loadAll = Boolean(data.backgroundAll);
+    const remaining = [];
+    while (loadAll || cursor) {
+      if (version !== workspaceLoadVersion) return;
+      const batchController = new AbortController();
+      const batchTimeout = setTimeout(() => batchController.abort(), 30000);
+      let batch;
+      try {
+        const response = await fetch(`/network-automation/api/workspace?limit=1000${cursor ? "&before="+cursor : ""}&summaries=false`, { cache: "no-store", signal: batchController.signal });
+        if (!response.ok) throw new Error("Unable to load the remaining files. Reload to retry.");
+        batch = await response.json();
+      } finally { clearTimeout(batchTimeout); }
+      if (version !== workspaceLoadVersion) return;
+      if (!Array.isArray(batch.documents) || (cursor && batch.nextBefore && batch.nextBefore >= cursor)) throw new Error("Invalid File batch. Reload to retry.");
+      for (const pdf of batch.documents) remaining.push(pdf);
+      cursor = batch.nextBefore;
+      loadAll = false;
+      backgroundStatus.textContent = `Loading files: ${pdfs.length + remaining.length} received. Search and filters currently show the first ${pdfs.length} records only.`;
+    }
+    if (version !== workspaceLoadVersion) return;
+    if (remaining.length) {
+      const knownIds = new Set(pdfs.map(pdf => pdf.id));
+      for (const pdf of remaining) if (!knownIds.has(pdf.id)) pdfs.push(pdf);
+      window.workspacePartial = false;
+      authorLookup = null;
+      renderApp();
+      if (state.searchQuery.trim()) scheduleAdvancedSearch();
+    }
+    window.workspacePartial = false;
+    backgroundStatus.hidden = true;
+  } catch (error) {
+    if (version === workspaceLoadVersion) {
+      const message = error.name === "AbortError" ? "Loading took too long. Please try again." : error.message;
+      if (!workspaceReady) {
+        workspaceLoading.dataset.error = "true";
+        document.getElementById("workspace-loading-title").textContent = "Couldn’t load your library";
+        document.getElementById("workspace-loading-message").textContent = message;
+        document.getElementById("workspace-loading-retry").hidden = false;
+        document.getElementById("workspace-loading-dismiss").hidden = false;
+      } else {
+        showToast(message);
+        if (window.workspacePartial) {
+          backgroundStatus.hidden = false;
+          backgroundStatus.textContent = "Only part of your library is loaded. Reload to retry loading the remaining files.";
+        }
+      }
+    }
+  } finally {
+    clearTimeout(timeout);
+    if (version === workspaceLoadVersion) workspaceFetching = false;
+  }
+}
+void loadDatabaseWorkspace();
+window.addEventListener("focus", () => { if (!workspaceFetching) void loadDatabaseWorkspace(); });
+document
+  .querySelector("#pdf-table-body")
+  .addEventListener("click", async (event) => {
+    const link = event.target.closest("a");
+    if (!link) return;
+    const pdf = pdfs.find((item) => item.pdfUrl === link.href);
+    if (!pdf) return;
+    const response = await fetch(`/network-automation/api/document/${pdf.id}/open`, {
+      method: "POST",
+    });
+    if (response.ok) {
+      pdf.openCount = (await response.json()).open_count;
+      renderPdfTable();
+    }
+  });
+
+(() => {
+  const dialog = document.querySelector("#pdf-details-dialog");
+  const status = document.querySelector("#pdf-details-status");
+  const fields = document.querySelector("#pdf-details-fields");
+  const text = document.querySelector("#pdf-details-text");
+  let sequence = 0;
+  let savedDetails = "", extractedText = "";
+  const copyDetails = document.querySelector("#pdf-details-copy");
+  const copyExtracted = document.querySelector("#pdf-text-copy");
+  async function copySaved(value, label) {
+    const current = sequence;
+    try {
+      await copyText(value);
+      if (sequence === current) status.textContent = `${label} copied.`;
+    } catch {
+      if (sequence === current) status.textContent = "Could not copy. Please select and copy the text manually.";
+    }
+  }
+  copyDetails.onclick = () => copySaved(savedDetails, "Saved File details");
+  copyExtracted.onclick = () => copySaved(extractedText, "Extracted text");
+  document.querySelector("#pdf-details-close").onclick = () => dialog.close();
+  dialog.addEventListener("close", () => { sequence++; });
+  document.querySelector("#pdf-table-body").addEventListener("click", async event => {
+    const button = event.target.closest("[data-pdf-details]");
+    if (!button) return;
+    const current = ++sequence;
+    copyDetails.disabled = copyExtracted.disabled = true;
+    savedDetails = extractedText = "";
+    fields.replaceChildren();
+    text.textContent = "";
+    status.textContent = "Loading saved record…";
+    dialog.showModal();
+    try {
+      const response = await fetch(`/network-automation/api/document/${button.dataset.pdfDetails}`, {cache: "no-store"});
+      if (!response.ok) throw new Error("Could not load the saved File record.");
+      const record = await response.json();
+      if (current !== sequence) return;
+      const labels = {
+        pdf_name: "File name", project: "Project", repo: "Repository", path: "Path",
+        url: "Bitbucket URL", file_size: "File size (bytes)", page_count: "Lines",
+        author: "Commit author", commit_id: "Commit ID", commit_message: "Commit message",
+        commit_date: "Commit date", added_at: "Saved at", updated_at: "Updated at",
+        last_scanned: "Last scanned", pdf_hash: "SHA-256", open_count: "Open count", notes: "Notes",
+      };
+      savedDetails = Object.entries(labels).map(([key, label]) => `${label}: ${record[key] ?? "Not available"}`).join("\n");
+      extractedText = record.pdf_text || "";
+      copyDetails.disabled = false;
+      copyExtracted.disabled = !extractedText;
+      for (const [key, label] of Object.entries(labels)) {
+        const title = document.createElement("dt");
+        const value = document.createElement("dd");
+        title.textContent = label;
+        value.textContent = record[key] ?? "Not available";
+        value.style.margin = "0";
+        fields.append(title, value);
+      }
+      text.textContent = record.pdf_text || "No text was extracted from this File.";
+      status.textContent = "Loaded from the database.";
+    } catch (error) { if (current === sequence) status.textContent = error.message; }
+  });
+})();

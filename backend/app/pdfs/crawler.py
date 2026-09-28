@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 import pymupdf
 from app.core.database import connection
-from app.core.library import extract_text, is_naas, supported_file
+from app.core.library import extract_text, is_text_library, supported_file
 from app.core.logging import event
 from app.pdfs.client import BitbucketError
 
@@ -79,7 +79,7 @@ async def process_pdf(client, project, repo, repository_id, path):
     else:
         # One shared background thread extracts PDFs serially, without child processes.
         page_count, text = await asyncio.get_running_loop().run_in_executor(
-            client.extractor, extract_text if is_naas() else extract, content
+            client.extractor, extract_text if is_text_library() else extract, content
         )
     stamp = now()
     timestamp = commit.get("authorTimestamp")
