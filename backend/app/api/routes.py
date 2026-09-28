@@ -25,7 +25,7 @@ from app.core.library import (
 )
 from app.core.logging import error_details, event, request_id
 from app.pdfs.client import BitbucketClient, BitbucketError
-from app.pdfs.search import matching_document_ids, search_documents
+from app.pdfs.search import ranked_matches, search_documents
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -275,7 +275,9 @@ class AdvancedSearchRequest(BaseModel):
 
 @router.post("/search/matches")
 def advanced_search(value: AdvancedSearchRequest):
-    return {"ids": matching_document_ids(value.q, value.fields, value.mode)}
+    ranked = ranked_matches(value.q, value.fields, value.mode)
+    # IDs are ordered most relevant first; tiers: 3 exact phrase, 2 words close together, 1 all words.
+    return {"ids": [id for id, _ in ranked], "tiers": {str(id): tier for id, tier in ranked}}
 
 
 @router.get("/search")

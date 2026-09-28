@@ -259,3 +259,9 @@ body.dragging-account .drop-zone{border-color:var(--accent);color:var(--accent)}
 .project-note{font-size:12px;color:var(--muted);margin:10px 0 0}
 @media(max-width:700px){.side-heading{display:none}#project-nav{margin-bottom:6px}.side-hint{display:none}.row-action{opacity:.7}
   .row,.category.compact .row{grid-template-columns:22px minmax(0,1fr) auto 104px 56px}}
+/* Best matches box while searching. */
+.category.best{border-color:var(--accent);box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 35%,transparent)}
+.category.best header{background:var(--soft)}
+.category.best h2{color:var(--accent)}
+.category.best .rows{columns:440px}
+.sort button{white-space:nowrap}

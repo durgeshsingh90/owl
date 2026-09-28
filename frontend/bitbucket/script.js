@@ -619,8 +619,11 @@ function renderProjects() {
 }
 
 function renderPdfTable() {
-  const filteredPdfs = [...filterPdfs()].sort(
-    (a, b) => new Date(b.committedAt) - new Date(a.committedAt),
+  // While searching, the most relevant files come first; otherwise the newest commits.
+  const byRelevance = Boolean(state.searchQuery.trim()) && advancedSearch.rank.size > 0;
+  const filteredPdfs = [...filterPdfs()].sort((a, b) => byRelevance
+    ? (advancedSearch.rank.get(a.id) ?? Infinity) - (advancedSearch.rank.get(b.id) ?? Infinity)
+    : new Date(b.committedAt) - new Date(a.committedAt),
   );
   const matchingIds = new Set(filteredPdfs.map((pdf) => pdf.id));
   state.selectedPdfs.forEach((id) => {
@@ -639,7 +642,7 @@ function renderPdfTable() {
   headingCount.hidden = false;
   if (hasSearch) {
     const matches = document.querySelector("#advanced-search-status").textContent || `${formatNumber(filteredPdfs.length)} search matches`;
-    headingCount.textContent = `${matches} · ${formatNumber(selectedRepos.length)} ${selectedRepos.length === 1 ? "repository" : "repositories"} searched`;
+    headingCount.textContent = `${matches} · ${formatNumber(selectedRepos.length)} ${selectedRepos.length === 1 ? "repository" : "repositories"} searched${byRelevance ? " · most relevant first" : ""}`;
   } else {
     const totalPdfs = selectedRepos.reduce((sum, repo) => sum + (Number(repo.pdfCount) || 0), 0);
     headingCount.textContent = `${formatNumber(totalPdfs)} PDFs · ${formatNumber(selectedRepos.length)} ${selectedRepos.length === 1 ? "repository" : "repositories"}`;
@@ -691,7 +694,7 @@ function renderPdfTable() {
       <tr class="timeline-document ${state.selectedPdfs.has(pdf.id) ? "selected" : ""}" data-pdf-id="${pdf.id}">
         <td class="select-column"><input class="row-radio" type="checkbox" name="selected-pdf" value="${pdf.id}" aria-label="Select ${escapeHtml(pdf.name)}" ${state.selectedPdfs.has(pdf.id) ? "checked" : ""} /></td>
         <td class="serial-number">${formatNumber(pageStart + index + 1)}</td>
-        <td><a class="timeline-file pdf-link" href="${escapeHtml(pdf.pdfUrl)}" data-open-pdf="${pdf.id}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(pdf.name)}"><span class="timeline-pdf-icon" aria-hidden="true">PDF</span><span>${escapeHtml(pdf.name)}</span></a></td>
+        <td><a class="timeline-file pdf-link" href="${escapeHtml(pdf.pdfUrl)}" data-open-pdf="${pdf.id}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(pdf.name)}"><span class="timeline-pdf-icon" aria-hidden="true">PDF</span><span>${escapeHtml(pdf.name)}</span></a>${searchTierBadge(pdf)}</td>
         <td><span class="badge project-badge">${escapeHtml(pdf.project || pdf.projectId)}</span></td>
         <td><span class="badge" title="${escapeHtml(pdf.repo)}">${escapeHtml(pdf.repo)}</span></td>
         <td><button class="path-button" type="button" data-copy-path="${pdf.id}" title="Copy PDF URL: ${escapeHtml(pdf.pdfUrl)}" aria-label="Copy complete URL for ${escapeHtml(pdf.name)}">${escapeHtml(pdf.path)}</button></td>

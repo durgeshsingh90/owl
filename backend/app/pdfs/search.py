@@ -46,8 +46,29 @@ def search_documents(q="", project=None, repo=None, author=None, limit=100, offs
         ]
 
 
+# Filler words never decide "words close together"; they still count in the exact phrase.
+STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "into",
+    "is", "it", "of", "on", "or", "the", "to", "with", "via", "vs",
+}
+# bm25 column weights in documents_fts order: pdf_name, repo, path, pdf_text, notes.
+BM25_WEIGHTS = (10.0, 2.0, 3.0, 1.0, 4.0)
+TIER_PHRASE, TIER_NEAR, TIER_ALL = 3, 2, 1
+NEAR_DISTANCE = 10
+
+
 def matching_document_ids(query, fields, mode):
-    """Require every term across selected fields of one document, or one phrase."""
+    """Matching document IDs, most relevant first."""
+    return [row[0] for row in ranked_matches(query, fields, mode)]
+
+
+def ranked_matches(query, fields, mode):
+    """Require every term across selected fields of one document, or one phrase.
+
+    Returns (id, tier) pairs, best first: the exact phrase, then every word within a
+    few words of each other in one field, then every word anywhere. Each tier is
+    ordered by bm25 with file names weighted highest.
+    """
     columns = {
         "name": "pdf_name",
         "path": "path",
@@ -65,8 +86,12 @@ def matching_document_ids(query, fields, mode):
             (negative if excluded else positive).append(term)
     if not positive and not negative:
         return []
+    words = positive
     if mode == "together" and positive:
         positive = [" ".join(positive)]
+    else:
+        # "AWS for IDE" requires AWS and IDE; filler words are optional unless that is all there is.
+        positive = [word for word in positive if word.lower() not in STOPWORDS] or positive
 
     def expression(terms, operator):
         return (
@@ -88,10 +113,58 @@ def matching_document_ids(query, fields, mode):
             "id NOT IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?)"
         )
         params.append(expression(negative, " OR "))
+    def quoted(term):
+        return '"' + term.replace('"', '""') + '"'
+
+    scope = "{" + " ".join(selected) + "}"
     with connection() as db:
-        return [
+        if not positive:
+            return [
+                (row[0], TIER_ALL)
+                for row in db.execute(
+                    "SELECT id FROM documents WHERE " + " AND ".join(conditions)
+                    + " ORDER BY commit_date DESC,id DESC",
+                    params,
+                )
+            ]
+        ids = [
             row[0]
             for row in db.execute(
                 "SELECT id FROM documents WHERE " + " AND ".join(conditions), params
             )
         ]
+        if not ids:
+            return []
+
+        def matching(expression):
+            return {
+                row[0]
+                for row in db.execute(
+                    "SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?",
+                    (expression,),
+                )
+            }
+
+        # Relevance of the positive terms; lower bm25 is better.
+        scores = {
+            row[0]: row[1]
+            for row in db.execute(
+                "SELECT rowid,bm25(documents_fts,?,?,?,?,?) FROM documents_fts WHERE documents_fts MATCH ?",
+                (*BM25_WEIGHTS, params[0]),
+            )
+        }
+        phrase = set(ids) if mode == "together" or len(words) < 2 else matching(
+            scope + " : " + quoted(" ".join(words))
+        )
+        key = [word for word in words if word.lower() not in STOPWORDS] or words
+        near = set()
+        if mode != "together" and len(key) > 1:
+            near = matching(
+                scope + " : NEAR(" + " ".join(quoted(word) for word in key) + f", {NEAR_DISTANCE})"
+            )
+    tier = {
+        id: TIER_PHRASE if id in phrase else TIER_NEAR if id in near else TIER_ALL
+        for id in ids
+    }
+    ids.sort(key=lambda id: (-tier[id], scores.get(id, 0.0), -id))
+    return [(id, tier[id]) for id in ids]

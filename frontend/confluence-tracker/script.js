@@ -83,21 +83,38 @@
     while(queue.length){const id=queue.pop();if(ids.has(id))continue;ids.add(id);for(const child of children.get(id)||[])queue.push(child.page_id);}
     return ids;
   }
+  // Searching ranks pages like Bookmarks: exact phrase, then all words, then partial matches.
+  // Page ID, people, space and breadcrumb count as the page's "content" for ranking.
+  const searchDocument=page=>({id:page.page_id,title:page.title||'',url:'',views:page.opens||0,page,
+    contentText:[page.page_id,page.author,page.lastEditor,page.space,...(page.breadcrumb||[])].filter(Boolean).join(' · ')});
+  let searchTiers=new Map();
   function filteredPages(){
     const query=$('page-search').value.trim().toLocaleLowerCase(),filter=$('change-filter').value,dateField=$('date-field').value,branch=branchIds();
-    return pages.filter(page=>(!branch||branch.has(page.page_id))&&(!query||[page.title,page.page_id,page.author,page.lastEditor,page.space].some(value=>String(value||'').toLocaleLowerCase().includes(query)))&&trackerDates.inRange(page[dateField],range)&&(filter==='all'||filter==='unread'&&page.unread||filter==='failed'&&page.download_status==='failed'||filter==='new'&&page.change_kind==='new'||filter==='updated'&&['updated','returned'].includes(page.change_kind)||filter==='missing'&&!page.present)).sort((a,b)=>(Date.parse(b[dateField])||0)-(Date.parse(a[dateField])||0)||a.title.localeCompare(b.title));
+    const list=pages.filter(page=>(!branch||branch.has(page.page_id))&&trackerDates.inRange(page[dateField],range)&&(filter==='all'||filter==='unread'&&page.unread||filter==='failed'&&page.download_status==='failed'||filter==='new'&&page.change_kind==='new'||filter==='updated'&&['updated','returned'].includes(page.change_kind)||filter==='missing'&&!page.present));
+    searchTiers=new Map();
+    if(!query)return list.sort((a,b)=>(Date.parse(b[dateField])||0)-(Date.parse(a[dateField])||0)||a.title.localeCompare(b.title));
+    const terms=bookmarkSearchTerms(query);
+    const documents=list.map(searchDocument).filter(doc=>terms.key.some(term=>`${doc.title} ${doc.contentText}`.toLocaleLowerCase().includes(term)));
+    return rankBookmarks(documents,query,['title','content']).map(result=>{searchTiers.set(result.item.page.page_id,result);return result.item.page;});
+  }
+  function tierBadge(page,query){
+    const result=searchTiers.get(page.page_id);if(!result)return'';
+    const single=bookmarkSearchTerms(query).words.length===1;
+    const [kind,text]=result.tier===3?['phrase',single?'Whole word':'Exact phrase']:result.tier===2?['all',single?'Word start':'All words']:['some',result.matched.length?`${result.matched.length} of ${result.matched.length+result.missing.length} words`:'Partial word'];
+    return `<span class="match-tier ${kind}">${esc(text)}</span>`;
   }
   function renderList(){
-    const list=filteredPages(),dateField=$('date-field').value;
-    $('result-count').textContent=`${list.length.toLocaleString()} of ${pages.length.toLocaleString()} pages${selectedBranch?' in selected branch':''}`;
+    const list=filteredPages(),dateField=$('date-field').value,query=$('page-search').value.trim();
+    $('result-count').textContent=`${list.length.toLocaleString()} of ${pages.length.toLocaleString()} pages${selectedBranch?' in selected branch':''}${query?' · most relevant first':''}`;
     $('clear-branch').hidden=!selectedBranch;$('no-results').hidden=Boolean(list.length);$('load-more').hidden=list.length<=pageLimit;
     let group='';
     $('page-list').innerHTML=list.slice(0,pageLimit).map(page=>{
-      const label=trackerDates.group(page[dateField]);let heading='';
-      if(label!==group){group=label;heading=`<tr class="date-heading"><td colspan="11">${esc(label)}</td></tr>`;}
+      // Date headings only make sense in date order, not while ranking search results.
+      const label=query?'':trackerDates.group(page[dateField]);let heading='';
+      if(label&&label!==group){group=label;heading=`<tr class="date-heading"><td colspan="11">${esc(label)}</td></tr>`;}
       const change=page.download_status==='failed'?'failed':page.change_kind;
       const url=page.url && /^https?:\/\//.test(page.url)?page.url:null;
-      return heading+`<tr class="${page.unread?'unread':''}"><td>${url?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" data-open-page="${esc(page.page_id)}">${esc(page.title)} ↗</a>`:esc(page.title)}<small>${page.error?esc(page.error):page.breadcrumb?.length?esc(page.breadcrumb.join(' / ')):page.download_status==='pending'?'Waiting to download':''}</small></td><td>${esc(page.page_id)}</td><td><span class="badge ${esc(change)}">${esc(change==='failed'?'Download failed':labels[change]||'Unchanged')}</span>${page.unread?`<small>${page.unread} unreviewed</small>`:''}</td><td>${page.opens||0}</td><td>${esc(displayDate(page.confluenceUpdatedAt))}</td><td>${esc(displayDate(page.writtenAt))}</td><td>${esc(page.lastEditor||'—')}</td><td>${esc(page.author||'—')}</td><td>${esc(page.version??'—')}</td><td>${esc(page.space||'—')}</td><td><button data-details="${esc(page.page_id)}" ${!page.url?'disabled':''}>Details</button></td></tr>`;
+      return heading+`<tr class="${page.unread?'unread':''}"><td>${url?`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" data-open-page="${esc(page.page_id)}">${esc(page.title)} ↗</a>`:esc(page.title)}${query?tierBadge(page,query):''}<small>${page.error?esc(page.error):page.breadcrumb?.length?esc(page.breadcrumb.join(' / ')):page.download_status==='pending'?'Waiting to download':''}</small></td><td>${esc(page.page_id)}</td><td><span class="badge ${esc(change)}">${esc(change==='failed'?'Download failed':labels[change]||'Unchanged')}</span>${page.unread?`<small>${page.unread} unreviewed</small>`:''}</td><td>${page.opens||0}</td><td>${esc(displayDate(page.confluenceUpdatedAt))}</td><td>${esc(displayDate(page.writtenAt))}</td><td>${esc(page.lastEditor||'—')}</td><td>${esc(page.author||'—')}</td><td>${esc(page.version??'—')}</td><td>${esc(page.space||'—')}</td><td><button data-details="${esc(page.page_id)}" ${!page.url?'disabled':''}>Details</button></td></tr>`;
     }).join('');
   }
   function renderArchive(){

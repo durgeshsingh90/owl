@@ -1,5 +1,14 @@
 "use strict";
-const advancedSearch = {ids: new Set(), timer: null, controller: null, version: 0, signature: null, pending: false};
+const advancedSearch = {ids: new Set(), rank: new Map(), tiers: {}, timer: null, controller: null, version: 0, signature: null, pending: false};
+// The server returns matches most relevant first: 3 exact phrase, 2 words close together, 1 all words.
+const SEARCH_TIERS = {3: ['phrase', 'Exact phrase'], 2: ['near', 'Words close together'], 1: ['all', 'All words']};
+function searchTierBadge(pdf) {
+  const words = state.searchQuery.trim().split(/\s+/).filter(word => word && !word.startsWith('-'));
+  const mode = document.querySelector('[name="search-mode"]:checked')?.value;
+  const tier = SEARCH_TIERS[advancedSearch.tiers[pdf.id]];
+  if (!tier || words.length < 2 || mode === 'together') return '';
+  return `<span class="match-tier ${tier[0]}" title="Search relevance">${tier[1]}</span>`;
+}
 function scheduleAdvancedSearch() {
   const status = document.querySelector('#advanced-search-status');
   const q = state.searchQuery.trim();
@@ -14,7 +23,7 @@ function scheduleAdvancedSearch() {
   const version = ++advancedSearch.version;
   advancedSearch.signature = signature;
   advancedSearch.pending = Boolean(q && fields.length);
-  if (changed) advancedSearch.ids = new Set();
+  if (changed) { advancedSearch.ids = new Set(); advancedSearch.rank = new Map(); advancedSearch.tiers = {}; }
   status.textContent = !q ? '' : !fields.length ? 'Select a search field' : 'Searching…';
   if (changed) state.currentPage = 1;
   renderCommitChart();
@@ -33,6 +42,8 @@ function scheduleAdvancedSearch() {
       const data = await response.json();
       if (version !== advancedSearch.version) return;
       advancedSearch.ids = new Set(data.ids);
+      advancedSearch.rank = new Map(data.ids.map((id, index) => [id, index]));
+      advancedSearch.tiers = data.tiers || {};
       status.textContent = '';
       renderCommitChart();
       renderPdfTable();

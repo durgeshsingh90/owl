@@ -627,6 +627,42 @@ class BackendTests(unittest.TestCase):
             404,
         )
 
+    def test_advanced_search_ranks_phrase_then_near_then_all_words(self):
+        self.crawl()
+        with connection() as db:
+            ids = [row[0] for row in db.execute("SELECT id FROM documents ORDER BY id")]
+            texts = {
+                ids[0]: "every team uses aws. " + "filler " * 60 + "the ide is separate",
+                ids[1]: "configure the aws toolkit inside your ide today",
+                ids[2]: "guide: how to use aws for ide integration",
+                ids[3]: "aws only",
+            }
+            for id, text in texts.items():
+                db.execute(
+                    "UPDATE documents SET pdf_name='neutral.pdf', pdf_text=? WHERE id=?",
+                    (text, id),
+                )
+        response = self.client.post("/api/search/matches", json={"q": "AWS for IDE"})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["ids"], [ids[2], ids[1], ids[0]])
+        self.assertEqual(
+            body["tiers"], {str(ids[2]): 3, str(ids[1]): 2, str(ids[0]): 1}
+        )
+        # A match in the file name outranks the same tier in content.
+        with connection() as db:
+            db.execute(
+                "UPDATE documents SET pdf_name='aws-ide-setup.pdf' WHERE id=?", (ids[0],)
+            )
+            db.execute(
+                "UPDATE documents SET pdf_text='aws toolkit in the ide', pdf_name='neutral.pdf' WHERE id=?",
+                (ids[3],),
+            )
+        body = self.client.post("/api/search/matches", json={"q": "aws ide"}).json()
+        self.assertEqual(body["ids"][0], ids[0])
+        self.assertEqual(body["tiers"][str(ids[0])], 3)
+        self.assertEqual(body["tiers"][str(ids[3])], 2)
+
     def test_advanced_search_fields_and_word_modes(self):
         self.crawl()
         with connection() as db:

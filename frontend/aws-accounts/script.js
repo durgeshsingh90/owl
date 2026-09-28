@@ -78,12 +78,41 @@
     return `<span class="copies" data-count-kind="${kind}" data-count-value="${esc(value)}"${count ? '' : ' hidden'} title="Copied ${count} time${count === 1 ? '' : 's'}">⧉ ${count}</span>`;
   };
 
+  // Highlight every search word (longest first so "stablecoin" wins over "stable").
   function highlight(text, query) {
-    if (!query) return esc(text);
-    const index = text.toLowerCase().indexOf(query);
-    if (index < 0) return esc(text);
-    return esc(text.slice(0, index)) + '<mark>' + esc(text.slice(index, index + query.length)) + '</mark>' + esc(text.slice(index + query.length));
+    const words = [...new Set(query.split(/\s+/).filter(Boolean))].sort((a, b) => b.length - a.length);
+    if (!words.length) return esc(text);
+    const lower = text.toLowerCase(), marked = new Array(text.length).fill(false);
+    for (const word of words) for (let at = lower.indexOf(word); at >= 0; at = lower.indexOf(word, at + 1)) marked.fill(true, at, at + word.length);
+    let html = '', open = false;
+    for (let index = 0; index < text.length; index++) {
+      if (marked[index] !== open) { html += open ? '</mark>' : '<mark>'; open = marked[index]; }
+      html += esc(text[index]);
+    }
+    return html + (open ? '</mark>' : '');
   }
+
+  // Search relevance: 4 exact name or ID, 3 the phrase in order, 2 every word as a whole
+  // name part (or its start), 1 every word somewhere. Every word must appear to match.
+  const compactText = value => value.replace(/[^a-z0-9]/g, '');
+  const searchWords = query => [...new Set(query.split(/\s+/).filter(Boolean))];
+  function accountMatches(item, words) {
+    const profile = item.profile.toLowerCase(), id = String(item.account_id).toLowerCase();
+    return words.every(word => profile.includes(word) || id.includes(word));
+  }
+  function accountRelevance(item, query, words) {
+    const profile = item.profile.toLowerCase(), id = String(item.account_id).toLowerCase();
+    const tokens = profile.split(/[^a-z0-9]+/).filter(Boolean);
+    const quality = word => tokens.includes(word) || id === word ? 1 : tokens.some(token => token.startsWith(word)) || id.startsWith(word) ? 0.7 : 0.3;
+    const qualities = words.map(quality);
+    const tier = profile === query || id === query || compactText(profile) === compactText(query) ? 4
+      : words.length > 1 ? (compactText(profile).includes(compactText(query)) ? 3 : qualities.every(value => value >= 0.7) ? 2 : 1)
+        : qualities[0] === 1 ? 3 : qualities[0] >= 0.7 ? 2 : 1;
+    const score = qualities.reduce((sum, value) => sum + value, 0) + (profile.startsWith(words[0]) || tokens[1]?.startsWith(words[0]) ? 0.5 : 0)
+      - profile.length / 200 + Math.log1p(accountCount(item.profile, item.account_id)) * 0.3;
+    return {tier, score};
+  }
+  const BEST = '__best__', BEST_LIMIT = 10;
 
   // Strictly by category name, account count or file order, in the chosen direction.
   // Names compare without leading spaces, emoji or punctuation ("☁ Platform" sorts under P).
@@ -143,8 +172,8 @@
     const query = $('search').value.trim().toLowerCase();
     const stars = starredSet();
     if (selected && !(selected in data.categories) && !(selected === STARRED && stars.size) && !projectFor(selected)) selected = null;
-    const keep = item => (envFilter === 'all' || item.env === envFilter) &&
-      (!query || item.profile.toLowerCase().includes(query) || String(item.account_id).toLowerCase().includes(query));
+    const words = searchWords(query);
+    const keep = item => (envFilter === 'all' || item.env === envFilter) && (!words.length || accountMatches(item, words));
     const matches = new Map();
     const byProfile = new Map();
     for (const account of Object.values(data.categories).flat()) if (!byProfile.has(account.profile)) byProfile.set(account.profile, account);
@@ -203,6 +232,26 @@
     }
     // Consecutive small categories share one row of boxes.
     const html = [];
+    if (words.length && !selected) {
+      // Best matches across every category, most relevant first.
+      const seen = new Set();
+      const ranked = Object.values(data.categories).flat()
+        .filter(account => !seen.has(account.profile) && seen.add(account.profile))
+        .map(account => ({...account, ...environment(account.profile)}))
+        .filter(keep)
+        .map(item => ({item, ...accountRelevance(item, query, words)}))
+        .sort((a, b) => b.tier - a.tier || b.score - a.score || a.item.profile.localeCompare(b.item.profile));
+      if (ranked.length > 1) {
+        const top = ranked.slice(0, BEST_LIMIT).map(result => result.item);
+        const labels = {4: 'exact', 3: 'phrase', 2: 'whole words', 1: 'partial words'};
+        const summary = [4, 3, 2, 1].map(tier => [tier, ranked.filter(result => result.tier === tier).length]).filter(([, count]) => count)
+          .map(([tier, count]) => `${count} ${labels[tier]}`).join(' · ');
+        html.push(`<section class="category best" data-category="${BEST}">
+          <header><h2>Best matches</h2><span class="count">${esc(summary)} · most relevant first${ranked.length > BEST_LIMIT ? ` · top ${BEST_LIMIT} of ${ranked.length}` : ''}</span></header>
+          <div class="rows">${top.map(item => row({...item, last: true}, query, null, stars)).join('')}</div>
+        </section>`);
+      }
+    }
     for (let index = 0; index < sections.length;) {
       if (!sections[index].compact) { html.push(sections[index++].html); continue; }
       const boxes = [];

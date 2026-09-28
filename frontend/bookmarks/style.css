@@ -2137,3 +2137,4 @@ body {
 [data-bookmark-row].best-flash>.tree-leaf,[data-bookmark-row].best-flash>details>summary{animation:best-flash 1.6s ease-out}
 @keyframes best-flash{0%{background:var(--blue-soft)}100%{background:transparent}}
 @media(max-width:700px){.best-match{grid-template-columns:22px minmax(0,1fr)}.best-reveal{grid-column:2;justify-self:start}}
+.best-line .match-tier{margin-left:0}
