@@ -560,6 +560,7 @@ function render() {
           : "Your saved pages, in one place.";
   updateBookmarkSearchCount(filtered.length, Boolean(query.trim()));
   renderBookmarkTree(filtered);
+  window.renderBestMatches?.(filtered);
   document.querySelector("#bookmark-empty").hidden = filtered.length > 0;
   document.querySelector("#bookmark-total").textContent =
     `Showing ${filtered.length} of ${bookmarks.length} bookmarks`;
