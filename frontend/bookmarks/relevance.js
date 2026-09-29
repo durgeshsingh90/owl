@@ -159,7 +159,7 @@ if (typeof document !== "undefined") {
         const path = bookmarkFolderPath(item, pageHierarchy[item.id]).join(" › ");
         const preview = result.phraseField === "title" ? "" : snippet(item, notesFor(item), terms, terms.words);
         return `<li class="best-match tier-${result.tier}">
-          <span class="best-rank">${index + 1}</span>
+          <span class="best-rank tree-number" title="Number in the bookmark tree">${escapeHtml(window.bookmarkSearchNumbers?.pages.get(item.id) ?? index + 1)}</span>
           <div class="best-body">
             <div class="best-line"><a class="best-title" data-open="${item.id}" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">${highlightTerms(item.title || item.url, terms.words)}</a>${reason(result, terms)}</div>
             <div class="best-path">${escapeHtml(path)} · ${item.views} ${item.views === 1 ? "open" : "opens"}</div>

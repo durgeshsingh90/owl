@@ -2114,10 +2114,10 @@ body {
 .best-matches-heading h3{margin:0;font-size:14px}
 .best-matches-heading span{font-size:12px;color:var(--text-muted)}
 .best-matches-list{list-style:none;margin:0;padding:0}
-.best-match{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:10px;align-items:start;padding:10px 16px;border-bottom:1px solid var(--border)}
+.best-match{display:grid;grid-template-columns:minmax(28px,max-content) minmax(0,1fr) auto;gap:10px;align-items:start;padding:10px 16px;border-bottom:1px solid var(--border)}
 .best-match:last-child{border-bottom:0}
 .best-match.tier-3{box-shadow:inset 3px 0 0 var(--blue)}
-.best-rank{font-size:12px;font-weight:700;color:var(--text-muted);text-align:right;padding-top:2px;font-variant-numeric:tabular-nums}
+.best-rank{font-size:12px;font-weight:700;color:var(--text-muted);text-align:right;padding-top:2px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .best-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .best-title{font-weight:600;color:var(--text);overflow-wrap:anywhere}
 .best-title:hover{color:var(--blue)}
@@ -2136,5 +2136,9 @@ body {
 .best-more:hover{background:var(--blue-soft)}
 [data-bookmark-row].best-flash>.tree-leaf,[data-bookmark-row].best-flash>details>summary{animation:best-flash 1.6s ease-out}
 @keyframes best-flash{0%{background:var(--blue-soft)}100%{background:transparent}}
-@media(max-width:700px){.best-match{grid-template-columns:22px minmax(0,1fr)}.best-reveal{grid-column:2;justify-self:start}}
+@media(max-width:700px){.best-match{grid-template-columns:minmax(22px,max-content) minmax(0,1fr)}.best-reveal{grid-column:2;justify-self:start}}
 .best-line .match-tier{margin-left:0}
+/* Rows share one column grid so titles line up whatever the tree number's width. */
+.best-matches-list{display:grid;grid-template-columns:max-content minmax(0,1fr) auto}
+.best-matches-list>.best-match{grid-column:1/-1;grid-template-columns:subgrid}
+@media(max-width:700px){.best-matches-list{grid-template-columns:max-content minmax(0,1fr)}}

@@ -194,6 +194,8 @@ function renderBookmarkTree(filtered, downloaded = [], scheduleSearch = true, do
     ? bookmarkTreeNumbers(bookmarks.filter(item => bookmarkInCurrentView(item) && matchesPerson(item)), pageHierarchy, document.querySelector("#bookmark-sort").value)
     : null;
   if (searchNumbers) extendBookmarkTreeNumbers(searchNumbers, [...downloaded, ...downloadedContext], pageHierarchy);
+  // Best matches shows the same tree numbers as the rows below it.
+  window.bookmarkSearchNumbers = searchNumbers;
   filtered = [...filtered, ...downloaded];
   const key = JSON.stringify([
     view,
