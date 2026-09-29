@@ -2142,3 +2142,6 @@ body {
 .best-matches-list{display:grid;grid-template-columns:max-content minmax(0,1fr) auto}
 .best-matches-list>.best-match{grid-column:1/-1;grid-template-columns:subgrid}
 @media(max-width:700px){.best-matches-list{grid-template-columns:max-content minmax(0,1fr)}}
+/* Tree numbers such as 10 or 12.3 never shrink or break across lines. */
+.tree-number { flex-shrink: 0; white-space: nowrap; overflow-wrap: normal; }
+.bookmark-root-name .tree-number { min-width: 2.2em; }
