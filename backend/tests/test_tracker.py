@@ -48,6 +48,24 @@ class TrackerTests(unittest.IsolatedAsyncioTestCase):
                 "rawMetadata": {"body": {"storage": {"value": "<p>content</p>"}}},
             }
 
+        # A tiny Confluence: 100 is the space home; 150 and 160 sit below it.
+        self.ancestry = {"100": [], "150": ["100"], "160": ["100", "150"]}
+
+        async def get(settings, path, params=None):
+            if path.startswith("content/"):
+                page = path.split("/")[1]
+                return {
+                    "id": page,
+                    "type": "page",
+                    "ancestors": [{"id": item} for item in self.ancestry.get(page, [])],
+                }
+            if path == "space/ENG":
+                return {"key": "ENG", "homepage": {"id": "100"}}
+            if path == "content" and params.get("title") == "Deep Page":
+                return {"results": [{"id": "160"}]}
+            return {"results": []}
+
+        patch.object(confluence, "get", side_effect=get).start()
         patch.object(service, "discover_pages", side_effect=discover).start()
         self.metadata = patch.object(
             confluence, "metadata", side_effect=metadata
@@ -175,3 +193,24 @@ class TrackerTests(unittest.IsolatedAsyncioTestCase):
         self.metadata.assert_not_awaited()
         with self.assertRaises(ValueError):
             await service.add_root("https://other.test/pages/100")
+
+    async def test_any_url_tracks_the_top_most_parent(self):
+        root = await service.add_root("100")
+        for value in (
+            "160",
+            "https://wiki.test/pages/viewpage.action?pageId=150",
+            "https://wiki.test/spaces/ENG/pages/160/Deep+Page",
+            "https://wiki.test/display/ENG/Deep+Page",
+            "https://wiki.test/pages/viewpage.action?spaceKey=ENG&title=Deep+Page",
+            "https://wiki.test/display/ENG",
+            "https://wiki.test/spaces/ENG/overview",
+            "https://wiki.test/x/oAAAAA",  # short link for page 160
+        ):
+            self.assertEqual(await service.add_root(value), root, value)
+        with connection() as db:
+            self.assertEqual(
+                [row[0] for row in db.execute("SELECT page_id FROM confluence_tracker_roots")],
+                ["100"],
+            )
+        with self.assertRaises(ValueError):
+            await service.add_root("https://wiki.test/display/ENG/Missing+Page")

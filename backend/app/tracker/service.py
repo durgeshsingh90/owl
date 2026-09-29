@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import json
-import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -50,21 +49,11 @@ def safe_error(error, settings=None):
 
 
 async def add_root(value):
+    """Track the top-most parent of any pasted page, space or short link, with everything below it."""
     settings = confluence.load()
-    target = value.strip()
-    if re.fullmatch(r"[0-9]{1,20}", target) and int(target):
-        page_id = str(int(target))
-    else:
-        if not confluence.belongs_to_server(settings, target):
-            raise ValueError("Use a root page on the configured Confluence server.")
-        ids = confluence.named_ids(target)
-        if not ids:
-            ids = await confluence.identity_from_url(settings, target)
-        if len(set(ids)) != 1:
-            raise ValueError(
-                "Use a Confluence page URL containing its page ID, or paste the page ID."
-            )
-        page_id = str(ids[0])
+    page_id = await confluence.top_most_page(
+        settings, await confluence.resolve_page_id(settings, value)
+    )
     url = settings.base_url + "/pages/viewpage.action?pageId=" + page_id
     with connection() as db:
         db.execute(

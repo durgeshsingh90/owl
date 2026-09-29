@@ -40,6 +40,11 @@ function canResumeCrawl(job) {
 }
 function watchCrawl(job) {
   let lastWorkspaceRefresh = 0;
+  // Reloading the whole library re-renders the table and restarts the search, so while a
+  // pull runs refresh at most every 2 minutes (libraries can hold 20,000+ files) and never
+  // while a search is typed.
+  // The library always refreshes once when the pull finishes.
+  const LIVE_REFRESH_MS = 120000;
   pullProgress.active = ["queued", "running", "paused"].includes(job.status);
   clearTimeout(pullProgress.timer);
   pullProgress.jobId = job.id;
@@ -127,7 +132,7 @@ function watchCrawl(job) {
         pullProgress.repositories = new Map(Object.values(current.repository_statuses || {}).map(repo =>
           [JSON.stringify([String(repo.project_id), repo.repo]), repo.status]));
       }
-      if ((!lastWorkspaceRefresh || Date.now() - lastWorkspaceRefresh >= 5000) && (statusesChanged || current.processed !== lastProcessed || current.repositories !== lastRepositories || (current.retry_recovered || 0) !== lastRecovered)) {
+      if (!state.searchQuery.trim() && (!lastWorkspaceRefresh || Date.now() - lastWorkspaceRefresh >= LIVE_REFRESH_MS) && (statusesChanged || current.processed !== lastProcessed || current.repositories !== lastRepositories || (current.retry_recovered || 0) !== lastRecovered)) {
         lastWorkspaceRefresh = Date.now();
         lastRecovered = current.retry_recovered || 0;
         lastProcessed = current.processed;

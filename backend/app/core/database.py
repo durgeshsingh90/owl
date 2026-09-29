@@ -253,6 +253,92 @@ def initialize(*, recover_jobs=False):
                 "UPDATE failed_documents SET pdf_name=?,url=? WHERE id=?",
                 (PurePosixPath(row["path"]).name, url, row["id"]),
             )
+        # Browsers cache the explorer workspace and reload it only when this revision
+        # changes. The token distinguishes databases; open counts do not bump it.
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS workspace_revision (
+                id INTEGER PRIMARY KEY CHECK(id=1), token TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT OR IGNORE INTO workspace_revision(id,token)
+            VALUES(1,lower(hex(randomblob(8))));
+            """
+        )
+        watched = {
+            "documents": "UPDATE OF repository_id,project,repo,pdf_name,path,url,"
+            "file_size,page_count,commit_id,commit_count,commit_message,author,"
+            "commit_date,notes,added_at,updated_at,last_scanned",
+            "repositories": "UPDATE",
+            "tracked_projects": "UPDATE",
+            "sync_metadata": "UPDATE",
+        }
+        for table, update in watched.items():
+            for operation in ("INSERT", "DELETE", update):
+                name = f"workspace_{table}_{operation.split()[0].lower()}"
+                db.execute(
+                    f"CREATE TRIGGER IF NOT EXISTS {name} AFTER {operation} ON {table} "
+                    "BEGIN UPDATE workspace_revision SET revision=revision+1 WHERE id=1; END"
+                )
+        # Confluence Tracker explorer: notes, full-text search, sync jobs and a revision that
+        # browser caches compare against (open counts do not bump it).
+        if "notes" not in {
+            row["name"] for row in db.execute("PRAGMA table_info(confluence_tracker_pages)")
+        }:
+            db.execute(
+                "ALTER TABLE confluence_tracker_pages ADD COLUMN notes TEXT NOT NULL DEFAULT ''"
+            )
+        db.executescript(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS confluence_tracker_fts USING fts5(
+                title, path, content, notes
+            );
+            CREATE TABLE IF NOT EXISTS confluence_tracker_revision (
+                id INTEGER PRIMARY KEY CHECK(id=1), token TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT OR IGNORE INTO confluence_tracker_revision(id,token)
+            VALUES(1,lower(hex(randomblob(8))));
+            CREATE TABLE IF NOT EXISTS confluence_tracker_jobs (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL, root_ids TEXT NOT NULL,
+                started_at TEXT NOT NULL, change_floor INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TRIGGER IF NOT EXISTS confluence_fts_insert AFTER INSERT ON confluence_tracker_pages BEGIN
+                INSERT INTO confluence_tracker_fts(rowid,title,path,content,notes) VALUES(
+                    new.rowid, json_extract(new.metadata,'$.title'),
+                    json_extract(new.metadata,'$.breadcrumb'),
+                    json_extract(new.metadata,'$.contentText'), new.notes);
+            END;
+            CREATE TRIGGER IF NOT EXISTS confluence_fts_update AFTER UPDATE OF metadata,notes ON confluence_tracker_pages BEGIN
+                DELETE FROM confluence_tracker_fts WHERE rowid=old.rowid;
+                INSERT INTO confluence_tracker_fts(rowid,title,path,content,notes) VALUES(
+                    new.rowid, json_extract(new.metadata,'$.title'),
+                    json_extract(new.metadata,'$.breadcrumb'),
+                    json_extract(new.metadata,'$.contentText'), new.notes);
+            END;
+            CREATE TRIGGER IF NOT EXISTS confluence_fts_delete AFTER DELETE ON confluence_tracker_pages BEGIN
+                DELETE FROM confluence_tracker_fts WHERE rowid=old.rowid;
+            END;
+            """
+        )
+        if not db.execute("SELECT 1 FROM confluence_tracker_fts LIMIT 1").fetchone():
+            db.execute(
+                "INSERT INTO confluence_tracker_fts(rowid,title,path,content,notes) "
+                "SELECT rowid,json_extract(metadata,'$.title'),json_extract(metadata,'$.breadcrumb'),"
+                "json_extract(metadata,'$.contentText'),notes FROM confluence_tracker_pages"
+            )
+        watched = {
+            "confluence_tracker_pages": "UPDATE OF metadata,notes,present,change_kind,parent_id",
+            "confluence_tracker_roots": "UPDATE OF title,last_success,status",
+            "confluence_tracker_changes": "UPDATE OF reviewed",
+        }
+        for table, update in watched.items():
+            for operation in ("INSERT", "DELETE", update):
+                name = f"confluence_revision_{table}_{operation.split()[0].lower()}"
+                db.execute(
+                    f"CREATE TRIGGER IF NOT EXISTS {name} AFTER {operation} ON {table} "
+                    "BEGIN UPDATE confluence_tracker_revision SET revision=revision+1 WHERE id=1; END"
+                )
         if recover_jobs:
             db.execute(
                 "UPDATE bookmark_downloads SET status='failed',error='Download interrupted. Click to retry.' WHERE status='running'"

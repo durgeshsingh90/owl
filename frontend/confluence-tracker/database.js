@@ -18,7 +18,7 @@ const workspaceCache = (() => {
   let opening;
   function open() {
     opening ??= new Promise((resolve, reject) => {
-      const request = indexedDB.open("owl-network-workspace", 1);
+      const request = indexedDB.open("owl-confluence-workspace", 1);
       request.onupgradeneeded = () => {
         request.result.createObjectStore("meta");
         request.result.createObjectStore("documents", {keyPath: "id"});
@@ -69,12 +69,15 @@ let workspaceRevision = null;
 let workspaceRun = null;
 let workspaceNextRun = null;
 function applyWorkspace(data) {
-  // Avoid spreading large file libraries into function arguments (browser limit).
+  // Avoid spreading large PDF libraries into function arguments (browser limit).
   for (const [target, source] of [[projects, data.projects], [pdfs, data.documents], [people, data.people]]) {
     target.length = 0;
     for (const item of source) target.push(item);
   }
   workspaceRevision = data.revision;
+  // Every tracked page (all dates) for the sidebar's folder and page tree.
+  window.workspaceTree = data.tree || [];
+  window.buildWorkspaceTree?.();
   window.workspaceLastPull = data.lastCompletedPull;
   authorLookup = null;
   renderApp();
@@ -90,19 +93,19 @@ async function fetchWorkspace(url) {
   } finally { clearTimeout(timeout); }
 }
 async function fetchCompleteWorkspace(version) {
-  const data = await fetchWorkspace("/network-automation/api/workspace?limit=5000");
+  const data = await fetchWorkspace("/api/confluence-library/workspace?limit=5000");
   if (!Array.isArray(data.projects) || !Array.isArray(data.documents) || !Array.isArray(data.people)) {
     throw new Error("Invalid workspace response; keeping the last loaded data.");
   }
   let cursor = data.nextBefore;
   while (cursor) {
     if (version !== workspaceLoadVersion) return null;
-    const batch = await fetchWorkspace(`/network-automation/api/workspace?limit=5000&before=${cursor}&summaries=false`);
-    if (!Array.isArray(batch.documents) || (batch.nextBefore && batch.nextBefore >= cursor)) throw new Error("Invalid file batch. Reload to retry.");
+    const batch = await fetchWorkspace(`/api/confluence-library/workspace?limit=5000&before=${cursor}&summaries=false`);
+    if (!Array.isArray(batch.documents) || (batch.nextBefore && batch.nextBefore >= cursor)) throw new Error("Invalid page batch. Reload to retry.");
     for (const pdf of batch.documents) data.documents.push(pdf);
     cursor = batch.nextBefore;
   }
-  return {projects: data.projects, documents: data.documents, people: data.people, lastCompletedPull: data.lastCompletedPull, revision: data.revision};
+  return {projects: data.projects, documents: data.documents, people: data.people, tree: data.tree, lastCompletedPull: data.lastCompletedPull, revision: data.revision};
 }
 function showWorkspaceError(error) {
   const message = error.name === "AbortError" ? "Loading took too long. Please try again." : error.message;
@@ -120,17 +123,17 @@ function showWorkspaceError(error) {
 async function loadWorkspaceFirstTime(version) {
   delete workspaceLoading.dataset.error;
   document.getElementById("workspace-loading-title").textContent = "Loading your library";
-  document.getElementById("workspace-loading-message").textContent = "Getting your repositories and files ready…";
+  document.getElementById("workspace-loading-message").textContent = "Getting your Confluence pages ready…";
   document.getElementById("workspace-loading-retry").hidden = true;
   document.getElementById("workspace-loading-dismiss").hidden = true;
-  const data = await fetchWorkspace("/network-automation/api/workspace?limit=200&current_month=true");
+  const data = await fetchWorkspace("/api/confluence-library/workspace?limit=200&current_month=true");
   if (version !== workspaceLoadVersion) return;
   if (!Array.isArray(data.projects) || !Array.isArray(data.documents) || !Array.isArray(data.people)) {
     throw new Error("Invalid workspace response; keeping the last loaded data.");
   }
   window.workspacePartial = true;
   backgroundStatus.hidden = false;
-  backgroundStatus.textContent = "First-time setup: loading the rest of your files… Search and filters currently show this month only.";
+  backgroundStatus.textContent = "First-time setup: loading the rest of your pages… Search and filters currently show this month only.";
   applyWorkspace({...data, revision: null});
   finishWorkspaceLoading();
   await new Promise(resolve => setTimeout(resolve, 0));
@@ -168,7 +171,7 @@ async function runWorkspaceLoad() {
       }
     }
     // Cheap check: only download the library again when something changed on the server.
-    const {revision} = await fetchWorkspace("/network-automation/api/workspace/revision");
+    const {revision} = await fetchWorkspace("/api/confluence-library/workspace/revision");
     if (revision === workspaceRevision) return;
     const complete = await fetchCompleteWorkspace(version);
     if (!complete || version !== workspaceLoadVersion) return;
@@ -179,7 +182,7 @@ async function runWorkspaceLoad() {
       showWorkspaceError(error);
       if (window.workspacePartial) {
         backgroundStatus.hidden = false;
-        backgroundStatus.textContent = "Only part of your library is loaded. Reload to retry loading the remaining files.";
+        backgroundStatus.textContent = "Only part of your pages are loaded. Reload to retry loading the rest.";
       }
     }
   } finally {
@@ -195,7 +198,7 @@ document
     if (!link) return;
     const pdf = pdfs.find((item) => item.pdfUrl === link.href);
     if (!pdf) return;
-    const response = await fetch(`/network-automation/api/document/${pdf.id}/open`, {
+    const response = await fetch(`/api/confluence-library/document/${pdf.id}/open`, {
       method: "POST",
     });
     if (response.ok) {
@@ -223,7 +226,7 @@ document
       if (sequence === current) status.textContent = "Could not copy. Please select and copy the text manually.";
     }
   }
-  copyDetails.onclick = () => copySaved(savedDetails, "Saved File details");
+  copyDetails.onclick = () => copySaved(savedDetails, "Saved page details");
   copyExtracted.onclick = () => copySaved(extractedText, "Extracted text");
   document.querySelector("#pdf-details-close").onclick = () => dialog.close();
   dialog.addEventListener("close", () => { sequence++; });
@@ -238,16 +241,17 @@ document
     status.textContent = "Loading saved record…";
     dialog.showModal();
     try {
-      const response = await fetch(`/network-automation/api/document/${button.dataset.pdfDetails}`, {cache: "no-store"});
-      if (!response.ok) throw new Error("Could not load the saved File record.");
+      const response = await fetch(`/api/confluence-library/document/${button.dataset.pdfDetails}`, {cache: "no-store"});
+      if (!response.ok) throw new Error("Could not load the saved page.");
       const record = await response.json();
       if (current !== sequence) return;
       const labels = {
-        pdf_name: "File name", project: "Project", repo: "Repository", path: "Path",
-        url: "Bitbucket URL", file_size: "File size (bytes)", page_count: "Lines",
-        author: "Commit author", commit_id: "Commit ID", commit_message: "Commit message",
-        commit_date: "Commit date", added_at: "Saved at", updated_at: "Updated at",
-        last_scanned: "Last scanned", pdf_hash: "SHA-256", open_count: "Open count", notes: "Notes",
+        pdf_name: "Page title", page_id: "Page ID", project: "Tracked tree", repo: "Section",
+        path: "Breadcrumb", url: "Confluence URL", space: "Space", created_by: "Created by",
+        created_at: "Created", updated_by: "Last updated by", updated_at: "Last updated",
+        version: "Version", version_message: "Version comment", file_size: "Text size (bytes)",
+        change_kind: "Latest change", first_seen: "First saved in OWL", last_checked: "Last checked",
+        open_count: "Open count", notes: "Notes",
       };
       savedDetails = Object.entries(labels).map(([key, label]) => `${label}: ${record[key] ?? "Not available"}`).join("\n");
       extractedText = record.pdf_text || "";
@@ -261,7 +265,7 @@ document
         value.style.margin = "0";
         fields.append(title, value);
       }
-      text.textContent = record.pdf_text || "No text was extracted from this File.";
+      text.textContent = record.pdf_text || "No text was saved for this page.";
       status.textContent = "Loaded from the database.";
     } catch (error) { if (current === sequence) status.textContent = error.message; }
   });

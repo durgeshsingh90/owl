@@ -685,8 +685,9 @@ function renderPdfTable() {
           ? "Unknown date"
           : CALENDAR_LABEL_FORMATTER.format(new Date(day));
       const group = getTimelineGroup(pdf.committedAt, timelineNow);
+      // Date headings only make sense in date order, not while ranking search results.
       const separator =
-        group !== previousGroup
+        !byRelevance && group !== previousGroup
           ? `<tr class="timeline-date-row"><th colspan="12" scope="rowgroup"><span class="timeline-marker" aria-hidden="true"></span><strong>${escapeHtml(group)}</strong><span class="timeline-group-count" title="Matching PDFs in this period across all pages">${formatNumber(groupCounts.get(group))} ${groupCounts.get(group) === 1 ? "PDF" : "PDFs"}</span></th></tr>`
           : "";
       previousGroup = group;

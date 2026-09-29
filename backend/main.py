@@ -131,6 +131,7 @@ async def validation_error(request, error):
 
 from app.api.aws_accounts import router as aws_accounts_router
 from app.api.bookmarks import router as bookmarks_router
+from app.api.confluence_library import router as confluence_library_router
 from app.api.compat import router as compat_router
 from app.api.tracker import router as tracker_router
 from app.api.workspace import router as workspace_router
@@ -139,6 +140,7 @@ app.include_router(aws_accounts_router)
 app.include_router(bookmarks_router)
 app.include_router(workspace_router)
 app.include_router(tracker_router)
+app.include_router(confluence_library_router)
 app.include_router(compat_router)
 app.include_router(router)
 app.include_router(router, prefix="/api")
@@ -155,6 +157,7 @@ for name in ("home", "bitbucket", "bookmarks", "confluence-tracker", "aws-accoun
 
 
 from app.api.workspace import workspace as library_workspace
+from app.api.workspace import workspace_revision as library_workspace_revision
 
 text_apps = {}
 for name, title in (("naas", "NAAS Update"), ("network", "Network Automation")):
@@ -166,6 +169,9 @@ for name, title in (("naas", "NAAS Update"), ("network", "Network Automation")):
     sub_app.include_router(router, prefix="/api")
     sub_app.include_router(compat_router)
     sub_app.add_api_route("/api/workspace", library_workspace, methods=["GET"])
+    sub_app.add_api_route(
+        "/api/workspace/revision", library_workspace_revision, methods=["GET"]
+    )
     prefix = TEXT_LIBRARIES[name]["prefix"]
     sub_app.mount(
         "/",

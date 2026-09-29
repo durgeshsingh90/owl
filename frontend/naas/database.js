@@ -13,98 +13,181 @@ function finishWorkspaceLoading() {
 }
 document.getElementById("workspace-loading-retry").onclick = () => loadDatabaseWorkspace();
 document.getElementById("workspace-loading-dismiss").onclick = finishWorkspaceLoading;
-async function loadDatabaseWorkspace() {
-  const version = ++workspaceLoadVersion;
-  workspaceFetching = true;
-  const initialLoad = !workspaceReady;
-  if (!workspaceReady) {
-    delete workspaceLoading.dataset.error;
-    document.getElementById("workspace-loading-title").textContent = "Loading your library";
-    document.getElementById("workspace-loading-message").textContent = "Getting your repositories and files ready…";
-    document.getElementById("workspace-loading-retry").hidden = true;
-    document.getElementById("workspace-loading-dismiss").hidden = true;
+// The library is cached in IndexedDB and reloaded only when the server revision changes.
+const workspaceCache = (() => {
+  let opening;
+  function open() {
+    opening ??= new Promise((resolve, reject) => {
+      const request = indexedDB.open("owl-naas-workspace", 1);
+      request.onupgradeneeded = () => {
+        request.result.createObjectStore("meta");
+        request.result.createObjectStore("documents", {keyPath: "id"});
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    return opening;
   }
+  function done(transaction) {
+    return new Promise((resolve, reject) => {
+      transaction.oncomplete = resolve;
+      transaction.onerror = transaction.onabort = () => reject(transaction.error);
+    });
+  }
+  return {
+    async read() {
+      try {
+        const transaction = (await open()).transaction(["meta", "documents"]);
+        const meta = transaction.objectStore("meta").get("workspace");
+        const documents = transaction.objectStore("documents").getAll();
+        await done(transaction);
+        return meta.result ? {...meta.result, documents: documents.result.sort((a, b) => b.id - a.id)} : null;
+      } catch { return null; }
+    },
+    async write(data) {
+      try {
+        const transaction = (await open()).transaction(["meta", "documents"], "readwrite");
+        const store = transaction.objectStore("documents");
+        store.clear();
+        for (const pdf of data.documents) store.put(pdf);
+        const {documents, ...meta} = data;
+        transaction.objectStore("meta").put(meta, "workspace");
+        await done(transaction);
+      } catch { /* The page still works without the cache. */ }
+    },
+    async update(pdf) {
+      try {
+        const transaction = (await open()).transaction("documents", "readwrite");
+        transaction.objectStore("documents").put(pdf);
+        await done(transaction);
+      } catch { /* Ignored; the next revision refresh corrects it. */ }
+    },
+  };
+})();
+window.workspaceCache = workspaceCache;
+let workspaceRevision = null;
+let workspaceRun = null;
+let workspaceNextRun = null;
+function applyWorkspace(data) {
+  // Avoid spreading large file libraries into function arguments (browser limit).
+  for (const [target, source] of [[projects, data.projects], [pdfs, data.documents], [people, data.people]]) {
+    target.length = 0;
+    for (const item of source) target.push(item);
+  }
+  workspaceRevision = data.revision;
+  window.workspaceLastPull = data.lastCompletedPull;
+  authorLookup = null;
+  renderApp();
+  if (state.searchQuery.trim()) scheduleAdvancedSearch();
+}
+async function fetchWorkspace(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
   try {
-    const response = await fetch(initialLoad ? "/naas/api/workspace?limit=200&current_month=true" : "/naas/api/workspace?limit=1000", { cache: "no-store", signal: controller.signal });
+    const response = await fetch(url, { cache: "no-store", signal: controller.signal });
     if (!response.ok) throw new Error("Unable to load saved repository data.");
-    const data = await response.json();
-    if (version !== workspaceLoadVersion) return;
-    if (!Array.isArray(data.projects) || !Array.isArray(data.documents) || !Array.isArray(data.people)) {
-      throw new Error("Invalid workspace response; keeping the last loaded data.");
+    return await response.json();
+  } finally { clearTimeout(timeout); }
+}
+async function fetchCompleteWorkspace(version) {
+  const data = await fetchWorkspace("/naas/api/workspace?limit=5000");
+  if (!Array.isArray(data.projects) || !Array.isArray(data.documents) || !Array.isArray(data.people)) {
+    throw new Error("Invalid workspace response; keeping the last loaded data.");
+  }
+  let cursor = data.nextBefore;
+  while (cursor) {
+    if (version !== workspaceLoadVersion) return null;
+    const batch = await fetchWorkspace(`/naas/api/workspace?limit=5000&before=${cursor}&summaries=false`);
+    if (!Array.isArray(batch.documents) || (batch.nextBefore && batch.nextBefore >= cursor)) throw new Error("Invalid file batch. Reload to retry.");
+    for (const pdf of batch.documents) data.documents.push(pdf);
+    cursor = batch.nextBefore;
+  }
+  return {projects: data.projects, documents: data.documents, people: data.people, lastCompletedPull: data.lastCompletedPull, revision: data.revision};
+}
+function showWorkspaceError(error) {
+  const message = error.name === "AbortError" ? "Loading took too long. Please try again." : error.message;
+  if (!workspaceReady) {
+    workspaceLoading.dataset.error = "true";
+    document.getElementById("workspace-loading-title").textContent = "Couldn’t load your library";
+    document.getElementById("workspace-loading-message").textContent = message;
+    document.getElementById("workspace-loading-retry").hidden = false;
+    document.getElementById("workspace-loading-dismiss").hidden = false;
+  } else {
+    showToast(message);
+  }
+}
+// First visit: show this month quickly, then the rest. Later visits open from the cache.
+async function loadWorkspaceFirstTime(version) {
+  delete workspaceLoading.dataset.error;
+  document.getElementById("workspace-loading-title").textContent = "Loading your library";
+  document.getElementById("workspace-loading-message").textContent = "Getting your repositories and files ready…";
+  document.getElementById("workspace-loading-retry").hidden = true;
+  document.getElementById("workspace-loading-dismiss").hidden = true;
+  const data = await fetchWorkspace("/naas/api/workspace?limit=200&current_month=true");
+  if (version !== workspaceLoadVersion) return;
+  if (!Array.isArray(data.projects) || !Array.isArray(data.documents) || !Array.isArray(data.people)) {
+    throw new Error("Invalid workspace response; keeping the last loaded data.");
+  }
+  window.workspacePartial = true;
+  backgroundStatus.hidden = false;
+  backgroundStatus.textContent = "First-time setup: loading the rest of your files… Search and filters currently show this month only.";
+  applyWorkspace({...data, revision: null});
+  finishWorkspaceLoading();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const complete = await fetchCompleteWorkspace(version);
+  if (!complete || version !== workspaceLoadVersion) return;
+  window.workspacePartial = false;
+  backgroundStatus.hidden = true;
+  applyWorkspace(complete);
+  await workspaceCache.write(complete);
+}
+// Overlapping requests share one follow-up run, so awaiting callers still see fresh data.
+function loadDatabaseWorkspace() {
+  if (!workspaceRun) {
+    workspaceRun = runWorkspaceLoad().finally(() => { workspaceRun = null; });
+    return workspaceRun;
+  }
+  workspaceNextRun ??= workspaceRun.then(() => {
+    workspaceNextRun = null;
+    return loadDatabaseWorkspace();
+  });
+  return workspaceNextRun;
+}
+async function runWorkspaceLoad() {
+  const version = ++workspaceLoadVersion;
+  workspaceFetching = true;
+  try {
+    if (!workspaceReady && workspaceRevision === null) {
+      const cached = await workspaceCache.read();
+      if (cached) {
+        applyWorkspace(cached);
+        finishWorkspaceLoading();
+      } else {
+        await loadWorkspaceFirstTime(version);
+        return;
+      }
     }
-    // Avoid spreading large File libraries into function arguments (browser limit).
-    for (const [target, source] of [[projects, data.projects], [pdfs, data.documents], [people, data.people]]) {
-      target.length = 0;
-      for (const item of source) target.push(item);
-    }
-    window.workspaceLastPull = data.lastCompletedPull;
-    window.workspacePartial = Boolean(data.backgroundAll || data.nextBefore);
-    backgroundStatus.hidden = !window.workspacePartial;
-    backgroundStatus.textContent = "Loading the rest of your files… Search and filters currently show loaded records only.";
-    authorLookup = null;
-    renderApp();
-    if (state.searchQuery.trim()) scheduleAdvancedSearch();
-    finishWorkspaceLoading();
-    clearTimeout(timeout);
-    // Let the first page paint before starting the remaining metadata requests.
-    await new Promise(resolve => setTimeout(resolve, 0));
-    let cursor = data.backgroundAll ? null : data.nextBefore;
-    let loadAll = Boolean(data.backgroundAll);
-    const remaining = [];
-    while (loadAll || cursor) {
-      if (version !== workspaceLoadVersion) return;
-      const batchController = new AbortController();
-      const batchTimeout = setTimeout(() => batchController.abort(), 30000);
-      let batch;
-      try {
-        const response = await fetch(`/naas/api/workspace?limit=1000${cursor ? "&before="+cursor : ""}&summaries=false`, { cache: "no-store", signal: batchController.signal });
-        if (!response.ok) throw new Error("Unable to load the remaining files. Reload to retry.");
-        batch = await response.json();
-      } finally { clearTimeout(batchTimeout); }
-      if (version !== workspaceLoadVersion) return;
-      if (!Array.isArray(batch.documents) || (cursor && batch.nextBefore && batch.nextBefore >= cursor)) throw new Error("Invalid File batch. Reload to retry.");
-      for (const pdf of batch.documents) remaining.push(pdf);
-      cursor = batch.nextBefore;
-      loadAll = false;
-      backgroundStatus.textContent = `Loading files: ${pdfs.length + remaining.length} received. Search and filters currently show the first ${pdfs.length} records only.`;
-    }
-    if (version !== workspaceLoadVersion) return;
-    if (remaining.length) {
-      const knownIds = new Set(pdfs.map(pdf => pdf.id));
-      for (const pdf of remaining) if (!knownIds.has(pdf.id)) pdfs.push(pdf);
-      window.workspacePartial = false;
-      authorLookup = null;
-      renderApp();
-      if (state.searchQuery.trim()) scheduleAdvancedSearch();
-    }
-    window.workspacePartial = false;
-    backgroundStatus.hidden = true;
+    // Cheap check: only download the library again when something changed on the server.
+    const {revision} = await fetchWorkspace("/naas/api/workspace/revision");
+    if (revision === workspaceRevision) return;
+    const complete = await fetchCompleteWorkspace(version);
+    if (!complete || version !== workspaceLoadVersion) return;
+    applyWorkspace(complete);
+    await workspaceCache.write(complete);
   } catch (error) {
     if (version === workspaceLoadVersion) {
-      const message = error.name === "AbortError" ? "Loading took too long. Please try again." : error.message;
-      if (!workspaceReady) {
-        workspaceLoading.dataset.error = "true";
-        document.getElementById("workspace-loading-title").textContent = "Couldn’t load your library";
-        document.getElementById("workspace-loading-message").textContent = message;
-        document.getElementById("workspace-loading-retry").hidden = false;
-        document.getElementById("workspace-loading-dismiss").hidden = false;
-      } else {
-        showToast(message);
-        if (window.workspacePartial) {
-          backgroundStatus.hidden = false;
-          backgroundStatus.textContent = "Only part of your library is loaded. Reload to retry loading the remaining files.";
-        }
+      showWorkspaceError(error);
+      if (window.workspacePartial) {
+        backgroundStatus.hidden = false;
+        backgroundStatus.textContent = "Only part of your library is loaded. Reload to retry loading the remaining files.";
       }
     }
   } finally {
-    clearTimeout(timeout);
-    if (version === workspaceLoadVersion) workspaceFetching = false;
+    workspaceFetching = false;
   }
 }
 void loadDatabaseWorkspace();
-window.addEventListener("focus", () => { if (!workspaceFetching) void loadDatabaseWorkspace(); });
+window.addEventListener("focus", () => void loadDatabaseWorkspace());
 document
   .querySelector("#pdf-table-body")
   .addEventListener("click", async (event) => {
@@ -116,7 +199,8 @@ document
       method: "POST",
     });
     if (response.ok) {
-      pdf.openCount = (await response.json()).open_count;
+      pdf.openCount = pdf.opens = (await response.json()).open_count;
+      void workspaceCache.update(pdf);
       renderPdfTable();
     }
   });

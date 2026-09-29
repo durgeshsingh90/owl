@@ -57,24 +57,46 @@ TIER_PHRASE, TIER_NEAR, TIER_ALL = 3, 2, 1
 NEAR_DISTANCE = 10
 
 
+class SearchIndex:
+    """Where ranked search looks: an FTS5 index over a base table's rowids."""
+
+    def __init__(self, fts, table, key, columns, weights, recency):
+        self.fts, self.table, self.key = fts, table, key
+        self.columns, self.weights, self.recency = columns, weights, recency
+
+
+# bm25 weights follow each index's column order.
+PDF_INDEX = SearchIndex(
+    "documents_fts",
+    "documents",
+    "id",
+    {"name": "pdf_name", "path": "path", "content": "pdf_text", "notes": "notes"},
+    BM25_WEIGHTS,
+    "commit_date DESC,id DESC",
+)
+CONFLUENCE_INDEX = SearchIndex(
+    "confluence_tracker_fts",
+    "confluence_tracker_pages",
+    "rowid",
+    {"name": "title", "path": "path", "content": "content", "notes": "notes"},
+    (10.0, 3.0, 1.0, 4.0),
+    "rowid DESC",
+)
+
+
 def matching_document_ids(query, fields, mode):
     """Matching document IDs, most relevant first."""
     return [row[0] for row in ranked_matches(query, fields, mode)]
 
 
-def ranked_matches(query, fields, mode):
+def ranked_matches(query, fields, mode, index=PDF_INDEX):
     """Require every term across selected fields of one document, or one phrase.
 
     Returns (id, tier) pairs, best first: the exact phrase, then every word within a
     few words of each other in one field, then every word anywhere. Each tier is
     ordered by bm25 with file names weighted highest.
     """
-    columns = {
-        "name": "pdf_name",
-        "path": "path",
-        "content": "pdf_text",
-        "notes": "notes",
-    }
+    columns = index.columns
     selected = [columns[field] for field in fields if field in columns]
     if not selected or not query.strip():
         return []
@@ -105,12 +127,12 @@ def ranked_matches(query, fields, mode):
     conditions, params = [], []
     if positive:
         conditions.append(
-            "id IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?)"
+            f"{index.key} IN (SELECT rowid FROM {index.fts} WHERE {index.fts} MATCH ?)"
         )
         params.append(expression(positive, " AND "))
     if negative:
         conditions.append(
-            "id NOT IN (SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?)"
+            f"{index.key} NOT IN (SELECT rowid FROM {index.fts} WHERE {index.fts} MATCH ?)"
         )
         params.append(expression(negative, " OR "))
     def quoted(term):
@@ -122,15 +144,16 @@ def ranked_matches(query, fields, mode):
             return [
                 (row[0], TIER_ALL)
                 for row in db.execute(
-                    "SELECT id FROM documents WHERE " + " AND ".join(conditions)
-                    + " ORDER BY commit_date DESC,id DESC",
+                    f"SELECT {index.key} FROM {index.table} WHERE " + " AND ".join(conditions)
+                    + f" ORDER BY {index.recency}",
                     params,
                 )
             ]
         ids = [
             row[0]
             for row in db.execute(
-                "SELECT id FROM documents WHERE " + " AND ".join(conditions), params
+                f"SELECT {index.key} FROM {index.table} WHERE " + " AND ".join(conditions),
+                params,
             )
         ]
         if not ids:
@@ -140,7 +163,7 @@ def ranked_matches(query, fields, mode):
             return {
                 row[0]
                 for row in db.execute(
-                    "SELECT rowid FROM documents_fts WHERE documents_fts MATCH ?",
+                    f"SELECT rowid FROM {index.fts} WHERE {index.fts} MATCH ?",
                     (expression,),
                 )
             }
@@ -149,8 +172,9 @@ def ranked_matches(query, fields, mode):
         scores = {
             row[0]: row[1]
             for row in db.execute(
-                "SELECT rowid,bm25(documents_fts,?,?,?,?,?) FROM documents_fts WHERE documents_fts MATCH ?",
-                (*BM25_WEIGHTS, params[0]),
+                f"SELECT rowid,bm25({index.fts},{','.join('?' * len(index.weights))}) "
+                f"FROM {index.fts} WHERE {index.fts} MATCH ?",
+                (*index.weights, params[0]),
             )
         }
         phrase = set(ids) if mode == "together" or len(words) < 2 else matching(

@@ -53,7 +53,7 @@ function watchCrawl(job) {
   const pause = document.querySelector("#crawl-pause");
   pause.onclick = async () => {
     pause.disabled = true;
-    try { await crawlJson(`/api/jobs/${job.id}/pause`, {}); }
+    try { await crawlJson(`/api/confluence-library/jobs/${job.id}/pause`, {}); }
     catch(error) { showToast(error.message); }
     finally { pause.disabled = false; }
   };
@@ -63,16 +63,16 @@ function watchCrawl(job) {
   resume.onclick = async () => {
     resume.disabled = true;
     try {
-      const resumed = await crawlJson(`/api/jobs/${job.id}/resume`, {});
+      const resumed = await crawlJson(`/api/confluence-library/jobs/${job.id}/resume`, {});
       watchCrawl(resumed);
     } catch (error) { resume.disabled = false; showToast(error.message); }
   };
   controls.hidden = false;
-  stop.hidden = !["queued", "running"].includes(job.status);
+  stop.hidden = true; // A Confluence check finishes on its own.
   stop.disabled = false;
   stop.onclick = async () => {
     stop.disabled = true;
-    try { await crawlJson(`/api/jobs/${job.id}/cancel`, {}); }
+    try { await crawlJson(`/api/confluence-library/jobs/${job.id}/cancel`, {}); }
     catch (error) { showToast(error.message); }
     finally { stop.disabled = false; }
   };
@@ -83,11 +83,11 @@ function watchCrawl(job) {
   let lastRecovered = -1;
   async function poll() {
     try {
-      const current = await crawlJson(`/api/jobs/${job.id}`);
+      const current = await crawlJson(`/api/confluence-library/jobs/${job.id}`);
       const running = ["queued", "running"].includes(current.status);
       const paused = current.status === "paused";
       pullProgress.active = running || paused;
-      pause.hidden = !running;
+      pause.hidden = true;
       const elapsed = running && current.started_at ? Math.max(current.elapsed_seconds || 0, (Date.now() - Date.parse(current.started_at)) / 1000 - (current.paused_seconds || 0)) : current.elapsed_seconds;
       const eta = current.eta_seconds == null ? null : Math.max(current.eta_seconds ? 1 : 0, current.eta_seconds - (current.eta_updated_at ? (Date.now() - Date.parse(current.eta_updated_at)) / 1000 : 0));
       document.querySelector("#crawl-eta").textContent = paused ? "ETA paused" : current.eta_seconds == null ? (running ? "ETA calculating…" : "") : `ETA ${formatEta(eta)}`;
@@ -98,14 +98,14 @@ function watchCrawl(job) {
       const progress = document.querySelector("#crawl-percentage");
       document.querySelector("#crawl-repository-count").textContent = `${doneRepos}/${totalRepos}`;
       progress.textContent = `${percentage}%`;
-      progress.title = `${doneRepos}/${totalRepos} repositories finished (including failures and empty repositories)`;
-      progress.setAttribute("aria-label", `${percentage}% complete: ${doneRepos} of ${totalRepos} repositories finished`);
-      stop.hidden = !running && !paused;
+      progress.title = `${doneRepos}/${totalRepos} pages checked`;
+      progress.setAttribute("aria-label", `${percentage}% complete: ${doneRepos} of ${totalRepos} pages checked`);
+      stop.hidden = true;
       resume.hidden = !paused && !canResumeCrawl(current);
       resume.title = paused ? "Resume sync" : "Resume interrupted sync";
       resume.setAttribute("aria-label", resume.title);
       if (current.bitbucket_connected && (["queued", "running"].includes(current.status) || ["queued", "running"].includes(job.status))) {
-        setConnectionStatus("connected", "Bitbucket responded successfully. Background indexing is running.");
+        setConnectionStatus("connected", "Confluence responded successfully. The check is running.");
       }
       updatePullSummary(current.status.replaceAll("_", " "));
       document.querySelector("#repository-pull-new").textContent = current.new;
@@ -149,7 +149,7 @@ function watchCrawl(job) {
             window.workspaceLastPull = current.completed_at;
             const label = document.querySelector("#shared-last-pull");
             label.hidden = false;
-            label.textContent = `Last Git pull: ${formatLastPull(current.completed_at)} · 0 days ago`;
+            label.textContent = `Last check: ${formatLastPull(current.completed_at)} · 0 days ago`;
           }
           updatePullSummary(current.status === "succeeded" ? "Background sync complete · refresh to see updates" : "Background sync will retry in two hours");
         }
@@ -171,19 +171,19 @@ async function startPullPreview(targetProjects = projects) {
   try {
     const selected = selectedRepositories();
     const scope = selected.length ? {repository_ids: selected.map(repo => Number(repo.id))} : {project_ids: targetProjects.map(project => Number(project.id))};
-    const job = await crawlJson("/api/crawl", scope);
+    const job = await crawlJson("/api/confluence-library/crawl", scope);
     watchCrawl(job);
   } catch (error) { pullProgress.active = false; updateSelectionHeader(); showToast(error.message); }
 }
 async function reconnectCrawl() {
   if (pullProgress.active) return;
   try {
-    const {job} = await crawlJson("/api/jobs/latest");
+    const {job} = await crawlJson("/api/confluence-library/jobs/latest");
     if (job && job.id !== pullProgress.dismissedId && job.id !== pullProgress.lastSeenId) {
       pullProgress.lastSeenId = job.id;
       watchCrawl(job);
     }
-  } catch (error) { updatePullSummary(`Cannot load crawl status: ${error.message}`); }
+  } catch (error) { updatePullSummary(`Cannot load check status: ${error.message}`); }
 }
 window.addEventListener("load", reconnectCrawl);
 window.addEventListener("focus", reconnectCrawl);

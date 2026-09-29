@@ -175,27 +175,36 @@ pages or adding them to the saved bookmarks.
 
 ### Confluence Tracker
 
-Open **Confluence Tracker** on the OWL home screen, or `/confluence-tracker/`.
-It shares Bookmark Manager's Confluence connection. Add a root page URL or numeric
-page ID. Each scan discovers all descendant IDs first (including pagination and
-the direct-child fallback), then downloads page content and metadata sequentially.
-The initial scan establishes the baseline. Subsequent scans flag new, changed,
-returned, or no-longer-listed pages, retaining cached content and change history.
-An absent page may have moved or become inaccessible; it is not treated as deleted.
+Open **Confluence Tracker** on the OWL home screen, or `/confluence-tracker/`. It uses
+the Bitbucket explorer interface (sidebar, timeline list, people, search, notes,
+details, activity and failures) over Confluence pages, and shares Bookmark Manager's
+Confluence connection (the settings button edits it).
 
-Each root syncs automatically once every 24 hours after a successful run. A failed
-or incomplete run retries after two hours, repeatedly until successful. The next
-daily run is then scheduled 24 hours after that success. SQLite stores the schedule
-and a worker lease prevents overlapping runs. **Check now** starts an explicit
-manual check. OWL's backend must be running; overdue work resumes on startup.
+Paste any Confluence URL in **New**: a page link in any form (`viewpage.action?pageId=`,
+`/spaces/KEY/pages/ID/…`, `/display/KEY/Title`, `?spaceKey=&title=`), a space home
+(`/display/KEY`, `/spaces/KEY/overview`), a short link (`/x/…`) or a page ID. OWL walks
+up to the page's **top-most parent** (usually the space home) and tracks that page and
+everything below it. Each check discovers every descendant page ID first (including
+pagination and the direct-child fallback), then downloads each page sequentially and
+saves its title, breadcrumb, creator and created date, last editor and updated date,
+version and version comment, space, text and labels.
 
-The sidebar filters by page subtree. The list supports search, unreviewed changes,
-updated/created/detected date selection, relative ranges, month/year archives, and
-inclusive custom date ranges in the browser's local timezone. Page titles open
-Confluence in a new tab; open counts record clicks through this app, not global
-Confluence analytics. **Details** shows returned metadata, cached page text, the
-text before the latest change, and the latest 50 change records. Review clears
-only changes already received by the browser. Notifications are in-app badges.
+Mapping to the Bitbucket explorer: a tracked tree is a project, each top-level page
+below it is a section (repository; loose top-level pages sit in the tree's own
+section), the breadcrumb is the path, and the commit date is the later of created and
+updated. The list shows pages created **or** updated in the last two years, newest
+first; search, the sidebar tree and the details dialog still cover every page. Each
+section in the sidebar expands into its folder and page tree; choosing a folder lists
+that page and everything below it. The version column opens the page's version history
+from Confluence. Notes are saved in the database and searchable. Search uses the same
+relevance ranking as Bitbucket.
+
+The first check establishes the baseline. Later checks flag new, updated, returned,
+or no-longer-listed pages with badges; **Unreviewed only** filters to them and **Mark
+changes reviewed** clears them (for the selected tree, or all). Each tree checks
+itself every 24 hours after a successful run and retries failed runs after two hours;
+the sync button checks now. A check cannot be paused or stopped. **Stop tracking**
+(select a tree, then the delete button) removes the tree's saved data from OWL only.
 
 Tracker validation uses isolated databases and mocked Confluence responses. A live
 corporate-server sync requires your network/VPN and configured connection.

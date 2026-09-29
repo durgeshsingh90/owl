@@ -61,6 +61,17 @@ def save_bookmarks(value: BookmarkWorkspace):
     return {"ok": True, "revision": value.revision + 1}
 
 
+def current_revision(db):
+    row = db.execute("SELECT token,revision FROM workspace_revision WHERE id=1").fetchone()
+    return f"{row['token']}:{row['revision']}"
+
+
+@router.get("/workspace/revision")
+def workspace_revision():
+    with connection() as db:
+        return {"revision": current_revision(db)}
+
+
 @router.get("/workspace")
 def workspace(
     limit: int | None = Query(default=None, ge=1, le=5000),
@@ -70,6 +81,7 @@ def workspace(
 ):
     month = datetime.now(timezone.utc).strftime("%Y-%m") if current_month else None
     with connection() as db:
+        revision = current_revision(db)
         completed = db.execute(
             "SELECT last_completed_at FROM sync_metadata WHERE id=1"
         ).fetchone()
@@ -174,4 +186,5 @@ def workspace(
         "nextBefore": documents[-1]["id"] if has_more else None,
         "backgroundAll": current_month,
         "lastCompletedPull": completed[0] if completed else None,
+        "revision": revision,
     }

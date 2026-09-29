@@ -1,0 +1,160 @@
+/* Confluence Tracker additions to the Bitbucket explorer styles. */
+
+/* Folder and page tree under each section. */
+.repository-row.has-tree,
+.repository-row {
+  display: flex;
+  align-items: stretch;
+}
+.repository-row > .repository-button {
+  flex: 1;
+  min-width: 0;
+}
+.tree-toggle,
+.tree-toggle-space {
+  flex: 0 0 18px;
+  width: 18px;
+}
+.tree-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--text-soft, var(--text-muted));
+  cursor: pointer;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  align-self: center;
+  height: 24px;
+  border-radius: 4px;
+}
+.tree-toggle:hover {
+  background: var(--surface-hover);
+}
+.tree-toggle:hover {
+  color: var(--blue);
+}
+.repository-row > .tree-toggle {
+  flex-basis: 20px;
+  width: 20px;
+}
+.page-tree {
+  list-style: none;
+  margin: 0 0 4px;
+  padding: 0;
+}
+.page-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: calc(var(--depth, 1) * 12px);
+  border-radius: 6px;
+}
+.page-tree-row:hover {
+  background: var(--surface-hover);
+}
+.page-tree-row.active {
+  background: var(--blue-soft);
+}
+.page-tree-node {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 6px 4px 2px;
+  cursor: pointer;
+}
+.page-tree-row.active .page-tree-node {
+  color: var(--blue);
+  font-weight: 600;
+}
+.page-tree-icon {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+.page-tree-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.page-tree-node small {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+.page-tree-more {
+  padding: 4px 6px 6px calc(var(--depth, 1) * 12px + 20px);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* Table cells unique to Confluence pages. */
+.created-cell small {
+  display: block;
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-top: 2px;
+}
+.change-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid currentColor;
+  font-size: 10.5px;
+  font-weight: 700;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.change-badge.new,
+.change-badge.returned {
+  color: var(--green);
+}
+.change-badge.updated {
+  color: var(--blue);
+}
+.change-badge.missing {
+  color: #b7791f;
+}
+
+/* Review controls in the list header. */
+.review-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.review-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#review-changes:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* Settings dialog: SSL checkbox. */
+.settings-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 14px;
+  font-size: 13px;
+}
+
+/* Version history list. */
+.commit-history-dialog .history-list li p {
+  margin: 4px 0;
+}

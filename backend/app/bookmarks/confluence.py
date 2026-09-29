@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
-from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urljoin, urlsplit, urlunsplit
 
 import httpx
 from app.core.config import atomic_private, config_dir
@@ -259,6 +259,75 @@ async def identity_from_url(settings, url):
                     ids.extend(named_ids(canonical))
             return list(dict.fromkeys(ids))
     raise ValueError("Confluence URL exceeded the redirect limit.")
+
+
+def decode_short_link(code):
+    """Confluence /x/<code> links are little-endian page IDs in URL-safe base64."""
+    try:
+        return str(
+            int.from_bytes(
+                base64.b64decode(code + "=" * (-len(code) % 4), altchars=b"-_", validate=True),
+                "little",
+            )
+        )
+    except ValueError:
+        raise ValueError("Invalid Confluence short link.") from None
+
+
+async def resolve_page_id(settings, value):
+    """Page ID for a page ID, any page URL form, a short link or a space URL (its home page)."""
+    target = value.strip()
+    if re.fullmatch(r"[0-9]{1,20}", target) and int(target):
+        return str(int(target))
+    if not belongs_to_server(settings, target):
+        raise ValueError("Use a page on the configured Confluence server.")
+    parsed = urlsplit(target)
+    relative = parsed.path[len(urlsplit(settings.base_url).path.rstrip("/")) :]
+    query = {key.lower(): item for key, item in parse_qsl(parsed.query)}
+    ids = list(dict.fromkeys(named_ids(target)))
+    if len(ids) == 1:
+        return ids[0]
+    short = re.fullmatch(r"/x/([A-Za-z0-9_-]+)/?", relative)
+    if short:
+        return decode_short_link(short[1])
+    space = title = None
+    if query.get("spacekey") and query.get("title"):
+        space, title = query["spacekey"], query["title"]
+    named = re.fullmatch(r"/display/([^/]+)/(.+?)/?", relative)
+    if named:
+        space, title = unquote(named[1]), unquote(named[2].replace("+", " "))
+    if space and title:
+        data = await get(
+            settings, "content", {"spaceKey": space, "title": title, "type": "page", "limit": 2}
+        )
+        matches = data.get("results", [])
+        if len(matches) == 1:
+            return str(matches[0]["id"])
+        raise ValueError(f'No single page titled "{title}" in space {space}.')
+    key = query.get("key") if relative.endswith("/viewspace.action") else None
+    home = re.fullmatch(r"/(?:display|spaces)/([^/]+)(?:/overview)?/?", relative)
+    key = key or (unquote(home[1]) if home else None)
+    if key:
+        data = await get(settings, "space/" + key, {"expand": "homepage"})
+        page = (data.get("homepage") or {}).get("id")
+        if not page:
+            raise ValueError(f"Space {key} has no home page.")
+        return str(page)
+    found = await identity_from_url(settings, target)
+    if len(found) == 1:
+        return str(found[0])
+    raise ValueError(
+        "Could not find a Confluence page for this URL. Copy the page link from your browser."
+    )
+
+
+async def top_most_page(settings, page_id):
+    """The highest ancestor of a page (usually the space home page), or the page itself."""
+    data = await get(settings, "content/" + str(page_id), {"expand": "ancestors"})
+    if data.get("type") not in (None, "page"):
+        raise ValueError("This Confluence link is not a page.")
+    ancestors = data.get("ancestors") or []
+    return str(ancestors[0]["id"] if ancestors else data["id"])
 
 
 async def resolved_content(settings, url, page_id):
