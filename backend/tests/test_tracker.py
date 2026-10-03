@@ -214,3 +214,31 @@ class TrackerTests(unittest.IsolatedAsyncioTestCase):
             )
         with self.assertRaises(ValueError):
             await service.add_root("https://wiki.test/display/ENG/Missing+Page")
+
+
+class DiscoveryFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_restricted_branch_is_skipped_during_child_walk(self):
+        from app.bookmarks.discovery import discover_pages
+
+        settings = confluence.ConfluenceSettings(base_url="https://wiki.test", token="secret")
+        children = {"1": ["2", "3"], "2": ["4"], "4": [], "5": []}
+
+        async def get(settings, path, params=None):
+            if path.endswith("/descendant/page"):
+                raise confluence.ConfluenceRequestError(500, "broken")
+            page = path.split("/")[1]
+            if page == "3":  # restricted: listed by its parent, but its children are hidden
+                raise confluence.ConfluenceRequestError(403, "denied")
+            return {"results": [{"id": child} for child in children.get(page, [])]}
+
+        with patch.object(confluence, "get", side_effect=get):
+            self.assertEqual(await discover_pages(settings, ["1"]), ["1", "2", "3", "4"])
+
+        async def failing(settings, path, params=None):
+            if path.endswith("/descendant/page"):
+                raise confluence.ConfluenceRequestError(500, "broken")
+            raise confluence.ConfluenceRequestError(401, "bad token")
+
+        with patch.object(confluence, "get", side_effect=failing):
+            with self.assertRaises(confluence.ConfluenceRequestError):
+                await discover_pages(settings, ["1"])

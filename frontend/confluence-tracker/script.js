@@ -658,7 +658,9 @@ function renderPdfTable() {
     const totalPdfs = selectedRepos.reduce((sum, repo) => sum + (Number(repo.pdfCount) || 0), 0);
     headingCount.textContent = state.selectedFolder
       ? `${formatNumber(filteredPdfs.length)} ${filteredPdfs.length === 1 ? "page" : "pages"} in this folder`
-      : `${formatNumber(state.unreviewedOnly ? filteredPdfs.length : totalPdfs)} pages · ${formatNumber(selectedRepos.length)} ${selectedRepos.length === 1 ? "section" : "sections"}`;
+      : state.unreviewedOnly
+        ? `${formatNumber(filteredPdfs.length)} unreviewed ${filteredPdfs.length === 1 ? "page" : "pages"}`
+        : `${formatNumber(totalPdfs)} pages · ${formatNumber(selectedRepos.length)} ${selectedRepos.length === 1 ? "section" : "sections"}`;
   }
   if (window.workspacePartial && hasSearch) headingCount.textContent += " · partial results";
   const commitRange = getActiveCommitRange();

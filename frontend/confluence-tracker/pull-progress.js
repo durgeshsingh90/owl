@@ -107,7 +107,10 @@ function watchCrawl(job) {
       if (current.bitbucket_connected && (["queued", "running"].includes(current.status) || ["queued", "running"].includes(job.status))) {
         setConnectionStatus("connected", "Confluence responded successfully. The check is running.");
       }
-      updatePullSummary(current.status.replaceAll("_", " "));
+      // Say why a check failed (for example no VPN or an expired token), not just that it did.
+      const reason = current.status === "failed" ? (current.roots || []).find(root => root.error)?.error : "";
+      updatePullSummary(reason ? `Check failed: ${reason}` : current.status.replaceAll("_", " "));
+      document.querySelector("#repository-pull-status").title = reason || "";
       document.querySelector("#repository-pull-new").textContent = current.new;
       const unchangedCount = Number(current.unchanged) || 0;
       const failedCount = (Number(current.failed) || 0) + (Number(current.repositories_failed) || 0);

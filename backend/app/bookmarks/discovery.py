@@ -72,6 +72,13 @@ async def discover_pages(settings, root_ids, space_key="", progress=None):
                 if parent in traversed:
                     continue
                 traversed.add(parent)
-                children = await discover("content/" + parent + "/child/page", {})
+                try:
+                    children = await discover("content/" + parent + "/child/page", {})
+                except confluence.ConfluenceRequestError as child_error:
+                    # A restricted or just-deleted page hides its own branch only; keep
+                    # walking the rest of the tree. Its download is reported separately.
+                    if child_error.upstream_status not in {403, 404}:
+                        raise
+                    continue
                 pending.extend(child for child in children if child not in traversed)
     return list(page_ids)
