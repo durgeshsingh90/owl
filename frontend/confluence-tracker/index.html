@@ -263,6 +263,7 @@
               <p id="selection-description">
                 Pages created or updated in the last 2 years
               </p>
+              <p class="owl-auto-refresh" data-auto-refresh="tracker"></p>
             </div>
             <div
               class="repository-pull-summary"
@@ -992,7 +993,7 @@
         <ul id="failed-folders-list" style="overflow-wrap:anywhere"></ul>
       </section>
       <p id="failed-pdfs-status" role="status"></p>
-      <p>Failed pages are retried automatically two hours after a check. Retrying now re-checks their trees.</p>
+      <p>Failed pages are retried automatically one hour after a check. Retrying now re-checks their trees.</p>
       <div style="overflow:auto"><table style="width:100%;text-align:left"><thead><tr><th>Tree</th><th>Page ID</th><th>Page</th><th>Error</th></tr></thead><tbody id="failed-pdfs-rows"></tbody></table></div>
       <button type="button" id="failed-pdfs-prev">Previous</button>
       <button type="button" id="failed-pdfs-next">Next</button>
@@ -1027,5 +1028,6 @@
     <script src="repository-delete.js?v=confluence-1"></script>
     <script src="hard-retry.js?v=confluence-1"></script>
     <script src="failed-pdfs.js?v=confluence-1"></script>
+    <script src="/home/auto-refresh.js?v=1"></script>
   </body>
 </html>

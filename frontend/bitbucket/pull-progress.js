@@ -151,7 +151,7 @@ function watchCrawl(job) {
             label.hidden = false;
             label.textContent = `Last Git pull: ${formatLastPull(current.completed_at)} · 0 days ago`;
           }
-          updatePullSummary(current.status === "succeeded" ? "Background sync complete · refresh to see updates" : "Background sync will retry in two hours");
+          updatePullSummary(current.status === "succeeded" ? "Background sync complete · refresh to see updates" : "Background sync will retry in one hour");
         }
         updateSelectionHeader();
         return;

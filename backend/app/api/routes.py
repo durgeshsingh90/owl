@@ -218,6 +218,13 @@ def activity_log(limit: int = Query(25, ge=1, le=100), offset: int = Query(0, ge
     return {"total": total, "items": [json.loads(row[0]) for row in rows]}
 
 
+@router.get("/refresh-schedule")
+def refresh_schedule(request: Request):
+    from app.pdfs.schedule import status
+
+    return status(request.app.state.jobs)
+
+
 @router.get("/jobs/latest")
 def latest_job():
     with connection() as db:

@@ -1,4 +1,4 @@
-"""Durable background Bitbucket sync: three weekdays, retry failures in two hours."""
+"""Durable background Bitbucket sync: once a day, retry failures every hour until one succeeds."""
 
 import asyncio
 import json
@@ -10,12 +10,8 @@ from app.core.logging import error_details, event
 from app.pdfs.client import BitbucketClient
 
 
-def after_weekdays(value, count=3):
-    while count:
-        value += timedelta(days=1)
-        if value.weekday() < 5:
-            count -= 1
-    return value
+INTERVAL = timedelta(days=1)
+RETRY = timedelta(hours=1)
 
 
 def setup():
@@ -24,6 +20,20 @@ def setup():
             server TEXT PRIMARY KEY, next_attempt TEXT NOT NULL,
             job_id TEXT, last_success TEXT, error TEXT NOT NULL DEFAULT ''
         )""")
+        # Bring a schedule saved under longer intervals forward to the current ones.
+        for row in db.execute(
+            "SELECT * FROM bitbucket_sync_schedule WHERE job_id IS NULL"
+        ).fetchall():
+            due = datetime.fromisoformat(row["next_attempt"])
+            if row["error"] or not row["last_success"]:
+                limit = datetime.now(timezone.utc) + RETRY
+            else:
+                limit = datetime.fromisoformat(row["last_success"]) + INTERVAL
+            if due > limit:
+                db.execute(
+                    "UPDATE bitbucket_sync_schedule SET next_attempt=? WHERE server=?",
+                    (limit.isoformat(), row["server"]),
+                )
 
 
 async def run_due(jobs, now=None):
@@ -54,7 +64,7 @@ async def run_due(jobs, now=None):
             )
             db.execute(
                 "INSERT INTO bitbucket_sync_schedule(server,next_attempt) VALUES(?,?)",
-                (server, after_weekdays(baseline).isoformat()),
+                (server, (baseline + INTERVAL).isoformat()),
             )
             row = db.execute(
                 "SELECT * FROM bitbucket_sync_schedule WHERE server=?", (server,)
@@ -78,7 +88,7 @@ async def run_due(jobs, now=None):
                 else now
             )
             next_attempt = (
-                after_weekdays(completed) if success else completed + timedelta(hours=2)
+                completed + (INTERVAL if success else RETRY)
             )
             db.execute(
                 "UPDATE bitbucket_sync_schedule SET job_id=NULL,next_attempt=?,last_success=CASE WHEN ? THEN ? ELSE last_success END,error=? WHERE server=?",
@@ -88,7 +98,7 @@ async def run_due(jobs, now=None):
                     completed.isoformat(),
                     ""
                     if success
-                    else "Sync did not complete successfully. Retrying in two hours.",
+                    else "Sync did not complete successfully. Retrying in one hour.",
                     server,
                 ),
             )
@@ -115,13 +125,74 @@ async def run_due(jobs, now=None):
             db.execute(
                 "UPDATE bitbucket_sync_schedule SET next_attempt=?,error=? WHERE server=?",
                 (
-                    (now + timedelta(hours=2)).isoformat(),
-                    "Connection or sync failed. Retrying in two hours.",
+                    (now + RETRY).isoformat(),
+                    "Connection or sync failed. Retrying in one hour.",
                     server,
                 ),
             )
     finally:
         await client.close()
+
+
+def status(jobs):
+    """Automatic refresh state for this library, in the shape every OWL app shares."""
+    state = {
+        "status": "not_configured",
+        "next_run": None,
+        "last_success": None,
+        "last_attempt": None,
+        "message": "",
+        "completed": 0,
+        "total": 0,
+        "failed": 0,
+        "eta_seconds": None,
+        "interval_hours": INTERVAL.total_seconds() / 3600,
+        "retry_hours": RETRY.total_seconds() / 3600,
+    }
+    try:
+        server = load_settings().base_url
+    except ValueError:
+        state["message"] = "Bitbucket is not connected. Add a connection in Settings."
+        return state
+    with connection() as db:
+        if not db.execute(
+            "SELECT 1 FROM tracked_projects WHERE server=? LIMIT 1", (server,)
+        ).fetchone():
+            state["status"] = "idle"
+            state["message"] = "Add a repository to start automatic refreshes."
+            return state
+        row = db.execute(
+            "SELECT * FROM bitbucket_sync_schedule WHERE server=?", (server,)
+        ).fetchone()
+        job = (
+            db.execute(
+                "SELECT status,progress FROM jobs WHERE id=?", (row["job_id"],)
+            ).fetchone()
+            if row and row["job_id"]
+            else None
+        )
+
+    def epoch(value):
+        return datetime.fromisoformat(value).timestamp() if value else None
+
+    state["status"] = "scheduled"
+    if row:
+        state["next_run"] = epoch(row["next_attempt"])
+        state["last_success"] = epoch(row["last_success"])
+        state["message"] = row["error"]
+        if row["error"]:
+            state["status"] = "retrying"
+    current = jobs.current if jobs.active() else None
+    if job and job["status"] in {"queued", "running", "paused"} or current:
+        progress = current or json.loads(job["progress"])
+        state["status"] = "running"
+        state["message"] = ""
+        state["last_attempt"] = epoch(progress.get("started_at"))
+        state["completed"] = progress.get("processed") or 0
+        state["total"] = progress.get("found") or 0
+        state["failed"] = progress.get("failed") or 0
+        state["eta_seconds"] = progress.get("eta_seconds")
+    return state
 
 
 async def run_scheduler(jobs):

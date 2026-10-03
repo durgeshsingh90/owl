@@ -37,12 +37,24 @@ async def lifespan(app):
     refresh_task = asyncio.create_task(run_scheduler())
     tracker_task = asyncio.create_task(run_tracker_scheduler())
     bitbucket_task = asyncio.create_task(run_bitbucket_scheduler(app.state.jobs))
+    # NAAS and Network Automation refresh on the same daily schedule, each in its own
+    # library: a task copies the library selection active when it is created.
+    library_tasks = []
+    for name, sub_app in text_apps.items():
+        token = library.set(name)
+        try:
+            library_tasks.append(
+                asyncio.create_task(run_bitbucket_scheduler(sub_app.state.jobs))
+            )
+        finally:
+            library.reset(token)
     yield
-    bitbucket_task.cancel()
-    try:
-        await bitbucket_task
-    except asyncio.CancelledError:
-        pass
+    for task in (bitbucket_task, *library_tasks):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     refresh_task.cancel()
     try:
         await refresh_task

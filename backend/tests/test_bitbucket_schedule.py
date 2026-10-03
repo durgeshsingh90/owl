@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.core.config import Settings, parse_target, save_settings
 from app.core.database import connection, initialize
-from app.pdfs.schedule import after_weekdays, run_due, setup
+from app.pdfs.schedule import INTERVAL, RETRY, run_due, setup, status
 
 
 class ScheduleTests(unittest.IsolatedAsyncioTestCase):
@@ -70,26 +70,28 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
             "example",
         )
 
-    async def test_connection_failure_retry_success_and_weekends(self):
-        self.assertEqual(after_weekdays(self.now), self.now + timedelta(days=5))
+    async def test_daily_refresh_retries_hourly_until_success(self):
+        self.assertEqual((INTERVAL, RETRY), (timedelta(days=1), timedelta(hours=1)))
         client = AsyncMock()
         with patch("app.pdfs.schedule.BitbucketClient", return_value=client):
             await run_due(self.jobs, self.now)
             client.test.assert_not_awaited()
-            due = after_weekdays(self.now)
+            due = self.now + timedelta(days=1)
             client.test.side_effect = ValueError("offline")
             await run_due(self.jobs, due)
             self.assertEqual(self.jobs.started, 0)
             with connection() as db:
                 row = db.execute("SELECT * FROM bitbucket_sync_schedule").fetchone()
             self.assertEqual(
-                row["next_attempt"], (due + timedelta(hours=2)).isoformat()
+                row["next_attempt"], (due + timedelta(hours=1)).isoformat()
             )
-            await run_due(self.jobs, due + timedelta(hours=1))
+            self.assertEqual(status(self.jobs)["status"], "retrying")
+            await run_due(self.jobs, due + timedelta(minutes=59))
             self.assertEqual(client.test.await_count, 1)
             client.test.side_effect = None
-            await run_due(self.jobs, due + timedelta(hours=2))
+            await run_due(self.jobs, due + timedelta(hours=1))
             self.assertEqual(self.jobs.started, 1)
+            self.assertEqual(status(self.jobs)["status"], "running")
             self.assertTrue(self.jobs.current["background"])
             await run_due(self.jobs, due + timedelta(hours=3))
             self.assertEqual(self.jobs.started, 1)
@@ -99,7 +101,12 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
             with connection() as db:
                 row = db.execute("SELECT * FROM bitbucket_sync_schedule").fetchone()
             self.assertEqual(row["last_success"], completed.isoformat())
-            self.assertEqual(row["next_attempt"], after_weekdays(completed).isoformat())
+            self.assertEqual(
+                row["next_attempt"], (completed + timedelta(days=1)).isoformat()
+            )
+            state = status(self.jobs)
+            self.assertEqual(state["status"], "scheduled")
+            self.assertEqual(state["last_success"], completed.timestamp())
 
     async def test_partial_failure_and_restart_retry_without_overlap(self):
         with connection() as db:
@@ -121,7 +128,7 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
                 row = db.execute("SELECT * FROM bitbucket_sync_schedule").fetchone()
             self.assertIsNone(row["last_success"])
             self.assertEqual(
-                row["next_attempt"], (self.now + timedelta(hours=2)).isoformat()
+                row["next_attempt"], (self.now + timedelta(hours=1)).isoformat()
             )
 
 

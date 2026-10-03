@@ -132,7 +132,7 @@ function watchCrawl(job) {
         pullProgress.repositories = new Map(Object.values(current.repository_statuses || {}).map(repo =>
           [JSON.stringify([String(repo.project_id), repo.repo]), repo.status]));
       }
-      if (!state.searchQuery.trim() && (!lastWorkspaceRefresh || Date.now() - lastWorkspaceRefresh >= LIVE_REFRESH_MS) && (statusesChanged || current.processed !== lastProcessed || current.repositories !== lastRepositories || (current.retry_recovered || 0) !== lastRecovered)) {
+      if (!current.background && !state.searchQuery.trim() && (!lastWorkspaceRefresh || Date.now() - lastWorkspaceRefresh >= LIVE_REFRESH_MS) && (statusesChanged || current.processed !== lastProcessed || current.repositories !== lastRepositories || (current.retry_recovered || 0) !== lastRecovered)) {
         lastWorkspaceRefresh = Date.now();
         lastRecovered = current.retry_recovered || 0;
         lastProcessed = current.processed;
@@ -143,7 +143,16 @@ function watchCrawl(job) {
         pullProgress.active = false;
         window.dispatchEvent(new Event("owl-crawl-finished"));
         pullProgress.jobId = null;
-        await loadDatabaseWorkspace();
+        if (!current.background) await loadDatabaseWorkspace();
+        else {
+          if (current.status === "succeeded") {
+            window.workspaceLastPull = current.completed_at;
+            const label = document.querySelector("#shared-last-pull");
+            label.hidden = false;
+            label.textContent = `Last Git pull: ${formatLastPull(current.completed_at)} · 0 days ago`;
+          }
+          updatePullSummary(current.status === "succeeded" ? "Background sync complete · refresh to see updates" : "Background sync will retry in one hour");
+        }
         updateSelectionHeader();
         return;
       }

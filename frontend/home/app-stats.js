@@ -145,7 +145,7 @@
         ["Unreviewed changes", unread, unread ? "Waiting for review" : "All caught up"],
         ["Download failures", failed, failed ? "Retried automatically" : "None"],
         ["Last successful sync", lastSuccess ? when(lastSuccess) : "Never", lastSuccess ? day(new Date(lastSuccess).toISOString()) : "Waiting for the first sync"],
-        ["Next automatic check", Number.isFinite(nextRun) ? (nextRun * 1000 <= Date.now() ? "Due now" : new Date(nextRun * 1000).toLocaleString(undefined, {dateStyle: "medium", timeStyle: "short"})) : "Shortly", "Daily, retry after 2 hours"],
+        ["Next automatic check", Number.isFinite(nextRun) ? (nextRun * 1000 <= Date.now() ? "Due now" : new Date(nextRun * 1000).toLocaleString(undefined, {dateStyle: "medium", timeStyle: "short"})) : "Shortly", "Daily, retry every hour after a failure"],
       ]) + `<section class="analytics">${[
         panel("Tracked roots", "Pages and changes", rows(roots.map(root => [root.title, `${labels[root.status] || root.status || ""} · last sync ${root.last_success ? when(Date.parse(root.last_success) || Number(root.last_success)) : "never"}`, `${plural(pageCount(root), "page")}${root.unread ? ` · ${number(root.unread)} new` : ""}`]), "No roots.")),
         panel("Unreviewed changes by root", "Most first", bars(roots.filter(root => root.unread).map(root => [root.title, root.unread]).sort((a, b) => b[1] - a[1]), "No unreviewed changes.")),

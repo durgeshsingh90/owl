@@ -1,4 +1,4 @@
-"""Durable weekly refresh of saved and downloaded Confluence pages."""
+"""Durable daily refresh of saved and downloaded Confluence pages."""
 
 import asyncio
 import json
@@ -12,8 +12,8 @@ from app.core.database import connection
 from app.core.logging import error_details, event
 from fastapi import HTTPException
 
-WEEK = 7 * 24 * 60 * 60
-RETRY = 2 * 60 * 60
+DAY = 24 * 60 * 60
+RETRY = 60 * 60
 LEASE = 10 * 60
 
 
@@ -27,6 +27,8 @@ def status():
         ).fetchone()[0]
     row.pop("owner")
     row.pop("lease_until")
+    row["interval_hours"] = DAY / 3600
+    row["retry_hours"] = RETRY / 3600
     return row
 
 
@@ -50,7 +52,7 @@ def finish(owner, *, success, message=""):
             "last_success=CASE WHEN ? THEN ? ELSE last_success END,owner=NULL,lease_until=0 "
             "WHERE id=1 AND owner=?",
             (
-                now + (WEEK if success else RETRY),
+                now + (DAY if success else RETRY),
                 "scheduled" if success else "retrying",
                 message,
                 success,
@@ -203,11 +205,11 @@ async def run_due():
         finish(
             owner,
             success=not failed,
-            message=f"{failed} pages failed. Retrying in two hours." if failed else "",
+            message=f"{failed} pages failed. Retrying in one hour." if failed else "",
         )
     except asyncio.CancelledError:
         finish(
-            owner, success=False, message="Update interrupted. Retrying in two hours."
+            owner, success=False, message="Update interrupted. Retrying in one hour."
         )
         raise
     except Exception as error:  # noqa: BLE001 - persist background failure and keep retries alive
@@ -215,11 +217,23 @@ async def run_due():
         finish(
             owner,
             success=False,
-            message="Confluence connection or update failed. Check connection settings and VPN. Retrying in two hours.",
+            message="Confluence connection or update failed. Check connection settings and VPN. Retrying in one hour.",
+        )
+
+
+def apply_intervals():
+    """Bring a schedule saved under longer intervals forward to the current ones."""
+    with connection() as db:
+        db.execute(
+            "UPDATE bookmark_refresh_schedule SET next_run=MIN(next_run,"
+            "CASE WHEN status='retrying' THEN COALESCE(last_attempt,0)+? "
+            "ELSE COALESCE(last_success,0)+? END) WHERE id=1 AND owner IS NULL",
+            (RETRY, DAY),
         )
 
 
 async def run_scheduler():
+    apply_intervals()
     while True:
         try:
             await run_due()

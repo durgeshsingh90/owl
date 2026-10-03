@@ -32,7 +32,12 @@ def roots():
     for row in rows:
         row.pop("owner")
         row.pop("lease_until")
-    return {"roots": rows, "interval_hours": 24, "retry_hours": 2}
+    return {"roots": rows, "interval_hours": service.DAY / 3600, "retry_hours": service.RETRY / 3600}
+
+
+@router.get("/refresh-schedule")
+def refresh_schedule():
+    return service.schedule_status()
 
 
 class RootInput(BaseModel):

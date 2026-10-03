@@ -64,17 +64,17 @@
           </a>
           <a class="app-card" href="../naas/">
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h12l4 4v14H4V3Zm5 6h6M9 13h6M9 17h4" /></svg></div>
-            <div><div class="app-title"><h3>NAAS Update</h3><span>YAML &amp; README</span></div><p>Track configuration and documentation.<br />Search repositories, changes and file history.</p></div>
+            <div><div class="app-title"><h3>NAAS Update</h3><span>YAML &amp; README</span></div><p>Track configuration and documentation.<br />Search repositories, changes and file history.</p><p class="owl-auto-refresh" data-auto-refresh="naas"></p></div>
             <span class="launch">Open app ↗</span>
           </a>
           <a class="app-card" href="../network-automation/">
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H6a2 2 0 0 0-2 2v4l-2 2 2 2v4a2 2 0 0 0 2 2h2M16 4h2a2 2 0 0 1 2 2v4l2 2-2 2v4a2 2 0 0 1-2 2h-2" /></svg></div>
-            <div><div class="app-title"><h3>Network Automation</h3><span>JSON &amp; README</span></div><p>Track network automation data.<br />Search repositories, changes and file history.</p></div>
+            <div><div class="app-title"><h3>Network Automation</h3><span>JSON &amp; README</span></div><p>Track network automation data.<br />Search repositories, changes and file history.</p><p class="owl-auto-refresh" data-auto-refresh="network"></p></div>
             <span class="launch">Open app ↗</span>
           </a>
           <a class="app-card" href="../confluence-tracker/">
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h12l4 4v14H4V3Zm5 6h6M9 13h6M9 17h4" /></svg></div>
-            <div><div class="app-title"><h3>Confluence Tracker</h3><span>Page changes</span></div><p>Follow an entire page tree.<br />See new pages and updates with daily sync.</p></div>
+            <div><div class="app-title"><h3>Confluence Tracker</h3><span>Page changes</span></div><p>Follow an entire page tree.<br />See new pages and updates with daily sync.</p><p class="owl-auto-refresh" data-auto-refresh="tracker"></p></div>
             <span class="launch">Open app ↗</span>
           </a>
           <a class="app-card bookmark-card" href="../bookmarks/"
@@ -92,6 +92,7 @@
                 Keep useful links together.<br />Find and organise your saved
                 resources.
               </p>
+              <p class="owl-auto-refresh" data-auto-refresh="bookmarks"></p>
             </div>
             <span class="launch">Open app ↗</span></a
           >
@@ -110,9 +111,14 @@
                 Find PDFs across repositories.<br />Explore projects, people and
                 document history.
               </p>
+              <p class="owl-auto-refresh" data-auto-refresh="bitbucket"></p>
             </div>
             <span class="launch">Open app ↗</span></a
           >
+        </section>
+        <section class="panel auto-refresh-panel" aria-labelledby="auto-refresh-title">
+          <div class="panel-heading"><h2 id="auto-refresh-title">Automatic refresh</h2><span>Daily in the background · failures retry every hour until they succeed</span></div>
+          <div data-auto-refresh-table><p>Loading refresh status…</p></div>
         </section>
         <div class="section-heading statistics-heading">
           <h2>Workspace statistics</h2>
@@ -322,6 +328,7 @@
     <script src="commit-stats.js?v=1"></script>
     <script src="script.js?v=weekday-commits-1"></script>
     <script src="bookmark-stats.js"></script>
-    <script src="app-stats.js?v=3"></script>
+    <script src="app-stats.js?v=4"></script>
+    <script src="auto-refresh.js?v=1"></script>
   </body>
 </html>

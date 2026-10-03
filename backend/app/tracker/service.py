@@ -15,7 +15,7 @@ from app.core.database import connection
 from app.core.logging import error_details, event
 
 DAY = 86400
-RETRY = 7200
+RETRY = 3600
 LEASE = 600
 FIELDS = (
     "title",
@@ -298,19 +298,74 @@ async def sync(root):
         finish(
             root,
             not failed,
-            f"{failed} pages could not be downloaded. Retrying in two hours."
+            f"{failed} pages could not be downloaded. Retrying in one hour."
             if failed
             else "",
         )
     except asyncio.CancelledError:
-        finish(root, False, "Sync interrupted. Retrying in two hours.")
+        finish(root, False, "Sync interrupted. Retrying in one hour.")
         raise
     except Exception as error:  # noqa: BLE001 - durable retry for background sync
         event("tracker.sync.failed", **error_details(error))
         finish(root, False, safe_error(error, settings))
 
 
+def schedule_status():
+    """Combined automatic refresh state of every tracked root, as each OWL app reports it."""
+
+    def epoch(value):
+        return datetime.fromisoformat(value).timestamp() if value else None
+
+    now = time.time()
+    with connection() as db:
+        roots = [
+            dict(row)
+            for row in db.execute(
+                "SELECT status,next_run,last_success,last_attempt,lease_until,total,completed,failed,error FROM confluence_tracker_roots"
+            )
+        ]
+    state = {
+        "status": "idle" if not roots else "scheduled",
+        "next_run": min((root["next_run"] for root in roots), default=None),
+        # The oldest success is when every tree was last fully current.
+        "last_success": None
+        if any(not root["last_success"] for root in roots)
+        else min((epoch(root["last_success"]) for root in roots), default=None),
+        "last_attempt": max(
+            (epoch(root["last_attempt"]) for root in roots if root["last_attempt"]),
+            default=None,
+        ),
+        "message": "" if roots else "Add a Confluence page to start automatic refreshes.",
+        "completed": 0,
+        "total": 0,
+        "failed": 0,
+        "eta_seconds": None,
+        "interval_hours": DAY / 3600,
+        "retry_hours": RETRY / 3600,
+    }
+    running = [root for root in roots if root["lease_until"] > now]
+    failed = [root for root in roots if root["status"] == "failed"]
+    if running:
+        state["status"] = "running"
+        for key in ("total", "completed", "failed"):
+            state[key] = sum(root[key] or 0 for root in running)
+    elif failed:
+        state["status"] = "retrying"
+        state["message"] = failed[0]["error"] or "Sync failed. Retrying in one hour."
+    return state
+
+
+def apply_intervals():
+    """Bring failed roots saved under a longer retry interval forward to the current one."""
+    with connection() as db:
+        db.execute(
+            "UPDATE confluence_tracker_roots SET next_run=MIN(next_run,?) WHERE status='failed' AND owner IS NULL",
+            (time.time() + RETRY,),
+        )
+
+
 async def run_scheduler():
+    apply_intervals()
     while True:
         try:
             root = claim()

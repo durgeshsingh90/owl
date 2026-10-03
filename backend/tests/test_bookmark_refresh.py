@@ -72,11 +72,11 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
                 ).fetchone()[0]
             )
 
-    async def test_success_weekly_and_persistent_across_initialization(self):
+    async def test_success_daily_and_persistent_across_initialization(self):
         await refresh.run_due()
         self.assertEqual(self.metadata.await_count, 1)
         state = refresh.status()
-        self.assertEqual(state["next_run"], self.now + refresh.WEEK)
+        self.assertEqual(state["next_run"], self.now + refresh.DAY)
         self.assertEqual(state["last_success"], self.now)
         item = self.workspace()["bookmarks"][0]
         self.assertEqual(item["title"], "Updated")
@@ -85,7 +85,7 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.workspace()["notes"], {"1": "local note"})
         initialize(recover_jobs=True)
-        self.now += refresh.WEEK - 1
+        self.now += refresh.DAY - 1
         await refresh.run_due()
         self.assertEqual(self.metadata.await_count, 1)
         self.now += 1
@@ -110,7 +110,7 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
         self.metadata.assert_not_awaited()
         self.test_connection.side_effect = None
         await refresh.run_due()
-        self.assertEqual(refresh.status()["next_run"], self.now + refresh.WEEK)
+        self.assertEqual(refresh.status()["next_run"], self.now + refresh.DAY)
 
     async def test_partial_failure_is_not_success_and_recovers(self):
         self.write(
@@ -151,7 +151,7 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
             return self.data
 
         self.metadata.side_effect = deleted
-        self.now += refresh.WEEK
+        self.now += refresh.DAY
         await refresh.run_due()
         self.assertEqual(self.workspace()["bookmarks"], [])
 

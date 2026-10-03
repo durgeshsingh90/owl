@@ -1,0 +1,146 @@
+"use strict";
+// Automatic refresh status shared by every OWL app. Each app's backend refreshes once a
+// day and retries every hour after a failure; this label only reports that schedule.
+(() => {
+  const APPS = {
+    bitbucket: {name: "Bitbucket", endpoint: "/api/refresh-schedule", href: "/bitbucket/"},
+    naas: {name: "NAAS Update", endpoint: "/naas/api/refresh-schedule", href: "/naas/"},
+    network: {name: "Network Automation", endpoint: "/network-automation/api/refresh-schedule", href: "/network-automation/"},
+    bookmarks: {name: "Bookmarks", endpoint: "/api/bookmarks/refresh-schedule", href: "/bookmarks/"},
+    tracker: {name: "Confluence Tracker", endpoint: "/api/confluence-tracker/refresh-schedule", href: "/confluence-tracker/"},
+  };
+
+  function duration(seconds) {
+    const total = Math.max(0, Math.round(seconds));
+    const days = Math.floor(total / 86400);
+    const hours = Math.floor((total % 86400) / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    if (days) return `${days}d ${hours}h`;
+    if (hours) return `${hours}h ${minutes}m`;
+    if (minutes) return `${minutes}m`;
+    return `${total}s`;
+  }
+  function when(epoch) {
+    return new Date(epoch * 1000).toLocaleString(undefined, {dateStyle: "medium", timeStyle: "short"});
+  }
+  function ago(epoch) {
+    return `${duration(Date.now() / 1000 - epoch)} ago`;
+  }
+
+  // Bookmarks keeps its original "scheduled" status; trackers report a failure as "retrying".
+  function describe(state) {
+    const now = Date.now() / 1000;
+    const next = Number(state.next_run);
+    const eta = Number.isFinite(next) && next > 0
+      ? (next <= now ? "due now" : `in ${duration(next - now)}`)
+      : "shortly";
+    const schedule = `Daily · retry every ${state.retry_hours || 1}h on failure`;
+    const last = state.last_success ? `Last success ${ago(state.last_success)}` : "No successful refresh yet";
+    switch (state.status) {
+      case "running": {
+        const progress = state.total ? ` ${state.completed}/${state.total}` : "";
+        const failed = state.failed ? ` · ${state.failed} failed` : "";
+        const remaining = Number(state.eta_seconds) > 0 ? ` · about ${duration(state.eta_seconds)} left` : "";
+        return {tone: "running", text: `Refreshing in background${progress}${failed}${remaining}`, detail: `${schedule}. ${last}.`};
+      }
+      case "retrying":
+        return {tone: "retrying", text: `Refresh failed · retry ${eta}`, detail: `${state.message || "The last refresh failed."} Next attempt ${Number.isFinite(next) && next > 0 ? when(next) : "shortly"}. ${last}.`};
+      case "idle":
+      case "not_configured":
+        return {tone: "idle", text: "Auto refresh waiting for setup", detail: state.message || schedule};
+      default:
+        return {tone: "ok", text: `Auto refresh ${eta}`, detail: `${schedule}. Next ${Number.isFinite(next) && next > 0 ? when(next) : "shortly"}. ${last}.`};
+    }
+  }
+
+  async function load(app) {
+    const response = await fetch(APPS[app].endpoint, {cache: "no-store", signal: AbortSignal.timeout(15000)});
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
+  const STYLE = `
+    .owl-auto-refresh{display:inline-flex;align-items:center;gap:6px;margin:4px 0 0;font-size:12px;line-height:1.4;color:inherit;opacity:.85}
+    .owl-auto-refresh .owl-ar-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:#1f9d55}
+    .owl-auto-refresh[data-tone="running"] .owl-ar-dot{background:#2f7de1;animation:owl-ar-pulse 1.2s ease-in-out infinite}
+    .owl-auto-refresh[data-tone="retrying"] .owl-ar-dot{background:#d97706}
+    .owl-auto-refresh[data-tone="idle"] .owl-ar-dot,.owl-auto-refresh[data-tone="unknown"] .owl-ar-dot{background:#8b949e}
+    .owl-auto-refresh[data-tone="retrying"] .owl-ar-text{color:#b45309}
+    :root[data-theme="dark"] .owl-auto-refresh[data-tone="retrying"] .owl-ar-text{color:#fbbf24}
+    @media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .owl-auto-refresh[data-tone="retrying"] .owl-ar-text{color:#fbbf24}}
+    .owl-ar-table{width:100%;border-collapse:collapse;font-size:12px}
+    .owl-ar-table th,.owl-ar-table td{text-align:left;padding:8px 10px;border-top:1px solid rgba(127,127,127,.2);vertical-align:top}
+    .owl-ar-table thead th{border-top:0;font-size:11px;font-weight:600;opacity:.7}
+    .owl-ar-table tbody th a{color:inherit;font-weight:600;text-decoration:none}
+    .owl-ar-table tbody th a:hover{text-decoration:underline}
+    .owl-ar-table .owl-auto-refresh{margin:0;white-space:nowrap}
+    @keyframes owl-ar-pulse{50%{opacity:.35}}
+    @media (prefers-reduced-motion: reduce){.owl-auto-refresh .owl-ar-dot{animation:none!important}}`;
+  function injectStyle() {
+    if (document.getElementById("owl-auto-refresh-style")) return;
+    const style = document.createElement("style");
+    style.id = "owl-auto-refresh-style";
+    style.textContent = STYLE;
+    document.head.append(style);
+  }
+
+  // A page label: <p class="owl-auto-refresh" data-auto-refresh="bitbucket"></p>
+  function label(element) {
+    const app = element.dataset.autoRefresh;
+    element.setAttribute("role", "status");
+    element.innerHTML = '<span class="owl-ar-dot" aria-hidden="true"></span><span class="owl-ar-text">Checking automatic refresh…</span>';
+    let state = null;
+    const render = () => {
+      const view = state ? describe(state) : {tone: "unknown", text: "Auto refresh status unavailable", detail: "OWL must be running to refresh automatically."};
+      element.dataset.tone = view.tone;
+      element.querySelector(".owl-ar-text").textContent = view.text;
+      element.title = view.detail;
+    };
+    async function poll() {
+      try { state = await load(app); }
+      catch { state = null; }
+      render();
+      window.dispatchEvent(new CustomEvent("owl-auto-refresh", {detail: {app, state}}));
+      setTimeout(poll, state && state.status === "running" ? 10000 : 30000);
+    }
+    setInterval(render, 30000);
+    void poll();
+  }
+
+  // Home summary: <div data-auto-refresh-table></div>, one row per app.
+  function table(element) {
+    const states = {};
+    const escape = value => String(value ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"})[c]);
+    const render = () => {
+      element.innerHTML = `<table class="owl-ar-table"><thead><tr><th scope="col">App</th><th scope="col">Status</th><th scope="col">Next refresh</th><th scope="col">Last success</th><th scope="col">Details</th></tr></thead><tbody>${
+        Object.entries(APPS).map(([app, config]) => {
+          const state = states[app];
+          const view = state ? describe(state) : {tone: "unknown", text: state === null ? "Status unavailable" : "Checking…", detail: ""};
+          const next = Number(state?.next_run);
+          const nextText = !state || state.status === "idle" || state.status === "not_configured" ? "—"
+            : state.status === "running" ? "Running now"
+            : Number.isFinite(next) && next > 0 ? `${when(next)} (${next <= Date.now() / 1000 ? "due now" : "in " + duration(next - Date.now() / 1000)})` : "Shortly";
+          const detail = state?.status === "running" || state?.status === "retrying" || state?.status === "idle" || state?.status === "not_configured"
+            ? (state.status === "running" ? view.text.replace("Refreshing in background", "Progress") : state.message || "") : "";
+          return `<tr><th scope="row"><a href="${config.href}">${escape(config.name)}</a></th><td><span class="owl-auto-refresh" data-tone="${view.tone}"><span class="owl-ar-dot" aria-hidden="true"></span><span class="owl-ar-text">${escape({running: "Refreshing", retrying: "Retrying", ok: "Scheduled", idle: "Not set up", unknown: view.text}[view.tone])}</span></span></td><td>${escape(nextText)}</td><td>${state?.last_success ? `${escape(when(state.last_success))} (${escape(ago(state.last_success))})` : "—"}</td><td>${escape(detail)}</td></tr>`;
+        }).join("")
+      }</tbody></table>`;
+    };
+    for (const app of Object.keys(APPS)) {
+      const poll = async () => {
+        try { states[app] = await load(app); }
+        catch { states[app] = null; }
+        render();
+        setTimeout(poll, states[app]?.status === "running" ? 10000 : 30000);
+      };
+      void poll();
+    }
+    render();
+    setInterval(render, 30000);
+  }
+
+  window.owlAutoRefresh = {APPS, describe, load, duration, when, ago};
+  injectStyle();
+  document.querySelectorAll("[data-auto-refresh]").forEach(label);
+  document.querySelectorAll("[data-auto-refresh-table]").forEach(table);
+})();

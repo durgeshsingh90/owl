@@ -99,7 +99,7 @@ class TrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["unread"], 0)
         self.assertIsNone(service.claim())
 
-    async def test_repeated_failures_wait_two_hours_then_resume_daily(self):
+    async def test_repeated_failures_wait_one_hour_then_resume_daily(self):
         await service.add_root("100")
         self.test_connection.side_effect = ValueError("connection secret failed")
         for _ in range(3):
@@ -107,15 +107,17 @@ class TrackerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state["status"], "failed")
             self.assertIsNone(state["last_success"])
             self.assertNotIn("secret", state["error"])
-            self.assertEqual(state["next_run"], self.now + 7200)
-            self.now += 7199
+            self.assertEqual(state["next_run"], self.now + 3600)
+            self.assertEqual(service.schedule_status()["status"], "retrying")
+            self.now += 3599
             self.assertIsNone(service.claim())
             self.now += 1
         self.test_connection.side_effect = None
         state = await self.scan()
         self.assertEqual(state["status"], "completed")
-        self.now += 7200
+        self.now += 3600
         self.assertIsNone(service.claim())
+        self.assertEqual(service.schedule_status()["status"], "scheduled")
 
     async def test_changes_prior_text_opens_and_review_cutoff(self):
         root_id = await service.add_root("100")

@@ -943,3 +943,12 @@ main > .insight {
     border-bottom: 1px solid var(--line);
   }
 }
+
+/* Automatic refresh: status on each app card and a summary of all apps. */
+.app-card .owl-auto-refresh { margin-top: 8px; font-size: 11px; color: var(--muted); }
+.auto-refresh-panel { margin: 0 0 28px; overflow-x: auto; }
+.auto-refresh-panel .panel-heading { margin-bottom: 12px; flex-wrap: wrap; }
+.auto-refresh-panel .panel-heading > span { white-space: normal; }
+@media (max-width: 700px) {
+  .owl-ar-table thead th:nth-child(5), .owl-ar-table td:nth-child(5) { display: none; }
+}
