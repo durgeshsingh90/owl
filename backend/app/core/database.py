@@ -155,6 +155,10 @@ def initialize(*, recover_jobs=False):
         CREATE TABLE IF NOT EXISTS jobs (
             id TEXT PRIMARY KEY, status TEXT NOT NULL, progress TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS compare_shares (
+            token TEXT PRIMARY KEY, payload TEXT NOT NULL,
+            created_at REAL NOT NULL, expires_at REAL NOT NULL
+        );
         """)
         if "folder_path" not in {
             row["name"]
