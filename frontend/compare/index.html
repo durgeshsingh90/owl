@@ -4,89 +4,83 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>OWL · Compare</title>
   <link rel="icon" href="../bitbucket/assets/owl.png">
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css?v=3">
   <script src="../bitbucket/theme.js?v=20260914-current-mode"></script>
 </head>
 <body>
 <header class="topbar">
   <a class="brand" href="../home/" aria-label="OWL home"><img src="../bitbucket/assets/owl.png" alt=""><span>OWL<small>Compare</small></span></a>
+  <div class="views" role="group" aria-label="Show">
+    <button type="button" data-view="all" aria-pressed="true">Show all <small id="count-all"></small></button>
+    <button type="button" data-view="differences" aria-pressed="false">Differences <small id="count-differences"></small></button>
+    <button type="button" data-view="similarities" aria-pressed="false">Similarities <small id="count-similarities"></small></button>
+  </div>
   <nav>
     <a href="../home/">Home ↗</a>
     <button id="share" type="button" title="Copy a link to this comparison (valid for 24 hours)">Share link</button>
     <button id="theme-toggle" type="button" aria-label="Switch color theme"><span>◐</span></button>
   </nav>
 </header>
-<main>
-  <div class="heading">
-    <div>
-      <span class="eyebrow">TOOLS / TEXT COMPARISON</span>
-      <h1>Compare</h1>
-      <p>Paste or open two texts. OWL lines them up and highlights every difference.</p>
-    </div>
+
+<div class="toolbar">
+  <div class="group" role="group" aria-label="Differences">
+    <button type="button" id="block-prev" title="Previous difference (Shift+F7)">↑ Prev</button>
+    <span id="block-position" aria-live="polite"></span>
+    <button type="button" id="block-next" title="Next difference (F7)">↓ Next</button>
   </div>
-  <p id="error" role="alert" hidden></p>
+  <div class="group" role="group" aria-label="Copy difference">
+    <button type="button" id="copy-left" title="Copy this difference from the right side to the left (Alt+←)">← Copy to left</button>
+    <button type="button" id="copy-right" title="Copy this difference from the left side to the right (Alt+→)">Copy to right →</button>
+  </div>
+  <button type="button" id="swap" title="Swap the two sides">⇄ Swap</button>
+  <label class="check"><input id="ignore-whitespace" type="checkbox" checked> Ignore leading and trailing spaces</label>
+  <div class="legend" aria-label="Colour key">
+    <span class="key key-changed">Changed <strong id="count-changed">0</strong></span>
+    <span class="key key-removed">Only left <strong id="count-removed">0</strong></span>
+    <span class="key key-added">Only right <strong id="count-added">0</strong></span>
+  </div>
+  <span id="status" class="status" aria-live="polite"></span>
+</div>
+<p id="notice" class="notice" hidden></p>
+<p id="error" class="error" role="alert" hidden></p>
 
-  <section class="inputs" aria-label="Texts to compare">
-    <div class="pane" data-side="original">
-      <div class="pane-head">
-        <input class="pane-title" id="original-title" value="Original" aria-label="Original title" maxlength="200">
-        <button type="button" class="mini" data-open="original" title="Load a file into this side">Open file</button>
-        <button type="button" class="mini" data-clear="original" title="Clear this side">Clear</button>
-      </div>
-      <textarea id="original-text" spellcheck="false" wrap="off" placeholder="Paste the original text, or drop a file here"></textarea>
-      <div class="pane-status" id="original-status"></div>
+<main class="workspace">
+  <section class="pane" data-side="original" aria-label="Left text">
+    <div class="pane-head">
+      <input class="pane-title" id="original-title" value="Original" aria-label="Left title" maxlength="200">
+      <button type="button" class="mini" data-open="original" title="Load a file into the left side">Open file</button>
+      <button type="button" class="mini" data-clear="original" title="Clear the left side">Clear</button>
     </div>
-    <button type="button" id="swap" class="swap" title="Swap the two sides" aria-label="Swap the two sides">⇄</button>
-    <div class="pane" data-side="modified">
-      <div class="pane-head">
-        <input class="pane-title" id="modified-title" value="Modified" aria-label="Modified title" maxlength="200">
-        <button type="button" class="mini" data-open="modified" title="Load a file into this side">Open file</button>
-        <button type="button" class="mini" data-clear="modified" title="Clear this side">Clear</button>
+    <div class="editor">
+      <div class="gutter" aria-hidden="true"><div class="gutter-lines"></div></div>
+      <div class="body">
+        <div class="layer" aria-hidden="true"></div>
+        <textarea id="original-text" spellcheck="false" wrap="off" autocomplete="off" placeholder="Paste the left text, or drop a file here"></textarea>
       </div>
-      <textarea id="modified-text" spellcheck="false" wrap="off" placeholder="Paste the modified text, or drop a file here"></textarea>
-      <div class="pane-status" id="modified-status"></div>
     </div>
+    <div class="pane-status" id="original-status"></div>
   </section>
-  <input id="file-input" type="file" hidden>
 
-  <section class="result" aria-labelledby="result-title">
-    <div class="toolbar">
-      <h2 id="result-title" class="sr-only">Comparison</h2>
-      <div class="views" role="group" aria-label="Show">
-        <button type="button" data-view="all" aria-pressed="true">Show all <small id="count-all"></small></button>
-        <button type="button" data-view="differences" aria-pressed="false">Differences <small id="count-differences"></small></button>
-        <button type="button" data-view="similarities" aria-pressed="false">Similarities <small id="count-similarities"></small></button>
+  <div class="overview" title="Overview: click to jump"><canvas id="overview"></canvas></div>
+
+  <section class="pane" data-side="modified" aria-label="Right text">
+    <div class="pane-head">
+      <input class="pane-title" id="modified-title" value="Modified" aria-label="Right title" maxlength="200">
+      <button type="button" class="mini" data-open="modified" title="Load a file into the right side">Open file</button>
+      <button type="button" class="mini" data-clear="modified" title="Clear the right side">Clear</button>
+    </div>
+    <div class="editor">
+      <div class="gutter" aria-hidden="true"><div class="gutter-lines"></div></div>
+      <div class="body">
+        <div class="layer" aria-hidden="true"></div>
+        <textarea id="modified-text" spellcheck="false" wrap="off" autocomplete="off" placeholder="Paste the right text, or drop a file here"></textarea>
       </div>
-      <label class="check"><input id="ignore-whitespace" type="checkbox" checked> Ignore leading and trailing spaces</label>
-      <label class="check"><input id="wrap" type="checkbox" checked> Wrap long lines</label>
-      <div class="hunk-nav">
-        <button type="button" id="hunk-prev" title="Previous difference (Shift+F7)">↑ Previous</button>
-        <span id="hunk-position" aria-live="polite"></span>
-        <button type="button" id="hunk-next" title="Next difference (F7)">↓ Next</button>
-      </div>
-      <span id="status" class="status" aria-live="polite"></span>
     </div>
-    <div id="legend" class="legend">
-      <span class="key key-changed">Changed <strong id="count-changed">0</strong></span>
-      <span class="key key-removed">Only in original <strong id="count-removed">0</strong></span>
-      <span class="key key-added">Only in modified <strong id="count-added">0</strong></span>
-    </div>
-    <div id="diff" class="diff wrap" tabindex="0" aria-label="Side-by-side comparison">
-      <table>
-        <colgroup><col class="num"><col><col class="num"><col></colgroup>
-        <thead><tr><th colspan="2" id="head-original">Original</th><th colspan="2" id="head-modified">Modified</th></tr></thead>
-        <tbody id="rows"></tbody>
-      </table>
-      <p id="empty" class="empty" hidden></p>
-    </div>
-    <div class="pager">
-      <span id="page-label"></span>
-      <button type="button" id="page-prev">← Previous rows</button>
-      <button type="button" id="page-next">Next rows →</button>
-    </div>
+    <div class="pane-status" id="modified-status"></div>
   </section>
 </main>
+<input id="file-input" type="file" hidden>
 <div id="toast" class="toast" role="status" hidden></div>
-<script src="script.js?v=1"></script>
+<script src="script.js?v=6"></script>
 </body>
 </html>

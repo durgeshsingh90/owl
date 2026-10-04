@@ -1,7 +1,7 @@
-"""Side-by-side text comparison: alignment, word highlights, filtering and paging.
+"""Side-by-side text comparison: alignment, colouring, filtering and block copying.
 
 The browser only renders what this returns. Rows are aligned so a line removed from
-one side faces a blank on the other; changed lines carry word-level segments.
+one side faces an empty filler line on the other; changed lines carry word ranges.
 """
 
 import hashlib
@@ -14,7 +14,6 @@ INLINE_DIFF_MAX_LINE_LENGTH = 2000
 INLINE_DIFF_MAX_TOTAL_CHARS = 2_000_000
 INLINE_DIFF_MAX_CHANGED_LINES = 5000
 MAX_TEXT_CHARS = 5_000_000
-PAGE_LIMIT = 1000
 VIEWS = ("all", "differences", "similarities")
 
 
@@ -168,11 +167,101 @@ def summarize(rows, original_text, modified_text):
     }
 
 
+def changed_ranges(segments):
+    """Column ranges [start, end) of the changed words on one side of a line."""
+    ranges, column = [], 0
+    for segment in segments:
+        end = column + len(segment["text"])
+        if segment["changed"] and end > column:
+            ranges.append([column, end])
+        column = end
+    return ranges
+
+
 class Comparison:
     def __init__(self, original_text, modified_text, ignore_whitespace):
+        self.original_text = original_text
+        self.modified_text = modified_text
+        self.ignore_whitespace = ignore_whitespace
         self.rows = build_rows(original_text, modified_text, ignore_whitespace)
         self.summary = summarize(self.rows, original_text, modified_text)
         self.views = {}
+        self.layouts = {}
+
+    def layout(self, name):
+        """Both editors' text, already aligned, with everything needed to colour it.
+
+        Line i of each side is row i: a line missing from one side is an empty filler
+        line there. kinds has one letter per line: s(ame), c(hanged), r(emoved: only in
+        original) or a(dded: only in modified).
+        """
+        if name not in self.layouts:
+            indexes, hunks = self.view(name)
+            letters = {"same": "s", "changed": "c", "removed": "r", "added": "a"}
+            sides = {
+                side: {"lines": [], "numbers": [], "words": {}}
+                for side in ("original", "modified")
+            }
+            kinds = []
+            for line, index in enumerate(indexes):
+                row = self.rows[index]
+                kinds.append(letters[row["kind"]])
+                for side in ("original", "modified"):
+                    target = sides[side]
+                    number = row[side + "Line"]
+                    target["lines"].append(row[side] if number else "")
+                    target["numbers"].append(number)
+                    segments = row.get(side + "Segments")
+                    if segments and len(segments) > 1:
+                        target["words"][line] = changed_ranges(segments)
+            blocks = []
+            for start in hunks:
+                end = start
+                while (
+                    end < len(indexes)
+                    and kinds[end] != "s"
+                    and (end == start or indexes[end] == indexes[end - 1] + 1)
+                ):
+                    end += 1
+                blocks.append([start, end])
+            self.layouts[name] = {
+                "view": name,
+                "lines": len(indexes),
+                "kinds": "".join(kinds),
+                "blocks": blocks,
+                "original": {
+                    "text": "\n".join(sides["original"]["lines"]),
+                    "numbers": sides["original"]["numbers"],
+                    "words": sides["original"]["words"],
+                },
+                "modified": {
+                    "text": "\n".join(sides["modified"]["lines"]),
+                    "numbers": sides["modified"]["numbers"],
+                    "words": sides["modified"]["words"],
+                },
+            }
+        return self.layouts[name]
+
+    def copy_block(self, block, direction):
+        """Texts after copying one block of differences to the other side."""
+        blocks = self.layout("all")["blocks"]
+        if not 0 <= block < len(blocks):
+            raise ValueError("That difference no longer exists. Compare again.")
+        start, end = blocks[block]
+        source, target = (
+            ("original", "modified") if direction == "right" else ("modified", "original")
+        )
+        lines = []
+        for index, row in enumerate(self.rows):
+            side = source if start <= index < end else target
+            if row[side + "Line"]:
+                lines.append(row[side])
+        text = "\n".join(lines)
+        return (
+            (self.original_text, text)
+            if direction == "right"
+            else (text, self.modified_text)
+        )
 
     def view(self, name):
         """Row indexes shown in a view, and where each block of differences starts."""
@@ -198,27 +287,9 @@ class Comparison:
             self.views[name] = (indexes, hunks)
         return self.views[name]
 
-    def page(self, name, offset, limit):
-        indexes, hunks = self.view(name)
-        offset = max(0, min(offset, max(0, len(indexes) - 1)))
-        rows = [
-            {"position": position, **self.rows[index]}
-            for position, index in enumerate(
-                indexes[offset : offset + limit], start=offset
-            )
-        ]
-        return {
-            "view": name,
-            "total": len(indexes),
-            "offset": offset,
-            "limit": limit,
-            "rows": rows,
-            "hunks": hunks,
-        }
-
 
 class Cache:
-    """Recent comparisons, so paging and switching views never recompute the diff."""
+    """Recent comparisons, so switching views or copying blocks never recomputes the diff."""
 
     def __init__(self, size=8):
         self.size = size
@@ -258,28 +329,32 @@ class Cache:
 cache = Cache()
 
 
-def compare(original_text, modified_text, ignore_whitespace=True, view="all", offset=0, limit=PAGE_LIMIT):
+def check(original_text, modified_text, view):
     if view not in VIEWS:
         raise ValueError("View must be all, differences or similarities.")
     if max(len(original_text), len(modified_text)) > MAX_TEXT_CHARS:
         raise ValueError("Each text can hold up to 5,000,000 characters.")
+
+
+def layout(original_text, modified_text, ignore_whitespace=True, view="all"):
+    check(original_text, modified_text, view)
     key, comparison = cache.get(original_text, modified_text, ignore_whitespace)
-    return {
-        "key": key,
-        "summary": comparison.summary,
-        **comparison.page(view, offset, max(1, min(limit, PAGE_LIMIT))),
-    }
+    return {"key": key, "summary": comparison.summary, **comparison.layout(view)}
 
 
-def page(key, view="all", offset=0, limit=PAGE_LIMIT):
-    """Another page or view of a recent comparison, or None once it has been evicted."""
+def layout_by_key(key, view="all"):
     if view not in VIEWS:
         raise ValueError("View must be all, differences or similarities.")
     comparison = cache.find(key)
     if comparison is None:
         return None
-    return {
-        "key": key,
-        "summary": comparison.summary,
-        **comparison.page(view, offset, max(1, min(limit, PAGE_LIMIT))),
-    }
+    return {"key": key, "summary": comparison.summary, **comparison.layout(view)}
+
+
+def copy_block(key, block, direction):
+    comparison = cache.find(key)
+    if comparison is None:
+        return None
+    original_text, modified_text = comparison.copy_block(block, direction)
+    result = layout(original_text, modified_text, comparison.ignore_whitespace, "all")
+    return {"originalText": original_text, "modifiedText": modified_text, **result}

@@ -1,4 +1,4 @@
-"""Compare two texts. The backend aligns, highlights, filters and pages; the UI renders."""
+"""Compare two texts. The backend aligns, colours, filters and copies blocks; the UI renders."""
 
 import json
 import secrets
@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 router = APIRouter(prefix="/api/compare")
 
 SHARE_SECONDS = 24 * 60 * 60
-View = Field("all", pattern="^(all|differences|similarities)$")
+VIEW_PATTERN = "^(all|differences|similarities)$"
+View = Field("all", pattern=VIEW_PATTERN)
 
 
 class CompareInput(BaseModel):
@@ -20,34 +21,39 @@ class CompareInput(BaseModel):
     modifiedText: str = ""
     ignoreWhitespace: bool = True
     view: str = View
-    offset: int = Field(0, ge=0)
-    limit: int = Field(diff.PAGE_LIMIT, ge=1, le=diff.PAGE_LIMIT)
 
 
-@router.post("/analyze")
-def analyze(value: CompareInput):
+@router.post("/layout")
+def layout(value: CompareInput):
     # A plain function runs in FastAPI's thread pool, so large diffs never block requests.
     try:
-        return diff.compare(
-            value.originalText,
-            value.modifiedText,
-            value.ignoreWhitespace,
-            value.view,
-            value.offset,
-            value.limit,
+        return diff.layout(
+            value.originalText, value.modifiedText, value.ignoreWhitespace, value.view
         )
     except ValueError as error:
         raise HTTPException(413, str(error)) from None
 
 
-@router.get("/results/{key}")
-def results(
-    key: str,
-    view: str = Query("all", pattern="^(all|differences|similarities)$"),
-    offset: int = Query(0, ge=0),
-    limit: int = Query(diff.PAGE_LIMIT, ge=1, le=diff.PAGE_LIMIT),
-):
-    result = diff.page(key, view, offset, limit)
+@router.get("/layout/{key}")
+def layout_by_key(key: str, view: str = Query("all", pattern=VIEW_PATTERN)):
+    result = diff.layout_by_key(key, view)
+    if result is None:
+        raise HTTPException(404, "Comparison expired. Send the texts again.")
+    return result
+
+
+class CopyInput(BaseModel):
+    key: str
+    block: int = Field(ge=0)
+    direction: str = Field(pattern="^(left|right)$")
+
+
+@router.post("/copy")
+def copy_block(value: CopyInput):
+    try:
+        result = diff.copy_block(value.key, value.block, value.direction)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
     if result is None:
         raise HTTPException(404, "Comparison expired. Send the texts again.")
     return result
