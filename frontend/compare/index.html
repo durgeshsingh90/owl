@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>OWL · Compare</title>
   <link rel="icon" href="../bitbucket/assets/owl.png">
-  <link rel="stylesheet" href="style.css?v=3">
+  <link rel="stylesheet" href="style.css?v=4">
   <script src="../bitbucket/theme.js?v=20260914-current-mode"></script>
 </head>
 <body>
@@ -51,13 +51,7 @@
       <button type="button" class="mini" data-open="original" title="Load a file into the left side">Open file</button>
       <button type="button" class="mini" data-clear="original" title="Clear the left side">Clear</button>
     </div>
-    <div class="editor">
-      <div class="gutter" aria-hidden="true"><div class="gutter-lines"></div></div>
-      <div class="body">
-        <div class="layer" aria-hidden="true"></div>
-        <textarea id="original-text" spellcheck="false" wrap="off" autocomplete="off" placeholder="Paste the left text, or drop a file here"></textarea>
-      </div>
-    </div>
+    <div class="editor" id="original-editor" aria-label="Left text"><p class="loading">Loading editor…</p></div>
     <div class="pane-status" id="original-status"></div>
   </section>
 
@@ -69,18 +63,13 @@
       <button type="button" class="mini" data-open="modified" title="Load a file into the right side">Open file</button>
       <button type="button" class="mini" data-clear="modified" title="Clear the right side">Clear</button>
     </div>
-    <div class="editor">
-      <div class="gutter" aria-hidden="true"><div class="gutter-lines"></div></div>
-      <div class="body">
-        <div class="layer" aria-hidden="true"></div>
-        <textarea id="modified-text" spellcheck="false" wrap="off" autocomplete="off" placeholder="Paste the right text, or drop a file here"></textarea>
-      </div>
-    </div>
+    <div class="editor" id="modified-editor" aria-label="Right text"><p class="loading">Loading editor…</p></div>
     <div class="pane-status" id="modified-status"></div>
   </section>
 </main>
 <input id="file-input" type="file" hidden>
 <div id="toast" class="toast" role="status" hidden></div>
-<script src="script.js?v=6"></script>
+<script src="../vendor/monaco/vs/loader.js"></script>
+<script src="script.js?v=9"></script>
 </body>
 </html>
