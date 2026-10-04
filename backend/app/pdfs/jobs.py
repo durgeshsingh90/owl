@@ -68,6 +68,8 @@ class Jobs:
         self.paused_seconds = 0
         self.repo_clocks = {}
         self.run_clock = None
+        self.saved_at = 0
+        self.flush_handle = None
         self.extractor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="owl-pdf")
 
     def clock(self):
@@ -436,7 +438,24 @@ class Jobs:
 
             self.save()
 
+    def save_soon(self):
+        """Save per-file progress at most once a second.
+
+        Each save rewrites the whole job, including every discovered path, so saving
+        after each file makes large repositories (thousands of YAML or JSON files)
+        quadratically slow. Repository and job transitions still save immediately.
+        """
+        if time.monotonic() - self.saved_at >= 1:
+            self.save()
+        elif self.flush_handle is None:
+            # Persist skipped progress within a second, even while a download blocks.
+            self.flush_handle = asyncio.get_running_loop().call_later(1, self.save)
+
     def save(self):
+        self.saved_at = time.monotonic()
+        if self.flush_handle is not None:
+            self.flush_handle.cancel()
+            self.flush_handle = None
         if is_text_library() and self.current.get("detail"):
             self.current["detail"] = (
                 self.current["detail"].replace("PDFs", "files").replace("PDF", "file")
@@ -494,17 +513,21 @@ class Jobs:
         checkpoint = p["checkpoint"]
         client.force_paths = {tuple(path) for path in p.get("force_paths", [])}
 
+        completed_sets = {}
+
         def pdf_started(project, slug, repository_id, path):
             checkpoint["active_pdf"] = [project, slug, path]
-            self.save()
+            self.save_soon()
 
         def pdf_finished(project, slug, repository_id, path, succeeded):
             if succeeded:
                 completed = checkpoint["successful"].setdefault(str(repository_id), [])
-                if path not in completed:
+                seen = completed_sets.setdefault(str(repository_id), set(completed))
+                if path not in seen:
+                    seen.add(path)
                     completed.append(path)
             checkpoint["active_pdf"] = None
-            self.save()
+            self.save_soon()
 
         client.on_pdf_started = pdf_started
         client.on_pdf_finished = pdf_finished
@@ -621,7 +644,7 @@ class Jobs:
                         path=path,
                         found=len(paths),
                     )
-                    self.save()
+                    self.save_soon()
 
                 def folder_failed(folder, error):
                     partial_repositories.add(repository_id)
@@ -756,14 +779,14 @@ class Jobs:
             processing_started = self.clock()
             self.save()
 
-            def progress_save():
+            def progress_save(force=True):
                 p["elapsed_seconds"] = round(self.clock() - started, 1)
                 if p["processed"]:
                     remaining = p["found"] - p["processed"]
                     p["eta_seconds"] = round(
                         (self.clock() - processing_started) / p["processed"] * remaining
                     )
-                self.save()
+                self.save() if force else self.save_soon()
 
             failed_paths = {}
             hard_failures = partial_repositories
@@ -784,7 +807,7 @@ class Jobs:
                         repository["processed"],
                         len(paths),
                     )
-                    progress_save()
+                    progress_save(force=False)
 
                 self.save()
 
@@ -944,8 +967,11 @@ class Jobs:
                     try:
                         await scan(*repo, paths)
                         await retry_repository_failures(*repo)
+                        # Files that failed are kept in failed_documents and retried on
+                        # every pull, so a complete inventory can advance the saved head.
+                        # Otherwise one unreadable file turns each pull into a full clone.
                         if (
-                            repository["status"] == "succeeded"
+                            repository["status"] in {"succeeded", "failed"}
                             and repo[2] not in partial_repositories
                             and repository_heads.get(repo[2])
                         ):

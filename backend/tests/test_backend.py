@@ -971,23 +971,31 @@ class BackendTests(unittest.TestCase):
                 {"2"},
             )
 
-    def test_failed_delta_processing_keeps_checkpoint_and_retries(self):
+    def test_failed_delta_files_advance_checkpoint_and_retry(self):
         self.crawl()
         self.version = 2
         self.fail = True
         job = self.crawl()
         self.assertGreater(job["failed"], 0)
         with connection() as db:
+            failed = db.execute("SELECT repository_id,path FROM failed_documents").fetchall()
+            # The inventory was complete, so the next pull is a delta, not a full clone.
             self.assertEqual(
                 {
                     r[0]
                     for r in db.execute("SELECT last_indexed_commit FROM repositories")
                 },
-                {"1"},
+                {"2"},
             )
+        self.assertTrue(failed)
         self.fail = False
+        self.calls.clear()
         job = self.crawl()
+        self.assertFalse(any("/browse/" in url for url in self.calls))
+        self.assertEqual(job["processed"], len(failed))
         self.assertEqual(job["failed"], 0)
+        with connection() as db:
+            self.assertFalse(db.execute("SELECT 1 FROM failed_documents").fetchone())
         with connection() as db:
             self.assertEqual(
                 {
@@ -1941,7 +1949,12 @@ class BackendTests(unittest.TestCase):
                 break
             time.sleep(0.01)
         self.assertTrue(paused)
-        snapshot = self.client.get("/api/jobs/" + job["id"]).json()
+        # Per-file progress is saved at most once a second.
+        for _ in range(30):
+            snapshot = self.client.get("/api/jobs/" + job["id"]).json()
+            if snapshot["checkpoint"]["active_pdf"]:
+                break
+            time.sleep(0.1)
         self.assertEqual(snapshot["processed"], 1)
         self.assertEqual(
             snapshot["checkpoint"]["active_pdf"], ["DEMO", "one", "second.pdf"]
