@@ -10,6 +10,8 @@ from app.tracker import service
 from fastapi.testclient import TestClient
 from main import app
 
+from tests.fake_confluence import FakeConfluence
+
 NOW = datetime.now(timezone.utc)
 RECENT = (NOW - timedelta(days=30)).isoformat()
 OLDER = (NOW - timedelta(days=400)).isoformat()
@@ -17,7 +19,7 @@ ANCIENT = (NOW - timedelta(days=1200)).isoformat()
 HOME = {"page_id": "100", "title": "Engineering Home"}
 ARCH = {"page_id": "200", "title": "Architecture"}
 DESIGN = {"page_id": "202", "title": "Design Reviews"}
-# page_id: (title, ancestors, created, updated, creator, editor, text)
+# page_id: (title, ancestors, created, updated, creator, editor, unused)
 PAGES = {
     "100": ("Engineering Home", [], OLDER, RECENT, "Ann", "Ben", "welcome"),
     "200": ("Architecture", [HOME], OLDER, OLDER, "Ann", "Ann", "architecture overview"),
@@ -41,37 +43,23 @@ class ConfluenceLibraryTests(unittest.TestCase):
         patch.object(confluence, "load", return_value=settings).start()
         patch.object(confluence, "test", new_callable=AsyncMock).start()
 
-        async def get(settings, path, params=None):
-            page = path.split("/")[1]
-            ancestors = PAGES.get(page, ("", [], "", "", "", "", ""))[1]
-            return {"id": page, "type": "page", "ancestors": [{"id": item["page_id"]} for item in ancestors]}
-
-        async def discover(*args, **kwargs):
-            return list(PAGES)
-
-        async def metadata(url, **kwargs):
-            page_id = url.split("=")[-1]
-            title, ancestors, created, updated, creator, editor, text = PAGES[page_id]
-            return {
-                "page_id": page_id,
-                "title": title,
-                "url": url,
-                "version": 3,
-                "author": creator,
-                "lastEditor": editor,
-                "writtenAt": created,
-                "confluenceUpdatedAt": updated,
-                "space": "Engineering",
-                "ancestors": ancestors,
-                "breadcrumb": [item["title"] for item in ancestors],
-                "contentText": text,
-                "pageTextSizeBytes": len(text),
-                "rawMetadata": {"version": {"message": "Edited " + title}},
-            }
-
-        patch.object(confluence, "get", side_effect=get).start()
-        patch.object(service, "discover_pages", side_effect=discover).start()
-        patch.object(confluence, "metadata", side_effect=metadata).start()
+        self.wiki = FakeConfluence(
+            {
+                page_id: {
+                    "title": title,
+                    "ancestors": [item["page_id"] for item in ancestors],
+                    "created": created,
+                    "updated": updated,
+                    "creator": creator,
+                    "editor": editor,
+                    "version": 3,
+                    "message": "Edited " + title,
+                }
+                for page_id, (title, ancestors, created, updated, creator, editor, _) in PAGES.items()
+            },
+            page_size=4,
+        )
+        patch.object(confluence, "get", side_effect=self.wiki.get).start()
         self.client = TestClient(app)
         self.client.__enter__()
         self.addCleanup(self.client.__exit__, None, None, None)
@@ -122,7 +110,8 @@ class ConfluenceLibraryTests(unittest.TestCase):
         found = self.client.post("/api/confluence-library/search/matches", json={"q": "aws for ide"}).json()
         self.assertEqual(found["ids"][0], docs["AWS for IDE"]["id"])
         self.assertEqual(found["tiers"][str(docs["AWS for IDE"]["id"])], 3)
-        self.assertIn(docs["Review 2026"]["id"], found["ids"])
+        # Only metadata is tracked: titles, paths and notes are searchable, content is not.
+        self.assertNotIn(docs["Review 2026"]["id"], found["ids"])
         revision = self.client.get("/api/confluence-library/workspace/revision").json()["revision"]
         page = docs["Restart Service"]["id"]
         opened = self.client.post(f"/api/confluence-library/document/{page}/open").json()
@@ -134,7 +123,8 @@ class ConfluenceLibraryTests(unittest.TestCase):
         self.assertEqual(by_notes["ids"], [page])
         details = self.client.get(f"/api/confluence-library/document/{page}").json()
         self.assertEqual((details["created_by"], details["updated_by"], details["notes"]), ("Ben", "Eve", "kubernetes restart"))
-        self.assertEqual(details["pdf_text"], "restart the service")
+        self.assertEqual(details["pdf_text"], "")
+        self.assertEqual(details["path"], "Runbooks")
         self.assertEqual(self.client.get("/api/confluence-library/document/99999").status_code, 404)
 
     def test_jobs_failures_and_deleting_a_tree(self):

@@ -25,6 +25,8 @@
         throw Error("Could not save the Update all timestamp. Reload before retrying.");
       }
       document.querySelector("#bookmark-last-update").textContent="Last update all: "+new Date(window.bookmarkLastUpdateAll).toLocaleString();
+      // A complete manual update counts as today's automatic refresh.
+      if(!failed)await fetch("/api/bookmarks/refresh-schedule/manual",{method:"POST"}).catch(()=>{});
       if(selectedBookmarkId!==null)showPageDetails(selectedBookmarkId);
     }catch(error){status.textContent=error.message;}
     finally{button.disabled=false;}

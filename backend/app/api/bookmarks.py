@@ -18,6 +18,14 @@ def refresh_schedule():
     return status()
 
 
+@router.post("/api/bookmarks/refresh-schedule/manual")
+def manual_refresh_done():
+    from app.bookmarks.refresh import record_manual_success, status
+
+    record_manual_success()
+    return status()
+
+
 @router.get("/bookmarks/settings/workspace/")
 def settings_workspace():
     try:

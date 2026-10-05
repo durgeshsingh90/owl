@@ -1,6 +1,6 @@
 "use strict";
 // Automatic refresh status shared by every OWL app. Each app's backend refreshes once a
-// day and retries every hour after a failure; this label only reports that schedule.
+// day and retries every two hours after a failure; this label only reports that schedule.
 (() => {
   const APPS = {
     bitbucket: {name: "Bitbucket", endpoint: "/api/refresh-schedule", href: "/bitbucket/"},

@@ -32,7 +32,7 @@ PAGE_FIELDS = """
     json_extract(p.metadata,'$.writtenAt') AS created_at,
     json_extract(p.metadata,'$.confluenceUpdatedAt') AS updated_at,
     json_extract(p.metadata,'$.version') AS version,
-    json_extract(p.metadata,'$.rawMetadata.version.message') AS version_message,
+    json_extract(p.metadata,'$.versionMessage') AS version_message,
     json_extract(p.metadata,'$.space') AS space,
     json_extract(p.metadata,'$.spaceKey') AS space_key,
     json_extract(p.metadata,'$.pageTextSizeBytes') AS size,

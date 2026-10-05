@@ -70,8 +70,8 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
             "example",
         )
 
-    async def test_daily_refresh_retries_hourly_until_success(self):
-        self.assertEqual((INTERVAL, RETRY), (timedelta(days=1), timedelta(hours=1)))
+    async def test_daily_refresh_retries_every_two_hours_until_success(self):
+        self.assertEqual((INTERVAL, RETRY), (timedelta(days=1), timedelta(hours=2)))
         client = AsyncMock()
         with patch("app.pdfs.schedule.BitbucketClient", return_value=client):
             await run_due(self.jobs, self.now)
@@ -83,13 +83,13 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
             with connection() as db:
                 row = db.execute("SELECT * FROM bitbucket_sync_schedule").fetchone()
             self.assertEqual(
-                row["next_attempt"], (due + timedelta(hours=1)).isoformat()
+                row["next_attempt"], (due + timedelta(hours=2)).isoformat()
             )
             self.assertEqual(status(self.jobs)["status"], "retrying")
-            await run_due(self.jobs, due + timedelta(minutes=59))
+            await run_due(self.jobs, due + timedelta(minutes=119))
             self.assertEqual(client.test.await_count, 1)
             client.test.side_effect = None
-            await run_due(self.jobs, due + timedelta(hours=1))
+            await run_due(self.jobs, due + timedelta(hours=2))
             self.assertEqual(self.jobs.started, 1)
             self.assertEqual(status(self.jobs)["status"], "running")
             self.assertTrue(self.jobs.current["background"])
@@ -128,8 +128,78 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
                 row = db.execute("SELECT * FROM bitbucket_sync_schedule").fetchone()
             self.assertIsNone(row["last_success"])
             self.assertEqual(
-                row["next_attempt"], (self.now + timedelta(hours=1)).isoformat()
+                row["next_attempt"], (self.now + timedelta(hours=2)).isoformat()
             )
+
+    async def test_full_manual_pull_counts_as_the_daily_refresh(self):
+        with connection() as db:
+            project = db.execute("SELECT id FROM tracked_projects").fetchone()[0]
+            repo = db.execute(
+                "INSERT INTO repositories(project_id,repo,name) VALUES(?,?,?) RETURNING id",
+                (project, "docs", "docs"),
+            ).fetchone()[0]
+            db.execute(
+                "INSERT INTO bitbucket_sync_schedule(server,next_attempt) VALUES(?,?)",
+                (self.settings.base_url, (self.now + timedelta(hours=5)).isoformat()),
+            )
+
+        def manual(job_id, completed, statuses, failed=0):
+            with connection() as db:
+                db.execute(
+                    "INSERT INTO jobs(id,status,progress) VALUES(?,?,?)",
+                    (job_id, "succeeded", json.dumps({"completed_at": completed.isoformat(), "repository_statuses": statuses, "failed": failed})),
+                )
+
+        client = AsyncMock()
+        with patch("app.pdfs.schedule.BitbucketClient", return_value=client):
+            # A pull of some repositories only, or with failures, does not count.
+            manual("partial", self.now, {})
+            await run_due(self.jobs, self.now)
+            manual("failed", self.now, {str(repo): {}}, failed=2)
+            await run_due(self.jobs, self.now)
+            with connection() as db:
+                row = db.execute("SELECT * FROM bitbucket_sync_schedule").fetchone()
+            self.assertIsNone(row["last_success"])
+            done = self.now + timedelta(minutes=10)
+            manual("full", done, {str(repo): {}})
+            await run_due(self.jobs, done + timedelta(minutes=1))
+            with connection() as db:
+                row = db.execute("SELECT * FROM bitbucket_sync_schedule").fetchone()
+            self.assertEqual(row["last_success"], done.isoformat())
+            self.assertEqual(row["next_attempt"], (done + timedelta(days=1)).isoformat())
+            self.assertEqual(status(self.jobs)["status"], "scheduled")
+            client.test.assert_not_awaited()
+
+    async def test_manual_pull_after_a_failure_cancels_the_retry(self):
+        with connection() as db:
+            project = db.execute("SELECT id FROM tracked_projects").fetchone()[0]
+            repo = db.execute(
+                "INSERT INTO repositories(project_id,repo,name) VALUES(?,?,?) RETURNING id",
+                (project, "docs", "docs"),
+            ).fetchone()[0]
+            db.execute(
+                "INSERT INTO bitbucket_sync_schedule(server,next_attempt) VALUES(?,?)",
+                (self.settings.base_url, self.now.isoformat()),
+            )
+        client = AsyncMock()
+        client.test.side_effect = ValueError("offline")
+        with patch("app.pdfs.schedule.BitbucketClient", return_value=client):
+            await run_due(self.jobs, self.now)
+            self.assertEqual(status(self.jobs)["status"], "retrying")
+            done = self.now + timedelta(minutes=30)
+            with connection() as db:
+                db.execute(
+                    "INSERT INTO jobs(id,status,progress) VALUES(?,?,?)",
+                    ("manual", "succeeded", json.dumps({"completed_at": done.isoformat(), "repository_statuses": {str(repo): {}}})),
+                )
+            await run_due(self.jobs, done)
+            client.test.side_effect = None
+            # The two-hour retry no longer happens; the next refresh is a day later.
+            await run_due(self.jobs, self.now + timedelta(hours=2))
+            client.test.assert_awaited_once()
+            self.assertEqual(self.jobs.started, 0)
+            state = status(self.jobs)
+            self.assertEqual((state["status"], state["next_run"]), ("scheduled", (done + timedelta(days=1)).timestamp()))
 
 
 class FakeJobs:

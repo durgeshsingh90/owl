@@ -2145,3 +2145,9 @@ body {
 /* Tree numbers such as 10 or 12.3 never shrink or break across lines. */
 .tree-number { flex-shrink: 0; white-space: nowrap; overflow-wrap: normal; }
 .bookmark-root-name .tree-number { min-width: 1.6em; margin-right: 0; }
+
+/* Track in Confluence Tracker: filled eye once the page's tree is tracked. */
+.bookmark-track { display:inline-grid; place-items:center; }
+.bookmark-track.is-tracked { color:#1f8a5b; }
+:root[data-theme="dark"] .bookmark-track.is-tracked { color:#72d5ad; }
+.bookmark-track:disabled { opacity:.5; cursor:default; }

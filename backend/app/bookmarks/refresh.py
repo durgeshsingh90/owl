@@ -13,7 +13,7 @@ from app.core.logging import error_details, event
 from fastapi import HTTPException
 
 DAY = 24 * 60 * 60
-RETRY = 60 * 60
+RETRY = 2 * 60 * 60
 LEASE = 10 * 60
 
 
@@ -60,6 +60,18 @@ def finish(owner, *, success, message=""):
                 owner,
             ),
         )
+
+
+def record_manual_success():
+    """A manual Update all with no failures counts as today's automatic refresh."""
+    now = time.time()
+    with connection() as db:
+        changed = db.execute(
+            "UPDATE bookmark_refresh_schedule SET next_run=?,status='scheduled',message='',"
+            "last_success=?,last_attempt=? WHERE id=1 AND owner IS NULL",
+            (now + DAY, now, now),
+        ).rowcount
+    return bool(changed)
 
 
 def targets(settings):
@@ -205,11 +217,11 @@ async def run_due():
         finish(
             owner,
             success=not failed,
-            message=f"{failed} pages failed. Retrying in one hour." if failed else "",
+            message=f"{failed} pages failed. Retrying in two hours." if failed else "",
         )
     except asyncio.CancelledError:
         finish(
-            owner, success=False, message="Update interrupted. Retrying in one hour."
+            owner, success=False, message="Update interrupted. Retrying in two hours."
         )
         raise
     except Exception as error:  # noqa: BLE001 - persist background failure and keep retries alive
@@ -217,7 +229,7 @@ async def run_due():
         finish(
             owner,
             success=False,
-            message="Confluence connection or update failed. Check connection settings and VPN. Retrying in one hour.",
+            message="Confluence connection or update failed. Check connection settings and VPN. Retrying in two hours.",
         )
 
 

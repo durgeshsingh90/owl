@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Track Confluence page trees: every page, who created and updated it, and what changed."
+      content="Track Confluence page trees: every page, who created and updated it, and when; then which pages are updated."
     />
     <title>OWL · Confluence Tracker</title>
     <script src="theme.js?v=20260914-current-mode"></script>
@@ -83,7 +83,6 @@
             <fieldset><legend>Search in</legend>
               <label><input type="checkbox" name="search-field" value="name" checked> Title</label>
               <label><input type="checkbox" name="search-field" value="path" checked> Breadcrumb</label>
-              <label><input type="checkbox" name="search-field" value="content" checked> Page text</label>
               <label><input type="checkbox" name="search-field" value="notes" checked> Notes</label>
             </fieldset>
             <fieldset><legend>Match</legend>
@@ -979,8 +978,9 @@
       <div style="display:flex;align-items:center;gap:8px"><button type="button" id="pdf-details-close">Close</button><button type="button" id="pdf-details-copy" title="Copy saved page details" aria-label="Copy saved page details" disabled><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H4v13h4"/></svg></button></div>
       <p id="pdf-details-status" role="status"></p>
       <dl id="pdf-details-fields" style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;overflow-wrap:anywhere"></dl>
-      <div style="display:flex;align-items:center;gap:8px"><h3>Page text</h3><button type="button" id="pdf-text-copy" title="Copy page text" aria-label="Copy page text" disabled><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H4v13h4"/></svg></button></div>
-      <pre id="pdf-details-text" style="white-space:pre-wrap;max-height:40vh;overflow:auto"></pre>
+      <!-- Pages are tracked by metadata only; no page text is stored. -->
+      <div hidden style="display:flex;align-items:center;gap:8px"><h3>Page text</h3><button type="button" id="pdf-text-copy" title="Copy page text" aria-label="Copy page text" disabled><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H4v13h4"/></svg></button></div>
+      <pre id="pdf-details-text" hidden></pre>
     </dialog>
     <dialog id="failed-pdfs-dialog" aria-labelledby="failed-pdfs-title" style="width:min(1000px,94vw);max-height:85vh;overflow:auto;padding:24px;background:#182535;color:#e5edf7;border-radius:12px">
       <h2 id="failed-pdfs-title">Pages that failed to download</h2>
@@ -993,7 +993,7 @@
         <ul id="failed-folders-list" style="overflow-wrap:anywhere"></ul>
       </section>
       <p id="failed-pdfs-status" role="status"></p>
-      <p>Failed pages are retried automatically one hour after a check. Retrying now re-checks their trees.</p>
+      <p>Failed pages are retried automatically two hours after a check. Retrying now re-checks their trees.</p>
       <div style="overflow:auto"><table style="width:100%;text-align:left"><thead><tr><th>Tree</th><th>Page ID</th><th>Page</th><th>Error</th></tr></thead><tbody id="failed-pdfs-rows"></tbody></table></div>
       <button type="button" id="failed-pdfs-prev">Previous</button>
       <button type="button" id="failed-pdfs-next">Next</button>
@@ -1023,7 +1023,7 @@
     <script src="script.js?v=confluence-5"></script>
     <script src="versions.js?v=1"></script>
     <script src="search-history.js?v=confluence-1"></script>
-    <script src="database.js?v=confluence-1"></script>
+    <script src="database.js?v=confluence-2"></script>
     <script src="confluence.js?v=1"></script>
     <script src="repository-delete.js?v=confluence-1"></script>
     <script src="hard-retry.js?v=confluence-1"></script>

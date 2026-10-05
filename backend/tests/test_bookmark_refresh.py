@@ -112,6 +112,27 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
         await refresh.run_due()
         self.assertEqual(refresh.status()["next_run"], self.now + refresh.DAY)
 
+    async def test_manual_update_all_counts_as_the_daily_refresh(self):
+        self.assertTrue(refresh.record_manual_success())
+        state = refresh.status()
+        self.assertEqual((state["status"], state["last_success"], state["next_run"]), ("scheduled", self.now, self.now + refresh.DAY))
+        self.assertIsNone(refresh.claim())
+        # Never while an automatic update holds the schedule.
+        self.now += refresh.DAY
+        owner = refresh.claim()
+        self.assertIsNotNone(owner)
+        self.assertFalse(refresh.record_manual_success())
+
+    async def test_manual_update_all_after_a_failure_cancels_the_retry(self):
+        self.test_connection.side_effect = ValueError("offline")
+        await refresh.run_due()
+        self.assertEqual(refresh.status()["next_run"], self.now + 2 * 3600)
+        self.now += 600
+        self.assertTrue(refresh.record_manual_success())
+        self.now += 2 * 3600
+        self.assertIsNone(refresh.claim())
+        self.assertEqual(refresh.status()["status"], "scheduled")
+
     async def test_partial_failure_is_not_success_and_recovers(self):
         self.write(
             [

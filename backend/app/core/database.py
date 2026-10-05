@@ -343,6 +343,14 @@ def initialize(*, recover_jobs=False):
                     f"CREATE TRIGGER IF NOT EXISTS {name} AFTER {operation} ON {table} "
                     "BEGIN UPDATE confluence_tracker_revision SET revision=revision+1 WHERE id=1; END"
                 )
+        # Confluence Tracker now keeps metadata only. Once, start it fresh: earlier trees
+        # stored full page content and content-change history.
+        db.execute("CREATE TABLE IF NOT EXISTS owl_migrations (name TEXT PRIMARY KEY)")
+        if db.execute(
+            "INSERT OR IGNORE INTO owl_migrations(name) VALUES('tracker-metadata-only')"
+        ).rowcount:
+            db.execute("DELETE FROM confluence_tracker_jobs")
+            db.execute("DELETE FROM confluence_tracker_roots")
         if recover_jobs:
             db.execute(
                 "UPDATE bookmark_downloads SET status='failed',error='Download interrupted. Click to retry.' WHERE status='running'"

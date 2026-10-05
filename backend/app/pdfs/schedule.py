@@ -1,4 +1,4 @@
-"""Durable background Bitbucket sync: once a day, retry failures every hour until one succeeds."""
+"""Durable background Bitbucket sync: once a day, retry failures every two hours until one succeeds."""
 
 import asyncio
 import json
@@ -11,7 +11,7 @@ from app.pdfs.client import BitbucketClient
 
 
 INTERVAL = timedelta(days=1)
-RETRY = timedelta(hours=1)
+RETRY = timedelta(hours=2)
 
 
 def setup():
@@ -34,6 +34,36 @@ def setup():
                     "UPDATE bitbucket_sync_schedule SET next_attempt=? WHERE server=?",
                     (limit.isoformat(), row["server"]),
                 )
+
+
+def manual_success(db, last_success):
+    """When a manual pull of every tracked repository last finished without failures.
+
+    Returns its completion time if it is newer than the last recorded success.
+    """
+    row = db.execute(
+        "SELECT status,progress FROM jobs ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+    if row is None or row["status"] != "succeeded":
+        return None
+    progress = json.loads(row["progress"])
+    if progress.get("background") or progress.get("failed") or progress.get("repositories_failed"):
+        return None
+    if not progress.get("completed_at"):
+        return None
+    covered = {str(key) for key in progress.get("repository_statuses", {})}
+    tracked = {
+        str(item[0])
+        for item in db.execute(
+            "SELECT r.id FROM repositories r JOIN tracked_projects p ON p.id=r.project_id"
+        )
+    }
+    if not tracked or not tracked <= covered:
+        return None
+    completed = datetime.fromisoformat(progress["completed_at"])
+    if last_success and completed <= datetime.fromisoformat(last_success):
+        return None
+    return completed
 
 
 async def run_due(jobs, now=None):
@@ -69,6 +99,15 @@ async def run_due(jobs, now=None):
             row = db.execute(
                 "SELECT * FROM bitbucket_sync_schedule WHERE server=?", (server,)
             ).fetchone()
+        if not row["job_id"]:
+            manual = manual_success(db, row["last_success"])
+            if manual:
+                # A full manual pull counts as today's refresh.
+                db.execute(
+                    "UPDATE bitbucket_sync_schedule SET next_attempt=?,last_success=?,error='' WHERE server=?",
+                    ((manual + INTERVAL).isoformat(), manual.isoformat(), server),
+                )
+                return
         if row["job_id"]:
             job = db.execute(
                 "SELECT status,progress FROM jobs WHERE id=?", (row["job_id"],)
@@ -98,7 +137,7 @@ async def run_due(jobs, now=None):
                     completed.isoformat(),
                     ""
                     if success
-                    else "Sync did not complete successfully. Retrying in one hour.",
+                    else "Sync did not complete successfully. Retrying in two hours.",
                     server,
                 ),
             )
@@ -126,7 +165,7 @@ async def run_due(jobs, now=None):
                 "UPDATE bitbucket_sync_schedule SET next_attempt=?,error=? WHERE server=?",
                 (
                     (now + RETRY).isoformat(),
-                    "Connection or sync failed. Retrying in one hour.",
+                    "Connection or sync failed. Retrying in two hours.",
                     server,
                 ),
             )

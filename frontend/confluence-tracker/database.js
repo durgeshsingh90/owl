@@ -249,7 +249,7 @@ document
         pdf_name: "Page title", page_id: "Page ID", project: "Tracked tree", repo: "Section",
         path: "Breadcrumb", url: "Confluence URL", space: "Space", created_by: "Created by",
         created_at: "Created", updated_by: "Last updated by", updated_at: "Last updated",
-        version: "Version", version_message: "Version comment", file_size: "Text size (bytes)",
+        version: "Version", version_message: "Version comment",
         change_kind: "Latest change", first_seen: "First saved in OWL", last_checked: "Last checked",
         open_count: "Open count", notes: "Notes",
       };

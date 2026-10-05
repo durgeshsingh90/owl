@@ -154,7 +154,7 @@ function watchCrawl(job) {
             label.hidden = false;
             label.textContent = `Last check: ${formatLastPull(current.completed_at)} · 0 days ago`;
           }
-          updatePullSummary(current.status === "succeeded" ? "Background sync complete · refresh to see updates" : "Background sync will retry in one hour");
+          updatePullSummary(current.status === "succeeded" ? "Background sync complete · refresh to see updates" : "Background sync will retry in two hours");
         }
         updateSelectionHeader();
         return;
