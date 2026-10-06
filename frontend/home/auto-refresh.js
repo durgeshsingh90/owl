@@ -40,8 +40,10 @@
       case "running": {
         const progress = state.total ? ` ${state.completed}/${state.total}` : "";
         const failed = state.failed ? ` · ${state.failed} failed` : "";
-        const remaining = Number(state.eta_seconds) > 0 ? ` · about ${duration(state.eta_seconds)} left` : "";
-        return {tone: "running", text: `Refreshing in background${progress}${failed}${remaining}`, detail: `${schedule}. ${last}.`};
+        const remaining = Number(state.eta_seconds) > 0 && state.completed > 0 ? ` · about ${duration(state.eta_seconds)} left` : "";
+        // A manual Update all in Bookmarks runs in the browser rather than in the background.
+        const what = state.manual ? "Updating now (Update all)" : "Refreshing in background";
+        return {tone: "running", text: `${what}${progress}${failed}${remaining}`, detail: `${schedule}. ${last}.`};
       }
       case "retrying":
         return {tone: "retrying", text: `Refresh failed · retry ${eta}`, detail: `${state.message || "The last refresh failed."} Next attempt ${Number.isFinite(next) && next > 0 ? when(next) : "shortly"}. ${last}.`};
@@ -96,13 +98,19 @@
       element.querySelector(".owl-ar-text").textContent = view.text;
       element.title = view.detail;
     };
+    let timer = 0;
     async function poll() {
+      clearTimeout(timer);
       try { state = await load(app); }
       catch { state = null; }
       render();
       window.dispatchEvent(new CustomEvent("owl-auto-refresh", {detail: {app, state}}));
-      setTimeout(poll, state && state.status === "running" ? 10000 : 30000);
+      timer = setTimeout(poll, state && state.status === "running" ? 10000 : 30000);
     }
+    // A page that starts or ends a refresh itself asks for the label to update now.
+    window.addEventListener("owl-auto-refresh-changed", event => {
+      if (!event.detail || event.detail === app) void poll();
+    });
     setInterval(render, 30000);
     void poll();
   }

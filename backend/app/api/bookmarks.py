@@ -6,7 +6,7 @@ from urllib.parse import parse_qs
 
 from app.bookmarks import confluence
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 router = APIRouter()
 
@@ -18,12 +18,27 @@ def refresh_schedule():
     return status()
 
 
-@router.post("/api/bookmarks/refresh-schedule/manual")
-def manual_refresh_done():
-    from app.bookmarks.refresh import record_manual_success, status
+class ManualRefresh(BaseModel):
+    action: str = Field(pattern="^(start|progress|finish)$")
+    owner: str = ""
+    total: int = Field(0, ge=0)
+    completed: int = Field(0, ge=0)
+    failed: int = Field(0, ge=0)
 
-    record_manual_success()
-    return status()
+
+@router.post("/api/bookmarks/refresh-schedule/manual")
+def manual_refresh(value: ManualRefresh):
+    """Update all in the browser reports its start, progress and end here."""
+    from app.bookmarks import refresh
+
+    if value.action == "start":
+        owner = refresh.manual_start(value.total)
+        if owner is None:
+            raise HTTPException(409, "An automatic Confluence update is running.")
+        return {"owner": owner}
+    if value.action == "progress":
+        return {"ok": refresh.manual_progress(value.owner, value.completed, value.failed)}
+    return {"done": refresh.manual_finish(value.owner, value.completed, value.failed)}
 
 
 @router.get("/bookmarks/settings/workspace/")

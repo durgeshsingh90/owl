@@ -25,8 +25,11 @@ def status():
         row["workspace_revision"] = db.execute(
             "SELECT revision FROM bookmark_workspace WHERE id=1"
         ).fetchone()[0]
-    row.pop("owner")
-    row.pop("lease_until")
+    owner, lease = row.pop("owner"), row.pop("lease_until")
+    row["manual"] = bool(owner and owner.startswith(MANUAL))
+    if row["status"] == "running" and lease <= time.time():
+        # The update stopped without finishing (OWL or the browser closed).
+        row.update(status="retrying", message="The last update stopped before finishing.")
     row["interval_hours"] = DAY / 3600
     row["retry_hours"] = RETRY / 3600
     return row
@@ -62,16 +65,55 @@ def finish(owner, *, success, message=""):
         )
 
 
-def record_manual_success():
-    """A manual Update all with no failures counts as today's automatic refresh."""
-    now = time.time()
+# Update all runs in the browser; it reports here so the schedule shows it running and
+# counts it as the day's refresh once it has gone through every bookmark.
+MANUAL = "manual-"
+
+
+def manual_start(total):
+    """Hold the schedule for a manual Update all; None while an update is running."""
+    now, owner = time.time(), MANUAL + uuid.uuid4().hex
     with connection() as db:
         changed = db.execute(
-            "UPDATE bookmark_refresh_schedule SET next_run=?,status='scheduled',message='',"
-            "last_success=?,last_attempt=? WHERE id=1 AND owner IS NULL",
-            (now + DAY, now, now),
+            "UPDATE bookmark_refresh_schedule SET owner=?,lease_until=?,status='running',"
+            "last_attempt=?,completed=0,total=?,failed=0,message='' WHERE id=1 AND lease_until<=?",
+            (owner, now + LEASE, now, total, now),
         ).rowcount
-    return bool(changed)
+    return owner if changed else None
+
+
+def manual_progress(owner, completed, failed):
+    with connection() as db:
+        return bool(
+            db.execute(
+                "UPDATE bookmark_refresh_schedule SET completed=?,failed=?,lease_until=? WHERE id=1 AND owner=?",
+                (completed, failed, time.time() + LEASE, owner),
+            ).rowcount
+        )
+
+
+def manual_finish(owner, completed, failed):
+    """Done for the day once every bookmark was tried; pages that failed show their error."""
+    with connection() as db:
+        total = db.execute(
+            "SELECT total FROM bookmark_refresh_schedule WHERE id=1 AND owner=?", (owner,)
+        ).fetchone()
+    if total is None:
+        return False
+    manual_progress(owner, completed, failed)
+    done = completed >= total[0]
+    finish(
+        owner,
+        success=done,
+        message=(
+            f"{failed} of {total[0]} pages could not be refreshed; each shows its error."
+            if failed
+            else ""
+        )
+        if done
+        else "Update all stopped before finishing. Retrying in two hours.",
+    )
+    return done
 
 
 def targets(settings):

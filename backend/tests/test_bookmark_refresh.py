@@ -112,23 +112,36 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
         await refresh.run_due()
         self.assertEqual(refresh.status()["next_run"], self.now + refresh.DAY)
 
-    async def test_manual_update_all_counts_as_the_daily_refresh(self):
-        self.assertTrue(refresh.record_manual_success())
+    async def test_manual_update_all_shows_running_and_counts_as_the_daily_refresh(self):
+        owner = refresh.manual_start(3)
+        state = refresh.status()
+        self.assertEqual((state["status"], state["manual"], state["total"]), ("running", True, 3))
+        self.assertIsNone(refresh.manual_start(3), "only one update at a time")
+        self.assertIsNone(refresh.claim(), "the automatic update waits")
+        self.assertTrue(refresh.manual_progress(owner, 2, 1))
+        self.assertEqual((refresh.status()["completed"], refresh.status()["failed"]), (2, 1))
+        self.assertTrue(refresh.manual_finish(owner, 3, 1))
         state = refresh.status()
         self.assertEqual((state["status"], state["last_success"], state["next_run"]), ("scheduled", self.now, self.now + refresh.DAY))
-        self.assertIsNone(refresh.claim())
-        # Never while an automatic update holds the schedule.
-        self.now += refresh.DAY
-        owner = refresh.claim()
-        self.assertIsNotNone(owner)
-        self.assertFalse(refresh.record_manual_success())
+        self.assertIn("1 of 3 pages", state["message"])
+
+    async def test_manual_update_all_stopped_early_is_not_done(self):
+        owner = refresh.manual_start(5)
+        self.assertFalse(refresh.manual_finish(owner, 2, 0))
+        self.assertEqual(refresh.status()["status"], "retrying")
+        # A browser closed mid-update stops holding the schedule once its lease ends.
+        owner = refresh.manual_start(5) if refresh.claim() is None else None
+        self.now += refresh.RETRY + refresh.LEASE
+        self.assertEqual(refresh.status()["status"], "retrying")
+        self.assertIsNotNone(refresh.claim())
 
     async def test_manual_update_all_after_a_failure_cancels_the_retry(self):
         self.test_connection.side_effect = ValueError("offline")
         await refresh.run_due()
         self.assertEqual(refresh.status()["next_run"], self.now + 2 * 3600)
         self.now += 600
-        self.assertTrue(refresh.record_manual_success())
+        owner = refresh.manual_start(1)
+        self.assertTrue(refresh.manual_finish(owner, 1, 0))
         self.now += 2 * 3600
         self.assertIsNone(refresh.claim())
         self.assertEqual(refresh.status()["status"], "scheduled")

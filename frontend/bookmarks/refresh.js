@@ -1,21 +1,34 @@
 "use strict";
 (() => {
   const button=document.querySelector("#update-all-bookmarks"), status=document.querySelector("#bookmark-refresh-status");
+  // Update all runs here; the backend schedule is told about it so the auto refresh label
+  // shows it running, and it counts as today's refresh once every bookmark was tried.
+  async function report(body) {
+    const response = await fetch("/api/bookmarks/refresh-schedule/manual", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw Error(typeof data.detail === "string" ? data.detail : "Could not update the refresh schedule.");
+    return data;
+  }
   button.addEventListener("click", async()=>{
-    if (window.bookmarkAutoRefreshRunning) { toast("Automatic Confluence update is running."); return; }
     if (!window.bookmarkDatabaseReady || button.disabled) return;
-    button.disabled=true;status.hidden=false;
-    let done=0,failed=0;
     const targets=[...bookmarks];
+    let owner;
+    try { ({owner} = await report({action:"start", total:targets.length})); }
+    catch (error) { toast(error.message); return; }
+    const changed = () => window.dispatchEvent(new CustomEvent("owl-auto-refresh-changed", {detail:"bookmarks"}));
+    changed();
+    button.disabled=true;status.hidden=false;
+    let done=0,failed=0,reported=0;
     try {
       for(const item of targets){
         status.textContent=`Refreshing ${done}/${targets.length} · ${failed} failed`;
         try{
           const data=await resolveBookmark(item.url);
-          if (!bookmarks.includes(item)) continue;
+          if (!bookmarks.includes(item)) { done++; continue; }
           Object.assign(item,data,{fetchError:""});
         }catch(error){item.fetchError=error.message;failed++;}
         done++;if(!await persist())throw Error("Database save failed. Reload before retrying.");render();
+        if (Date.now()-reported>3000) { reported=Date.now(); void report({action:"progress", owner, completed:done, failed}).catch(()=>{}); }
       }
       status.textContent=`Updated ${done}/${targets.length} · ${failed} failed`;
       const previous = window.bookmarkLastUpdateAll;
@@ -25,10 +38,13 @@
         throw Error("Could not save the Update all timestamp. Reload before retrying.");
       }
       document.querySelector("#bookmark-last-update").textContent="Last update all: "+new Date(window.bookmarkLastUpdateAll).toLocaleString();
-      // A complete manual update counts as today's automatic refresh.
-      if(!failed)await fetch("/api/bookmarks/refresh-schedule/manual",{method:"POST"}).catch(()=>{});
       if(selectedBookmarkId!==null)showPageDetails(selectedBookmarkId);
     }catch(error){status.textContent=error.message;}
-    finally{button.disabled=false;}
+    finally{
+      button.disabled=false;
+      // Every bookmark tried: done for the day, even if some pages failed (each shows why).
+      await report({action:"finish", owner, completed:done, failed}).catch(()=>{});
+      changed();
+    }
   });
 })();
