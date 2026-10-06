@@ -191,7 +191,7 @@ async def discover_pdfs(client, project, repo, on_folder_error=None):
 
 
 async def crawl_repository(client, project, repo, repository_id, progress, paths):
-    for path in paths:
+    async def crawl(path):
         if gate := getattr(client, "wait_unpaused", None):
             await gate()
         if callback := getattr(client, "on_pdf_started", None):
@@ -243,6 +243,24 @@ async def crawl_repository(client, project, repo, repository_id, progress, paths
             callback(project, repo, repository_id, path, succeeded)
         progress["processed"] += 1
         progress["save"]()
+
+    # Files are independent: fetching a few at once hides the network round trips that
+    # dominate large repositories (thousands of YAML or JSON files). Workers share one
+    # iterator, so each file is processed once; a failure stops them all.
+    remaining = iter(paths)
+
+    async def worker():
+        for path in remaining:
+            await crawl(path)
+
+    try:
+        async with asyncio.TaskGroup() as group:
+            for _ in range(min(getattr(client, "workers", 1), len(paths)) or 1):
+                group.create_task(worker())
+    except ExceptionGroup as group_error:
+        # Callers handle the original error, as when files were processed one by one.
+        raise group_error.exceptions[0] from None
+
     with connection() as db:
         db.execute(
             "UPDATE repositories SET last_scanned=? WHERE id=?", (now(), repository_id)

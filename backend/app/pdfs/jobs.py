@@ -21,6 +21,10 @@ from app.pdfs.client import BitbucketClient, BitbucketError
 from app.pdfs.crawler import crawl_repository, discover_pdfs, now
 
 
+# Files fetched at once within a repository.
+FILE_WORKERS = 4
+
+
 def remaining_eta(elapsed, processed, total):
     if processed >= total:
         return 0
@@ -250,6 +254,10 @@ class Jobs:
             raise ValueError(
                 "This crawl has already been resumed. Use the latest crawl."
             )
+        # Files in progress when the crawl stopped are processed again in full.
+        in_progress = checkpoint.get("active_files") or (
+            [checkpoint["active_pdf"]] if checkpoint.get("active_pdf") else []
+        )
         if checkpoint["server"] != load_settings().base_url:
             raise ValueError(
                 "Restore the original Bitbucket server settings before resuming."
@@ -275,11 +283,10 @@ class Jobs:
                     targets.append(base)
                 else:
                     successful = checkpoint["successful"].get(key, [])
-                    active = checkpoint.get("active_pdf")
                     remaining = [
                         path
                         for path in inventory
-                        if path not in successful or active == [project, slug, path]
+                        if path not in successful or [project, slug, path] in in_progress
                     ]
                     targets.extend({**base, "path": path} for path in remaining)
         else:
@@ -297,9 +304,7 @@ class Jobs:
                 }
         self.start(list(project_ids), targets or None)
         self.current["resumed_from"] = job_id
-        self.current["force_paths"] = (
-            [checkpoint["active_pdf"]] if checkpoint.get("active_pdf") else []
-        )
+        self.current["force_paths"] = in_progress
         self.save()
         previous["resumed_by"] = self.current["id"]
         with connection() as db:
@@ -393,9 +398,12 @@ class Jobs:
                         else "repositories_failed"
                     )
                     p[counter] = max(0, p[counter] - 1)
-            for container, field in ((cp, "active_pdf"),):
-                if container.get(field) and tuple(container[field][:2]) in pairs:
-                    container[field] = None
+            if cp.get("active_pdf") and tuple(cp["active_pdf"][:2]) in pairs:
+                cp["active_pdf"] = None
+            # In place: the running crawl keeps a reference to this list.
+            cp.setdefault("active_files", [])[:] = [
+                item for item in cp["active_files"] if tuple(item[:2]) not in pairs
+            ]
             self.targets = [
                 t for t in self.targets if (t["project"], t.get("repo")) not in pairs
             ]
@@ -506,6 +514,7 @@ class Jobs:
     async def run(self, settings, projects, targets=None, auto_retry=True):
         client = BitbucketClient(settings)
         client.extractor = self.extractor
+        client.workers = FILE_WORKERS
         client.wait_unpaused = self.wait_unpaused
         started = self.clock()
         self.run_clock = started
@@ -515,7 +524,12 @@ class Jobs:
 
         completed_sets = {}
 
+        # Several files are processed at once: active_files holds all of them, and
+        # active_pdf the most recently started, which the page shows.
+        active = checkpoint.setdefault("active_files", [])
+
         def pdf_started(project, slug, repository_id, path):
+            active.append([project, slug, path])
             checkpoint["active_pdf"] = [project, slug, path]
             self.save_soon()
 
@@ -526,7 +540,9 @@ class Jobs:
                 if path not in seen:
                     seen.add(path)
                     completed.append(path)
-            checkpoint["active_pdf"] = None
+            if [project, slug, path] in active:
+                active.remove([project, slug, path])
+            checkpoint["active_pdf"] = active[-1] if active else None
             self.save_soon()
 
         client.on_pdf_started = pdf_started

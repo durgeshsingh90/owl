@@ -121,6 +121,8 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
             client.test.assert_not_awaited()
             self.jobs.busy = False
             await run_due(self.jobs, self.now)
+            # A repository whose file list could not be read is a failed refresh.
+            self.jobs.current["discovery_failed"] = True
             self.jobs.finish("succeeded_with_errors", self.now)
             # A new scheduler invocation reads the durable failed-job state.
             await run_due(FakeJobs(), self.now)
@@ -130,6 +132,23 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 row["next_attempt"], (self.now + timedelta(hours=2)).isoformat()
             )
+
+    async def test_pull_with_some_failed_files_is_done_for_the_day(self):
+        with connection() as db:
+            db.execute(
+                "INSERT INTO bitbucket_sync_schedule(server,next_attempt) VALUES(?,?)",
+                (self.settings.base_url, self.now.isoformat()),
+            )
+        client = AsyncMock()
+        with patch("app.pdfs.schedule.BitbucketClient", return_value=client):
+            await run_due(self.jobs, self.now)
+            # Two unreadable files: they are retried on the next pull, not in two hours.
+            self.jobs.current.update(failed=2, repositories_failed=1)
+            self.jobs.finish("succeeded_with_errors", self.now)
+            await run_due(self.jobs, self.now)
+            state = status(self.jobs)
+            self.assertEqual(state["status"], "scheduled")
+            self.assertEqual(state["next_run"], (self.now + timedelta(days=1)).timestamp())
 
     async def test_full_manual_pull_counts_as_the_daily_refresh(self):
         with connection() as db:
@@ -143,19 +162,19 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
                 (self.settings.base_url, (self.now + timedelta(hours=5)).isoformat()),
             )
 
-        def manual(job_id, completed, statuses, failed=0):
+        def manual(job_id, completed, statuses, discovery_failed=False):
             with connection() as db:
                 db.execute(
                     "INSERT INTO jobs(id,status,progress) VALUES(?,?,?)",
-                    (job_id, "succeeded", json.dumps({"completed_at": completed.isoformat(), "repository_statuses": statuses, "failed": failed})),
+                    (job_id, "succeeded_with_errors", json.dumps({"completed_at": completed.isoformat(), "repository_statuses": statuses, "failed": 2, "discovery_failed": discovery_failed})),
                 )
 
         client = AsyncMock()
         with patch("app.pdfs.schedule.BitbucketClient", return_value=client):
-            # A pull of some repositories only, or with failures, does not count.
+            # A pull of some repositories only, or one that could not list every file, does not count.
             manual("partial", self.now, {})
             await run_due(self.jobs, self.now)
-            manual("failed", self.now, {str(repo): {}}, failed=2)
+            manual("unread", self.now, {str(repo): {}}, discovery_failed=True)
             await run_due(self.jobs, self.now)
             with connection() as db:
                 row = db.execute("SELECT * FROM bitbucket_sync_schedule").fetchone()

@@ -70,6 +70,9 @@ class ConfluenceLibraryTests(unittest.TestCase):
         job = self.client.post("/api/confluence-library/imports", json={"urls": [url]})
         self.assertEqual(job.status_code, 202, job.text)
         self.assertEqual(job.json()["status"], "queued")
+        # Only changes since tracking started are kept; start before every sample page.
+        with connection() as db:
+            db.execute("UPDATE confluence_tracker_roots SET created_at=?", ((NOW - timedelta(days=1500)).isoformat(),))
         asyncio.run(service.sync(service.claim()))
         return job.json()["id"]
 

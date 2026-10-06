@@ -1,8 +1,9 @@
-"""Track Confluence page trees by metadata only: who created and updated each page, and when.
+"""Keep an eye on Confluence page trees: which pages are new or updated, from the day
+tracking starts.
 
-The first sync of a tree records every page's title, path, link, authors and dates.
-Later syncs ask Confluence only for pages modified since the last success and record
-which were updated or added, again without downloading any page content.
+Old pages are never collected. Each sync asks Confluence only for pages in the tree
+modified since the last check (since the start day at first) and records each one's
+title, path, link, who created and updated it, and when, without any page content.
 """
 
 import asyncio
@@ -92,13 +93,13 @@ def fingerprint(page):
     return f"{page.get('version')}|{page.get('confluenceUpdatedAt')}"
 
 
-def save_pages(root, pages, complete):
-    """Store page metadata; once a tree has a baseline, record new and updated pages.
+def save_pages(root, pages, start_day):
+    """Record pages that are new or updated since tracking started.
 
-    complete says the list holds the whole tree, so pages missing from it are gone.
+    A page created on or after the start day is new; an older page is updated. A page
+    seen again with the same version is not reported twice.
     """
     now = stamp()
-    baseline = not root["last_success"]
     with connection() as db:
         db.execute("BEGIN IMMEDIATE")
         if not db.execute(
@@ -109,68 +110,54 @@ def save_pages(root, pages, complete):
         stored = {
             row["page_id"]: row
             for row in db.execute(
-                "SELECT page_id,fingerprint,present,change_kind,changed_at,metadata FROM confluence_tracker_pages WHERE root_id=?",
+                "SELECT page_id,fingerprint,metadata FROM confluence_tracker_pages WHERE root_id=?",
                 (root["id"],),
             )
         }
+        recorded = 0
         for page in pages:
+            # Only changes on or after the day tracking started.
+            if str(page.get("confluenceUpdatedAt") or "")[:10] < start_day:
+                continue
             old = stored.get(page["page_id"])
             digest = fingerprint(page)
-            if baseline:
-                kind, changed_at = "baseline", now
-            elif not old:
-                kind, changed_at = "new", now
-            elif not old["present"]:
-                kind, changed_at = "returned", now
-            elif old["fingerprint"] != digest:
-                kind, changed_at = "updated", now
-            else:
-                kind, changed_at = old["change_kind"], old["changed_at"]
-            if not baseline and changed_at == now:
-                before = json.loads(old["metadata"]).get("version") if old else None
-                db.execute(
-                    "INSERT INTO confluence_tracker_changes(root_id,page_id,kind,detected_at,summary) VALUES(?,?,?,?,?)",
-                    (
-                        root["id"],
-                        page["page_id"],
-                        kind,
-                        now,
-                        json.dumps(
-                            {
-                                "title": page["title"],
-                                "path": " / ".join(page["breadcrumb"]),
-                                "url": page["url"],
-                                "updatedBy": page["lastEditor"] or page["author"],
-                                "updatedAt": page["confluenceUpdatedAt"],
-                                "version": {"before": before, "after": page["version"]},
-                            }
-                        ),
+            if old and old["fingerprint"] == digest:
+                continue
+            created = str(page.get("writtenAt") or "")[:10]
+            kind = "new" if not old and created >= start_day else "updated"
+            before = json.loads(old["metadata"]).get("version") if old else None
+            db.execute(
+                "INSERT INTO confluence_tracker_changes(root_id,page_id,kind,detected_at,summary) VALUES(?,?,?,?,?)",
+                (
+                    root["id"],
+                    page["page_id"],
+                    kind,
+                    now,
+                    json.dumps(
+                        {
+                            "title": page["title"],
+                            "path": " / ".join(page["breadcrumb"]),
+                            "url": page["url"],
+                            "updatedBy": page["lastEditor"] or page["author"],
+                            "updatedAt": page["confluenceUpdatedAt"],
+                            "version": {"before": before, "after": page["version"]},
+                        }
                     ),
-                )
+                ),
+            )
             ancestors = page["ancestors"]
             parent = ancestors[-1]["page_id"] if ancestors and page["page_id"] != root["page_id"] else None
             db.execute(
                 "INSERT INTO confluence_tracker_pages(root_id,page_id,parent_id,metadata,fingerprint,first_seen,last_checked,changed_at,change_kind) VALUES(?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(root_id,page_id) DO UPDATE SET parent_id=excluded.parent_id,metadata=excluded.metadata,fingerprint=excluded.fingerprint,last_checked=excluded.last_checked,changed_at=excluded.changed_at,change_kind=excluded.change_kind,present=1",
-                (root["id"], page["page_id"], parent, json.dumps(page), digest, now, now, changed_at, kind),
+                (root["id"], page["page_id"], parent, json.dumps(page), digest, now, now, now, kind),
             )
-            if page["page_id"] == root["page_id"]:
-                db.execute(
-                    "UPDATE confluence_tracker_roots SET title=? WHERE id=?",
-                    (page["title"], root["id"]),
-                )
-        if complete and not baseline:
-            listed = {page["page_id"] for page in pages}
-            for page_id, row in stored.items():
-                if row["present"] and page_id not in listed:
-                    db.execute(
-                        "UPDATE confluence_tracker_pages SET present=0,change_kind='missing',changed_at=? WHERE root_id=? AND page_id=?",
-                        (now, root["id"], page_id),
-                    )
+            recorded += 1
         db.execute(
             "UPDATE confluence_tracker_roots SET total=?,completed=? WHERE id=? AND owner=?",
             (len(pages), len(pages), root["id"], root["owner"]),
         )
+        return recorded
 
 
 def finish(root, success, error=""):
@@ -198,28 +185,39 @@ async def sync(root):
                 "This root uses a different Confluence server. Restore its saved connection to sync it."
             )
         await asyncio.wait_for(confluence.test(settings), 120)
-        pages, complete = None, True
-        if root["last_success"]:
-            # Ask only for pages modified since the last success, with a day of margin;
-            # unchanged versions among them are ignored when saving.
-            day = (
-                datetime.fromisoformat(root["last_success"]) - timedelta(days=1)
-            ).strftime("%Y-%m-%d")
-            try:
-                pages = await listing.updated_since(
-                    settings, root["page_id"], day, lambda count: heartbeat(root, count)
-                )
-                complete = False
-            except confluence.ConfluenceRequestError as error:
-                # Servers without this search fall back to listing the whole tree.
-                if error.upstream_status not in listing.UNSUPPORTED:
-                    raise
-        if pages is None:
-            pages = await listing.tree(
-                settings, root["page_id"], lambda count: heartbeat(root, count)
+        # The tree's title, for the tracker page; it is not recorded as a change.
+        top = await confluence.get(settings, "content/" + root["page_id"])
+        with connection() as db:
+            db.execute(
+                "UPDATE confluence_tracker_roots SET title=? WHERE id=? AND owner=?",
+                (top.get("title") or root["title"], root["id"], root["owner"]),
             )
+        start_day = root["created_at"][:10]
+        # Pages modified since the last check, with a day of overlap; at first, since
+        # the day tracking started.
+        since = (
+            (datetime.fromisoformat(root["last_success"]) - timedelta(days=1)).strftime("%Y-%m-%d")
+            if root["last_success"]
+            else start_day
+        )
+        since = max(since, start_day)
+        try:
+            pages = await listing.updated_since(
+                settings, root["page_id"], since, lambda count: heartbeat(root, count)
+            )
+        except confluence.ConfluenceRequestError as error:
+            # Servers without this search: list the tree's metadata and keep changed pages.
+            if error.upstream_status not in listing.UNSUPPORTED:
+                raise
+            pages = [
+                page
+                for page in await listing.tree(
+                    settings, root["page_id"], lambda count: heartbeat(root, count)
+                )
+                if str(page.get("confluenceUpdatedAt") or "")[:10] >= since
+            ]
         heartbeat(root, len(pages))
-        save_pages(root, pages, complete)
+        save_pages(root, pages, start_day)
         finish(root, True)
     except asyncio.CancelledError:
         finish(root, False, "Sync interrupted. Retrying in two hours.")

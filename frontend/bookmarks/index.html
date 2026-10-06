@@ -232,6 +232,17 @@
                 aria-label="Update and delete bookmarks"
               >
                 <button
+                  id="track-confluence-tree"
+                  class="folder-button"
+                  type="button"
+                  aria-label="Track a Confluence tree"
+                  title="Track a Confluence tree: paste any page link, the tracker follows its top-most parent"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg></button
+                ><button
                   id="update-all-bookmarks"
                   class="folder-button"
                   type="button"
@@ -526,10 +537,10 @@
     <script src="search.js?v=3"></script>
     <script src="failures.js?v=3"></script>
     <script src="folder-downloads.js?v=20260924-branches"></script>
-    <script src="tracker-link.js?v=1"></script>
+    <script src="tracker-link.js?v=2"></script>
     <script src="tree-numbering.js?v=2"></script>
     <script src="relevance.js?v=2"></script>
-    <script src="script.js?v=track-1"></script>
+    <script src="script.js?v=track-2"></script>
     <script src="database.js?v=update-timestamp-7"></script>
     <script src="metadata.js?scope=confluence&v=reveal-added-6"></script>
     <script src="connection.js?v=confluence-live-2"></script>

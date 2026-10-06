@@ -36,18 +36,30 @@ def setup():
                 )
 
 
+def completed(job_status, progress):
+    """A pull that finished and read every repository's file list counts as done.
+
+    Individual files that failed (an unreadable PDF or a non-UTF-8 YAML file) do not
+    make it a failure: they are kept in failed_documents and retried on every pull, so
+    retrying the whole refresh every two hours would only repeat them.
+    """
+    return job_status in {"succeeded", "succeeded_with_errors"} and not progress.get(
+        "discovery_failed"
+    )
+
+
 def manual_success(db, last_success):
-    """When a manual pull of every tracked repository last finished without failures.
+    """When a manual pull of every tracked repository last finished.
 
     Returns its completion time if it is newer than the last recorded success.
     """
     row = db.execute(
         "SELECT status,progress FROM jobs ORDER BY rowid DESC LIMIT 1"
     ).fetchone()
-    if row is None or row["status"] != "succeeded":
+    if row is None:
         return None
     progress = json.loads(row["progress"])
-    if progress.get("background") or progress.get("failed") or progress.get("repositories_failed"):
+    if progress.get("background") or not completed(row["status"], progress):
         return None
     if not progress.get("completed_at"):
         return None
@@ -60,10 +72,10 @@ def manual_success(db, last_success):
     }
     if not tracked or not tracked <= covered:
         return None
-    completed = datetime.fromisoformat(progress["completed_at"])
-    if last_success and completed <= datetime.fromisoformat(last_success):
+    finished = datetime.fromisoformat(progress["completed_at"])
+    if last_success and finished <= datetime.fromisoformat(last_success):
         return None
-    return completed
+    return finished
 
 
 async def run_due(jobs, now=None):
@@ -115,29 +127,22 @@ async def run_due(jobs, now=None):
             if job and job["status"] in {"queued", "running", "paused"}:
                 return
             progress = json.loads(job["progress"]) if job else {}
-            success = (
-                job
-                and job["status"] == "succeeded"
-                and not progress.get("failed")
-                and not progress.get("repositories_failed")
-            )
-            completed = (
+            success = job is not None and completed(job["status"], progress)
+            finished = (
                 datetime.fromisoformat(progress["completed_at"])
                 if progress.get("completed_at")
                 else now
             )
-            next_attempt = (
-                completed + (INTERVAL if success else RETRY)
-            )
+            next_attempt = finished + (INTERVAL if success else RETRY)
             db.execute(
                 "UPDATE bitbucket_sync_schedule SET job_id=NULL,next_attempt=?,last_success=CASE WHEN ? THEN ? ELSE last_success END,error=? WHERE server=?",
                 (
                     next_attempt.isoformat(),
                     bool(success),
-                    completed.isoformat(),
+                    finished.isoformat(),
                     ""
                     if success
-                    else "Sync did not complete successfully. Retrying in two hours.",
+                    else "Sync stopped before reading every repository. Retrying in two hours.",
                     server,
                 ),
             )

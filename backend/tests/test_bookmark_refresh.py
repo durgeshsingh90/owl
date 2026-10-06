@@ -133,25 +133,39 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(refresh.claim())
         self.assertEqual(refresh.status()["status"], "scheduled")
 
-    async def test_partial_failure_is_not_success_and_recovers(self):
+    async def test_unreadable_pages_fail_alone_and_the_day_is_done(self):
         self.write(
             [
                 self.page,
                 {**self.page, "id": 3, "url": "https://wiki.test/pages/456/Other"},
+                {**self.page, "id": 4, "url": "https://wiki.test/pages/789/Restricted"},
             ]
         )
-        self.metadata.side_effect = [self.data, ValueError("page unavailable")]
+        self.metadata.side_effect = [
+            self.data,
+            confluence.ConfluenceRequestError(404, "Confluence HTTP 404: page or endpoint not found. Request: https://wiki.test/rest/api/content/456"),
+            confluence.ConfluenceRequestError(403, "Confluence HTTP 403: access denied. Request: https://wiki.test/rest/api/content/789"),
+        ]
         await refresh.run_due()
         state = refresh.status()
-        self.assertEqual(
-            (state["completed"], state["total"], state["failed"]), (2, 2, 1)
-        )
-        self.assertEqual(state["next_run"], self.now + refresh.RETRY)
-        self.assertNotIn("last_update_all", self.workspace())
-        self.metadata.side_effect = None
-        self.now += refresh.RETRY
+        self.assertEqual((state["completed"], state["total"], state["failed"]), (3, 3, 2))
+        self.assertEqual((state["status"], state["next_run"]), ("scheduled", self.now + refresh.DAY))
+        self.assertIn("2 of 3 pages", state["message"])
+        errors = {item["id"]: item.get("fetchError", "") for item in self.workspace()["bookmarks"]}
+        self.assertIn("HTTP 404", errors[3])
+        self.assertIn("HTTP 403", errors[4])
+
+    async def test_server_errors_stop_the_update_and_retry(self):
+        self.write([self.page, {**self.page, "id": 3, "url": "https://wiki.test/pages/456/Other"}])
+        self.metadata.side_effect = [
+            confluence.ConfluenceRequestError(503, "Confluence HTTP 503: request failed. Request: https://wiki.test/rest/api/content/1"),
+            self.data,
+        ]
         await refresh.run_due()
-        self.assertEqual(refresh.status()["status"], "scheduled")
+        state = refresh.status()
+        self.assertEqual((state["status"], state["next_run"]), ("retrying", self.now + refresh.RETRY))
+        self.assertIn("HTTP 503", state["message"])
+        self.assertEqual(self.metadata.await_count, 1)
 
     async def test_concurrent_user_edits_are_preserved_and_deletions_not_restored(self):
         async def edited(_):

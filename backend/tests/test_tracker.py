@@ -57,68 +57,73 @@ class TrackerTests(unittest.IsolatedAsyncioTestCase):
         page["editor"] = editor
         page["updated"] = self.stamp()
 
-    async def test_baseline_stores_who_and_when_without_content(self):
+    def new_page(self, page_id, title, parent_chain):
+        self.wiki.pages[page_id] = {"title": title, "ancestors": parent_chain, "created": self.stamp(), "updated": self.stamp(), "creator": "Fay", "editor": "Fay"}
+
+    async def test_old_pages_are_never_collected(self):
         root_id = await service.add_root("160")  # any page tracks its top-most parent
         state = await self.scan()
-        self.assertEqual((state["status"], state["page_count"], state["unread"]), ("completed", 4, 0))
+        self.assertEqual((state["status"], state["page_count"], state["unread"]), ("completed", 0, 0))
+        self.assertEqual(state["title"], "Home")
+        self.assertFalse(any(path.endswith(("/descendant/page", "/child/page")) for path, _ in self.wiki.calls))
         self.assertTrue(all("body" not in str(params) for _, params in self.wiki.calls))
-        pages = {page["page_id"]: page for page in api.pages(root_id)["pages"]}
-        deep = pages["160"]
-        self.assertEqual(
-            (deep["title"], deep["author"], deep["writtenAt"], deep["lastEditor"], deep["confluenceUpdatedAt"]),
-            ("Deep Page", "Eve", "2026-04-01T00:00:00Z", "Eve", "2026-04-02T00:00:00Z"),
-        )
-        self.assertEqual(deep["breadcrumb"], ["Home", "Architecture"])
-        self.assertEqual(deep["url"], "https://wiki.test/pages/viewpage.action?pageId=160")
-        self.assertEqual(deep["parent_id"], "150")
-        self.assertNotIn("contentText", deep)
+        searched = [params["cql"] for path, params in self.wiki.calls if path == "content/search"]
+        self.assertEqual(searched, ['(id = 100 or ancestor = 100) and type = page and lastmodified >= "2027-01-15"'])
+        self.assertEqual(api.pages(root_id)["pages"], [])
         self.assertEqual(state["next_run"], self.now + DAY)
 
-    async def test_daily_sync_asks_only_for_updated_pages(self):
+    async def test_new_and_updated_pages_from_the_start_day(self):
         root_id = await service.add_root("100")
-        await self.scan()
-        self.now += DAY
-        self.edit("160")
-        self.wiki.pages["170"] = {"title": "New Page", "ancestors": ["100", "150"], "created": self.stamp(), "updated": self.stamp(), "creator": "Fay", "editor": "Fay"}
+        self.now += 3600
+        self.edit("160")  # an old page updated today
+        self.new_page("170", "New Page", ["100", "150"])
         state = await self.scan()
-        searched = [params for path, params in self.wiki.calls if path == "content/search"]
-        self.assertTrue(searched, self.wiki.calls)
-        self.assertIn('lastmodified >= "2027-01-14"', searched[0]["cql"])
-        self.assertFalse(any(path.endswith("/descendant/page") for path, _ in self.wiki.calls))
-        self.assertEqual((state["status"], state["page_count"], state["unread"]), ("completed", 5, 2))
-        detail = api.page_details(root_id, "160")
-        change = detail["changes"][0]
-        self.assertEqual(change["kind"], "updated")
+        self.assertEqual((state["page_count"], state["unread"]), (2, 2))
+        pages = {page["page_id"]: page for page in api.pages(root_id)["pages"]}
+        self.assertEqual((pages["160"]["change_kind"], pages["170"]["change_kind"]), ("updated", "new"))
+        deep = pages["160"]
+        self.assertEqual(
+            (deep["title"], deep["author"], deep["writtenAt"], deep["lastEditor"], deep["breadcrumb"], deep["url"]),
+            ("Deep Page", "Eve", "2026-04-01T00:00:00Z", "Zed", ["Home", "Architecture"], "https://wiki.test/pages/viewpage.action?pageId=160"),
+        )
+        self.assertNotIn("contentText", deep)
+        change = api.page_details(root_id, "160")["changes"][0]
         self.assertEqual(
             {key: change["summary"][key] for key in ("path", "url", "updatedBy", "version")},
-            {"path": "Home / Architecture", "url": "https://wiki.test/pages/viewpage.action?pageId=160", "updatedBy": "Zed", "version": {"before": 1, "after": 2}},
+            {"path": "Home / Architecture", "url": "https://wiki.test/pages/viewpage.action?pageId=160", "updatedBy": "Zed", "version": {"before": None, "after": 2}},
         )
-        self.assertEqual(api.page_details(root_id, "170")["changes"][0]["kind"], "new")
-        # Pages returned again by the overlapping day are not reported twice.
-        self.now += DAY
-        state = await self.scan()
-        self.assertEqual(state["unread"], 2)
-
-    async def test_without_search_the_whole_tree_is_compared(self):
-        root_id = await service.add_root("100")
-        await self.scan()
-        self.wiki.unsupported.add("search")
+        # The next day: only pages changed since, and nothing reported twice.
         self.now += DAY
         self.edit("101")
-        del self.wiki.pages["160"]
         state = await self.scan()
-        self.assertEqual(state["status"], "completed")
-        self.assertEqual(api.page_details(root_id, "101")["changes"][0]["kind"], "updated")
-        missing = next(page for page in api.pages(root_id)["pages"] if page["page_id"] == "160")
-        self.assertEqual((missing["present"], missing["change_kind"]), (0, "missing"))
+        searched = [params["cql"] for path, params in self.wiki.calls if path == "content/search"]
+        self.assertIn('lastmodified >= "2027-01-15"', searched[0])
+        self.assertEqual((state["page_count"], state["unread"]), (3, 3))
+        self.now += DAY
+        self.edit("160", editor="Amy")
+        state = await self.scan()
+        self.assertEqual(state["unread"], 4)
+        self.assertEqual(api.page_details(root_id, "160")["changes"][0]["summary"]["version"], {"before": 2, "after": 3})
 
-    async def test_children_are_walked_when_descendants_cannot_be_listed(self):
+    async def test_without_search_the_tree_metadata_is_filtered(self):
         root_id = await service.add_root("100")
-        self.wiki.unsupported.add("content/100/descendant/page")
-        self.wiki.denied.add("150")  # its own branch is hidden; the rest is still tracked
+        self.wiki.unsupported.add("search")
+        self.now += 3600
+        self.edit("101")
         state = await self.scan()
         self.assertEqual(state["status"], "completed")
-        self.assertEqual({page["page_id"] for page in api.pages(root_id)["pages"]}, {"100", "101", "150"})
+        self.assertEqual([page["page_id"] for page in api.pages(root_id)["pages"]], ["101"])
+
+    async def test_children_are_walked_when_nothing_else_works(self):
+        root_id = await service.add_root("100")
+        self.wiki.unsupported.update({"search", "content/100/descendant/page"})
+        self.wiki.denied.add("150")  # its own branch is hidden; the rest is still tracked
+        self.now += 3600
+        self.edit("101")
+        self.edit("160")
+        state = await self.scan()
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual([page["page_id"] for page in api.pages(root_id)["pages"]], ["101"])
 
     async def test_repeated_failures_wait_two_hours_then_resume_daily(self):
         await service.add_root("100")
@@ -155,24 +160,21 @@ class TrackerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_daily_sync_keeps_pages(self):
         root_id = await service.add_root("100")
+        self.edit("101")
         await self.scan()
         self.now += DAY
-        self.wiki.unsupported.add("content/100")
-        self.wiki.unsupported.add("search")
+        self.wiki.unsupported.update({"content/100", "search"})
         state = await self.scan()
         self.assertEqual(state["status"], "failed")
-        self.assertEqual(state["page_count"], 4)
-        self.assertTrue(all(page["present"] for page in api.pages(root_id)["pages"]))
+        self.assertEqual(state["page_count"], 1)
 
     async def test_opens_and_review(self):
         root_id = await service.add_root("100")
-        await self.scan()
-        api.record_open(root_id, "100")
-        self.now += DAY
         self.edit("100")
         self.edit("101")
         state = await self.scan()
         self.assertEqual(state["unread"], 2)
+        api.record_open(root_id, "100")
         listing = api.pages(root_id)
         self.assertEqual(next(p for p in listing["pages"] if p["page_id"] == "100")["opens"], 1)
         api.review(root_id, api.ReviewInput(through_id=listing["max_event"]))

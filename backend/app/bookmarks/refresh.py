@@ -145,6 +145,47 @@ def save_page(owner, kind, original, data):
             )
 
 
+def connection_lost(error):
+    """Errors that stop the whole update: the network, the token or the server is down.
+
+    Confluence's own status is used: OWL reports every Confluence error as HTTP 502.
+    """
+    if isinstance(error, (httpx.RequestError, TimeoutError)):
+        return True
+    if isinstance(error, confluence.ConfluenceRequestError):
+        return error.upstream_status >= 500 or error.upstream_status in (401, 429)
+    return isinstance(error, HTTPException) and error.status_code >= 500
+
+
+def describe(error):
+    if isinstance(error, HTTPException):
+        return str(error.detail).rstrip(".") + "."
+    if isinstance(error, TimeoutError):
+        return "Confluence did not answer within two minutes."
+    # Other errors can carry upstream text; name only their type.
+    return f"{type(error).__name__}."
+
+
+def save_failure(owner, original, message):
+    with connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        if not db.execute(
+            "SELECT 1 FROM bookmark_refresh_schedule WHERE id=1 AND owner=?", (owner,)
+        ).fetchone():
+            return
+        payload = json.loads(
+            db.execute("SELECT payload FROM bookmark_workspace WHERE id=1").fetchone()[0]
+        )
+        for item in payload["bookmarks"]:
+            if item["id"] == original["id"] and item["url"] == original["url"]:
+                item["fetchError"] = message[:500]
+                db.execute(
+                    "UPDATE bookmark_workspace SET payload=?,revision=revision+1 WHERE id=1",
+                    (json.dumps(payload),),
+                )
+                break
+
+
 async def run_due():
     owner = claim()
     if owner is None:
@@ -181,18 +222,16 @@ async def run_due():
             except Exception as error:
                 failed += 1
                 event("bookmarks.refresh.page_failed", **error_details(error))
-                if isinstance(error, (httpx.RequestError, TimeoutError)) or (
-                    isinstance(error, HTTPException)
-                    and (
-                        error.status_code >= 500 or error.status_code in (401, 403, 429)
-                    )
-                ):
+                if connection_lost(error):
                     with connection() as db:
                         db.execute(
                             "UPDATE bookmark_refresh_schedule SET completed=?,failed=? WHERE owner=?",
                             (index + 1, failed, owner),
                         )
                     raise
+                # A deleted or restricted page fails alone; the rest still refresh.
+                if kind == "bookmark":
+                    save_failure(owner, original, describe(error))
             with connection() as db:
                 db.execute(
                     "UPDATE bookmark_refresh_schedule SET completed=?,failed=? WHERE owner=?",
@@ -214,10 +253,14 @@ async def run_due():
                         "UPDATE bookmark_workspace SET payload=?,revision=revision+1 WHERE id=1",
                         (json.dumps(payload),),
                     )
+        # The update reached every page: that is today's refresh, even if some pages
+        # could not be read. Each failed bookmark shows its own error.
         finish(
             owner,
-            success=not failed,
-            message=f"{failed} pages failed. Retrying in two hours." if failed else "",
+            success=True,
+            message=f"{failed} of {len(pages)} pages could not be refreshed; each shows its error."
+            if failed
+            else "",
         )
     except asyncio.CancelledError:
         finish(
@@ -229,7 +272,7 @@ async def run_due():
         finish(
             owner,
             success=False,
-            message="Confluence connection or update failed. Check connection settings and VPN. Retrying in two hours.",
+            message=f"Confluence connection failed: {describe(error)} Check connection settings and VPN. Retrying in two hours.",
         )
 
 
