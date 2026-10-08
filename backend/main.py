@@ -179,6 +179,7 @@ for name in (
     "confluence-tracker",
     "aws-accounts",
     "compare",
+    "json-visualizer",
     "vendor",
 ):
     app.mount("/" + name, StaticFiles(directory=frontend / name, html=True), name=name)

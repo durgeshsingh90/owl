@@ -20,6 +20,7 @@ APPS = {
     "tracker": "Confluence Tracker",
     "compare": "Compare",
     "aws": "AWS Accounts",
+    "json": "JSON Visualizer",
 }
 # Tables in the main database, by app (full-text indexes keep their shadow tables
 # under the same prefix).
