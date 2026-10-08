@@ -43,6 +43,17 @@
         const remaining = Number(state.eta_seconds) > 0 && state.completed > 0 ? ` · about ${duration(state.eta_seconds)} left` : "";
         // A manual Update all in Bookmarks runs in the browser rather than in the background.
         const what = state.manual ? "Updating now (Update all)" : "Refreshing in background";
+        if (state.phase) {
+          // Bitbucket-style apps: say which repository and whether it is listing or updating.
+          const repos = state.repositories ? ` · ${state.repositories_done}/${state.repositories} repositories done` : "";
+          const left = Number(state.current_eta_seconds) > 0 && state.current_processed > 0 ? ` · about ${duration(state.current_eta_seconds)} left` : "";
+          const text = state.phase === "finding"
+            ? `${what} · finding files in ${state.current} · ${Number(state.current_found).toLocaleString()} found`
+            : state.phase === "retrying"
+              ? `${what} · retrying failed files in ${state.current}`
+              : `${what} · updating ${state.current} ${Number(state.current_processed).toLocaleString()}/${Number(state.current_found).toLocaleString()}${left}`;
+          return {tone: "running", text: text + repos, detail: `${schedule}. ${last}.`};
+        }
         return {tone: "running", text: `${what}${progress}${failed}${remaining}`, detail: `${schedule}. ${last}.`};
       }
       case "retrying":

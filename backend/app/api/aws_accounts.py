@@ -1,51 +1,80 @@
-"""Imported AWS account inventory, grouped by category."""
+"""AWS accounts from the AWS CLI config file (~/.aws/config), grouped by category."""
 
 import json
+import os
 from datetime import datetime, timezone
 from typing import Literal
 
 from app.aws import connection as aws
+from app.aws import profiles
 from app.core.database import connection
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 router = APIRouter(prefix="/api")
 
 
-class Account(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    profile: str = Field(min_length=1, max_length=500)
-    account_id: str = Field(default="", max_length=64)
-
-    @field_validator("account_id", mode="before")
-    @classmethod
-    def text_id(cls, value):
-        # Account IDs keep leading zeros only as strings; accept numbers too.
-        return "" if value is None else str(value)
+def _source(db):
+    row = db.execute("SELECT * FROM aws_config_source WHERE id=1").fetchone()
+    return dict(row) if row else {"path": "", "mtime": None, "loaded_at": None, "error": ""}
 
 
-class Inventory(BaseModel):
-    model_config = ConfigDict(extra="allow")
+def sync_config():
+    """Read the AWS config file again when it changed; the accounts page shows it."""
+    with connection() as db:
+        source = _source(db)
+    path = source["path"] or profiles.default_path()
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        error = f"No AWS config file at {path}. Set its location in Settings."
+        if error != source["error"]:
+            with connection() as db:
+                db.execute(
+                    "INSERT INTO aws_config_source(id,path,error) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET error=excluded.error",
+                    (source["path"], error),
+                )
+        return
+    if mtime == source["mtime"] and not source["error"]:
+        return
+    try:
+        payload = profiles.inventory(path)
+        error = ""
+    except (OSError, UnicodeError, ValueError) as problem:
+        payload, error = None, str(problem)[:500] or "The AWS config file could not be read."
+    now = datetime.now(timezone.utc).isoformat()
+    with connection() as db:
+        if payload is not None:
+            db.execute(
+                "INSERT INTO aws_accounts(id,payload,imported_at) VALUES(1,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,imported_at=excluded.imported_at",
+                (json.dumps(payload), now),
+            )
+        db.execute(
+            "INSERT INTO aws_config_source(id,path,mtime,loaded_at,error) VALUES(1,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET mtime=excluded.mtime,loaded_at=CASE WHEN ? THEN excluded.loaded_at ELSE loaded_at END,error=excluded.error",
+            (source["path"], mtime if payload is not None else None, now, error, payload is not None),
+        )
 
-    generated_at: str | None = Field(default=None, max_length=64)
-    total_accounts: int | None = None
-    common_roles: dict[str, str] = Field(default_factory=dict)
-    categories: dict[str, list[Account]] = Field(max_length=1000)
 
-    @field_validator("categories")
-    @classmethod
-    def limits(cls, value):
-        if not value:
-            raise ValueError("The file has no categories.")
-        if sum(len(accounts) for accounts in value.values()) > 50000:
-            raise ValueError("The file has more than 50,000 accounts.")
-        return value
+def source_state():
+    with connection() as db:
+        source = _source(db)
+    path = source["path"] or profiles.default_path()
+    return {
+        "path": path,
+        "custom": bool(source["path"]),
+        "default_path": profiles.default_path(),
+        "exists": os.path.exists(path),
+        "loaded_at": source["loaded_at"],
+        "error": source["error"],
+    }
 
 
 @router.get("/aws-accounts")
 def inventory():
+    sync_config()
     with connection() as db:
         row = db.execute(
             "SELECT payload,imported_at FROM aws_accounts WHERE id=1"
@@ -59,8 +88,9 @@ def inventory():
     counts = {"profile": {}, "account_id": {}, "role": {}}
     for copy in copies:
         counts[copy["kind"]][copy["value"]] = copy["count"]
+    source = source_state()
     if row is None:
-        return {"imported": False, "copies": counts, "stars": stars, "projects": projects}
+        return {"imported": False, "copies": counts, "stars": stars, "projects": projects, "config": source}
     return {
         "imported": True,
         "imported_at": row["imported_at"],
@@ -68,7 +98,31 @@ def inventory():
         "copies": counts,
         "stars": stars,
         "projects": projects,
+        "config": source,
     }
+
+
+class ConfigPath(BaseModel):
+    path: str = Field(default="", max_length=1000)
+
+
+@router.put("/aws-accounts/config")
+def set_config(value: ConfigPath):
+    """Where the AWS config file is; empty means the default (~/.aws/config)."""
+    path = os.path.expandvars(os.path.expanduser(value.path.strip().strip('"')))
+    if path and not os.path.isfile(path):
+        raise HTTPException(400, f"No file at {path}.")
+    with connection() as db:
+        db.execute(
+            "INSERT INTO aws_config_source(id,path,mtime,error) VALUES(1,?,NULL,'') "
+            "ON CONFLICT(id) DO UPDATE SET path=excluded.path,mtime=NULL,error=''",
+            (path,),
+        )
+    sync_config()
+    state = source_state()
+    if state["error"]:
+        raise HTTPException(400, state["error"])
+    return state
 
 
 def _projects(db):
@@ -236,34 +290,20 @@ def connection_login():
         raise HTTPException(400, str(error)) from None
 
 
-@router.put("/aws-accounts")
-def import_inventory(value: Inventory):
-    imported_at = datetime.now(timezone.utc).isoformat()
-    with connection() as db:
-        db.execute(
-            "INSERT INTO aws_accounts(id,payload,imported_at) VALUES(1,?,?) "
-            "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,imported_at=excluded.imported_at",
-            (json.dumps(value.model_dump()), imported_at),
-        )
-    return {
-        "ok": True,
-        "imported_at": imported_at,
-        "accounts": sum(len(accounts) for accounts in value.categories.values()),
-    }
-
-
 class DeleteAll(BaseModel):
     confirmation: str = ""
 
 
 @router.delete("/aws-accounts")
 def delete_all(value: DeleteAll):
-    """Delete every AWS Accounts record: inventory, copy counts, stars, projects and session."""
+    """Delete every AWS Accounts record: copy counts, stars, projects and session. The
+    accounts themselves are read again from the AWS config file."""
     if value.confirmation != "delete all":
         raise HTTPException(400, 'Type "delete all" to confirm.')
     aws.reset()
     with connection() as db:
         accounts = db.execute("DELETE FROM aws_accounts").rowcount
+        db.execute("UPDATE aws_config_source SET mtime=NULL")
         copies = db.execute("DELETE FROM aws_account_copies").rowcount
         stars = db.execute("DELETE FROM aws_account_stars").rowcount
         db.execute("DELETE FROM aws_project_accounts")

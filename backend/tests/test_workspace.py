@@ -89,3 +89,40 @@ class WorkspaceTests(unittest.TestCase):
                 saved = client.get("/api/bookmarks/workspace").json()
                 self.assertEqual(saved["bookmarks"][0]["title"], "Real link")
                 self.assertEqual(saved["notes"]["13"], "My note")
+
+
+class PeopleTests(unittest.TestCase):
+    def test_files_name_who_added_them_and_people_include_creators(self):
+        import json
+
+        from app.core.database import connection
+
+        history = [
+            {"id": "c3", "author": {"displayName": "Ben"}},
+            {"id": "c2", "author": {"name": "Cat"}},
+            {"id": "c1", "author": {"displayName": "Ann"}},
+        ]
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.dict(os.environ, {"OWL_DB_PATH": folder + "/db"}),
+            TestClient(app) as client,
+        ):
+            with connection() as db:
+                db.execute("INSERT INTO tracked_projects(id,project_url,server,project) VALUES(1,'https://bb.test/projects/P','https://bb.test','P')")
+                db.execute("INSERT INTO repositories(id,project_id,repo,name) VALUES(1,1,'r','r')")
+                for index, (author, commits) in enumerate((("Ben", history), ("Ann", history[-1:]))):
+                    db.execute(
+                        "INSERT INTO documents(repository_id,project,repo,pdf_name,path,url,file_size,page_count,"
+                        "pdf_hash,pdf_text,added_at,updated_at,last_scanned,author,commit_id,commit_history) "
+                        "VALUES(1,'P','r',?,?,'https://bb.test/x',1,1,'h','t','2026','2026','2026',?,?,?)",
+                        (f"{index}.yaml", f"{index}.yaml", author, commits[0]["id"], json.dumps(commits)),
+                    )
+            data = client.get("/api/workspace").json()
+            self.assertEqual(
+                sorted((doc["name"], doc["createdBy"], doc["commitAuthor"]) for doc in data["documents"]),
+                [("0.yaml", "Ann", "Ben"), ("1.yaml", "Ann", "Ann")],
+            )
+            self.assertEqual(
+                {person["name"]: (person["pdfCount"], person["commits"]) for person in data["people"]},
+                {"Ann": (2, 1), "Ben": (1, 1)},
+            )

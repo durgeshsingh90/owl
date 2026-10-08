@@ -265,3 +265,18 @@ body.dragging-account .drop-zone{border-color:var(--accent);color:var(--accent)}
 .category.best h2{color:var(--accent)}
 .category.best .rows{columns:440px}
 .sort button{white-space:nowrap}
+
+/* Categories open to their environments; accounts are grouped by environment. */
+.nav-group{display:flex;align-items:center}
+.nav-group>button[data-select]{flex:1;min-width:0}
+.category-nav .nav-expand{flex:0 0 24px;justify-content:center;padding:6px 0;color:var(--muted);font-size:14px;line-height:1}
+.env-nav{display:flex;flex-direction:column;gap:1px;margin:0 0 6px 22px;border-left:1px solid var(--line);padding-left:6px}
+.env-nav button{padding:5px 8px;font-size:12px}
+.env-group{border-top:1px solid var(--line)}
+.env-group:first-of-type{border-top:0}
+.env-group>summary{display:flex;align-items:center;gap:8px;padding:7px 14px;cursor:pointer;font-size:12px;color:var(--muted);list-style:none}
+.env-group>summary::-webkit-details-marker{display:none}
+.env-group>summary::before{content:"▸";font-size:10px;color:var(--muted)}
+.env-group[open]>summary::before{content:"▾"}
+.env.stage{color:var(--violet)}
+.env.test{color:var(--accent)}

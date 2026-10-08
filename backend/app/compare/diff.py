@@ -22,8 +22,10 @@ def normalize(line, ignore_whitespace):
 
 
 def tokenize(value):
-    # Keep whitespace tokens so spacing is preserved when segments are rendered.
-    return re.findall(r"\s+|[^\s]+", value or "")
+    # Words, spaces and each punctuation mark are separate tokens, so only what changed
+    # is highlighted: the comma added after "bookmarks", or the 2 in 1.4.2 -> 1.5.2.
+    # Spacing is kept so segments render exactly.
+    return re.findall(r"\s+|\w+|[^\w\s]", value or "")
 
 
 def clear_edge_whitespace(tokens, changed):
@@ -101,20 +103,87 @@ def align(rows, original, modified, ignore_whitespace, inline):
         elif tag == "insert":
             rows.extend(make_row(None, line, ignore_whitespace, inline) for line in right)
         else:
-            for index in range(max(len(left), len(right))):
-                rows.append(
-                    make_row(
-                        left[index] if index < len(left) else None,
-                        right[index] if index < len(right) else None,
-                        ignore_whitespace,
-                        inline,
-                    )
-                )
+            for a, b in pair_lines(left, right, ignore_whitespace):
+                rows.append(make_row(a, b, ignore_whitespace, inline))
 
 
-def build_rows(original_text, modified_text, ignore_whitespace):
-    original = list(enumerate(original_text.split("\n"), 1))
-    modified = list(enumerate(modified_text.split("\n"), 1))
+# A replaced line pairs with a line on the other side at least this similar, so a line
+# where only a few words changed shows those words rather than lining up with whatever
+# happens to sit at the same position.
+SIMILAR = 0.5
+SEARCH_AHEAD = 20
+
+
+def similarity(left, right):
+    matcher = SequenceMatcher(a=left, b=right, autojunk=False)
+    return matcher.ratio() if matcher.quick_ratio() >= SIMILAR else 0
+
+
+def pair_lines(left, right, ignore_whitespace):
+    """Pair replaced lines by similarity, keeping their order; the rest stand alone."""
+    pairs, start = [], 0
+    for line in left:
+        text = normalize(line[1], ignore_whitespace)
+        best, best_score = None, SIMILAR
+        for index in range(start, min(len(right), start + SEARCH_AHEAD)):
+            score = similarity(text, normalize(right[index][1], ignore_whitespace))
+            if score >= best_score and (best is None or score > best_score):
+                best, best_score = index, score
+        if best is None:
+            pairs.append((line, None))
+            continue
+        pairs.extend((None, added) for added in right[start:best])
+        pairs.append((line, right[best]))
+        start = best + 1
+    pairs.extend((None, added) for added in right[start:])
+    if not any(a and b for a, b in pairs):
+        # Nothing alike: pair by position, as two rewritten lines facing each other.
+        pairs = [
+            (left[index] if index < len(left) else None, right[index] if index < len(right) else None)
+            for index in range(max(len(left), len(right)))
+        ]
+    return pairs
+
+
+def with_blank_lines(rows, original, modified):
+    """Put back the blank lines left out of the comparison, as unchanged rows: blank
+    lines face each other where both sides have them, otherwise an empty filler."""
+    from collections import deque
+
+    blank = {
+        "original": deque(number for number, text in original if not text.strip()),
+        "modified": deque(number for number, text in modified if not text.strip()),
+    }
+    texts = {"original": dict(original), "modified": dict(modified)}
+    result = []
+
+    def flush(limits):
+        while any(blank[side] and blank[side][0] < limits[side] for side in blank):
+            row = {"kind": "same", "originalLine": None, "modifiedLine": None, "original": "", "modified": ""}
+            for side in blank:
+                if blank[side] and blank[side][0] < limits[side]:
+                    number = blank[side].popleft()
+                    row[side + "Line"] = number
+                    row[side] = texts[side][number]
+            result.append(row)
+
+    for row in rows:
+        # A blank line goes before the first row that comes after it on its side.
+        flush({
+            "original": row["originalLine"] or float("-inf"),
+            "modified": row["modifiedLine"] or float("-inf"),
+        })
+        result.append(row)
+    flush({"original": float("inf"), "modified": float("inf")})
+    return result
+
+
+def build_rows(original_text, modified_text, ignore_whitespace, ignore_blank=False):
+    every_original = list(enumerate(original_text.split("\n"), 1))
+    every_modified = list(enumerate(modified_text.split("\n"), 1))
+    # Ignoring empty lines: they take no part in lining the texts up.
+    original = [line for line in every_original if line[1].strip()] if ignore_blank else every_original
+    modified = [line for line in every_modified if line[1].strip()] if ignore_blank else every_modified
     matcher = SequenceMatcher(
         a=[normalize(line, ignore_whitespace) for _, line in original],
         b=[normalize(line, ignore_whitespace) for _, line in modified],
@@ -143,6 +212,8 @@ def build_rows(original_text, modified_text, ignore_whitespace):
                 and longest <= INLINE_DIFF_MAX_LINE_LENGTH
             )
             align(rows, left, right, ignore_whitespace, inline)
+    if ignore_blank:
+        rows = with_blank_lines(rows, every_original, every_modified)
     return rows
 
 
@@ -179,11 +250,12 @@ def changed_ranges(segments):
 
 
 class Comparison:
-    def __init__(self, original_text, modified_text, ignore_whitespace):
+    def __init__(self, original_text, modified_text, ignore_whitespace, ignore_blank=False):
         self.original_text = original_text
         self.modified_text = modified_text
         self.ignore_whitespace = ignore_whitespace
-        self.rows = build_rows(original_text, modified_text, ignore_whitespace)
+        self.ignore_blank = ignore_blank
+        self.rows = build_rows(original_text, modified_text, ignore_whitespace, ignore_blank)
         self.summary = summarize(self.rows, original_text, modified_text)
         self.views = {}
         self.layouts = {}
@@ -296,13 +368,14 @@ class Cache:
         self.items = OrderedDict()
         self.lock = threading.Lock()
 
-    def get(self, original_text, modified_text, ignore_whitespace):
+    def get(self, original_text, modified_text, ignore_whitespace, ignore_blank=False):
         key = hashlib.sha256(
             b"\0".join(
                 [
                     original_text.encode(),
                     modified_text.encode(),
                     b"1" if ignore_whitespace else b"0",
+                    b"1" if ignore_blank else b"0",
                 ]
             )
         ).hexdigest()
@@ -310,7 +383,7 @@ class Cache:
             if key in self.items:
                 self.items.move_to_end(key)
                 return key, self.items[key]
-        comparison = Comparison(original_text, modified_text, ignore_whitespace)
+        comparison = Comparison(original_text, modified_text, ignore_whitespace, ignore_blank)
         with self.lock:
             self.items[key] = comparison
             while len(self.items) > self.size:
@@ -336,9 +409,9 @@ def check(original_text, modified_text, view):
         raise ValueError("Each text can hold up to 5,000,000 characters.")
 
 
-def layout(original_text, modified_text, ignore_whitespace=True, view="all"):
+def layout(original_text, modified_text, ignore_whitespace=True, view="all", ignore_blank=False):
     check(original_text, modified_text, view)
-    key, comparison = cache.get(original_text, modified_text, ignore_whitespace)
+    key, comparison = cache.get(original_text, modified_text, ignore_whitespace, ignore_blank)
     return {"key": key, "summary": comparison.summary, **comparison.layout(view)}
 
 
@@ -356,5 +429,7 @@ def copy_block(key, block, direction):
     if comparison is None:
         return None
     original_text, modified_text = comparison.copy_block(block, direction)
-    result = layout(original_text, modified_text, comparison.ignore_whitespace, "all")
+    result = layout(
+        original_text, modified_text, comparison.ignore_whitespace, "all", comparison.ignore_blank
+    )
     return {"originalText": original_text, "modifiedText": modified_text, **result}

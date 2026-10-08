@@ -12,6 +12,8 @@ class FakeConfluence:
         self.calls = []
         self.unsupported = set()  # paths, or "search", answered with HTTP 501
         self.denied = set()  # page IDs whose children are hidden (HTTP 403)
+        self.restricted = set()  # page IDs whose content cannot be read (HTTP 403)
+        self.downloads = []  # page IDs whose content was downloaded
 
     def item(self, page_id):
         page = self.pages[page_id]
@@ -38,8 +40,9 @@ class FakeConfluence:
 
         params = params or {}
         self.calls.append((path, dict(params)))
-        if "body" in str(params.get("expand", "")):
-            raise AssertionError("The tracker must not download page content.")
+        wants_body = "body" in str(params.get("expand", ""))
+        if wants_body and path in ("content/search",) or wants_body and path.endswith("/page"):
+            raise AssertionError("Page lists must never include page content.")
         if path in self.unsupported or (path == "content/search" and "search" in self.unsupported):
             raise confluence.ConfluenceRequestError(501, "not supported")
         if path == "content/search":
@@ -53,6 +56,12 @@ class FakeConfluence:
         if len(parts) == 2 and parts[0] == "content":
             if parts[1] not in self.pages:
                 raise confluence.ConfluenceRequestError(404, "missing")
+            if wants_body:
+                if parts[1] in self.restricted:
+                    raise confluence.ConfluenceRequestError(403, "Confluence HTTP 403: access denied.")
+                self.downloads.append(parts[1])
+                text = self.pages[parts[1]].get("text", "Text of " + self.pages[parts[1]]["title"])
+                return {**self.item(parts[1]), "status": "current", "body": {"storage": {"value": f"<p>{text}</p>"}}}
             return self.item(parts[1])
         if len(parts) == 4 and parts[2] == "descendant":
             ids = [page_id for page_id, page in self.pages.items() if parts[1] in page.get("ancestors", [])]

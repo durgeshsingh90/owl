@@ -1,10 +1,16 @@
 "use strict";
 const pullProgress = {active: false, completed: new Set(), failed: new Set(), timer: null, repositories: new Map(), found: new Map(), processed: new Map(), failedCounts: new Map()};
 pullProgress.timings = new Map();
+// While a refresh runs: animated dots on the repository being worked on, a tick on each
+// one already done. Both go once the whole refresh has finished.
 function pullRepoMark(projectId, repoName) {
   const status = pullProgress.repositories.get(JSON.stringify([String(projectId), repoName]));
-  if (!pullProgress.active || status !== "succeeded") return "";
-  return '<span class="repo-job-status repo-job-succeeded" title="Completed in this sync" aria-label="Completed in this sync">✓</span>';
+  if (!pullProgress.active) return "";
+  if (["scanning", "processing", "retrying"].includes(status)) {
+    return '<span class="repo-job-status repo-job-working" title="Refreshing now" aria-label="Refreshing now"><span class="repo-job-dots" aria-hidden="true"><i></i><i></i><i></i></span></span>';
+  }
+  if (status !== "succeeded") return "";
+  return '<span class="repo-job-status repo-job-succeeded" title="Refreshed in this sync" aria-label="Refreshed in this sync">✓</span>';
 }
 function formatEta(seconds) {
   const total = Math.max(0, Math.round(Number(seconds) || 0));
@@ -131,6 +137,12 @@ function watchCrawl(job) {
           [JSON.stringify([String(repo.project_id), repo.repo]), repo.found]));
         pullProgress.repositories = new Map(Object.values(current.repository_statuses || {}).map(repo =>
           [JSON.stringify([String(repo.project_id), repo.repo]), repo.status]));
+        // Redraw the repository list only when a repository starts or finishes.
+        const marks = JSON.stringify([...pullProgress.repositories]);
+        if (marks !== pullProgress.marks && typeof renderProjects === "function") {
+          pullProgress.marks = marks;
+          renderProjects();
+        }
       }
       if (!current.background && !state.searchQuery.trim() && (!lastWorkspaceRefresh || Date.now() - lastWorkspaceRefresh >= LIVE_REFRESH_MS) && (statusesChanged || current.processed !== lastProcessed || current.repositories !== lastRepositories || (current.retry_recovered || 0) !== lastRecovered)) {
         lastWorkspaceRefresh = Date.now();
@@ -141,6 +153,8 @@ function watchCrawl(job) {
       }
       if (!["queued", "running", "paused"].includes(current.status)) {
         pullProgress.active = false;
+        pullProgress.marks = "";
+        if (typeof renderProjects === "function") renderProjects();
         window.dispatchEvent(new Event("owl-crawl-finished"));
         pullProgress.jobId = null;
         if (!current.background) await loadDatabaseWorkspace();
@@ -179,8 +193,14 @@ async function reconnectCrawl() {
   if (pullProgress.active) return;
   try {
     const {job} = await crawlJson("/network-automation/api/jobs/latest");
-    if (job && job.id !== pullProgress.dismissedId) watchCrawl(job);
+    if (job && job.id !== pullProgress.dismissedId && job.id !== pullProgress.lastSeenId) {
+      pullProgress.lastSeenId = job.id;
+      watchCrawl(job);
+    }
   } catch (error) { updatePullSummary(`Cannot load crawl status: ${error.message}`); }
 }
 window.addEventListener("load", reconnectCrawl);
 window.addEventListener("focus", reconnectCrawl);
+
+// Discover scheduled work quietly while this tab stays open.
+setInterval(reconnectCrawl, 60000);

@@ -243,42 +243,54 @@ async def run_due():
         # Fail fast when VPN, authentication or the server is unavailable.
         await asyncio.wait_for(confluence.test(settings), timeout=120)
         failed = 0
-        for index, (kind, original) in enumerate(pages):
+        retry = []
+
+        async def refresh_page(kind, original):
+            data = await asyncio.wait_for(confluence.metadata(original["url"]), timeout=120)
+            if (
+                data.get("sourceType") != "confluence"
+                or data.get("confluenceBaseUrl") != settings.base_url
+            ):
+                raise ValueError("Confluence configuration changed during refresh")
+            save_page(owner, kind, original, data)
+
+        def progress(completed):
             with connection() as db:
-                renewed = db.execute(
-                    "UPDATE bookmark_refresh_schedule SET lease_until=? WHERE owner=?",
-                    (time.time() + LEASE, owner),
+                return db.execute(
+                    "UPDATE bookmark_refresh_schedule SET completed=?,failed=?,lease_until=? WHERE owner=?",
+                    (completed, failed, time.time() + LEASE, owner),
                 ).rowcount
-            if not renewed:
+
+        for index, (kind, original) in enumerate(pages):
+            if not progress(index):
                 return
             try:
-                data = await asyncio.wait_for(
-                    confluence.metadata(original["url"]), timeout=120
-                )
-                if (
-                    data.get("sourceType") != "confluence"
-                    or data.get("confluenceBaseUrl") != settings.base_url
-                ):
-                    raise ValueError("Confluence configuration changed during refresh")
-                save_page(owner, kind, original, data)
+                await refresh_page(kind, original)
             except Exception as error:
                 failed += 1
                 event("bookmarks.refresh.page_failed", **error_details(error))
                 if connection_lost(error):
-                    with connection() as db:
-                        db.execute(
-                            "UPDATE bookmark_refresh_schedule SET completed=?,failed=? WHERE owner=?",
-                            (index + 1, failed, owner),
-                        )
+                    progress(index + 1)
+                    raise
+                retry.append((kind, original))
+            progress(index + 1)
+        # Pages that failed get one more try once every other page is done; only those
+        # that fail again keep their error.
+        for kind, original in retry:
+            if not progress(len(pages)):
+                return
+            try:
+                await refresh_page(kind, original)
+                failed -= 1
+            except Exception as error:
+                event("bookmarks.refresh.page_failed", retry=True, **error_details(error))
+                if connection_lost(error):
+                    progress(len(pages))
                     raise
                 # A deleted or restricted page fails alone; the rest still refresh.
                 if kind == "bookmark":
                     save_failure(owner, original, describe(error))
-            with connection() as db:
-                db.execute(
-                    "UPDATE bookmark_refresh_schedule SET completed=?,failed=? WHERE owner=?",
-                    (index + 1, failed, owner),
-                )
+        progress(len(pages))
         if not failed and pages:
             with connection() as db:
                 db.execute("BEGIN IMMEDIATE")

@@ -154,11 +154,10 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
                 {**self.page, "id": 4, "url": "https://wiki.test/pages/789/Restricted"},
             ]
         )
-        self.metadata.side_effect = [
-            self.data,
-            confluence.ConfluenceRequestError(404, "Confluence HTTP 404: page or endpoint not found. Request: https://wiki.test/rest/api/content/456"),
-            confluence.ConfluenceRequestError(403, "Confluence HTTP 403: access denied. Request: https://wiki.test/rest/api/content/789"),
-        ]
+        missing = confluence.ConfluenceRequestError(404, "Confluence HTTP 404: page or endpoint not found. Request: https://wiki.test/rest/api/content/456")
+        denied = confluence.ConfluenceRequestError(403, "Confluence HTTP 403: access denied. Request: https://wiki.test/rest/api/content/789")
+        # Each failed page is tried once more at the end, and fails again.
+        self.metadata.side_effect = [self.data, missing, denied, missing, denied]
         await refresh.run_due()
         state = refresh.status()
         self.assertEqual((state["completed"], state["total"], state["failed"]), (3, 3, 2))
@@ -167,6 +166,16 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
         errors = {item["id"]: item.get("fetchError", "") for item in self.workspace()["bookmarks"]}
         self.assertIn("HTTP 404", errors[3])
         self.assertIn("HTTP 403", errors[4])
+
+    async def test_a_page_that_fails_once_recovers_at_the_end(self):
+        self.write([self.page, {**self.page, "id": 3, "url": "https://wiki.test/pages/456/Other"}])
+        busy = confluence.ConfluenceRequestError(404, "Confluence HTTP 404: page or endpoint not found.")
+        self.metadata.side_effect = [busy, self.data, self.data]
+        await refresh.run_due()
+        state = refresh.status()
+        self.assertEqual((state["status"], state["failed"], state["message"]), ("scheduled", 0, ""))
+        self.assertEqual(self.metadata.await_count, 3)
+        self.assertTrue(all(not item.get("fetchError") for item in self.workspace()["bookmarks"]))
 
     async def test_server_errors_stop_the_update_and_retry(self):
         self.write([self.page, {**self.page, "id": 3, "url": "https://wiki.test/pages/456/Other"}])

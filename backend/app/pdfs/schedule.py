@@ -236,6 +236,22 @@ def status(jobs):
         state["total"] = progress.get("found") or 0
         state["failed"] = progress.get("failed") or 0
         state["eta_seconds"] = progress.get("eta_seconds")
+        # What it is doing now: listing a repository's files (found grows, nothing is
+        # processed yet) reads very differently from updating them.
+        statuses = progress.get("repository_statuses") or {}
+        working = next(
+            (repo for repo in statuses.values() if repo.get("status") in {"scanning", "processing", "retrying"}),
+            None,
+        )
+        state["repositories"] = progress.get("repositories") or len(statuses)
+        state["repositories_done"] = progress.get("repositories_done") or 0
+        if working:
+            name = f"{working.get('project', '')}/{working['repo']}".strip("/")
+            state["phase"] = {"scanning": "finding", "processing": "updating", "retrying": "retrying"}[working["status"]]
+            state["current"] = name
+            state["current_found"] = working.get("found") or 0
+            state["current_processed"] = working.get("processed") or 0
+            state["current_eta_seconds"] = working.get("eta_seconds")
     return state
 
 

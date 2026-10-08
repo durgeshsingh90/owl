@@ -19,7 +19,7 @@ ANCIENT = (NOW - timedelta(days=1200)).isoformat()
 HOME = {"page_id": "100", "title": "Engineering Home"}
 ARCH = {"page_id": "200", "title": "Architecture"}
 DESIGN = {"page_id": "202", "title": "Design Reviews"}
-# page_id: (title, ancestors, created, updated, creator, editor, unused)
+# page_id: (title, ancestors, created, updated, creator, editor, text)
 PAGES = {
     "100": ("Engineering Home", [], OLDER, RECENT, "Ann", "Ben", "welcome"),
     "200": ("Architecture", [HOME], OLDER, OLDER, "Ann", "Ann", "architecture overview"),
@@ -42,6 +42,9 @@ class ConfluenceLibraryTests(unittest.TestCase):
         settings = confluence.ConfluenceSettings(base_url="https://wiki.test", token="secret")
         patch.object(confluence, "load", return_value=settings).start()
         patch.object(confluence, "test", new_callable=AsyncMock).start()
+        # Sample pages are up to three years old; these tests are about the page layout,
+        # not about deleting pages nobody maintains.
+        patch.object(service, "RETENTION_DAYS", 100000).start()
 
         self.wiki = FakeConfluence(
             {
@@ -54,8 +57,9 @@ class ConfluenceLibraryTests(unittest.TestCase):
                     "editor": editor,
                     "version": 3,
                     "message": "Edited " + title,
+                    "text": text,
                 }
-                for page_id, (title, ancestors, created, updated, creator, editor, _) in PAGES.items()
+                for page_id, (title, ancestors, created, updated, creator, editor, text) in PAGES.items()
             },
             page_size=4,
         )
@@ -113,8 +117,8 @@ class ConfluenceLibraryTests(unittest.TestCase):
         found = self.client.post("/api/confluence-library/search/matches", json={"q": "aws for ide"}).json()
         self.assertEqual(found["ids"][0], docs["AWS for IDE"]["id"])
         self.assertEqual(found["tiers"][str(docs["AWS for IDE"]["id"])], 3)
-        # Only metadata is tracked: titles, paths and notes are searchable, content is not.
-        self.assertNotIn(docs["Review 2026"]["id"], found["ids"])
+        # The text of recorded pages is downloaded and searchable.
+        self.assertIn(docs["Review 2026"]["id"], found["ids"])
         revision = self.client.get("/api/confluence-library/workspace/revision").json()["revision"]
         page = docs["Restart Service"]["id"]
         opened = self.client.post(f"/api/confluence-library/document/{page}/open").json()
@@ -126,7 +130,8 @@ class ConfluenceLibraryTests(unittest.TestCase):
         self.assertEqual(by_notes["ids"], [page])
         details = self.client.get(f"/api/confluence-library/document/{page}").json()
         self.assertEqual((details["created_by"], details["updated_by"], details["notes"]), ("Ben", "Eve", "kubernetes restart"))
-        self.assertEqual(details["pdf_text"], "")
+        self.assertEqual(details["pdf_text"], "restart the service")
+        self.assertTrue(details["kept_until"])
         self.assertEqual(details["path"], "Runbooks")
         self.assertEqual(self.client.get("/api/confluence-library/document/99999").status_code, 404)
 

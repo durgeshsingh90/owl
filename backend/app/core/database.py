@@ -159,6 +159,17 @@ def initialize(*, recover_jobs=False):
             token TEXT PRIMARY KEY, payload TEXT NOT NULL,
             created_at REAL NOT NULL, expires_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS aws_config_source (
+            id INTEGER PRIMARY KEY CHECK(id=1), path TEXT NOT NULL DEFAULT '',
+            mtime REAL, loaded_at TEXT, error TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS app_opens (
+            app TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, last_opened REAL
+        );
+        CREATE TABLE IF NOT EXISTS compare_history (
+            token TEXT PRIMARY KEY, payload TEXT NOT NULL,
+            created_at REAL NOT NULL, updated_at REAL NOT NULL
+        );
         """)
         if "folder_path" not in {
             row["name"]

@@ -10,7 +10,7 @@
   const DRAFT_KEY = "owl-compare-draft";
   const LANGUAGES = {yaml: "yaml", yml: "yaml", json: "json", xml: "xml", ini: "ini", cfg: "ini", conf: "ini", properties: "ini", sh: "shell", bash: "shell", md: "markdown", py: "python", sql: "sql", ps1: "powershell", dockerfile: "dockerfile"};
   const pane = {};
-  const state = {view: "all", key: null, layout: null, block: -1, sequence: 0, controller: null, timer: null, syncing: false, applying: false, dirty: false};
+  const state = {historyToken: "", historyTimer: 0, view: "all", key: null, layout: null, block: -1, sequence: 0, controller: null, timer: null, syncing: false, applying: false, dirty: false};
   let monaco;
 
   const number = value => Number(value || 0).toLocaleString();
@@ -63,6 +63,7 @@
       originalText: texts ? texts.original : realText("original"),
       modifiedText: texts ? texts.modified : realText("modified"),
       ignoreWhitespace: $("#ignore-whitespace").checked,
+      ignoreBlankLines: $("#ignore-blank-lines").checked,
       view: state.view,
     };
     try {
@@ -318,9 +319,36 @@
     }
   }
 
+  // The comparison as saved in Recent and in share links.
+  function payload(original = realText("original"), modified = realText("modified")) {
+    return {
+      originalTitle: pane.original.title.value, modifiedTitle: pane.modified.title.value,
+      originalText: original, modifiedText: modified,
+      ignoreWhitespace: $("#ignore-whitespace").checked,
+      ignoreBlankLines: $("#ignore-blank-lines").checked,
+      view: state.view,
+    };
+  }
+
+  // Each comparison is kept among the 20 most recent (older ones are deleted), updated as
+  // it is edited, so it can be reopened from Recent or shared by link.
+  async function saveHistory(body = payload()) {
+    clearTimeout(state.historyTimer);
+    if (!body.originalText.trim() && !body.modifiedText.trim()) return null;
+    const saved = await request("/api/compare/history", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({...body, token: state.historyToken || ""}),
+    });
+    state.historyToken = saved.token;
+    return saved.token;
+  }
+
   function saveDraft(original, modified) {
+    clearTimeout(state.historyTimer);
+    state.historyTimer = setTimeout(() => saveHistory(payload(original, modified)).catch(() => {}), 2000);
     try {
-      const draft = JSON.stringify({originalTitle: pane.original.title.value, modifiedTitle: pane.modified.title.value, originalText: original, modifiedText: modified});
+      const draft = JSON.stringify({...payload(original, modified), historyToken: state.historyToken || ""});
       // Large inputs are not kept between visits; browser storage is small.
       if (draft.length < 2_000_000) localStorage.setItem(DRAFT_KEY, draft);
       else localStorage.removeItem(DRAFT_KEY);
@@ -456,20 +484,13 @@
       const button = $("#share");
       button.disabled = true;
       try {
-        const data = await request("/api/compare/share", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({
-            originalTitle: pane.original.title.value, modifiedTitle: pane.modified.title.value,
-            originalText: realText("original"), modifiedText: realText("modified"),
-            ignoreWhitespace: $("#ignore-whitespace").checked, view: state.view,
-          }),
-        });
+        const token = await saveHistory();
+        if (!token) throw new Error("Add some text to share this comparison.");
         const url = new URL(location.href);
         url.search = "";
-        url.searchParams.set("share", data.token);
+        url.searchParams.set("share", token);
         await navigator.clipboard.writeText(url.toString());
-        toast("Link copied · valid for 24 hours");
+        toast("Link copied · it works while this is among your 20 most recent comparisons");
       } catch (error) {
         toast(error.message || "Could not create a share link.");
       } finally {
@@ -482,6 +503,9 @@
   async function start() {
     createEditors();
     bindControls();
+    bindRecent();
+    document.querySelectorAll("[data-format]").forEach(button => button.addEventListener("click", () => formatSide(button.dataset.format)));
+    $("#ignore-blank-lines").addEventListener("change", () => compare());
     let saved = null;
     const token = new URLSearchParams(location.search).get("share");
     if (token) {
@@ -497,10 +521,101 @@
         if (typeof saved[`${side}Title`] === "string" && saved[`${side}Title`].trim()) pane[side].title.value = saved[`${side}Title`];
       }
       if (typeof saved.ignoreWhitespace === "boolean") $("#ignore-whitespace").checked = saved.ignoreWhitespace;
+      if (typeof saved.ignoreBlankLines === "boolean") $("#ignore-blank-lines").checked = saved.ignoreBlankLines;
       if (["all", "differences", "similarities"].includes(saved.view)) setViewButtons(saved.view);
+      // Your own draft keeps updating its Recent entry; a link someone shared starts a new one.
+      if (!token && typeof saved.historyToken === "string") state.historyToken = saved.historyToken;
     }
     setLanguage();
     compare(texts);
+  }
+
+  function openComparison(saved, historyToken = "") {
+    const texts = {original: saved.originalText || "", modified: saved.modifiedText || ""};
+    for (const side of SIDES) pane[side].title.value = saved[`${side}Title`] || (side === "original" ? "Original" : "Modified");
+    if (typeof saved.ignoreWhitespace === "boolean") $("#ignore-whitespace").checked = saved.ignoreWhitespace;
+    if (typeof saved.ignoreBlankLines === "boolean") $("#ignore-blank-lines").checked = saved.ignoreBlankLines;
+    setViewButtons("all");
+    state.historyToken = historyToken;
+    state.block = -1;
+    setLanguage();
+    compare(texts);
+  }
+
+  function bindRecent() {
+    const toggle = $("#recent-toggle"), menu = $("#recent-menu");
+    const ago = seconds => {
+      const minutes = Math.round((Date.now() / 1000 - seconds) / 60);
+      return minutes < 1 ? "just now" : minutes < 60 ? `${minutes}m ago` : minutes < 1440 ? `${Math.round(minutes / 60)}h ago` : `${Math.round(minutes / 1440)}d ago`;
+    };
+    const escape = value => String(value ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"})[c]);
+    async function show() {
+      menu.innerHTML = "<p>Loading…</p>";
+      try {
+        const {items, limit} = await request("/api/compare/history");
+        menu.innerHTML = items.length
+          ? `<p class="recent-note">Your ${limit} most recent comparisons; older ones are deleted.</p>` + items.map(item => `<div class="recent-item${item.token === state.historyToken ? " current" : ""}"><button type="button" data-recent="${escape(item.token)}" title="Open this comparison"><strong>${escape(item.original_title || "Original")} ⇄ ${escape(item.modified_title || "Modified")}</strong><small>${ago(item.updated_at)} · ${Number(item.original_chars || 0).toLocaleString()} / ${Number(item.modified_chars || 0).toLocaleString()} chars</small></button><button type="button" class="recent-link" data-recent-link="${escape(item.token)}" title="Copy a link to this comparison" aria-label="Copy a link">⧉</button><button type="button" class="recent-delete" data-recent-delete="${escape(item.token)}" title="Remove from Recent" aria-label="Remove">×</button></div>`).join("")
+          : "<p>No recent comparisons yet.</p>";
+      } catch (error) { menu.innerHTML = `<p>${escape(error.message)}</p>`; }
+    }
+    toggle.addEventListener("click", () => {
+      const opening = menu.hidden;
+      menu.hidden = !opening;
+      toggle.setAttribute("aria-expanded", String(opening));
+      if (opening) void show();
+    });
+    document.addEventListener("click", event => {
+      if (!menu.hidden && !event.target.closest(".recent")) { menu.hidden = true; toggle.setAttribute("aria-expanded", "false"); }
+    });
+    menu.addEventListener("click", async event => {
+      const openButton = event.target.closest("[data-recent]");
+      const link = event.target.closest("[data-recent-link]");
+      const remove = event.target.closest("[data-recent-delete]");
+      try {
+        if (openButton) {
+          const {payload: saved} = await request(`/api/compare/share/${encodeURIComponent(openButton.dataset.recent)}`);
+          menu.hidden = true;
+          history.replaceState(null, "", location.pathname);
+          openComparison(saved, openButton.dataset.recent);
+        } else if (link) {
+          const url = new URL(location.href);
+          url.search = "";
+          url.searchParams.set("share", link.dataset.recentLink);
+          await navigator.clipboard.writeText(url.toString());
+          toast("Link copied");
+        } else if (remove) {
+          await request(`/api/compare/history/${encodeURIComponent(remove.dataset.recentDelete)}`, {method: "DELETE"});
+          if (remove.dataset.recentDelete === state.historyToken) state.historyToken = "";
+          void show();
+        }
+      } catch (error) { toast(error.message); }
+    });
+    $("#new-compare").addEventListener("click", async () => {
+      await saveHistory().catch(() => {});
+      history.replaceState(null, "", location.pathname);
+      openComparison({}, "");
+    });
+  }
+
+  async function formatSide(side) {
+    try {
+      const {text, kind} = await request("/api/compare/format", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({text: realText(side)}),
+      });
+      const texts = {original: realText("original"), modified: realText("modified")};
+      texts[side] = text;
+      if (state.view !== "all") setViewButtons("all");
+      if (!/\.(json5?|jsonl|ndjson)$/i.test(pane[side].title.value)) setLanguageTo("json");
+      compare(texts);
+      toast(`Formatted as ${kind === "jsonl" ? "JSON Lines" : kind.toUpperCase()}`);
+    } catch (error) {
+      toast(error.message);
+    }
+  }
+  function setLanguageTo(language) {
+    for (const side of SIDES) monaco.editor.setModelLanguage(pane[side].model, language);
   }
 
   // Monaco is served from OWL itself (frontend/vendor/monaco), so it works offline.

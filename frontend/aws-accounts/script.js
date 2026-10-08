@@ -13,11 +13,19 @@
   };
   // Trailing environment token, optionally followed by an account-number suffix (mc-x-nonp-216989139306).
   const ENV_PATTERN = /-(prod|production|prd|nonp|nonprod|nonprd|work|mtf|dev|develop|development|test|testing|qa|uat|sit|stage|staging|stg|preprod|pre|perf|sandbox|sbx|demo|poc|lab|dr)(?:-\d+)?$/i;
-  const ENV_CLASS = {prod:'prod',production:'prod',prd:'prod',nonp:'nonp',nonprod:'nonp',nonprd:'nonp',work:'work'};
-  const ENV_FIRST = ['prod','production','prd','nonp','nonprod','nonprd','work'];
+  const ENV_CLASS = {prod:'prod',production:'prod',prd:'prod',nonp:'nonp',nonprod:'nonp',nonprd:'nonp',work:'work',
+    // Environments as grouped from the AWS config file.
+    'Prod':'prod','Non-prod':'nonp','Stage':'stage','Test':'test','Dev':'work','Sandbox':'other','DR':'other','Other':'none'};
+  const ENV_FIRST = ['Prod','Non-prod','Stage','Test','Dev','Sandbox','DR','prod','production','prd','nonp','nonprod','nonprd','work'];
   // Known environments first, then any other environment alphabetically, then accounts without one.
-  const envRank = env => env === '' ? 1e6 : ENV_FIRST.includes(env) ? ENV_FIRST.indexOf(env) : 100;
+  const envRank = env => env === '' || env === 'Other' ? 1e6 : ENV_FIRST.includes(env) ? ENV_FIRST.indexOf(env) : 100;
   const envSort = (a, b) => envRank(a) - envRank(b) || a.localeCompare(b);
+  const EXPANDED_KEY = 'owl-aws-accounts-expanded', CLOSED_ENVS_KEY = 'owl-aws-accounts-closed-envs';
+  let expanded = new Set(), closedEnvs = new Set();
+  try {
+    expanded = new Set(JSON.parse(localStorage.getItem(EXPANDED_KEY) || '[]'));
+    closedEnvs = new Set(JSON.parse(localStorage.getItem(CLOSED_ENVS_KEY) || '[]'));
+  } catch { /* Open and closed groups stay for this page only. */ }
   let data = null, envFilter = 'all', pinned = new Set(), selected = null, sortMode = 'az', sortDir = 'asc', toastTimer = 0;
   try {
     pinned = new Set(JSON.parse(localStorage.getItem(PIN_KEY) || '[]'));
@@ -46,18 +54,19 @@
     return body;
   }
 
-  function environment(profile) {
+  function environment(profile, account = null) {
     const match = ENV_PATTERN.exec(profile);
-    if (!match) return {base: profile, env: '', kind: 'none'};
-    const env = match[1].toLowerCase();
-    return {base: profile.slice(0, match.index), env, kind: ENV_CLASS[env] || 'other'};
+    const base = match ? profile.slice(0, match.index) : profile;
+    // Accounts from the AWS config file carry their grouped environment (Prod, Non-prod…).
+    const env = account?.environment || (match ? match[1].toLowerCase() : '');
+    return {base, env, kind: env ? ENV_CLASS[env] || 'other' : 'none'};
   }
 
   // Group sibling accounts (x-prod, x-nonp, x-work) together, keeping the file's order of first appearance.
   function groups(accounts) {
     const map = new Map();
     for (const account of accounts) {
-      const info = environment(account.profile);
+      const info = environment(account.profile, account);
       if (!map.has(info.base)) map.set(info.base, []);
       map.get(info.base).push({...account, ...info});
     }
@@ -133,15 +142,15 @@
     $('total').textContent = count.toLocaleString();
     const categories = Object.keys(data.categories).length;
     const mismatch = Number.isInteger(data.total_accounts) && data.total_accounts !== count ? ` · file reports ${data.total_accounts.toLocaleString()}` : '';
-    $('summary').textContent = `${categories.toLocaleString()} categories · generated ${displayDate(data.generated_at)} · imported ${displayDate(data.imported_at)}${mismatch}`;
-    $('file-note').textContent = `${count.toLocaleString()} accounts · imported ${displayDate(data.imported_at)}`;
+    $('summary').textContent = `${categories.toLocaleString()} categories · read from ${data.config?.path || 'the AWS config file'} · ${displayDate(data.imported_at)}${mismatch}`;
+    $('file-note').textContent = `${count.toLocaleString()} accounts · read ${displayDate(data.imported_at)}`;
     const roles = Object.entries(data.common_roles || {});
     $('roles').innerHTML = roles.length ? '<span class="eyebrow">COMMON ROLES</span>' + roles.map(([name, value]) =>
       `<button class="role" type="button" data-copy="${esc(value)}" data-kind="role" data-label="${esc(label(name))}" title="Copy ${esc(label(name))}"><span class="role-name">${esc(label(name))}</span><code>${esc(value)}</code>${badge('role', value)}<span class="copy-icon" aria-hidden="true">⧉</span></button>`).join('') : '';
     $('roles').hidden = !roles.length;
     const counts = new Map();
     for (const account of all) {
-      const env = environment(account.profile).env;
+      const env = environment(account.profile, account).env;
       counts.set(env, (counts.get(env) || 0) + 1);
     }
     if (envFilter !== 'all' && !counts.has(envFilter)) envFilter = 'all';
@@ -167,6 +176,28 @@
     <button class="id" type="button" data-copy="${esc(item.account_id)}" data-account="${esc(item.profile)}" data-label="Account ID" title="Copy account ID"><span class="text">${highlight(String(item.account_id), query)}</span></button>
     <span class="count-cell">${accountBadge(item.profile, item.account_id)}<button class="row-action" type="button" data-add-menu="${esc(item.profile)}" title="Add ${esc(item.profile)} to a project" aria-label="Add to a project">⊕</button>${project ? `<button class="row-action remove" type="button" data-remove="${esc(item.profile)}" data-project="${project.id}" title="Remove from ${esc(project.name)}" aria-label="Remove from project">×</button>` : ''}</span>
   </div>`;
+
+  // Inside a category, accounts sit under their environment, each part opening and closing.
+  function envGroups(name, items, query, stars) {
+    const byEnv = new Map();
+    for (const item of items) {
+      if (!byEnv.has(item.env)) byEnv.set(item.env, []);
+      byEnv.get(item.env).push(item);
+    }
+    if (byEnv.size < 2 && !byEnv.has('') ) {
+      const [[env, list]] = [...byEnv];
+      return envBlock(name, env, list, query, stars);
+    }
+    return [...byEnv.keys()].sort(envSort).map(env => envBlock(name, env, byEnv.get(env), query, stars)).join('');
+  }
+  function envBlock(name, env, list, query, stars) {
+    const key = `${name}\u0000${env}`;
+    list = list.slice().sort((a, b) => a.profile.localeCompare(b.profile));
+    return `<details class="env-group" data-env-group="${esc(key)}" ${closedEnvs.has(key) ? '' : 'open'}>
+      <summary><span class="env ${ENV_CLASS[env] || 'other'}">${esc(env || 'no env')}</span><span class="count">${list.length} account${list.length === 1 ? '' : 's'}</span></summary>
+      <div class="rows">${list.map(item => row({...item, last: true}, query, null, stars)).join('')}</div>
+    </details>`;
+  }
 
   function render() {
     const query = $('search').value.trim().toLowerCase();
@@ -197,10 +228,18 @@
     $('project-nav').innerHTML = projects.map(project => navItem(projectKey(project), matches.get(projectKey(project)).length, project.name, false)
       .replace('<button ', `<button data-drop-project="${project.id}" `).replace('<span class="nav-name">', '<span class="nav-name"><span class="folder">▣</span>')).join('');
     $('project-hint').hidden = projects.length > 0;
+    // Each category opens to its environments (Prod, Non-prod, Stage…); one click shows that part.
+    const envList = (name, items) => {
+      const counts = new Map();
+      for (const item of items) counts.set(item.env, (counts.get(item.env) || 0) + 1);
+      if (!counts.size || !expanded.has(name)) return '';
+      return `<div class="env-nav">${[...counts.keys()].sort(envSort).map(env => `<button type="button" data-select="${esc(name)}" data-select-env="${esc(env)}" aria-current="${selected === name && envFilter === env}"><span class="env ${ENV_CLASS[env] || 'other'}">${esc(env || 'no env')}</span><span class="nav-count">${counts.get(env)}</span></button>`).join('')}</div>`;
+    };
+    const toggle = name => `<button type="button" class="nav-expand" data-expand="${esc(name)}" aria-expanded="${expanded.has(name)}" title="${expanded.has(name) ? 'Hide' : 'Show'} environments">${expanded.has(name) ? '▾' : '▸'}</button>`;
     $('category-nav').innerHTML = navItem('', everything, 'All accounts', false) +
       [...matches].filter(([name]) => !name.startsWith(PROJECT)).map(([name, items]) => name === STARRED
         ? navItem(name, items.length, 'Starred accounts', true).replace('class="pinned', 'class="starred-nav pinned')
-        : navItem(name, items.length, label(name), pinned.has(name))).join('');
+        : `<div class="nav-group">${toggle(name)}${navItem(name, items.length, label(name), pinned.has(name))}</div>${envList(name, items)}`).join('');
     const sections = [];
     let shown = 0;
     const filtering = Boolean(query) || envFilter !== 'all';
@@ -227,7 +266,7 @@
       sections.push({compact, html: `<section class="category${isPinned ? ' pinned' : ''}${isStarred ? ' starred' : ''}${compact ? ' compact' : ''}" data-category="${esc(name)}">
         <header><h2>${isStarred ? '★ Starred accounts' : esc(label(name))}</h2><span class="count">${items.length} account${items.length === 1 ? '' : 's'}</span>
           ${isStarred ? '' : `<button class="pin" type="button" data-pin="${esc(name)}" aria-pressed="${isPinned}" title="${isPinned ? 'Remove highlight from' : 'Highlight'} category ${esc(label(name))}">${isPinned ? '★' : '☆'}</button>`}</header>
-        <div class="rows">${items.map((item, index) => row(item, query, items[index + 1], stars)).join('')}</div>
+        ${isStarred ? `<div class="rows">${items.map((item, index) => row(item, query, items[index + 1], stars)).join('')}</div>` : envGroups(name, items, query, stars)}
       </section>`});
     }
     // Consecutive small categories share one row of boxes.
@@ -237,7 +276,7 @@
       const seen = new Set();
       const ranked = Object.values(data.categories).flat()
         .filter(account => !seen.has(account.profile) && seen.add(account.profile))
-        .map(account => ({...account, ...environment(account.profile)}))
+        .map(account => ({...account, ...environment(account.profile, account)}))
         .filter(keep)
         .map(item => ({item, ...accountRelevance(item, query, words)}))
         .sort((a, b) => b.tier - a.tier || b.score - a.score || a.item.profile.localeCompare(b.item.profile));
@@ -309,11 +348,15 @@
     render();
   }
 
+  let configState = null;
   async function load() {
     try {
       const result = await api('/api/aws-accounts');
       data = result.imported ? result : null;
-      error('');
+      configState = result.config;
+      // A config problem shows on the page; the last accounts read stay visible.
+      error(result.config?.error || '');
+      if (!data && result.config) $('empty-detail').textContent = result.config.error || `Reading ${result.config.path}.`;
     } catch (failure) {
       error(`Could not load saved accounts: ${failure.message}`);
       data = null;
@@ -321,26 +364,28 @@
     show();
   }
 
-  async function importFile(file) {
-    if (!file) return;
-    let parsed;
+  // Where the AWS config file is. OWL reads it again by itself whenever it changes.
+  function openConfig() {
+    const config = data?.config || configState || {};
+    $('config-path').value = config.custom ? config.path : '';
+    $('config-path').placeholder = config.default_path || '~/.aws/config';
+    $('config-note').textContent = config.loaded_at
+      ? `Reading ${config.path} · last read ${displayDate(config.loaded_at)}. Leave empty for the default: ${config.default_path}.`
+      : `Leave empty for the default: ${config.default_path || '~/.aws/config'}.`;
+    $('config-error').hidden = !config.error;
+    $('config-error').textContent = config.error || '';
+    $('config-dialog').showModal();
+    $('config-path').focus();
+  }
+  async function saveConfig(path) {
     try {
-      parsed = JSON.parse(await file.text());
-    } catch {
-      error(`${file.name} is not valid JSON.`);
-      return;
-    }
-    if (!parsed || typeof parsed.categories !== 'object' || Array.isArray(parsed.categories)) {
-      error(`${file.name} has no "categories" object. Expected {"categories": {"Name": [{"profile": "…", "account_id": "…"}]}}.`);
-      return;
-    }
-    try {
-      const result = await api('/api/aws-accounts', {method:'PUT', body:JSON.stringify(parsed)});
-      error('');
-      toast(`Imported ${result.accounts.toLocaleString()} accounts from ${file.name}`);
+      const state = await api('/api/aws-accounts/config', {method: 'PUT', body: JSON.stringify({path})});
+      $('config-dialog').close();
+      toast(`Reading AWS accounts from ${state.path}`);
       await load();
     } catch (failure) {
-      error(`Could not import ${file.name}:\n${failure.message}`);
+      $('config-error').textContent = failure.message;
+      $('config-error').hidden = false;
     }
   }
 
@@ -528,8 +573,14 @@
 
   document.addEventListener('click', event => {
     if (!event.target.closest('#project-menu,[data-add-menu]')) closeMenu();
-    const target = event.target.closest('[data-copy],[data-pin],[data-star],[data-env],[data-select],[data-sort],[data-add-menu],[data-add-to],[data-remove],[data-rename-project],[data-delete-project],#new-project');
+    const target = event.target.closest('[data-copy],[data-pin],[data-star],[data-env],[data-select],[data-expand],[data-sort],[data-add-menu],[data-add-to],[data-remove],[data-rename-project],[data-delete-project],#new-project');
     if (!target) return;
+    if (target.dataset.expand !== undefined) {
+      const name = target.dataset.expand;
+      expanded.has(name) ? expanded.delete(name) : expanded.add(name);
+      store(EXPANDED_KEY, JSON.stringify([...expanded]));
+      return render();
+    }
     if (target.id === 'new-project') return openProjectDialog();
     if (target.dataset.sort) {
       sortDir = target.dataset.sort === sortMode ? (sortDir === 'asc' ? 'desc' : 'asc') : SORT_DEFAULT[target.dataset.sort];
@@ -561,6 +612,11 @@
     }
     selected = target.dataset.select || null;
     store(SELECTED_KEY, selected);
+    // An environment under a category shows only that part of it.
+    if (target.dataset.selectEnv !== undefined) {
+      envFilter = target.dataset.selectEnv;
+      if (data) renderHeader();
+    }
     render();
     window.scrollTo({top: 0});
   });
@@ -602,23 +658,23 @@
   window.addEventListener('scroll', trackScroll, {passive: true});
   window.addEventListener('resize', trackScroll);
   $('search').addEventListener('input', render);
-  $('import-button').addEventListener('click', () => $('file-input').click());
-  $('empty-import').addEventListener('click', () => $('file-input').click());
-  $('file-input').addEventListener('change', event => { importFile(event.target.files[0]); event.target.value = ''; });
+  $('settings-button').addEventListener('click', openConfig);
+  $('empty-settings').addEventListener('click', openConfig);
+  $('config-form').addEventListener('submit', event => { event.preventDefault(); saveConfig($('config-path').value.trim()); });
+  $('config-default').addEventListener('click', () => saveConfig(''));
+  document.querySelectorAll('[data-close-config]').forEach(button => button.addEventListener('click', () => $('config-dialog').close()));
+  // The file is read again when it changes; look for changes when the page is shown again.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+  document.addEventListener('toggle', event => {
+    const group = event.target.closest?.('[data-env-group]');
+    if (!group) return;
+    if (group.open) closedEnvs.delete(group.dataset.envGroup); else closedEnvs.add(group.dataset.envGroup);
+    store(CLOSED_ENVS_KEY, JSON.stringify([...closedEnvs]));
+  }, true);
   document.addEventListener('keydown', event => {
     if (event.key === '/' && !['INPUT','TEXTAREA'].includes(document.activeElement.tagName) && data) { event.preventDefault(); $('search').focus(); }
     if (event.key === 'Escape' && document.activeElement === $('search')) { $('search').value = ''; render(); }
     if (event.key === 'Escape') closeMenu();
-  });
-  let dragDepth = 0;
-  const hasFile = event => [...(event.dataTransfer?.types || [])].includes('Files');
-  document.addEventListener('dragenter', event => { if (hasFile(event)) { dragDepth += 1; $('drop-overlay').hidden = false; } });
-  document.addEventListener('dragleave', event => { if (hasFile(event) && --dragDepth <= 0) { dragDepth = 0; $('drop-overlay').hidden = true; } });
-  document.addEventListener('dragover', event => { if (hasFile(event)) event.preventDefault(); });
-  document.addEventListener('drop', event => {
-    if (!hasFile(event)) return;
-    event.preventDefault(); dragDepth = 0; $('drop-overlay').hidden = true;
-    importFile(event.dataTransfer.files[0]);
   });
   window.owlToast = toast;
   load();

@@ -3,7 +3,10 @@ tracking starts.
 
 Old pages are never collected. Each sync asks Confluence only for pages in the tree
 modified since the last check (since the start day at first) and records each one's
-title, path, link, who created and updated it, and when, without any page content.
+title, path, link, who created and updated it, and when, plus the page's full text.
+
+Only those changed pages are downloaded. A page nobody has created or updated for six
+months is outdated and is deleted automatically, so storage does not keep growing.
 """
 
 import asyncio
@@ -22,6 +25,10 @@ from app.tracker import listing
 DAY = 86400
 RETRY = 2 * 3600
 LEASE = 600
+# A page not created or updated in Confluence for this long is no longer maintained: it is
+# deleted automatically with its text and change history.
+RETENTION_DAYS = 183
+PURGE_EVERY = 3600
 def stamp():
     return datetime.now(timezone.utc).isoformat()
 
@@ -91,6 +98,118 @@ def heartbeat(root, total=None):
 
 def fingerprint(page):
     return f"{page.get('version')}|{page.get('confluenceUpdatedAt')}"
+
+
+def changed_pages(root, pages, start_day):
+    """Pages changed since tracking started that are not recorded at this version yet."""
+    with connection() as db:
+        stored = {
+            row["page_id"]: row["fingerprint"]
+            for row in db.execute(
+                "SELECT page_id,fingerprint FROM confluence_tracker_pages WHERE root_id=?",
+                (root["id"],),
+            )
+        }
+    now = datetime.fromtimestamp(time.time(), timezone.utc)
+    return [
+        page
+        for page in pages
+        if str(page.get("confluenceUpdatedAt") or "")[:10] >= start_day
+        and stored.get(page["page_id"]) != fingerprint(page)
+        # Already outdated pages are not recorded again (after a long gap between syncs).
+        and (kept_until(page, None) or now) >= now
+    ]
+
+
+async def with_content(settings, root, pages):
+    """Download the full text of each changed page (only those).
+
+    A page whose text cannot be read is tried once more at the end; if it fails again
+    it keeps its details without text, with the reason.
+    """
+
+    async def download(page):
+        heartbeat(root)
+        try:
+            data = await asyncio.wait_for(
+                confluence.metadata(page["url"], settings=settings), 120
+            )
+        except confluence.ConfluenceRequestError as error:
+            # A restricted or just-deleted page keeps its details without text.
+            if error.upstream_status not in (403, 404):
+                raise
+            page.update(contentText="", pageTextSizeBytes=0, contentError=safe_error(error, settings))
+            return False
+        text = data.get("contentText", "")
+        page.update(contentText=text, pageTextSizeBytes=len(text.encode()), contentError="")
+        return True
+
+    failed = []
+    for index, page in enumerate(pages):
+        if not await download(page):
+            failed.append(page)
+        with connection() as db:
+            db.execute(
+                "UPDATE confluence_tracker_roots SET completed=? WHERE id=? AND owner=?",
+                (index + 1, root["id"], root["owner"]),
+            )
+    for page in failed:
+        await download(page)
+    return pages
+
+
+def parse_time(value):
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def last_activity(metadata, recorded_at):
+    """When a page was last maintained: the latest of its Confluence created and updated
+    dates and the last change OWL recorded."""
+    moments = [
+        parse_time(value)
+        for value in (metadata.get("writtenAt"), metadata.get("confluenceUpdatedAt"), recorded_at)
+        if value
+    ]
+    return max((moment for moment in moments if moment), default=None)
+
+
+def kept_until(metadata, recorded_at):
+    moment = last_activity(metadata, recorded_at)
+    return moment + timedelta(days=RETENTION_DAYS) if moment else None
+
+
+def purge(now=None):
+    """Delete pages nobody maintains: no creation or update in Confluence for six months.
+
+    A page that keeps being updated is kept; its page, text and change history go only
+    after six months without activity. If it is edited later, it is recorded again.
+    """
+    cutoff = datetime.fromtimestamp(now or time.time(), timezone.utc) - timedelta(days=RETENTION_DAYS)
+    with connection() as db:
+        stale = [
+            (row["root_id"], row["page_id"])
+            for row in db.execute(
+                "SELECT root_id,page_id,metadata,changed_at FROM confluence_tracker_pages"
+            )
+            if (last_activity(json.loads(row["metadata"]), row["changed_at"]) or cutoff) < cutoff
+        ]
+        changes = 0
+        for root_id, page_id in stale:
+            db.execute(
+                "DELETE FROM confluence_tracker_pages WHERE root_id=? AND page_id=?",
+                (root_id, page_id),
+            )
+            changes += db.execute(
+                "DELETE FROM confluence_tracker_changes WHERE root_id=? AND page_id=?",
+                (root_id, page_id),
+            ).rowcount
+    if stale:
+        event("tracker.purged", pages=len(stale), changes=changes)
+    return len(stale), changes
 
 
 def save_pages(root, pages, start_day):
@@ -216,8 +335,14 @@ async def sync(root):
                 )
                 if str(page.get("confluenceUpdatedAt") or "")[:10] >= since
             ]
+        pages = changed_pages(root, pages, start_day)
         heartbeat(root, len(pages))
-        save_pages(root, pages, start_day)
+        with connection() as db:
+            db.execute(
+                "UPDATE confluence_tracker_roots SET status='downloading',total=?,completed=0 WHERE id=? AND owner=?",
+                (len(pages), root["id"], root["owner"]),
+            )
+        save_pages(root, await with_content(settings, root, pages), start_day)
         finish(root, True)
     except asyncio.CancelledError:
         finish(root, False, "Sync interrupted. Retrying in two hours.")
@@ -283,8 +408,12 @@ def apply_intervals():
 
 async def run_scheduler():
     apply_intervals()
+    purged_at = 0
     while True:
         try:
+            if time.time() - purged_at >= PURGE_EVERY:
+                purged_at = time.time()
+                purge()
             root = claim()
             if root:
                 await sync(root)

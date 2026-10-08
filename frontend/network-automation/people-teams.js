@@ -48,6 +48,10 @@ function personKey(person) {
 let authorLookup = null;
 function pdfAuthorKey(pdf) {
   if (pdf.commitAuthorEmail) return pdf.commitAuthorEmail.toLocaleLowerCase();
+  return pdfPersonKey(pdf, pdf.commitAuthor);
+}
+// The person key for a name on one file: people are listed per repository.
+function pdfPersonKey(pdf, name) {
   const normalize = value => String(value || "").trim().replace(/\s+/g, " ").toLocaleLowerCase();
   if (!authorLookup) {
     authorLookup = new Map();
@@ -58,7 +62,46 @@ function pdfAuthorKey(pdf) {
       else if (authorLookup.get(lookupKey) !== key) authorLookup.set(lookupKey, null);
     }
   }
-  return authorLookup.get(JSON.stringify([String(pdf.projectId), pdf.repo, normalize(pdf.commitAuthor)])) ?? null;
+  return authorLookup.get(JSON.stringify([String(pdf.projectId), pdf.repo, normalize(name)])) ?? null;
+}
+// As in Bookmarks: a person "wrote" the files they created and "updated" the files they
+// changed last. personRole picks which of those a selected person shows.
+let personRole = "any";
+function pdfCreatorKey(pdf) {
+  return pdf.createdBy ? pdfPersonKey(pdf, pdf.createdBy) : null;
+}
+function pdfEditorKey(pdf) {
+  return pdf.editedBy !== undefined ? pdfPersonKey(pdf, pdf.editedBy) : pdfAuthorKey(pdf);
+}
+function matchesPeopleFiles(pdf) {
+  if (activePeopleFilter === "all") return true;
+  if (!activePeopleFilter.startsWith("person:")) return matchesPeopleFilter(pdfAuthorKey(pdf));
+  const key = activePeopleFilter.slice(7);
+  const written = pdfCreatorKey(pdf) === key;
+  const updated = pdfEditorKey(pdf) === key;
+  if (personRole === "written") return written;
+  if (personRole === "updated") return updated;
+  return written || updated || pdfAuthorKey(pdf) === key;
+}
+function personRoleCounts(files) {
+  const counts = new Map();
+  const add = (key, role) => {
+    if (key === null) return;
+    const entry = counts.get(key) || {written: 0, updated: 0};
+    entry[role] += 1;
+    counts.set(key, entry);
+  };
+  for (const pdf of files) {
+    add(pdfCreatorKey(pdf), "written");
+    add(pdfEditorKey(pdf), "updated");
+  }
+  return counts;
+}
+function personRoleButtons(person, counts) {
+  const key = personKey(person);
+  const entry = counts.get(key) || {written: 0, updated: 0};
+  const selected = activePeopleFilter === `person:${key}`;
+  return `<div class="person-roles">${["written", "updated"].map(role => `<button type="button" data-team-filter="person:${escapeHtml(key)}" data-person-role="${role}" aria-pressed="${selected && personRole === role}" title="${role === "written" ? "Show files created by" : "Show files last changed by"} ${escapeHtml(person.name)}">${formatNumber(entry[role])} ${role}</button>`).join("")}</div>`;
 }
 function groupPeopleByIdentity(records) {
   const groups = new Map();
@@ -195,6 +238,7 @@ function refreshPeopleFilter() {
       const button = event.target.closest("[data-team-filter]");
       if (!button) return;
       activePeopleFilter = button.dataset.teamFilter;
+      personRole = button.dataset.personRole || "any";
       state.peopleQuery = activePeopleFilter.startsWith("person:") ? activePeopleFilterLabel() : "";
       elements.peopleSearchInput.value = state.peopleQuery;
       refreshPeopleFilter();

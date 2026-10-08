@@ -190,8 +190,11 @@ let treeFilterKey = "";
 let showSearchBranches = false;
 function renderBookmarkTree(filtered, downloaded = [], scheduleSearch = true, downloadedContext = []) {
   const treeItems = [...bookmarks, ...downloaded, ...downloadedContext];
-  const searchNumbers = query.trim()
-    ? bookmarkTreeNumbers(bookmarks.filter(item => bookmarkInCurrentView(item) && matchesPerson(item)), pageHierarchy, document.querySelector("#bookmark-sort").value)
+  const sortMode = document.querySelector("#bookmark-sort").value;
+  // Most viewed lists pages by opens, each keeping the number it has in the tree.
+  const mostViewed = sortMode === "opens";
+  const searchNumbers = query.trim() || mostViewed
+    ? bookmarkTreeNumbers(bookmarks.filter(item => bookmarkInCurrentView(item) && matchesPerson(item)), pageHierarchy, mostViewed ? "added" : sortMode)
     : null;
   if (searchNumbers) extendBookmarkTreeNumbers(searchNumbers, [...downloaded, ...downloadedContext], pageHierarchy);
   // Best matches shows the same tree numbers as the rows below it.
@@ -304,13 +307,32 @@ function renderBookmarkTree(filtered, downloaded = [], scheduleSearch = true, do
           `<li class="nested-bookmark-folder">${folderMarkup(child, childName, [...path, childName], number + "." + (index + 1))}</li>`,
       )
       .join("");
-    return `<details class="tree-space" data-branch="${esc(branch)}" ${collapsedBranches.has(branch) ? "" : "open"}><summary><span class="tree-number">${number}</span><span class="tree-folder" aria-hidden="true">▱</span><strong>${esc(name)}</strong><span class="tree-count">${folderCount(folder)} ${query.trim() && showSearchBranches ? "matches" : "bookmarks"}</span><span class="tree-folder-opens">${folderOpens(folder)} opens</span><span class="tree-folder-label">Folder</span>${starButton}${window.bookmarkFolderTrackButton?.(path) || ""}${downloadButton}</summary><ul>${children}${roots.map((item, index) => entry(item, number + "." + (folder.children.size + index + 1), folder.pages)).join("")}</ul></details>`;
+    return `<details class="tree-space" data-branch="${esc(branch)}" ${collapsedBranches.has(branch) ? "" : "open"}><summary><span class="tree-folder-opens opens-count">${folderOpens(folder)} ${folderOpens(folder) === 1 ? "open" : "opens"}</span><span class="tree-number">${number}</span><span class="tree-folder" aria-hidden="true">▱</span><strong>${esc(name)}</strong><span class="tree-count">${folderCount(folder)} ${query.trim() && showSearchBranches ? "matches" : "bookmarks"}</span><span class="tree-folder-label">Folder</span>${starButton}${window.bookmarkFolderTrackButton?.(path) || ""}${downloadButton}</summary><ul>${children}${roots.map((item, index) => entry(item, number + "." + (folder.children.size + index + 1), folder.pages)).join("")}</ul></details>`;
   }
-  document.querySelector("#bookmark-tree").innerHTML = [...folders.children]
-    .map(([name, folder], index) =>
-      folderMarkup(folder, name, [name], String(index + 1)),
-    )
-    .join("");
+  document.querySelector("#bookmark-tree").innerHTML = mostViewed
+    ? mostViewedMarkup()
+    : [...folders.children]
+        .map(([name, folder], index) =>
+          folderMarkup(folder, name, [name], String(index + 1)),
+        )
+        .join("");
+  function mostViewedMarkup() {
+    const pages = filtered
+      .filter((item) => !item.searchOnly)
+      .sort((a, b) => (Number(b.views) || 0) - (Number(a.views) || 0) ||
+        String(searchNumbers.pages.get(a.id) || "").localeCompare(String(searchNumbers.pages.get(b.id) || ""), undefined, {numeric: true}));
+    if (!pages.length) return "";
+    return `<p class="most-viewed-note">Most opened first · each page keeps its number in the tree</p><ul class="most-viewed-list">${pages
+      .map((item) => {
+        // The folder path, on its own line, says where each page sits in the tree.
+        const path = esc(bookmarkFolderPath(item, pageHierarchy[item.id]).join(" › "));
+        return entry(item, searchNumbers.pages.get(item.id) || "", []).replace(
+          /(<div class="tree-page-content"[^>]*>)/,
+          `$1<div class="most-viewed-path" title="${path}">${path}</div>`,
+        );
+      })
+      .join("")}</ul>`;
+  }
   const navigation = document.querySelector("#bookmark-root-links");
   if (navigation) {
     function hasStar(folder, path) {
@@ -323,7 +345,8 @@ function renderBookmarkTree(filtered, downloaded = [], scheduleSearch = true, do
     roots.sort((a, b) => sort === "count" ? folderCount(b.folder) - folderCount(a.folder) || a.index-b.index : sort === "alpha" ? a.name.localeCompare(b.name, undefined, {numeric:true}) : a.number.localeCompare(b.number, undefined, {numeric:true}));
     navigation.innerHTML = roots.map(({name, folder, index, number}) => {
       const starred = hasStar(folder, [name]);
-      return `<button type="button" class="bookmark-root-link" data-root-index="${index}" title="Go to ${esc(name)}"><span class="bookmark-root-name"><span class="tree-number">${esc(number)}</span>${esc(name)}${starred ? '<span class="bookmark-root-star" role="img" aria-label="Contains a starred folder or favourite bookmark" title="Contains a starred folder or favourite bookmark">★</span>' : ''}</span><span class="bookmark-root-counts">${folderCount(folder)} bookmarks · ${folderOpens(folder)} opens</span></button>`;
+      const opens = folderOpens(folder);
+      return `<div class="bookmark-root-item"><button type="button" class="bookmark-root-link" data-root-index="${index}" title="Go to ${esc(name)}"><span class="bookmark-root-name"><span class="tree-number">${esc(number)}</span>${esc(name)}${starred ? '<span class="bookmark-root-star" role="img" aria-label="Contains a starred folder or favourite bookmark" title="Contains a starred folder or favourite bookmark">★</span>' : ''}</span><span class="bookmark-root-counts"><span>${folderCount(folder)} bookmarks</span><span class="opens-count">${opens} ${opens === 1 ? "open" : "opens"}</span></span></button>${window.bookmarkFolderTrackButton?.([name]) || ""}</div>`;
     }).join("") || '<p class="bookmark-root-empty">No bookmark trees in this view.</p>';
   }
   if (scheduleSearch) window.searchDownloadedBookmarkPages?.(filtered);
@@ -333,6 +356,12 @@ document.querySelector("#bookmark-navigation-sort").addEventListener("change", (
 document.querySelector("#bookmark-root-links")?.addEventListener("click", event => {
   const button = event.target.closest("[data-root-index]");
   if (!button) return;
+  // The Most viewed list has no folders: show the tree to go to one.
+  const sort = document.querySelector("#bookmark-sort");
+  if (sort.value === "opens") {
+    sort.value = "added";
+    render();
+  }
   const root = document.querySelector("#bookmark-tree").children[Number(button.dataset.rootIndex)];
   if (!root) return;
   root.open = true;

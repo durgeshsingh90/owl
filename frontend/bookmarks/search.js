@@ -17,8 +17,13 @@ function bookmarkMatchesUrl(item, value) {
   const identity = bookmarkPageIdentity(value);
   return Boolean(identity && identity === bookmarkPageIdentity(item.url, item.page_id));
 }
+// "aws for ide", "aws_for_ide" and "aws-for-ide" are the same search: underscores,
+// hyphens, dots and slashes separate words like spaces do, in queries and in text.
+function searchWords(value) {
+  return String(value || "").toLocaleLowerCase().replace(/[_\-./\\+]+/g, " ").replace(/\s+/g, " ").trim();
+}
 function bookmarkSearchMatches(item, query, fields, mode = "separate", notes = "") {
-  const needle = query.trim().toLocaleLowerCase();
+  const needle = searchWords(query);
   if (!needle) return true;
   if ((fields.includes("url") || fields.includes("page_id")) && bookmarkMatchesUrl(item, query.trim())) return true;
   const values = {
@@ -29,7 +34,7 @@ function bookmarkSearchMatches(item, query, fields, mode = "separate", notes = "
     page_id: String(item.page_id || ""),
   };
   const terms = mode === "together" ? [needle] : needle.split(/\s+/);
-  return fields.some(field => typeof values[field] === "string" && terms.some(term => values[field].toLocaleLowerCase().includes(term)));
+  return fields.some(field => typeof values[field] === "string" && terms.some(term => searchWords(values[field]).includes(term)));
 }
 function matchesBookmarkSearch(item) {
   const fields = [...document.querySelectorAll('[name="bookmark-search-field"]:checked')].map(input => input.value);

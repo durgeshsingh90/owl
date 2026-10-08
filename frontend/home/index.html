@@ -43,6 +43,7 @@
         <span>Workspace <span class="slash">/</span> Overview</span>
         <div class="header-actions">
           <span class="sample-badge">Database records</span
+          ><button id="refresh-all" type="button" title="Refresh every app now, in the background" aria-label="Refresh every app now, in the background"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8M4 4v4h4M4 13a8 8 0 0 0 14.3 4.9L20 16m0 4v-4h-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button
           ><button id="theme-toggle" aria-label="Switch color theme">
             <span>◐</span>
           </button>
@@ -59,28 +60,28 @@
           </div>
         </div>
         <section class="app-area" aria-label="Your apps">
-          <a class="app-card" href="../aws-accounts/">
+          <a class="app-card" href="../aws-accounts/"><span class="app-opens" data-app-opens="aws" hidden></span>
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h10a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.2 9.5 4.3 4.3 0 0 0 7 18Z" /></svg></div>
-            <div><div class="app-title"><h3>AWS Accounts</h3><span>Account inventory</span></div><p>Import your accounts JSON.<br />Browse by category and copy names, IDs and roles.</p></div>
+            <div><div class="app-title"><h3>AWS Accounts</h3><span>Account inventory</span></div><p>Reads your ~/.aws/config profiles.<br />Grouped by category and environment; copy names, IDs and roles.</p></div>
             <span class="launch">Open app ↗</span>
           </a>
-          <a class="app-card" href="../naas/">
+          <a class="app-card" href="../naas/"><span class="app-opens" data-app-opens="naas" hidden></span>
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h12l4 4v14H4V3Zm5 6h6M9 13h6M9 17h4" /></svg></div>
             <div><div class="app-title"><h3>NAAS Update</h3><span>YAML &amp; README</span></div><p>Track configuration and documentation.<br />Search repositories, changes and file history.</p><p class="owl-auto-refresh" data-auto-refresh="naas"></p></div>
             <span class="launch">Open app ↗</span>
           </a>
-          <a class="app-card" href="../network-automation/">
+          <a class="app-card" href="../network-automation/"><span class="app-opens" data-app-opens="network" hidden></span>
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H6a2 2 0 0 0-2 2v4l-2 2 2 2v4a2 2 0 0 0 2 2h2M16 4h2a2 2 0 0 1 2 2v4l2 2-2 2v4a2 2 0 0 1-2 2h-2" /></svg></div>
             <div><div class="app-title"><h3>Network Automation</h3><span>JSON &amp; README</span></div><p>Track network automation data.<br />Search repositories, changes and file history.</p><p class="owl-auto-refresh" data-auto-refresh="network"></p></div>
             <span class="launch">Open app ↗</span>
           </a>
-          <a class="app-card" href="../confluence-tracker/">
+          <a class="app-card" href="../confluence-tracker/"><span class="app-opens" data-app-opens="tracker" hidden></span>
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h12l4 4v14H4V3Zm5 6h6M9 13h6M9 17h4" /></svg></div>
             <div><div class="app-title"><h3>Confluence Tracker</h3><span>Page changes</span></div><p>Follow an entire page tree.<br />See new pages and updates with daily sync.</p><p class="owl-auto-refresh" data-auto-refresh="tracker"></p></div>
             <span class="launch">Open app ↗</span>
           </a>
           <a class="app-card bookmark-card" href="../bookmarks/"
-            ><div class="app-icon">
+            ><span class="app-opens" data-app-opens="bookmarks" hidden></span><div class="app-icon">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M6 3h12v18l-6-4-6 4V3Z" />
               </svg>
@@ -99,7 +100,7 @@
             <span class="launch">Open app ↗</span></a
           >
           <a class="app-card" href="../bitbucket/"
-            ><div class="app-icon">
+            ><span class="app-opens" data-app-opens="bitbucket" hidden></span><div class="app-icon">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M3 4h18l-3 16H6L3 4Zm6 6 1 5h4l1-5H9Z" />
               </svg>
@@ -117,7 +118,7 @@
             </div>
             <span class="launch">Open app ↗</span></a
           >
-          <a class="app-card" href="../compare/">
+          <a class="app-card" href="../compare/"><span class="app-opens" data-app-opens="compare" hidden></span>
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v16H4zM13 4h7v16h-7zM6.5 8h2M6.5 12h2M15.5 8h2M15.5 12h2M15.5 16h2" /></svg></div>
             <div><div class="app-title"><h3>Compare</h3><span>Text diff</span></div><p>Compare two texts or files side by side.<br />See changed words, added and removed lines.</p></div>
             <span class="launch">Open app ↗</span>
@@ -126,6 +127,11 @@
         <section class="panel auto-refresh-panel" aria-labelledby="auto-refresh-title">
           <div class="panel-heading"><h2 id="auto-refresh-title">Automatic refresh</h2><span>Daily in the background · failures retry every 2 hours until they succeed · a manual refresh counts as done</span></div>
           <div data-auto-refresh-table><p>Loading refresh status…</p></div>
+        </section>
+        <section class="panel storage-panel" aria-labelledby="storage-title">
+          <div class="panel-heading"><h2 id="storage-title">Storage</h2><span id="storage-total">Measuring…</span></div>
+          <div id="storage-bars" aria-live="polite"><p>Measuring the database…</p></div>
+          <p class="panel-foot" id="storage-foot"></p>
         </section>
         <div class="section-heading statistics-heading">
           <h2>Workspace statistics</h2>
@@ -335,7 +341,8 @@
     <script src="commit-stats.js?v=1"></script>
     <script src="script.js?v=weekday-commits-1"></script>
     <script src="bookmark-stats.js"></script>
-    <script src="app-stats.js?v=4"></script>
-    <script src="auto-refresh.js?v=3"></script>
+    <script src="app-stats.js?v=5"></script>
+    <script src="auto-refresh.js?v=4"></script>
+    <script src="storage.js?v=2"></script>
   </body>
 </html>

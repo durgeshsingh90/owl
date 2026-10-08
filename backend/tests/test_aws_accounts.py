@@ -6,77 +6,96 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from main import app
 
-INVENTORY = {
-    "generated_at": "2026-09-27T13:33:35.338514",
-    "total_accounts": 3,
-    "common_roles": {
-        "aws_role": "77-mc-infra-design-eng-readonly",
-        "kubernetes_role": "global-kubernetes-readonly",
-    },
-    "categories": {
-        "Data": [
-            {"profile": "mc-databricks-prod", "account_id": "012345678901"},
-            {"profile": "mc-databricks-nonp", "account_id": 987654321098},
-        ],
-        "Networking": [{"profile": "mc-networking-work", "account_id": "111122223333"}],
-    },
-}
+CONFIG = """[default]
+region = us-east-1
+
+[sso-session mc]
+sso_start_url = https://mc.awsapps.com/start
+sso_region = us-east-1
+
+[profile mc-databricks-prod]
+sso_session = mc
+sso_account_id = 012345678901
+sso_role_name = 77-mc-infra-design-eng-readonly
+
+[profile mc-databricks-nonp]
+sso_session = mc
+sso_account_id = 987654321098
+sso_role_name = 77-mc-infra-design-eng-readonly
+
+[profile mc-networking-work]
+role_arn = arn:aws:iam::111122223333:role/global-kubernetes-readonly
+source_profile = default
+"""
 
 
 def delete_all(client):
     return client.request("DELETE", "/api/aws-accounts", json={"confirmation": "delete all"})
 
 
+def use_config(client, folder, text=CONFIG):
+    path = os.path.join(folder, "config")
+    with open(path, "w") as file:
+        file.write(text)
+    return client.put("/api/aws-accounts/config", json={"path": path})
+
+
 class AwsAccountsTests(unittest.TestCase):
-    def test_import_roundtrip_replace_and_clear(self):
+    def test_accounts_come_from_the_aws_config_file(self):
         with (
             tempfile.TemporaryDirectory() as folder,
-            patch.dict(os.environ, {"OWL_DB_PATH": folder + "/db"}),
+            patch.dict(os.environ, {"OWL_DB_PATH": folder + "/db", "AWS_CONFIG_FILE": folder + "/missing"}),
         ):
             with TestClient(app) as client:
-                self.assertEqual(client.get("/api/aws-accounts").json()["imported"], False)
-                response = client.put("/api/aws-accounts", json=INVENTORY)
-                self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.json()["accounts"], 3)
-            with TestClient(app) as client:
+                empty = client.get("/api/aws-accounts").json()
+                self.assertFalse(empty["imported"])
+                self.assertIn("No AWS config file", empty["config"]["error"])
+                self.assertEqual(client.put("/api/aws-accounts/config", json={"path": folder + "/nope"}).status_code, 400)
+                response = use_config(client, folder)
+                self.assertEqual(response.status_code, 200, response.text)
                 saved = client.get("/api/aws-accounts").json()
                 self.assertTrue(saved["imported"])
-                self.assertEqual(saved["common_roles"], INVENTORY["common_roles"])
-                self.assertEqual(list(saved["categories"]), ["Data", "Networking"])
+                self.assertEqual(list(saved["categories"]), ["Data & Analytics", "Networking", "Other accounts"])
+                data = saved["categories"]["Data & Analytics"]
+                self.assertEqual([a["profile"] for a in data], ["mc-databricks-prod", "mc-databricks-nonp"][::-1])
+                self.assertEqual({a["environment"] for a in data}, {"Prod", "Non-prod"})
+                network = saved["categories"]["Networking"][0]
                 self.assertEqual(
-                    saved["categories"]["Data"][1],
-                    {"profile": "mc-databricks-nonp", "account_id": "987654321098"},
+                    (network["account_id"], network["role"], network["environment"]),
+                    ("111122223333", "global-kubernetes-readonly", "Dev"),
                 )
-                replacement = {"categories": {"Security": [{"profile": "mc-identity-prod"}]}}
-                self.assertEqual(client.put("/api/aws-accounts", json=replacement).status_code, 200)
-                saved = client.get("/api/aws-accounts").json()
-                self.assertEqual(list(saved["categories"]), ["Security"])
-                self.assertEqual(delete_all(client).status_code, 200)
-                self.assertEqual(client.get("/api/aws-accounts").json()["imported"], False)
-
-    def test_rejects_invalid_files(self):
-        with (
-            tempfile.TemporaryDirectory() as folder,
-            patch.dict(os.environ, {"OWL_DB_PATH": folder + "/db"}),
-        ):
+                self.assertEqual(data[0]["sso_start_url"], "https://mc.awsapps.com/start")
+                self.assertIn("77-mc-infra-design-eng-readonly", saved["common_roles"])
+            # The file is read again automatically when it changes.
             with TestClient(app) as client:
-                for payload in (
-                    {},
-                    {"categories": {}},
-                    {"categories": {"Data": [{"account_id": "1"}]}},
-                    {"categories": {"Data": [{"profile": ""}]}},
-                    {"categories": ["Data"]},
-                ):
-                    self.assertEqual(
-                        client.put("/api/aws-accounts", json=payload).status_code, 422, payload
-                    )
-                self.assertEqual(client.get("/api/aws-accounts").json()["imported"], False)
+                path = os.path.join(folder, "config")
+                with open(path, "a") as file:
+                    file.write("\n[profile mc-centralizednetworking-prod]\nsso_account_id = 222233334444\n")
+                os.utime(path, (1, 2_000_000_000))
+                saved = client.get("/api/aws-accounts").json()
+                self.assertEqual(saved["categories"]["Shared Services"][0]["profile"], "mc-centralizednetworking-prod")
+                self.assertEqual(client.put("/api/aws-accounts", json={"categories": {}}).status_code, 405)
+
+    def test_grouping_rules(self):
+        from app.aws import profiles
+
+        cases = {
+            "mc-egressnetworkingpalo-prod": ("Networking", "Prod"),
+            "mc-egressnetworkingpalo-stage": ("Networking", "Stage"),
+            "mc-centralizednetworking-nonp": ("Shared Services", "Non-prod"),
+            "mc-stablecoinsecurity-nonp": ("Security", "Non-prod"),
+            "mc-paymentgateway-prod-123456789012": ("Payments & Cards", "Prod"),
+            "mc-log-archive-prod": ("Logging & Monitoring", "Prod"),
+            "mc-somethingelse-uat": ("Other accounts", "Stage"),
+        }
+        for name, expected in cases.items():
+            self.assertEqual((profiles.category(name), profiles.environment(name)[0]), expected, name)
 
 
 class AwsCopiesExportConnectionTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
-        self.env = patch.dict(os.environ, {"OWL_DB_PATH": self.folder.name + "/db"})
+        self.env = patch.dict(os.environ, {"OWL_DB_PATH": self.folder.name + "/db", "AWS_CONFIG_FILE": self.folder.name + "/missing"})
         self.env.start()
 
     def tearDown(self):
@@ -86,7 +105,7 @@ class AwsCopiesExportConnectionTests(unittest.TestCase):
     def test_copy_counts_and_export(self):
         with TestClient(app) as client:
             self.assertEqual(client.get("/api/aws-accounts/export").status_code, 404)
-            client.put("/api/aws-accounts", json=INVENTORY)
+            use_config(client, self.folder.name)
             for expected in (1, 2):
                 response = client.post(
                     "/api/aws-accounts/copies",
@@ -104,10 +123,10 @@ class AwsCopiesExportConnectionTests(unittest.TestCase):
             exported = client.get("/api/aws-accounts/export")
             self.assertIn("attachment", exported.headers["content-disposition"])
             body = exported.json()
-            self.assertEqual(body["common_roles"], INVENTORY["common_roles"])
-            self.assertEqual(body["total_accounts"], 3)
-            self.assertEqual(list(body["categories"]), ["Data", "Networking"])
-            self.assertEqual(body["categories"]["Data"][1]["account_id"], "987654321098")
+            self.assertIn("77-mc-infra-design-eng-readonly", body["common_roles"])
+            self.assertEqual(body["total_accounts"], 4)
+            self.assertEqual(list(body["categories"]), ["Data & Analytics", "Networking", "Other accounts"])
+            self.assertEqual(body["categories"]["Data & Analytics"][0]["account_id"], "987654321098")
             self.assertNotIn("copies", body)
             self.assertNotIn("imported_at", body)
 
@@ -170,12 +189,53 @@ class AwsCopiesExportConnectionTests(unittest.TestCase):
             self.assertEqual(state["login_url"], "https://device.sso.example.com/?user_code=ABCD-EFGH")
             self.assertEqual(state["login_code"], "ABCD-EFGH")
 
+    def test_approved_login_is_not_reported_failed_while_the_profile_is_checked(self):
+        import subprocess
+        import sys
+        import threading
+        import time
+
+        from app.aws import connection as aws
+
+        # The CLI exits as soon as the browser approves (printing a non-ASCII character);
+        # checking the profile afterwards takes a moment. Polls in between stay pending.
+        script = "import sys; sys.stdout.buffer.write('Successfully logged into Start URL \u2713\\n'.encode())"
+        identity = {"Account": "1", "Arn": "arn"}
+        checking = threading.Event()
+        release = threading.Event()
+
+        def slow_sts(profile):
+            checking.set()
+            release.wait(5)
+            return identity, None
+
+        popen = subprocess.Popen
+        with (
+            TestClient(app) as client,
+            patch.object(aws, "_aws", return_value=sys.executable),
+            patch.object(aws.subprocess, "Popen", lambda args, **kw: popen([sys.executable, "-c", script], **kw)),
+            patch.object(aws, "run_sts", side_effect=slow_sts),
+        ):
+            client.post("/api/aws-accounts/connection/login")
+            self.assertTrue(checking.wait(5))
+            for _ in range(3):
+                state = client.get("/api/aws-accounts/connection").json()
+                self.assertEqual((state["login_status"], state["error"]), ("pending", ""))
+                time.sleep(0.05)
+            release.set()
+            for _ in range(100):
+                state = client.get("/api/aws-accounts/connection").json()
+                if state["login_status"] != "pending":
+                    break
+                time.sleep(0.05)
+            self.assertEqual((state["login_status"], state["status"]), ("approved", "connected"))
+
     def test_delete_all_is_locked_and_removes_every_record(self):
         from app.aws import connection as aws
 
         identity = {"Account": "1", "Arn": "arn"}
         with TestClient(app) as client:
-            client.put("/api/aws-accounts", json=INVENTORY)
+            use_config(client, self.folder.name)
             client.post("/api/aws-accounts/copies", json={"kind": "profile", "value": "mc-databricks-prod"})
             with patch.object(aws, "run_sts", return_value=(identity, None)):
                 client.put("/api/aws-accounts/connection", json={"profile": "other"})
@@ -191,18 +251,19 @@ class AwsCopiesExportConnectionTests(unittest.TestCase):
                 delete_all(client).json(),
                 {"ok": True, "inventory": 1, "copies": 1, "stars": 1, "projects": 1},
             )
+            # OWL's own records are gone; the accounts are read again from the config file.
             saved = client.get("/api/aws-accounts").json()
-            self.assertFalse(saved["imported"])
+            self.assertTrue(saved["imported"])
             self.assertEqual(saved["copies"]["profile"], {})
             self.assertEqual((saved["stars"], saved["projects"]), ([], []))
             state = client.get("/api/aws-accounts/connection").json()
             self.assertEqual(state["profile"], "mc-stablecoinsecurity-nonp")
             self.assertEqual((state["status"], state["approved_at"], state["identity"]), ("unknown", None, None))
-            self.assertEqual(delete_all(client).json()["inventory"], 0)
+            self.assertEqual(delete_all(client).json()["inventory"], 1)
 
     def test_account_stars(self):
         with TestClient(app) as client:
-            client.put("/api/aws-accounts", json=INVENTORY)
+            use_config(client, self.folder.name)
             self.assertEqual(client.get("/api/aws-accounts").json()["stars"], [])
             for profile in ("mc-networking-work", "mc-databricks-prod", "mc-networking-work"):
                 response = client.put("/api/aws-accounts/stars", json={"profile": profile, "starred": True})
@@ -217,13 +278,13 @@ class AwsCopiesExportConnectionTests(unittest.TestCase):
                 client.put("/api/aws-accounts/stars", json={"profile": "", "starred": True}).status_code, 422
             )
             # Re-importing keeps stars; export stays in the original format.
-            client.put("/api/aws-accounts", json=INVENTORY)
+            use_config(client, self.folder.name)
             self.assertEqual(client.get("/api/aws-accounts").json()["stars"], ["mc-databricks-prod"])
             self.assertNotIn("stars", client.get("/api/aws-accounts/export").json())
 
     def test_projects(self):
         with TestClient(app) as client:
-            client.put("/api/aws-accounts", json=INVENTORY)
+            use_config(client, self.folder.name)
             project = client.post("/api/aws-accounts/projects", json={"name": "  Stablecoin   Project "}).json()
             self.assertEqual(project["name"], "Stablecoin Project")
             pid = project["id"]

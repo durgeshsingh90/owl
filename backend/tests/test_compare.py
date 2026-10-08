@@ -74,6 +74,49 @@ class DiffTests(unittest.TestCase):
             diff.layout("x" * (diff.MAX_TEXT_CHARS + 1), "")
 
 
+class BlankLinesAndPairingTests(unittest.TestCase):
+    def test_empty_lines_are_ignored_by_default(self):
+        original = "name: owl\n\nversion: 1\nport: 8000\n\n\nkeep"
+        modified = "name: owl\nversion: 2\n\nport: 8000\nkeep"
+        strict = diff.layout(original, modified)
+        relaxed = diff.layout(original, modified, ignore_blank=True)
+        self.assertGreater(strict["summary"]["differences"], 1)
+        self.assertEqual(relaxed["summary"]["differences"], 1)
+        line = relaxed["original"]["text"].split("\n").index("version: 1")
+        self.assertEqual(relaxed["modified"]["text"].split("\n")[line], "version: 2")
+        self.assertEqual(relaxed["kinds"][line], "c")
+        # Every line of both texts is still shown, in order.
+        for side, text in (("original", original), ("modified", modified)):
+            numbers = [n for n in relaxed[side]["numbers"] if n]
+            self.assertEqual(numbers, list(range(1, text.count("\n") + 2)))
+
+    def test_changed_line_pairs_with_its_most_similar_line(self):
+        original = "start\nlegacy export line here\nend"
+        modified = "start\nbrand new line entirely\nlegacy export line HERE\nend"
+        layout = diff.layout(original, modified)
+        self.assertEqual(layout["kinds"], "sacs")
+        self.assertEqual(layout["original"]["words"], {2: [[19, 23]]})
+
+
+class FormatTests(unittest.TestCase):
+    def test_json_jsonl_and_json5(self):
+        from app.compare.formatting import prettify
+
+        self.assertEqual(prettify('{"a":1,"b":[1,2]}'), ('{\n  "a": 1,\n  "b": [\n    1,\n    2\n  ]\n}', "json"))
+        text, kind = prettify('{"a":1}\n{"a":2}\n')
+        self.assertEqual((kind, text.count('"a"')), ("jsonl", 2))
+        json5 = """// settings
+        {unquoted: 'single', hex: 0x1F, trailing: [1, 2,], nested: {ok: true,}, inf: +Infinity, /* note */ text: "a\\"b"}"""
+        text, kind = prettify(json5)
+        self.assertEqual(kind, "json5")
+        self.assertIn('"unquoted": "single"', text)
+        self.assertIn('"hex": 31', text)
+        self.assertIn('"inf": Infinity', text)
+        self.assertIn('"text": "a\\"b"', text)
+        with self.assertRaises(ValueError):
+            prettify("key: value")
+
+
 class ApiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -115,6 +158,27 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(
             self.client.post("/api/compare/layout", json={"view": "bogus"}).status_code, 422
         )
+
+    def test_recent_comparisons_keep_the_latest_20_and_their_links_work(self):
+        tokens = []
+        for index in range(22):
+            body = {"originalTitle": f"left {index}", "originalText": f"a {index}", "modifiedText": "b"}
+            tokens.append(self.client.post("/api/compare/history", json=body).json()["token"])
+            time.sleep(0.002)
+        items = self.client.get("/api/compare/history").json()["items"]
+        self.assertEqual(len(items), 20)
+        self.assertEqual(items[0]["original_title"], "left 21")
+        self.assertNotIn(tokens[0], {item["token"] for item in items}, "the oldest are deleted")
+        # Saving again updates the same comparison instead of adding one.
+        again = self.client.post("/api/compare/history", json={"token": tokens[5], "originalText": "edited"}).json()
+        self.assertEqual(again["token"], tokens[5])
+        self.assertEqual(len(self.client.get("/api/compare/history").json()["items"]), 20)
+        shared = self.client.get(f"/api/compare/share/{tokens[5]}").json()
+        self.assertEqual((shared["payload"]["originalText"], shared["expiresAt"]), ("edited", None))
+        self.assertEqual(self.client.get(f"/api/compare/share/{tokens[0]}").status_code, 404)
+        formatted = self.client.post("/api/compare/format", json={"text": "{a: 1}"}).json()
+        self.assertEqual(formatted, {"text": '{\n  "a": 1\n}', "kind": "json5"})
+        self.assertEqual(self.client.post("/api/compare/format", json={"text": "plain"}).status_code, 422)
 
     def test_share_links_expire_after_a_day(self):
         payload = {"originalTitle": "A", "originalText": ORIGINAL, "modifiedText": MODIFIED, "view": "differences"}

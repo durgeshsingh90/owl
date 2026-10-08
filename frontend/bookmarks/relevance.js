@@ -8,7 +8,8 @@ const BOOKMARK_TIER = {PHRASE: 3, ALL: 2, SOME: 1};
 const CONTENT_LIMIT = 60000;
 
 function bookmarkSearchTerms(query) {
-  const words = [...new Set(query.toLocaleLowerCase().split(/\s+/).filter(Boolean))];
+  query = searchWords(query);
+  const words = [...new Set(query.split(/\s+/).filter(Boolean))];
   const significant = words.filter(word => !BOOKMARK_STOPWORDS.has(word));
   return {
     phrase: query.toLocaleLowerCase().split(/\s+/).filter(Boolean).join(" "),
@@ -50,7 +51,7 @@ function termWindow(text, terms) {
 }
 
 function bookmarkFieldTexts(item, fields, notes) {
-  const normal = value => String(value || "").toLocaleLowerCase().replace(/\s+/g, " ").trim();
+  const normal = searchWords;
   const texts = {};
   if (fields.includes("title")) texts.title = normal(item.title);
   if (fields.includes("notes")) texts.notes = normal(notes);
@@ -66,6 +67,14 @@ function decodeURIComponentSafe(value) {
  * Rank bookmarks that already passed the search filter.
  * Returns [{item, tier, score, matched, missing, phraseField}] sorted best first.
  */
+// Pages you open often rank higher among equally good matches: the bonus grows with
+// each doubling of opens (1 open +6, 3 +12, 7 +18, 31 +30), plus a little for a page
+// opened in the last two weeks. How well a page matches (its tier) still comes first.
+function usageBonus(item) {
+  const views = Math.max(0, Number(item.views) || 0);
+  const recent = item.lastViewed && Date.now() - Number(item.lastViewed) < 14 * 86400000 ? 5 : 0;
+  return 6 * Math.log2(1 + views) + recent;
+}
 function rankBookmarks(items, query, fields, notesFor = () => "") {
   const terms = bookmarkSearchTerms(query);
   if (!terms.words.length) return [];
@@ -95,7 +104,7 @@ function rankBookmarks(items, query, fields, notesFor = () => "") {
       const window = Math.min(...entries.filter(([, text]) => terms.key.every(term => termQuality(text, term) >= 0.6)).map(([, text]) => termWindow(text, terms.key)));
       if (Number.isFinite(window)) score += 15 + Math.max(0, 20 - window);
     }
-    score += Math.log1p(item.views || 0) * 2;
+    score += usageBonus(item);
     return {item, tier, score, matched, missing, phraseField};
   });
   return ranked.sort((a, b) => b.tier - a.tier || b.score - a.score || String(a.item.title).localeCompare(String(b.item.title)));
@@ -140,6 +149,7 @@ if (typeof document !== "undefined") {
     if (!result.matched.length) return `<span class="match-tier some">Partial word</span>`;
     return `<span class="match-tier some">${result.matched.length} of ${terms.key.length} words</span><span class="match-missing">missing: ${result.missing.map(escapeHtml).join(", ")}</span>`;
   }
+  const TREE_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M5 3v14a2 2 0 0 0 2 2h4M5 9h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="11" y="6" width="9" height="6" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="11" y="16" width="9" height="6" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
   window.renderBestMatches = (filtered) => {
     const panel = document.querySelector("#best-matches");
     if (!panel) return;
@@ -162,10 +172,10 @@ if (typeof document !== "undefined") {
           <span class="best-rank tree-number" title="Number in the bookmark tree">${escapeHtml(window.bookmarkSearchNumbers?.pages.get(item.id) ?? index + 1)}</span>
           <div class="best-body">
             <div class="best-line"><a class="best-title" data-open="${item.id}" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">${highlightTerms(item.title || item.url, terms.words)}</a>${reason(result, terms)}</div>
-            <div class="best-path">${escapeHtml(path)} · ${item.views} ${item.views === 1 ? "open" : "opens"}</div>
+            <div class="best-path">${escapeHtml(path)}</div>
             ${preview ? `<p class="best-snippet">${preview}</p>` : ""}
           </div>
-          <button type="button" class="best-reveal" data-reveal-tree="${item.id}" title="Show this bookmark in the tree below">Show in tree</button>
+          <div class="best-side"><span class="opens-count">${item.views} ${item.views === 1 ? "open" : "opens"}</span><button type="button" class="best-reveal" data-reveal-tree="${item.id}" title="Show in tree" aria-label="Show ${escapeHtml(item.title || item.url)} in the tree">${TREE_ICON}</button></div>
         </li>`;
       }).join("")}</ol>
       ${ranked.length > limit ? `<button type="button" class="best-more" data-best-more>Show ${Math.min(10, ranked.length - limit)} more · ${ranked.length - limit} left</button>` : ""}`;

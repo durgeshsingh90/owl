@@ -30,6 +30,16 @@
         done++;if(!await persist())throw Error("Database save failed. Reload before retrying.");render();
         if (Date.now()-reported>3000) { reported=Date.now(); void report({action:"progress", owner, completed:done, failed}).catch(()=>{}); }
       }
+      // Bookmarks that failed get one more try at the end; only those failing again keep the error.
+      for(const item of targets.filter(entry => entry.fetchError && bookmarks.includes(entry))){
+        status.textContent=`Retrying failed pages · ${failed} failed`;
+        try{
+          const data=await resolveBookmark(item.url);
+          if (!bookmarks.includes(item)) continue;
+          Object.assign(item,data,{fetchError:""});failed--;
+          if(!await persist())throw Error("Database save failed. Reload before retrying.");render();
+        }catch(error){if(error.message.startsWith("Database save failed"))throw error;item.fetchError=error.message;}
+      }
       status.textContent=`Updated ${done}/${targets.length} · ${failed} failed`;
       const previous = window.bookmarkLastUpdateAll;
       window.bookmarkLastUpdateAll = new Date().toISOString();

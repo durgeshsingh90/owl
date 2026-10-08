@@ -94,8 +94,28 @@ async def download(settings, key, space_key, root_ids, root_title=""):
                 "UPDATE bookmark_downloads SET total=?,phase='downloading',updated_at=? WHERE folder_key=?",
                 (len(page_ids), stamp(), key),
             )
+        from app.bookmarks.refresh import connection_lost, describe
+
+        # An unreadable page (restricted, deleted) is skipped and tried once more when
+        # the rest are done; only a lost connection stops the whole download.
+        failed = {}
         for page_id in page_ids:
-            await save(page_id)
+            try:
+                await save(page_id)
+            except Exception as error:  # noqa: BLE001 - classified below
+                if connection_lost(error):
+                    raise
+                failed[str(page_id)] = describe(error)
+        for page_id in list(failed):
+            try:
+                await save(page_id)
+                del failed[page_id]
+            except Exception as error:  # noqa: BLE001 - classified below
+                if connection_lost(error):
+                    raise
+                failed[page_id] = describe(error)
+        # Pages that could not be read this time keep their earlier copy.
+        seen.update(failed)
         with connection() as db:
             existing = db.execute(
                 "SELECT page_id FROM bookmark_downloaded_pages WHERE folder_key=?",
@@ -108,8 +128,15 @@ async def download(settings, key, space_key, root_ids, root_title=""):
                         (key, row[0]),
                     )
             db.execute(
-                "UPDATE bookmark_downloads SET status='completed',count=?,error=NULL,updated_at=? WHERE folder_key=?",
-                (len(seen), stamp(), key),
+                "UPDATE bookmark_downloads SET status='completed',count=?,error=?,updated_at=? WHERE folder_key=?",
+                (
+                    len(seen) - len(failed),
+                    f"{len(failed)} pages could not be downloaded, for example page {next(iter(failed))}: {next(iter(failed.values()))}"
+                    if failed
+                    else None,
+                    stamp(),
+                    key,
+                ),
             )
     except Exception as error:  # noqa: BLE001 - persist failure for background downloads
         if isinstance(error, HTTPException):

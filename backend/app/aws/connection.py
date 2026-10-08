@@ -23,6 +23,17 @@ URL = re.compile(r"https://\S+")
 CODE = re.compile(r"\b[A-Z0-9]{4}-[A-Z0-9]{4}\b")
 _lock = threading.Lock()
 _login = None  # The running `aws sso login` process, owned by this backend.
+# The thread that reads the login's output and then checks the profile. A login is in
+# progress until it finishes: the CLI exits as soon as the browser approves, and the
+# profile check that follows takes a few more seconds.
+_watcher = None
+
+
+def _in_progress():
+    with _lock:
+        return (_login is not None and _login.poll() is None) or (
+            _watcher is not None and _watcher.is_alive()
+        )
 
 
 def _aws():
@@ -107,9 +118,7 @@ def check():
 
 def state():
     row = _row()
-    with _lock:
-        running = _login is not None and _login.poll() is None
-    if row["login_status"] == "pending" and not running:
+    if row["login_status"] == "pending" and not _in_progress():
         # The backend restarted while a login was waiting for approval.
         _update(login_status="failed", error="Login was interrupted. Start it again.")
         row = _row()
@@ -121,9 +130,8 @@ def state():
 
 def reset():
     """Forget the saved session and profile; used by Delete all."""
-    with _lock:
-        if _login is not None and _login.poll() is None:
-            raise ValueError("Wait for the current AWS login to finish.")
+    if _in_progress():
+        raise ValueError("Wait for the current AWS login to finish.")
     with connection() as db:
         db.execute("DELETE FROM aws_connection WHERE id=1")
         db.execute("INSERT INTO aws_connection(id) VALUES(1)")
@@ -132,9 +140,8 @@ def reset():
 def set_profile(profile):
     if not PROFILE.match(profile):
         raise ValueError("Profile names may contain letters, digits, '.', '_' and '-'.")
-    with _lock:
-        if _login is not None and _login.poll() is None:
-            raise ValueError("Wait for the current login to finish.")
+    if _in_progress():
+        raise ValueError("Wait for the current login to finish.")
     _update(
         profile=profile, status="unknown", identity=None, error="", checked_at=None,
         approved_at=None, expires_at=None, source="", login_status="idle",
@@ -143,6 +150,14 @@ def set_profile(profile):
 
 
 def _watch(process, profile):
+    try:
+        _follow(process, profile)
+    except Exception as error:  # noqa: BLE001 - never leave a login pending forever
+        _update(login_status="failed", status="disconnected", error=f"Login check failed: {type(error).__name__}.")
+        event("aws.login_failed", profile=profile, error=type(error).__name__)
+
+
+def _follow(process, profile):
     expired = threading.Event()
 
     def expire():
@@ -174,6 +189,8 @@ def _watch(process, profile):
         event("aws.login_failed", profile=profile, returncode=process.returncode)
         return
     identity, error = run_sts(profile)
+    if identity is None:
+        error = f"Signed in to AWS SSO, but profile {profile} could not be used: {error}"
     _record(identity, error, approved=True)
     _update(login_status="approved" if identity else "failed")
     event("aws.login_finished", profile=profile, approved=identity is not None)
@@ -181,20 +198,23 @@ def _watch(process, profile):
 
 def login():
     """Start `aws sso login`; the CLI opens the approval page in a browser tab."""
-    global _login
+    global _login, _watcher
     profile = _row()["profile"]
+    if _in_progress():
+        return state()
     with _lock:
-        if _login is not None and _login.poll() is None:
-            return state()
         process = subprocess.Popen(
             [_aws(), "sso", "login", "--profile", profile],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
+            # Not the Windows code page: one unexpected character must not stop the watcher.
+            encoding="utf-8",
+            errors="replace",
             **_options(),
         )
         _login = process
-    _update(login_status="pending", login_started=time.time(), login_url=None, login_code=None, error="")
+        _update(login_status="pending", login_started=time.time(), login_url=None, login_code=None, error="")
+        _watcher = threading.Thread(target=_watch, args=(process, profile), daemon=True)
+        _watcher.start()
     event("aws.login_started", profile=profile)
-    threading.Thread(target=_watch, args=(process, profile), daemon=True).start()
     return state()

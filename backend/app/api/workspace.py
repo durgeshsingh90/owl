@@ -61,6 +61,13 @@ def save_bookmarks(value: BookmarkWorkspace):
     return {"ok": True, "revision": value.revision + 1}
 
 
+# The author of a document's oldest commit (commit_history lists newest first).
+CREATOR = (
+    "COALESCE(json_extract(d.commit_history,'$[#-1].author.displayName'),"
+    "json_extract(d.commit_history,'$[#-1].author.name'))"
+)
+
+
 def current_revision(db):
     row = db.execute("SELECT token,revision FROM workspace_revision WHERE id=1").fetchone()
     return f"{row['token']}:{row['revision']}"
@@ -124,7 +131,8 @@ def workspace(
         for row in db.execute(
             "SELECT d.id,d.project,d.file_size,d.page_count,d.commit_id,d.commit_count,"
             "d.commit_message,d.last_scanned,d.repo,d.pdf_name,d.path,d.url,d.commit_date,"
-            "d.author,d.open_count,d.notes,d.added_at,d.updated_at,r.project_id "
+            "d.author,d.open_count,d.notes,d.added_at,d.updated_at,r.project_id,"
+            f"{CREATOR} AS creator "
             "FROM documents d JOIN repositories r ON r.id=d.repository_id "
             "WHERE (? IS NULL OR d.id < ?) AND (? IS NULL OR strftime('%Y-%m', d.commit_date)=?) ORDER BY d.id DESC LIMIT ?",
             (before, before, month, month, limit + 1 if limit is not None else -1),
@@ -149,6 +157,8 @@ def workspace(
                     "folderUrl": d["url"].rsplit("/", 1)[0],
                     "committedAt": d["commit_date"],
                     "commitAuthor": d["author"],
+                    # Who added the file: the author of its oldest commit.
+                    "createdBy": d["creator"] or "",
                     "openCount": d["open_count"],
                     "opens": d["open_count"],
                     "notes": d["notes"],
@@ -161,22 +171,31 @@ def workspace(
             documents.pop()
         people = []
         if summaries:
+            # Everyone who last changed or first added a file, per repository, as
+            # Bookmarks lists people who wrote or updated a page.
+            totals = {}
             for row in db.execute(
-                "SELECT r.project_id,d.repo,d.author,COUNT(*) pdf_count,"
-                "COUNT(DISTINCT NULLIF(d.commit_id,'')) commits "
-                "FROM documents d JOIN repositories r ON r.id=d.repository_id "
-                "WHERE d.author IS NOT NULL AND d.author != '' "
-                "GROUP BY r.project_id,d.repo,d.author ORDER BY r.project_id,d.repo,d.author"
+                f"SELECT r.project_id,d.repo,d.author,d.commit_id,{CREATOR} AS creator "
+                "FROM documents d JOIN repositories r ON r.id=d.repository_id"
             ):
+                for name in {row["author"], row["creator"]} - {None, ""}:
+                    entry = totals.setdefault(
+                        (str(row["project_id"]), row["repo"], name),
+                        {"files": 0, "commits": set()},
+                    )
+                    entry["files"] += 1
+                    if name == row["author"] and row["commit_id"]:
+                        entry["commits"].add(row["commit_id"])
+            for (project_id, repo, name), entry in sorted(totals.items()):
                 people.append(
                     {
                         "id": len(people) + 1,
-                        "projectId": str(row["project_id"]),
-                        "repo": row["repo"],
-                        "name": row["author"],
+                        "projectId": project_id,
+                        "repo": repo,
+                        "name": name,
                         "email": "",
-                        "pdfCount": row["pdf_count"],
-                        "commits": row["commits"],
+                        "pdfCount": entry["files"],
+                        "commits": len(entry["commits"]),
                     }
                 )
     return {

@@ -66,7 +66,6 @@ class TrackerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((state["status"], state["page_count"], state["unread"]), ("completed", 0, 0))
         self.assertEqual(state["title"], "Home")
         self.assertFalse(any(path.endswith(("/descendant/page", "/child/page")) for path, _ in self.wiki.calls))
-        self.assertTrue(all("body" not in str(params) for _, params in self.wiki.calls))
         searched = [params["cql"] for path, params in self.wiki.calls if path == "content/search"]
         self.assertEqual(searched, ['(id = 100 or ancestor = 100) and type = page and lastmodified >= "2027-01-15"'])
         self.assertEqual(api.pages(root_id)["pages"], [])
@@ -104,6 +103,60 @@ class TrackerTests(unittest.IsolatedAsyncioTestCase):
         state = await self.scan()
         self.assertEqual(state["unread"], 4)
         self.assertEqual(api.page_details(root_id, "160")["changes"][0]["summary"]["version"], {"before": 2, "after": 3})
+
+    async def test_text_is_downloaded_only_for_recorded_pages(self):
+        root_id = await service.add_root("100")
+        self.now += 3600
+        self.edit("160")
+        self.wiki.pages["160"]["text"] = "rotate the certificates"
+        self.edit("101")
+        self.wiki.restricted.add("101")
+        state = await self.scan()
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(self.wiki.downloads, ["160"])  # 101 is restricted (tried twice); nothing else changed
+        self.assertEqual(sum(1 for path, params in self.wiki.calls if path == "content/101" and "body" in str(params)), 2)
+        pages = {page["page_id"]: page for page in api.pages(root_id)["pages"]}
+        with connection() as db:
+            text = dict(db.execute("SELECT page_id,json_extract(metadata,'$.contentText') FROM confluence_tracker_pages"))
+        self.assertEqual(text, {"160": "rotate the certificates", "101": ""})
+        self.assertIn("403", pages["101"]["contentError"])
+        # The next sync downloads nothing again.
+        self.now += DAY
+        self.wiki.downloads.clear()
+        await self.scan()
+        self.assertEqual(self.wiki.downloads, [])
+
+    async def test_only_pages_nobody_maintains_are_deleted_after_six_months(self):
+        root_id = await service.add_root("100")
+        self.now += 3600
+        self.edit("160")
+        self.edit("101")
+        await self.scan()
+        # 101 keeps being maintained: updated again three and five months later.
+        for months in (90, 60):
+            self.now += months * DAY
+            self.edit("101")
+            await self.scan()
+        self.now += 40 * DAY  # 190 days since 160 was last updated
+        self.assertEqual(service.purge(self.now), (1, 1))
+        self.assertEqual([page["page_id"] for page in api.pages(root_id)["pages"]], ["101"])
+        self.assertEqual(len(api.page_details(root_id, "101")["changes"]), 3, "history of a maintained page stays")
+        # Six months without any update: 101 goes too, with its history.
+        self.now += 150 * DAY
+        self.assertEqual(service.purge(self.now), (1, 3))
+        self.assertEqual(api.pages(root_id)["pages"], [])
+        # Edited again later, a deleted page is tracked again.
+        self.edit("160")
+        await self.scan()
+        self.assertEqual([page["page_id"] for page in api.pages(root_id)["pages"]], ["160"])
+
+    def test_last_activity_uses_the_newest_confluence_date(self):
+        moment = service.last_activity(
+            {"writtenAt": "2026-01-01T09:00:00.000+01:00", "confluenceUpdatedAt": "2026-05-02T10:00:00Z"},
+            "2026-03-01T00:00:00+00:00",
+        )
+        self.assertEqual(moment.isoformat(), "2026-05-02T10:00:00+00:00")
+        self.assertEqual(service.kept_until({}, None), None)
 
     async def test_without_search_the_tree_metadata_is_filtered(self):
         root_id = await service.add_root("100")

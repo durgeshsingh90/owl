@@ -158,7 +158,7 @@ function getScopedPdfs() {
       (pdf.pageId === folder.pageId || (pdf.ancestorIds || []).includes(folder.pageId)));
     return (
       matchesProject && matchesRepo && matchesFolder && (!state.unreviewedOnly || pdf.unread > 0) &&
-      (activePeopleFilter === "all" || matchesPeopleFilter(pdfAuthorKey(pdf)))
+      matchesPeopleFiles(pdf)
     );
   });
 }
@@ -742,10 +742,12 @@ function renderPeople() {
   renderTeamFilters();
   const scopedPeople = groupPeopleByIdentity(getScopedPeople());
   const range = getActiveCommitRange();
-  const query = state.peopleQuery.trim().toLocaleLowerCase();
+  // "first_last", "first-last" and "first last" find the same person.
+  const words = value => String(value || "").toLocaleLowerCase().replace(/[_\-.]+/g, " ").replace(/\s+/g, " ").trim();
+  const query = words(state.peopleQuery);
   const visiblePeople = query
     ? scopedPeople.filter((person) =>
-        `${person.name} ${person.email}`.toLocaleLowerCase().includes(query),
+        words(`${person.name} ${person.email}`).includes(query),
       )
     : scopedPeople;
   renderCollapsedPeople(visiblePeople);
@@ -757,6 +759,10 @@ function renderPeople() {
       ? "No contributors match the current team, repository, and date filters."
       : "No contributor data is loaded for this selection.";
 
+  // Written / updated counts over the files in the selected project and repositories.
+  const roleCounts = personRoleCounts(pdfs.filter(pdf =>
+    (!state.selectedProject || pdf.projectId === state.selectedProject) &&
+    (!state.selectedRepos.size || state.selectedRepos.has(repositoryKey(pdf.projectId, pdf.repo)))));
   elements.peopleList.innerHTML = visiblePeople
     .map(
       (person, index) => `
@@ -770,6 +776,7 @@ function renderPeople() {
               <span><strong>${formatNumber(person.commits)}</strong> latest edits</span>
               <span><strong>${formatNumber(person.pdfCount)}</strong> pages</span>
             </div>
+            ${personRoleButtons(person, roleCounts)}
           </div>
         </article>
       `,

@@ -297,6 +297,11 @@ def document_details(document_id: int):
         ).fetchone()[0]
         _, info = layout(db)
     when, who = latest_activity(row)
+    # Deleted six months after the page was last created or updated, unless it changes.
+    kept = service.kept_until(
+        {"writtenAt": row["created_at"], "confluenceUpdatedAt": row["updated_at"]},
+        row["changed_at"],
+    )
     return {
         "pdf_name": row["title"],
         "page_id": row["page_id"],
@@ -320,6 +325,7 @@ def document_details(document_id: int):
         "latest_activity": when,
         "latest_by": who,
         "pdf_text": text or "",
+        "kept_until": kept.isoformat() if kept else None,
     }
 
 

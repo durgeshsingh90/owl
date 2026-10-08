@@ -898,7 +898,7 @@ class Jobs:
                 retry_repository.update(
                     retry_processed=0, retry_total=len(paths), eta_seconds=None
                 )
-                for path in sorted(paths, key=lambda path: (path.casefold(), path)):
+                for path in sorted(list(paths), key=lambda path: (path.casefold(), path)):
                     p["detail"] = f"Automatic retry: {project}/{slug}/{path}"
                     self.save()
                     counters = {
@@ -921,6 +921,8 @@ class Jobs:
                         len(paths),
                     )
                     if not counters["failed"]:
+                        # Recovered: a later retry pass skips it.
+                        paths.discard(path)
                         remaining_failures -= 1
                         retry_repository["failed"] -= 1
                         p["failed"] -= 1
@@ -1025,11 +1027,9 @@ class Jobs:
                     p["repositories_done"] += 1
                     self.save()
 
-            for repo in repos:
-                if repo[2] in self.deleted_ids:
-                    continue
+            async def run_for(repo, work):
                 self.repository_id = repo[2]
-                self.repository_task = asyncio.create_task(process_repository(repo))
+                self.repository_task = asyncio.create_task(work)
                 try:
                     await self.repository_task
                 except asyncio.CancelledError:
@@ -1041,6 +1041,39 @@ class Jobs:
                 finally:
                     self.repository_task = None
                     self.repository_id = None
+
+            for repo in repos:
+                if repo[2] in self.deleted_ids:
+                    continue
+                await run_for(repo, process_repository(repo))
+
+            # When everything else is done, try what still failed once more: files that
+            # failed twice, and repositories whose file list could not be read. Only what
+            # fails again is reported as failed.
+            if auto_retry:
+                for repo in list(repos):
+                    key = str(repo[2])
+                    status = p["repository_statuses"].get(key)
+                    if repo[2] in self.deleted_ids or not status or status["status"] != "failed":
+                        continue
+                    await self.wait_unpaused()
+                    if failed_paths.get(repo):
+                        p["detail"] = f"Final retry of failed files in {repo[0]}/{repo[1]}"
+                        await run_for(repo, retry_repository_failures(*repo))
+                    elif key not in checkpoint["inventories"] and key not in checkpoint["finished"]:
+                        p["detail"] = f"Final retry of {repo[0]}/{repo[1]}"
+                        p["repositories_failed"] = max(0, p["repositories_failed"] - 1)
+                        p["repositories_done"] = max(0, p["repositories_done"] - 1)
+                        p["folder_failures"] = [
+                            failure
+                            for failure in p["folder_failures"]
+                            if (failure["project"], failure["repo"]) != (repo[0], repo[1])
+                        ]
+                        partial_repositories.discard(repo[2])
+                        p["discovery_failed"] = bool(p["folder_failures"])
+                        status["status"] = "queued"
+                        self.save()
+                        await run_for(repo, process_repository(repo))
             await self.wait_unpaused()
             p["discovery_complete"] = True
             self.save()

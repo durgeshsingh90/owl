@@ -212,6 +212,36 @@ class BookmarkTests(unittest.TestCase):
             (status["status"], status["total"], status["count"]), ("completed", 3, 3)
         )
 
+    def test_unreadable_pages_are_retried_at_the_end_and_skipped(self):
+        from unittest.mock import AsyncMock
+
+        from app.bookmarks import confluence
+
+        self.client.post("/bookmarks/settings/save/", data=self.settings)
+        tries = {}
+
+        async def listing(settings, path, params):
+            return {"results": [{"id": "456"}, {"id": "789"}], "_links": {}}
+
+        async def content(settings, url, page_id):
+            tries[page_id] = tries.get(page_id, 0) + 1
+            if page_id == "789":  # restricted: fails both times
+                raise confluence.ConfluenceRequestError(403, "Confluence HTTP 403: access denied.")
+            if page_id == "456" and tries[page_id] == 1:  # fails once, then works
+                raise confluence.ConfluenceRequestError(404, "Confluence HTTP 404: page or endpoint not found.")
+            return {"title": page_id, "body": {"view": {"value": "<p>saved</p>"}}}
+
+        with (
+            patch("app.bookmarks.confluence.get", new=AsyncMock(side_effect=listing)),
+            patch("app.bookmarks.confluence.resolved_content", new=AsyncMock(side_effect=content)),
+        ):
+            self.client.post("/api/bookmarks/downloads", json={"folder_key": "tree", "root_ids": ["123"]})
+        status = self.client.get("/api/bookmarks/downloads").json()[0]
+        self.assertEqual((status["status"], status["count"]), ("completed", 2))
+        self.assertEqual(tries, {"123": 1, "456": 2, "789": 2})
+        self.assertIn("1 pages could not be downloaded", status["error"])
+        self.assertIn("789", status["error"])
+
     def test_folder_title_resolves_parent_and_downloads_descendants(self):
         from unittest.mock import AsyncMock
 

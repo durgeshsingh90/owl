@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>OWL · Compare</title>
   <link rel="icon" href="../bitbucket/assets/owl.png">
-  <link rel="stylesheet" href="style.css?v=4">
+  <link rel="stylesheet" href="style.css?v=5">
   <script src="../bitbucket/theme.js?v=20260914-current-mode"></script>
 </head>
 <body>
@@ -17,7 +17,12 @@
   </div>
   <nav>
     <a href="../home/">Home ↗</a>
-    <button id="share" type="button" title="Copy a link to this comparison (valid for 24 hours)">Share link</button>
+    <button id="new-compare" type="button" title="Start a new comparison (the current one stays in Recent)">New</button>
+    <div class="recent">
+      <button id="recent-toggle" type="button" aria-expanded="false" aria-controls="recent-menu" title="Your 20 most recent comparisons">Recent ▾</button>
+      <div id="recent-menu" class="recent-menu" hidden></div>
+    </div>
+    <button id="share" type="button" title="Copy a link to this comparison; it works while the comparison is among the 20 most recent">Share link</button>
     <button id="theme-toggle" type="button" aria-label="Switch color theme"><span>◐</span></button>
   </nav>
 </header>
@@ -34,6 +39,7 @@
   </div>
   <button type="button" id="swap" title="Swap the two sides">⇄ Swap</button>
   <label class="check"><input id="ignore-whitespace" type="checkbox" checked> Ignore leading and trailing spaces</label>
+  <label class="check"><input id="ignore-blank-lines" type="checkbox" checked> Ignore empty lines</label>
   <div class="legend" aria-label="Colour key">
     <span class="key key-changed">Changed <strong id="count-changed">0</strong></span>
     <span class="key key-removed">Only left <strong id="count-removed">0</strong></span>
@@ -48,6 +54,7 @@
   <section class="pane" data-side="original" aria-label="Left text">
     <div class="pane-head">
       <input class="pane-title" id="original-title" value="Original" aria-label="Left title" maxlength="200">
+      <button type="button" class="mini" data-format="original" title="Pretty-print JSON, JSON Lines or JSON5 on the left">{ } Format JSON</button>
       <button type="button" class="mini" data-open="original" title="Load a file into the left side">Open file</button>
       <button type="button" class="mini" data-clear="original" title="Clear the left side">Clear</button>
     </div>
@@ -60,6 +67,7 @@
   <section class="pane" data-side="modified" aria-label="Right text">
     <div class="pane-head">
       <input class="pane-title" id="modified-title" value="Modified" aria-label="Right title" maxlength="200">
+      <button type="button" class="mini" data-format="modified" title="Pretty-print JSON, JSON Lines or JSON5 on the right">{ } Format JSON</button>
       <button type="button" class="mini" data-open="modified" title="Load a file into the right side">Open file</button>
       <button type="button" class="mini" data-clear="modified" title="Clear the right side">Clear</button>
     </div>
@@ -70,6 +78,7 @@
 <input id="file-input" type="file" hidden>
 <div id="toast" class="toast" role="status" hidden></div>
 <script src="../vendor/monaco/vs/loader.js"></script>
-<script src="script.js?v=9"></script>
+<script src="script.js?v=10"></script>
+  <script src="/home/app-open.js?v=1" data-app="compare"></script>
 </body>
 </html>

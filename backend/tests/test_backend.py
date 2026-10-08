@@ -1525,7 +1525,8 @@ class BackendTests(unittest.TestCase):
             self.config["base_url"]
             + "/projects/DEMO/repos/one/browse/nested/first.pdf",
         )
-        self.assertEqual(failure["attempts"], 2)
+        # Tried in the pull, in the repository's retry, and in the final retry pass.
+        self.assertEqual(failure["attempts"], 3)
         with connection() as db:
             saved = db.execute("SELECT pdf_name,url FROM failed_documents").fetchone()
             self.assertEqual(
@@ -1885,6 +1886,24 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(all(count == 2 for count in downloads.values()))
         self.assertEqual(self.client.get("/api/failed").json(), [])
 
+    def test_repository_listing_that_fails_once_recovers_in_the_final_pass(self):
+        original = self.upstream
+        failures = {"left": 1}
+
+        def flaky(request):
+            if request.url.path.endswith("/repos/one/browse/") and failures["left"]:
+                failures["left"] -= 1
+                return httpx.Response(500)  # not retried by the HTTP client itself
+            return original(request)
+
+        self.upstream = flaky
+        job = self.crawl()
+        self.assertEqual(failures["left"], 0)
+        self.assertEqual(job["status"], "succeeded", job.get("folder_failures"))
+        self.assertFalse(job["discovery_failed"])
+        self.assertEqual(job["repositories_failed"], 0)
+        self.assertEqual(job["repositories_done"], job["repositories"])
+
     def test_failure_and_retry(self):
         self.fail = True
         job = self.crawl()
@@ -1894,7 +1913,7 @@ class BackendTests(unittest.TestCase):
         )
         failures = self.client.get("/api/failed").json()
         self.assertEqual(len(failures), 4)
-        self.assertTrue(all(row["attempts"] == 2 for row in failures))
+        self.assertTrue(all(row["attempts"] == 3 for row in failures))
         self.assertEqual(failures[0]["error"], "Bitbucket returned HTTP 403.")
         self.assertTrue(failures[0]["repo"])
         self.assertTrue(failures[0]["project"])
@@ -1914,7 +1933,7 @@ class BackendTests(unittest.TestCase):
             if not succeeds:
                 self.assertTrue(
                     all(
-                        row["attempts"] == 3
+                        row["attempts"] == 4
                         for row in self.client.get("/api/failed").json()
                     )
                 )

@@ -2153,3 +2153,20 @@ body {
 .bookmark-track:disabled { opacity:.5; cursor:default; }
 .tree-fetch-error { flex-basis:100%; order:3; font-size:11.5px; color:#a94b00; overflow-wrap:anywhere; }
 :root[data-theme="dark"] .tree-fetch-error { color:#ffb86b; }
+
+/* Open counts sit on the right for folders, pages, best matches and navigation. */
+.opens-count { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--text-muted); font-size: 12px; }
+/* A folder heading is a list item (it keeps its arrow), so the count floats right. */
+.tree-space > summary .tree-folder-opens { float: right; margin: 3px 0 0 10px; }
+.bookmark-root-item { display: flex; align-items: flex-start; gap: 2px; }
+.bookmark-root-item .bookmark-root-link { flex: 1; min-width: 0; }
+.bookmark-root-item .bookmark-track { margin-top: 6px; flex-shrink: 0; }
+.bookmark-root-counts { display: flex; justify-content: space-between; gap: 8px; }
+.bookmark-root-counts .opens-count { font-size: 11px; }
+.best-side { display: flex; align-items: center; gap: 8px; }
+.best-side .best-reveal { display: inline-grid; place-items: center; padding: 4px 6px; }
+
+/* Most viewed: one list of pages, most opened first, with their tree numbers. */
+.most-viewed-note { margin: 4px 8px 8px; color: var(--text-muted); font-size: 12px; }
+.most-viewed-list { list-style: none; margin: 0; padding: 0; }
+.most-viewed-path { flex-basis: 100%; order: -1; color: var(--text-muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

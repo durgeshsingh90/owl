@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>OWL · AWS Accounts</title>
   <link rel="icon" href="../bitbucket/assets/owl.png">
-  <link rel="stylesheet" href="style.css?v=10">
+  <link rel="stylesheet" href="style.css?v=aws-config-2">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
@@ -15,7 +15,7 @@
   <span id="file-note" class="file-note"></span>
   <nav>
     <a href="../home/">Home ↗</a>
-    <button id="import-button" type="button" title="Import accounts JSON">⇪ Import</button>
+    <button id="settings-button" type="button" title="Where your AWS config file is (~/.aws/config)">⚙ Settings</button>
     <a id="export-button" class="button" href="/api/aws-accounts/export" download="aws_accounts_by_category.json" title="Export accounts JSON" hidden>⇩ Export</a>
     <button id="delete-button" type="button" title="Delete all AWS Accounts records" hidden>🔒 Delete all</button>
     <div id="connection-status" class="connection" data-state="connecting">
@@ -27,15 +27,14 @@
     </div>
   </nav>
 </header>
-<input id="file-input" type="file" accept=".json,application/json" hidden>
 <main>
   <p id="error" role="alert" hidden></p>
   <section id="empty-state" class="empty-state" hidden>
     <div class="empty-icon">☁</div>
     <h1>All your AWS accounts, sorted by category</h1>
-    <p>Import the JSON file that groups your accounts into categories. OWL saves it locally, so the page is ready next time you open it.</p>
-    <button id="empty-import" class="primary" type="button">Choose JSON file</button>
-    <small>Or drop the file anywhere on this page. Expected shape: <code>{"categories": {"Data": [{"profile": "…", "account_id": "…"}]}}</code></small>
+    <p>OWL reads the profiles in your AWS CLI config file and groups them by name: Networking, Shared Services, Security and more, each split into Prod, Non-prod, Stage and the rest. It reads the file again whenever it changes.</p>
+    <button id="empty-settings" class="primary" type="button">Set the AWS config file</button>
+    <small id="empty-detail">Usually <code>~/.aws/config</code> (on Windows <code>%USERPROFILE%\.aws\config</code>).</small>
   </section>
   <div id="content" class="layout" hidden>
     <aside class="sidebar" aria-label="Projects and categories">
@@ -91,7 +90,7 @@
     <div class="dialog-heading"><h2>🔒 Delete all AWS Accounts data</h2><button type="button" data-close-delete aria-label="Close">×</button></div>
     <p>This permanently deletes <strong>every record</strong> in AWS Accounts and cannot be undone:</p>
     <ul>
-      <li><strong id="delete-count"></strong> imported accounts and all categories</li>
+      <li>OWL's copy of the <strong id="delete-count"></strong> accounts (they are read again from your AWS config file)</li>
       <li>All copy counts, starred accounts and projects</li>
       <li>The saved AWS connection, 12-hour session timer and profile</li>
       <li>Starred categories in this browser</li>
@@ -114,9 +113,19 @@
   </form>
 </dialog>
 <div id="project-menu" class="project-menu" role="menu" hidden></div>
-<div id="drop-overlay" class="drop-overlay" hidden><div>Drop the JSON file to import</div></div>
+<dialog id="config-dialog" class="project-dialog">
+  <form id="config-form">
+    <div class="dialog-heading"><h2>AWS config file</h2><button type="button" data-close-config aria-label="Close">×</button></div>
+    <label for="config-path">Path to the AWS CLI config file</label>
+    <input id="config-path" autocomplete="off" spellcheck="false" placeholder="~/.aws/config">
+    <p class="project-note" id="config-note"></p>
+    <p id="config-error" class="dialog-error" hidden></p>
+    <div class="dialog-actions"><button type="button" id="config-default">Use the default</button><button type="button" data-close-config>Cancel</button><button type="submit" class="primary">Save and read</button></div>
+  </form>
+</dialog>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script src="connection.js?v=2"></script>
-<script src="script.js?v=12"></script>
+<script src="script.js?v=aws-config-1"></script>
+  <script src="/home/app-open.js?v=1" data-app="aws"></script>
 </body>
 </html>

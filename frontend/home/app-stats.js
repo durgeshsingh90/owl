@@ -86,8 +86,8 @@
     try {
       const [data, connection] = await Promise.all([json("/api/aws-accounts"), json("/api/aws-accounts/connection").catch(() => null)]);
       if (!data.imported) {
-        figure("aws", "not imported");
-        body.innerHTML = emptyState("No AWS accounts imported yet. Import your accounts JSON to see statistics.", "../aws-accounts/", "Open app");
+        figure("aws", "not set up");
+        body.innerHTML = emptyState(data.config?.error || "No AWS accounts yet. Set your AWS config file in AWS Accounts settings.", "../aws-accounts/", "Open app");
         return;
       }
       const accounts = [...new Map(Object.values(data.categories).flat().map(account => [account.profile, account])).values()];
@@ -107,7 +107,7 @@
         ["Starred accounts", (data.stars || []).length, "Quick access"],
         ["Copies", totalCopies, "Names, IDs and roles copied"],
         ["AWS connection", connected ? "Connected" : connection ? "Disconnected" : "Unknown", connected ? `${Math.floor(left / 3600)}h ${Math.floor(left % 3600 / 60)}m left · ${connection.profile}` : connection?.profile || ""],
-        ["Imported", when(data.imported_at), data.generated_at ? `File generated ${day(data.generated_at)}` : ""],
+        ["Read from config", when(data.imported_at), data.config?.path || ""],
       ]) + `<section class="analytics">${[
         panel("Accounts by category", "Current inventory", bars(Object.entries(data.categories).map(([name, list]) => [name.replace(/_/g, " "), list.length]).sort((a, b) => b[1] - a[1]), "No categories.")),
         panel("Accounts by environment", "From account names", bars([...environments].sort((a, b) => b[1] - a[1]), "No accounts.")),
