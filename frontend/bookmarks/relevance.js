@@ -179,7 +179,7 @@ if (typeof document !== "undefined") {
             <div class="best-path">${escapeHtml(path)}</div>
             ${preview ? `<p class="best-snippet">${preview}</p>` : ""}
           </div>
-          <div class="best-side"><span class="opens-count">${item.views} ${item.views === 1 ? "open" : "opens"}</span><button type="button" class="best-reveal" data-reveal-tree="${item.id}" title="Show in tree" aria-label="Show ${escapeHtml(item.title || item.url)} in the tree">${TREE_ICON}</button></div>
+          <div class="best-side"><span class="opens-count" title="${Number(item.views) || 0} ${item.views === 1 ? "open" : "opens"}">${(window.shortCount || String)(Number(item.views) || 0)}</span><button type="button" class="best-reveal" data-reveal-tree="${item.id}" title="Show in tree" aria-label="Show ${escapeHtml(item.title || item.url)} in the tree">${TREE_ICON}</button></div>
         </li>`;
       }).join("")}</ol>
       ${ranked.length > limit ? `<button type="button" class="best-more" data-best-more>Show ${Math.min(10, ranked.length - limit)} more · ${ranked.length - limit} left</button>` : ""}`;

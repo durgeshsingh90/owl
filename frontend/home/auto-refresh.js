@@ -23,6 +23,16 @@
   function when(epoch) {
     return new Date(epoch * 1000).toLocaleString(undefined, {dateStyle: "medium", timeStyle: "short"});
   }
+  // "56 min ago", "23 hours ago", "3 days ago".
+  function since(epoch) {
+    const minutes = Math.max(0, Math.floor((Date.now() / 1000 - Number(epoch)) / 60));
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 48) return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
+    const days = Math.floor(hours / 24);
+    return `${days} ${days === 1 ? "day" : "days"} ago`;
+  }
   function ago(epoch) {
     return `${duration(Date.now() / 1000 - epoch)} ago`;
   }
@@ -59,7 +69,7 @@
       ? (next <= now ? "due now" : `in ${duration(next - now)}`)
       : "shortly";
     const schedule = `Daily · retry every ${state.retry_hours || 1}h on failure`;
-    const last = state.last_success ? `Last success ${ago(state.last_success)}` : "No successful refresh yet";
+    const last = state.last_success ? `Last updated ${since(state.last_success)}` : "Not updated yet";
     switch (state.status) {
       case "running": {
         // Bookmarks and Confluence Tracker count pages.
@@ -107,6 +117,8 @@
     .owl-auto-refresh[data-tone="retrying"] .owl-ar-text{color:#b45309}
     :root[data-theme="dark"] .owl-auto-refresh[data-tone="retrying"] .owl-ar-text{color:#fbbf24}
     @media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .owl-auto-refresh[data-tone="retrying"] .owl-ar-text{color:#fbbf24}}
+    .owl-auto-refresh[data-show-last]{flex-wrap:wrap}
+    .owl-ar-last{flex-basis:100%;padding-left:14px;font-size:10.5px;opacity:.75}
     .owl-ar-table{width:100%;border-collapse:collapse;font-size:12px}
     .owl-ar-table th,.owl-ar-table td{text-align:left;padding:8px 10px;border-top:1px solid rgba(127,127,127,.2);vertical-align:top}
     .owl-ar-table thead th{border-top:0;font-size:11px;font-weight:600;opacity:.7}
@@ -134,6 +146,18 @@
       element.dataset.tone = shown.tone;
       element.querySelector(".owl-ar-text").textContent = shown.text;
       element.title = shown.detail;
+      // Labels say how long ago the last update was; while all is well that is all
+      // they show (the next refresh is in Home's Automatic refresh table).
+      if (element.hasAttribute("data-show-last") && state) {
+        let line = element.querySelector(".owl-ar-last");
+        if (!line) element.append(line = Object.assign(document.createElement("small"), {className: "owl-ar-last"}));
+        line.textContent = state.last_success ? `Last updated ${since(state.last_success)}` : "Not updated yet";
+        line.title = state.last_success ? when(state.last_success) : "";
+        const quiet = shown.tone === "ok";
+        element.classList.toggle("owl-ar-quiet", quiet);
+        if (quiet) element.querySelector(".owl-ar-text").textContent = line.textContent;
+        line.hidden = quiet;
+      }
     };
     let timer = 0;
     async function poll() {
@@ -167,7 +191,7 @@
             : Number.isFinite(next) && next > 0 ? `${when(next)} (${next <= Date.now() / 1000 ? "due now" : "in " + duration(next - Date.now() / 1000)})` : "Shortly";
           // The status reads exactly as on the app's card; the note only explains a problem.
           const note = shown.tone === "running" ? "" : state?.message || "";
-          return `<tr><th scope="row"><a href="${config.href}">${escape(config.name)}</a></th><td><span class="owl-auto-refresh" data-tone="${shown.tone}"><span class="owl-ar-dot" aria-hidden="true"></span><span class="owl-ar-text">${escape(shown.text)}</span></span></td><td>${escape(nextText)}</td><td>${state?.last_success ? `${escape(when(state.last_success))} (${escape(ago(state.last_success))})` : "—"}</td><td>${escape(note)}</td></tr>`;
+          return `<tr><th scope="row"><a href="${config.href}">${escape(config.name)}</a></th><td><span class="owl-auto-refresh" data-tone="${shown.tone}"><span class="owl-ar-dot" aria-hidden="true"></span><span class="owl-ar-text">${escape(shown.text)}</span></span></td><td>${escape(nextText)}</td><td>${state?.last_success ? `${escape(when(state.last_success))} (${escape(since(state.last_success))})` : "—"}</td><td>${escape(note)}</td></tr>`;
         }).join("")
       }</tbody></table>`;
     };

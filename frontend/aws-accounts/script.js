@@ -35,8 +35,6 @@
   } catch { /* Pins and the selected category stay for this page only. */ }
   const store = (key, value) => { try { value == null ? localStorage.removeItem(key) : localStorage.setItem(key, value); } catch { /* Per-page only. */ } };
   const label = name => name.replace(/_/g, ' ');
-  // Categories this small sit side by side as boxes; larger ones get a full-width section.
-  const COMPACT = 45;
   const STARRED = '__starred__';
   const starredSet = () => new Set(data?.stars || []);
   const PROJECT = 'project:';
@@ -75,16 +73,17 @@
       .map((item, index) => ({...item, last: index === items.length - 1})));
   }
 
+  const short = count => (window.shortCount || String)(count);
   const copyCount = (kind, value) => data?.copies?.[kind]?.[value] || 0;
   // One counter per account: copying the name or the ID both count. Older ID-only counts are added in.
   const accountCount = (profile, id) => copyCount('profile', profile) + copyCount('account_id', String(id));
   const accountBadge = (profile, id) => {
     const count = accountCount(profile, id);
-    return `<span class="copies" data-count-account="${esc(profile)}" data-count-id="${esc(id)}"${count ? '' : ' hidden'} title="Copied ${count} time${count === 1 ? '' : 's'}">⧉ ${count}</span>`;
+    return `<span class="copies" data-count-account="${esc(profile)}" data-count-id="${esc(id)}"${count ? '' : ' hidden'} title="Copied ${count} time${count === 1 ? '' : 's'}">⧉ ${short(count)}</span>`;
   };
   const badge = (kind, value) => {
     const count = copyCount(kind, value);
-    return `<span class="copies" data-count-kind="${kind}" data-count-value="${esc(value)}"${count ? '' : ' hidden'} title="Copied ${count} time${count === 1 ? '' : 's'}">⧉ ${count}</span>`;
+    return `<span class="copies" data-count-kind="${kind}" data-count-value="${esc(value)}"${count ? '' : ' hidden'} title="Copied ${count} time${count === 1 ? '' : 's'}">⧉ ${short(count)}</span>`;
   };
 
   // Highlight every search word (longest first so "stablecoin" wins over "stable").
@@ -157,16 +156,6 @@
     const chip = (key, text, count, kind) => `<button type="button" data-env="${esc(key)}" class="${kind}" aria-pressed="${key === envFilter}">${esc(text)}<small>${count}</small></button>`;
     $('env-filter').innerHTML = chip('all', 'All', count, '') +
       [...counts.keys()].sort(envSort).map(env => chip(env, env || 'no env', counts.get(env), env ? ENV_CLASS[env] || 'other' : 'none')).join('');
-  }
-
-  function renderFrequent() {
-    const ids = new Map(Object.values(data.categories).flat().map(account => [account.profile, String(account.account_id)]));
-    const top = [...ids].map(([profile, id]) => [profile, accountCount(profile, id)]).filter(([, count]) => count)
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 10);
-    $('frequent').hidden = !top.length;
-    $('frequent-list').innerHTML = top.map(([profile]) =>
-      `<div class="chip"><button class="name" type="button" data-copy="${esc(profile)}" data-account="${esc(profile)}" data-label="Account name" title="Copy account name"><span class="text">${esc(profile)}</span></button>` +
-      `<button class="id" type="button" data-copy="${esc(ids.get(profile))}" data-account="${esc(profile)}" data-label="Account ID" title="Copy account ID"><span class="text">${esc(ids.get(profile))}</span></button>${accountBadge(profile, ids.get(profile))}</div>`).join('');
   }
 
   const row = (item, query, next, stars, project) => `<div class="row${!next || next.base !== item.base ? ' group-end' : ''}" draggable="true" data-profile="${esc(item.profile)}">
@@ -250,7 +239,7 @@
       if (!items.length && !(project && !filtering)) continue;
       if (!extra(name) || selected === name) shown += items.length;
       if (project) {
-        sections.push({compact: !selected && items.length <= COMPACT, html: `<section class="category project${!selected && items.length <= COMPACT ? ' compact' : ''}" data-category="${esc(name)}" data-drop-project="${project.id}">
+        sections.push({compact: !selected, html: `<section class="category project${!selected ? ' compact' : ''}" data-category="${esc(name)}" data-drop-project="${project.id}">
           <header><h2><span class="folder">▣</span>${esc(project.name)}</h2><span class="count">${items.length} account${items.length === 1 ? '' : 's'}</span>
             <button class="pin" type="button" data-rename-project="${project.id}" title="Rename ${esc(project.name)}">✎</button>
             <button class="pin" type="button" data-delete-project="${project.id}" title="Delete project ${esc(project.name)}">🗑</button></header>
@@ -262,7 +251,8 @@
       if (!items.length) continue;
       const isStarred = name === STARRED;
       const isPinned = isStarred || pinned.has(name);
-      const compact = !selected && items.length <= COMPACT;
+      // Every category is a card in one column flow; one chosen category gets the full width.
+      const compact = !selected;
       sections.push({compact, html: `<section class="category${isPinned ? ' pinned' : ''}${isStarred ? ' starred' : ''}${compact ? ' compact' : ''}" data-category="${esc(name)}">
         <header><h2>${isStarred ? '★ Starred accounts' : esc(label(name))}</h2><span class="count">${items.length} account${items.length === 1 ? '' : 's'}</span>
           ${isStarred ? '' : `<button class="pin" type="button" data-pin="${esc(name)}" aria-pressed="${isPinned}" title="${isPinned ? 'Remove highlight from' : 'Highlight'} category ${esc(label(name))}">${isPinned ? '★' : '☆'}</button>`}</header>
@@ -291,12 +281,23 @@
         </section>`);
       }
     }
-    for (let index = 0; index < sections.length;) {
-      if (!sections[index].compact) { html.push(sections[index++].html); continue; }
-      const boxes = [];
-      while (index < sections.length && sections[index].compact) boxes.push(sections[index++].html);
-      html.push(`<div class="compact-grid">${boxes.join('')}</div>`);
+    // Most used: every account copied at least once, most copied first, above the categories.
+    if (!selected) {
+      const seen = new Set();
+      const used = Object.values(data.categories).flat()
+        .filter(account => !seen.has(account.profile) && seen.add(account.profile))
+        .map(account => ({...account, ...environment(account.profile, account), uses: accountCount(account.profile, account.account_id)}))
+        .filter(item => item.uses && keep(item))
+        .sort((a, b) => b.uses - a.uses || a.profile.localeCompare(b.profile));
+      if (used.length) html.push(`<section class="category most-used" data-category="__most_used__">
+        <header><h2>Most used</h2><span class="count">${used.length} account${used.length === 1 ? '' : 's'} · most copied first</span></header>
+        <div class="rows">${used.map(item => row({...item, last: true}, query, null, stars)).join('')}</div>
+      </section>`);
     }
+    // All categories flow down balanced columns (masonry), so no box leaves a gap.
+    const cards = sections.filter(section => section.compact).map(section => section.html);
+    if (cards.length) html.push(`<div class="compact-grid">${cards.join('')}</div>`);
+    html.push(...sections.filter(section => !section.compact).map(section => section.html));
     $('title').firstChild.textContent = selected === STARRED ? 'Starred accounts ' : projectFor(selected) ? `${projectFor(selected).name} ` : selected ? `${label(selected)} ` : 'AWS accounts ';
     document.querySelectorAll('[data-sort]').forEach(button => {
       const active = button.dataset.sort === sortMode;
@@ -341,10 +342,8 @@
     $('content').hidden = !data;
     $('file-note').textContent = '';
     $('export-button').hidden = !data;
-    $('delete-button').hidden = !data;
     if (!data) return;
     renderHeader();
-    renderFrequent();
     render();
   }
 
@@ -410,7 +409,7 @@
       const {count} = await api('/api/aws-accounts/copies', {method:'POST', body:JSON.stringify({kind, value:text})});
       ((data.copies ||= {})[kind] ||= {})[text] = count;
       const show = (element, total) => {
-        element.textContent = `⧉ ${total}`;
+        element.textContent = `⧉ ${short(total)}`;
         element.title = `Copied ${total} time${total === 1 ? '' : 's'}`;
         element.hidden = false;
       };
@@ -418,7 +417,7 @@
         document.querySelectorAll('[data-count-account]').forEach(element => {
           if (element.dataset.countAccount === account) show(element, accountCount(account, element.dataset.countId));
         });
-        renderFrequent();
+        render();
       } else {
         document.querySelectorAll('[data-count-kind]').forEach(element => {
           if (element.dataset.countKind === kind && element.dataset.countValue === text) show(element, count);
@@ -625,41 +624,6 @@
     }
     render();
     window.scrollTo({top: 0});
-  });
-  // Delete all is locked until the exact phrase is typed; the backend checks it again.
-  const PHRASE = 'delete all';
-  const unlocked = () => $('delete-phrase').value.trim().toLowerCase() === PHRASE;
-  function lockState() {
-    $('delete-confirm').disabled = !unlocked();
-    $('delete-confirm').textContent = unlocked() ? '🔓 Delete all' : '🔒 Delete all';
-  }
-  $('delete-button').addEventListener('click', () => {
-    $('delete-count').textContent = Object.values(data.categories).flat().length.toLocaleString();
-    $('delete-phrase').value = '';
-    $('delete-error').hidden = true;
-    lockState();
-    $('delete-dialog').showModal();
-    $('delete-phrase').focus();
-  });
-  $('delete-phrase').addEventListener('input', lockState);
-  document.querySelectorAll('[data-close-delete]').forEach(button => button.addEventListener('click', () => $('delete-dialog').close()));
-  $('delete-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    if (!unlocked()) return;
-    $('delete-confirm').disabled = true;
-    try {
-      await api('/api/aws-accounts', {method:'DELETE', body:JSON.stringify({confirmation:PHRASE})});
-      pinned.clear(); selected = null; store(PIN_KEY, null); store(SELECTED_KEY, null);
-      $('delete-dialog').close();
-      $('search').value = '';
-      toast('All AWS Accounts data deleted');
-      await load();
-      window.owlRefreshConnection?.();
-    } catch (failure) {
-      $('delete-error').textContent = failure.message;
-      $('delete-error').hidden = false;
-      lockState();
-    }
   });
   window.addEventListener('scroll', trackScroll, {passive: true});
   window.addEventListener('resize', trackScroll);

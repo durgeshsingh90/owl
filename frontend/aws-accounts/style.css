@@ -69,7 +69,6 @@ h1{font-size:26px;letter-spacing:-.6px;margin:6px 0}
 .env-filter small{opacity:.75;margin-left:5px}
 .hint{color:var(--muted);font-size:12px;margin:0 0 14px}
 
-.frequent{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:14px}
 #frequent-list{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 .chip{display:flex;align-items:center;border:1px solid var(--line);border-radius:8px;background:var(--raised);overflow:hidden}
 .chip .name{max-width:340px}
@@ -163,30 +162,23 @@ dialog[data-state=failed] .connection-state strong{color:var(--red)}
 .dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
 @media(max-width:900px){.connection-text small{display:none}}
 @media(max-width:600px){.connection-text{display:none}.session-times{grid-template-columns:1fr 1fr}}
-.topbar #delete-button:hover{border-color:#ff9fa7;color:#ff9fa7}
 button.danger{background:#ba3d49;border-color:#ba3d49;color:#fff}
 button.danger:hover{background:#a3303c}
 button.danger:disabled{opacity:.5;cursor:not-allowed;background:#ba3d49}
-.delete-dialog{width:min(95vw,500px)}
-.delete-dialog h2{color:var(--red)}
-.delete-dialog p{color:var(--muted);line-height:1.6;margin:0 0 10px}
-.delete-dialog ul{margin:0 0 14px;padding-left:20px;line-height:1.8}
-.delete-dialog strong{color:var(--text)}
-.delete-dialog label{display:block;font-size:13px;margin-bottom:6px}
-.delete-dialog input{width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line-strong);border-radius:6px;padding:9px;font:13px var(--mono)}
-.delete-dialog input:focus{outline:none;border-color:var(--red);box-shadow:0 0 0 3px #ba3d4933}
 /* Sidebar marker for the categories currently on screen. */
 .category-nav button{position:relative}
 .category-nav button.in-view{background:var(--raised);color:var(--text);font-weight:600}
 .category-nav button.in-view::before{content:"";position:absolute;left:0;top:6px;bottom:6px;width:3px;border-radius:3px;background:var(--accent)}
 .category-nav button.in-view .nav-count{background:var(--soft);color:var(--accent)}
 /* Small categories as side-by-side boxes. */
-.compact-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(400px,1fr));gap:16px;align-items:start;margin-bottom:18px}
-.compact-grid .category{margin:0}
+/* Small categories stack in balanced columns, like a masonry wall: no empty gaps under
+   short boxes next to a tall one. */
+.compact-grid{columns:520px;column-gap:16px;margin-bottom:18px}
+.compact-grid .category{display:inline-block;width:100%;margin:0 0 16px;break-inside:avoid}
 .category.compact header{position:static}
 .category.compact .rows{columns:1;padding:4px 12px 8px}
 .category.compact .row{grid-template-columns:minmax(0,1fr) auto 128px}
-@media(max-width:700px){.compact-grid{grid-template-columns:1fr}.category.compact .row{grid-template-columns:minmax(0,1fr) auto 118px}}
+@media(max-width:700px){.compact-grid{columns:1}.category.compact .row{grid-template-columns:minmax(0,1fr) auto 118px}}
 /* Account stars. */
 .row{grid-template-columns:22px minmax(0,1fr) 84px 150px}
 .category.compact .row{grid-template-columns:22px minmax(0,1fr) auto 128px}
@@ -280,3 +272,8 @@ body.dragging-account .drop-zone{border-color:var(--accent);color:var(--accent)}
 .env-group[open]>summary::before{content:"▾"}
 .env.stage{color:var(--violet)}
 .env.test{color:var(--accent)}
+/* Most used: full width above the categories, its rows in balanced columns. */
+.most-used{margin-bottom:18px;border-color:var(--accent,#4f8cff)}
+.most-used .rows{columns:520px;column-gap:24px}
+.most-used .row{break-inside:avoid}
+@media(max-width:700px){.most-used .rows{columns:1}}

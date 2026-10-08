@@ -7,8 +7,8 @@
     <link rel="icon" type="image/png" href="../bitbucket/assets/owl.png?v=owl-1" />
     <script src="../bitbucket/theme.js?v=20260914-current-mode"></script>
     <script src="sidebar.js?v=2"></script>
-    <link rel="stylesheet" href="../bitbucket/style.css?v=relevance-1" />
-    <link rel="stylesheet" href="style.css?v=tracked-mark-1" />
+    <link rel="stylesheet" href="../bitbucket/style.css?v=failed-mark-1" />
+    <link rel="stylesheet" href="style.css?v=failed-mark-1" />
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&amp;icon_names=settings,sync"
@@ -171,7 +171,7 @@
         <h2 id="bookmark-root-navigation-title">Navigation</h2>
         <label for="bookmark-navigation-sort">Sort</label>
         <select id="bookmark-navigation-sort" aria-label="Sort navigation">
-          <option value="number">Number</option><option value="alpha">Alphabetical</option><option value="count">Most bookmarks</option>
+          <option value="number">Number</option><option value="alpha">Alphabetical</option><option value="count">Most bookmarks</option><option value="opens">Most opened</option>
         </select>
         <nav id="bookmark-root-links" aria-label="Jump to bookmark tree"></nav>
       </aside>
@@ -193,7 +193,7 @@
           <div class="bookmark-failures-heading"><strong>Bookmark failures</strong><button id="dismiss-bookmark-failures" type="button" aria-label="Dismiss all bookmark failures" title="Dismiss all bookmark failures">×</button></div>
           <ul id="bookmark-failure-list" aria-live="polite" aria-relevant="additions"></ul>
         </section>
-        <p class="bookmark-auto-refresh"><span class="owl-auto-refresh" data-auto-refresh="bookmarks"></span> <button id="bookmark-auto-refresh-reload" type="button" hidden>Reload updated pages</button></p>
+        <p class="bookmark-auto-refresh"><span class="owl-auto-refresh" data-auto-refresh="bookmarks" data-show-last></span> <button id="bookmark-auto-refresh-reload" type="button" hidden>Reload updated pages</button></p>
         </div>
         <section class="table-panel">
           <div class="tree-heading">
@@ -539,8 +539,9 @@
     <script src="folder-downloads.js?v=20260924-branches"></script>
     <script src="tracker-link.js?v=4"></script>
     <script src="tree-numbering.js?v=2"></script>
-    <script src="relevance.js?v=words-2"></script>
-    <script src="script.js?v=no-downloads-1"></script>
+    <script src="/home/short-count.js?v=1"></script>
+    <script src="relevance.js?v=short-count-1"></script>
+    <script src="script.js?v=failed-mark-1"></script>
     <script src="database.js?v=update-timestamp-7"></script>
     <script src="metadata.js?scope=confluence&v=reveal-added-6"></script>
     <script src="connection.js?v=confluence-live-2"></script>
@@ -550,7 +551,7 @@
     <script src="bulk.js?v=confluence-live-2"></script>
     <script src="refresh.js?v=final-retry-1"></script>
     <script src="auto-refresh.js?v=3"></script>
-    <script src="/home/auto-refresh.js?v=8"></script>
+    <script src="/home/auto-refresh.js?v=11"></script>
     <script src="/home/app-open.js?v=1" data-app="bookmarks"></script>
 </body>
 </html>

@@ -16,72 +16,100 @@ from pathlib import Path
 # without the environment suffix (so "egressnetworkingpalo" matches "network").
 CATEGORY_RULES = [
     ("Shared Services", [
-        "centralized", "centralised", "central", "shared", "sharedsvc", "sharedservice",
-        "common", "coreservice", "core-services", "hub", "landingzone", "landing-zone",
-        "directory", "activedirectory", "mgmt-shared", "tooling-shared",
+        "centralized", "centralised", "sharedservice", "shared-service", "sharedsvc", "shared",
+        "commoncd", "argocd-hub", "landingzone", "landing-zone", "activedirectory", "directory",
+        "b2eshared", "rtcshared", "ethocacommon",
     ]),
     ("Management & Billing", [
-        "management", "mgmt", "master", "organization", "organisation", "payer",
-        "billing", "orgroot", "root-account", "controltower", "control-tower", "governance",
+        "management", "mgmt", "orgroot", "org-root", "organization", "organisation", "payer",
+        "billing", "controltower", "control-tower", "governance", "admin", "accessmanagement",
+        "technologybusiness", "enterprisereference", "settlementprofile",
     ]),
-    ("Security", [
-        "security", "secops", "infosec", "cyber", "guardduty", "securityhub", "audit",
-        "siem", "kms", "hsm", "pki", "certificate", "secrets", "vault",
-        "stablecoinsecurity", "compliance", "forensic", "vulnerab", "pentest", "waf-sec",
+    ("Security & Privacy", [
+        "security", "secops", "infosec", "cyber", "guardduty", "securityhub", "audit", "siem",
+        "kms", "hsm", "pki", "certificate", "secrets", "vault", "compliance", "forensic",
+        "pentest", "privacy", "cryptographic", "sensitivedata", "confidential", "keymanagement",
+        "securityevent", "aisecurity",
     ]),
     ("Identity & Access", [
-        "identity", "-iam", "iam-", "idp", "-sso", "sso-", "okta", "pingfed", "ping-",
-        "cognito", "authn", "authentication", "access",
+        "identity", "-iam", "iam-", "idp", "-sso", "sso-", "okta", "pingfed", "cognito",
+        "authn", "authentication", "authorization", "secureaccess", "access", "knowya",
+        "knowyouragent", "sovrin", "userpermission", "permission", "directservices",
+        "tokenauthenticat", "clouddataaccess",
     ]),
     ("Networking", [
-        "network", "networking", "egress", "ingress", "palo", "paloalto", "firewall",
-        "fw-", "-fw", "vpc", "transit", "tgw", "dns", "route53", "akamai", "cdn",
-        "cloudfront", "natgw", "nat-gateway", "proxy", "waf", "vpn", "directconnect", "dx-", "loadbalanc",
-        "-elb", "edge", "connectivity", "peering", "subnet", "ipam",
+        "network", "egress", "ingress", "palo", "firewall", "fw-", "-fw", "vpc", "transit",
+        "tgw", "dns", "route53", "akamai", "cdn", "cloudfront", "natgw", "proxy", "waf",
+        "vpn", "directconnect", "loadbalanc", "edgeservice", "nextedge", "edge-site",
+        "connectivity", "peering", "ipam", "endpointservice", "vmip", "vll-",
     ]),
     ("Logging & Monitoring", [
-        "logarchive", "log-archive", "logging", "logs", "log-", "monitor", "observab",
-        "splunk", "datadog", "dynatrace", "grafana", "prometheus", "cloudwatch",
-        "newrelic", "elastic", "opensearch", "telemetry", "apm",
+        "logarchive", "log-archive", "logging", "-logs", "-log-", "monitor", "observab",
+        "splunk", "datadog", "dynatrace", "grafana", "prometheus", "cloudwatch", "newrelic",
+        "elastic", "opensearch", "telemetry", "apm", "servicecatalogspok",
     ]),
-    ("Backup & DR", [
-        "backup", "disaster", "recovery", "-dr", "dr-", "resilien", "failover",
+    ("Backup & DR", ["backup", "disaster", "recovery", "resilien", "failover"]),
+    ("AI & ML", [
+        "genai", "llm", "gpt", "agentic", "aifoundation", "aiecosystem", "aicloud",
+        "aidefeature", "aiandml", "aiassistant", "aiinsights", "aitooling", "aiobservab",
+        "machinelearning", "mlops", "mlengineering", "mleng", "sagemaker", "bedrock",
+        "genaicode", "assistant", "inclusivegrowth", "collaborativeintelligence", "intelligentsolution",
+        "intelligentmedia", "knowledgebot", "translate",
     ]),
     ("Data & Analytics", [
-        "data", "analytics", "datalake", "lake", "warehouse", "lakehouse", "etl", "glue",
-        "redshift", "snowflake", "emr", "databricks", "athena", "bi-", "reporting",
-        "machinelearning", "mlops", "sagemaker", "ai-", "genai", "bedrock",
+        "data", "analytic", "datalake", "lakehouse", "lake", "warehouse", "etl", "glue",
+        "redshift", "snowflake", "emr", "databricks", "athena", "reporting", "reports",
+        "insight", "intelligence", "dcp", "diagnose", "measurement", "analyzer", "harbr",
+        "bmidata", "onedatastrategy", "decisioncaching", "cdp", "udap",
     ]),
     ("Streaming & Messaging", [
         "kafka", "msk", "stream", "kinesis", "messag", "queue", "sqs", "sns", "eventbus",
-        "eventbridge", "rabbitmq", "activemq",
+        "eventbridge", "eventbroker", "eventframework", "rabbitmq", "activemq",
     ]),
     ("Databases", [
-        "database", "db-", "-db", "rds", "aurora", "dynamo", "postgres", "mysql",
-        "oracle", "mongo", "redis", "cache",
+        "database", "db-", "-db", "dbengineering", "rds", "aurora", "dynamo", "postgres",
+        "mysql", "oracle", "mongo", "redis", "cache",
     ]),
     ("Platform & DevOps", [
         "platform", "devops", "cicd", "ci-cd", "pipeline", "build", "deploy", "jenkins",
-        "artifactory", "nexus", "tooling", "tools", "eks", "kubernetes", "k8s", "ecs",
-        "container", "registry", "ecr", "terraform", "automation", "infra",
+        "artifactory", "nexus", "tooling", "tools", "toolkit", "eks", "kubernetes", "k8s",
+        "ecs", "container", "registry", "ecr", "terraform", "automation", "infra", "devflow",
+        "devinsights", "devcloud", "awstesting", "client-test", "forge", "foundry",
+        "dogfooding", "canary", "spinup", "opensource", "cloudops", "aws-osb", "osb",
+        "cloudasaservice", "cloud-", "-cloud", "azure", "robotic", "experiencecreation",
+        "releaseruntime", "orbit", "optimus", "heracles", "axon", "enablement", "developer",
     ]),
     ("Payments & Cards", [
-        "payment", "payments", "pay-", "card", "issuer", "issuing", "acquir", "clearing",
+        "payment", "pay-", "paykit", "card", "issuer", "issuing", "acquir", "clearing",
         "settlement", "switch", "authoriz", "tokeniz", "token", "wallet", "stablecoin",
-        "crypto", "blockchain", "remit", "transfer", "billpay",
+        "crypto", "blockchain", "remit", "transfer", "billpay", "xborder", "swift",
+        "interchange", "transaction", "mpgs", "orderprocessing", "mdes", "tiplus",
+        "openfinance", "rtp", "protocolconnect", "spei", "acs-", "-acs", "nextgenpoi",
+        "commercial", "bulkpayment", "filetransfer", "funds", "remittance", "sdram", "ipscore",
     ]),
     ("Fraud & Risk", [
-        "fraud", "risk", "aml", "kyc", "sanction", "decision", "scoring",
+        "fraud", "risk", "aml", "kyc", "sanction", "decision", "scoring", "dispute",
+        "detectandidentify", "brighterion",
+    ]),
+    ("Loyalty, Offers & Marketing", [
+        "loyalty", "offers", "offer", "shopper", "marketplace", "market", "media",
+        "attribution", "leads", "tourism", "spendingpulse", "smallbusiness", "merchant",
+        "martech", "commerce", "carbon", "benefit", "rewards", "campaign", "moments",
     ]),
     ("Customer & Digital", [
         "customer", "digital", "portal", "web", "mobile", "app-", "api", "gateway",
-        "consumer", "merchant", "partner", "crm",
+        "consumer", "partner", "crm", "humanresources", "workplace", "operational",
+        "servicecatalog", "localmi", "edie", "kmp", "andaplad", "meitech", "co-", "-co",
     ]),
     ("Sandbox & Experiments", [
-        "sandbox", "sbx", "poc", "playground", "experiment", "-lab", "lab-", "innovation",
-        "hackathon", "trial", "demo", "training", "learn",
+        "sandbox", "sbx", "poc", "playground", "experiment", "-lab", "lab-", "learninglab",
+        "innovation", "hackathon", "trial", "demo", "training", "learn", "testandlearn",
+        "msbx",
     ]),
 ]
+# Words removed before matching: the company prefix says nothing about the account
+# ("mastercard" would otherwise read as "master" and "card").
+NOISE = re.compile(r"^(mc-|mastercard-?)|mastercard")
 OTHER = "Other accounts"
 
 # The environment is the name's last part (an account number may follow it).
@@ -117,9 +145,11 @@ def environment(profile):
 
 def category(profile):
     _, base = environment(profile)
-    # Without the common "mc-" style prefix the rest of the name decides.
+    base = NOISE.sub("", base)
+    # "-" marks the name's edges, so rules like "-db" or "co-" match whole parts only.
+    edged = f"-{base}-"
     for name, words in CATEGORY_RULES:
-        if any(word in base for word in words):
+        if any(word in edged for word in words):
             return name
     return OTHER
 
@@ -148,6 +178,7 @@ def read(path):
         values = dict(parser.items(section))
         account_id = values.get("sso_account_id", "")
         role = values.get("sso_role_name", "")
+        kubernetes_role = values.get("kubernetes_role_name", "")
         match = ROLE_ARN.match(values.get("role_arn", ""))
         if match:
             account_id = account_id or match.group(1)
@@ -158,6 +189,7 @@ def read(path):
             "profile": profile,
             "account_id": account_id,
             "role": role,
+            "kubernetes_role": kubernetes_role,
             "region": values.get("region", "") or values.get("sso_region", "") or session.get("sso_region", ""),
             "sso_start_url": values.get("sso_start_url", "") or session.get("sso_start_url", ""),
             "environment": env,
@@ -174,11 +206,22 @@ def inventory(path):
         key=lambda item: (ENVIRONMENT_ORDER.index(item["environment"]), item["profile"]),
     ):
         categories.setdefault(category(account["profile"]), []).append(account)
-    roles = Counter(account["role"] for account in accounts if account["role"])
+    # The roles to copy: the most used AWS (SSO) role and Kubernetes role, then any
+    # other AWS role that several accounts use.
+    aws_roles = Counter(account["role"] for account in accounts if account["role"])
+    kubernetes_roles = Counter(account["kubernetes_role"] for account in accounts if account["kubernetes_role"])
+    common = {}
+    if aws_roles:
+        common["aws_role"] = aws_roles.most_common(1)[0][0]
+    if kubernetes_roles:
+        common["kubernetes_role"] = kubernetes_roles.most_common(1)[0][0]
+    for index, (role, count) in enumerate(aws_roles.most_common()[1:4], 2):
+        if count > 1:
+            common[f"aws_role_{index}"] = role
     return {
         "source": "aws-config",
         "total_accounts": len(accounts),
-        "common_roles": {role: role for role, _ in roles.most_common(6)},
+        "common_roles": common,
         "categories": dict(sorted(categories.items(), key=lambda item: (item[0] == OTHER, item[0]))),
         "environments": ENVIRONMENT_ORDER,
     }

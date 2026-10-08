@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>OWL · AWS Accounts</title>
   <link rel="icon" href="../bitbucket/assets/owl.png">
-  <link rel="stylesheet" href="style.css?v=aws-config-2">
+  <link rel="stylesheet" href="style.css?v=most-used-1">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
@@ -17,7 +17,6 @@
     <a href="../home/">Home ↗</a>
     <button id="settings-button" type="button" title="Where your AWS config file is (~/.aws/config)">⚙ Settings</button>
     <a id="export-button" class="button" href="/api/aws-accounts/export" download="aws_accounts_by_category.json" title="Export accounts JSON" hidden>⇩ Export</a>
-    <button id="delete-button" type="button" title="Delete all AWS Accounts records" hidden>🔒 Delete all</button>
     <div id="connection-status" class="connection" data-state="connecting">
       <button id="connection-open" class="connection-button" type="button" title="Checking AWS connection…">
         <img id="connection-image" src="../bitbucket/assets/no-connection.gif" width="36" height="36" alt="">
@@ -56,7 +55,6 @@
         <label class="search"><span class="sr-only">Search accounts</span><input id="search" type="search" placeholder="Search account name or account ID" autocomplete="off"><kbd>/</kbd></label>
         <div id="env-filter" class="env-filter" role="group" aria-label="Environment"></div>
       </div>
-      <section id="frequent" class="frequent" hidden><span class="eyebrow">MOST COPIED</span><div id="frequent-list"></div></section>
       <p class="hint">Drag accounts into projects · ☆ stars an account · click a name, ID or role to copy it · <span class="copies">⧉ 3</span> = times copied</p>
       <div id="categories" aria-live="polite"></div>
       <p id="no-results" class="no-results" hidden>No accounts match these filters.</p>
@@ -85,23 +83,6 @@
   <p class="commands">Check: <code id="check-command"></code><br>Connect: <code id="login-command"></code></p>
   <div class="dialog-actions"><button id="check-now" type="button">↻ Check now</button><button id="dialog-login" class="primary" type="button">Connect with aws sso login</button></div>
 </dialog>
-<dialog id="delete-dialog" class="delete-dialog">
-  <form id="delete-form">
-    <div class="dialog-heading"><h2>🔒 Delete all AWS Accounts data</h2><button type="button" data-close-delete aria-label="Close">×</button></div>
-    <p>This permanently deletes <strong>every record</strong> in AWS Accounts and cannot be undone:</p>
-    <ul>
-      <li>OWL's copy of the <strong id="delete-count"></strong> accounts (they are read again from your AWS config file)</li>
-      <li>All copy counts, starred accounts and projects</li>
-      <li>The saved AWS connection, 12-hour session timer and profile</li>
-      <li>Starred categories in this browser</li>
-    </ul>
-    <p class="delete-backup">Want a backup first? <a href="/api/aws-accounts/export" download="aws_accounts_by_category.json">⇩ Export JSON</a></p>
-    <label for="delete-phrase">Type <code>delete all</code> to unlock</label>
-    <input id="delete-phrase" autocomplete="off" spellcheck="false" placeholder="delete all">
-    <p id="delete-error" class="dialog-error" hidden></p>
-    <div class="dialog-actions"><button type="button" data-close-delete>Cancel</button><button type="submit" class="danger" id="delete-confirm" disabled>🔒 Delete all</button></div>
-  </form>
-</dialog>
 <dialog id="project-dialog" class="project-dialog">
   <form id="project-form">
     <div class="dialog-heading"><h2 id="project-dialog-title">New project</h2><button type="button" data-close-project aria-label="Close">×</button></div>
@@ -125,7 +106,8 @@
 </dialog>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script src="connection.js?v=2"></script>
-<script src="script.js?v=aws-config-2"></script>
+<script src="/home/short-count.js?v=1"></script>
+<script src="script.js?v=most-used-1"></script>
   <script src="/home/app-open.js?v=1" data-app="aws"></script>
 </body>
 </html>

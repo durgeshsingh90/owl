@@ -87,11 +87,11 @@ test('downloaded context gets distinct numbers without renumbering saved bookmar
 
 test('root navigation shows aggregate counts and nested favourites alongside matching trees',()=>{
  const f=fixture(); f.items[4].favorite=true; f.render();
- assert.match(f.navigation.innerHTML,/Team[\s\S]*?★[\s\S]*?4 bookmarks<\/span><span class="opens-count">14 opens/);
- assert.match(f.navigation.innerHTML,/first.test[\s\S]*?1 bookmarks<\/span><span class="opens-count">1 open</);
+ assert.match(f.navigation.innerHTML,/Team[\s\S]*?★[\s\S]*?4 bookmarks<\/span><span class="opens-count" title="14 opens">14</);
+ assert.match(f.navigation.innerHTML,/first.test[\s\S]*?1 bookmarks<\/span><span class="opens-count" title="1 open">1</);
  f.render([f.items[3]],'Needle');
  assert.doesNotMatch(f.navigation.innerHTML,/first.test/);
- assert.match(f.navigation.innerHTML,/1 bookmarks<\/span><span class="opens-count">4 opens/);
+ assert.match(f.navigation.innerHTML,/1 bookmarks<\/span><span class="opens-count" title="4 opens">4</);
  f.render([],'missing');
  assert.match(f.navigation.innerHTML,/No bookmark trees in this view/);
 });

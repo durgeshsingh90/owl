@@ -85,7 +85,7 @@
         const entry = opens[element.dataset.appOpens];
         element.hidden = !entry;
         if (!entry) return;
-        element.textContent = `opened ${entry.count.toLocaleString()}×`;
+        element.textContent = (window.shortCount || String)(entry.count);
         element.title = `Opened ${entry.count.toLocaleString()} times · last ${new Date(entry.last_opened * 1000).toLocaleString()}`;
       });
     } catch { /* The counts are a nicety; the page works without them. */ }

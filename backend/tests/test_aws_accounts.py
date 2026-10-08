@@ -17,6 +17,7 @@ sso_region = us-east-1
 sso_session = mc
 sso_account_id = 012345678901
 sso_role_name = 77-mc-infra-design-eng-readonly
+kubernetes_role_name = global-kubernetes-readonly
 
 [profile mc-databricks-nonp]
 sso_session = mc
@@ -65,7 +66,11 @@ class AwsAccountsTests(unittest.TestCase):
                     ("111122223333", "global-kubernetes-readonly", "Dev"),
                 )
                 self.assertEqual(data[0]["sso_start_url"], "https://mc.awsapps.com/start")
-                self.assertIn("77-mc-infra-design-eng-readonly", saved["common_roles"])
+                # Both roles in the file: the AWS (SSO) role and the Kubernetes role.
+                self.assertEqual(
+                    saved["common_roles"],
+                    {"aws_role": "77-mc-infra-design-eng-readonly", "kubernetes_role": "global-kubernetes-readonly"},
+                )
             # The file is read again automatically when it changes.
             with TestClient(app) as client:
                 path = os.path.join(folder, "config")
@@ -83,7 +88,11 @@ class AwsAccountsTests(unittest.TestCase):
             "mc-egressnetworkingpalo-prod": ("Networking", "Prod"),
             "mc-egressnetworkingpalo-stage": ("Networking", "Stage"),
             "mc-centralizednetworking-nonp": ("Shared Services", "Non-prod"),
-            "mc-stablecoinsecurity-nonp": ("Security", "Non-prod"),
+            "mc-stablecoinsecurity-nonp": ("Security & Privacy", "Non-prod"),
+            # "mastercard" in a name is not "master" (management) or "card" (payments).
+            "mc-mastercarddeveloper-prod": ("Platform & DevOps", "Prod"),
+            "mc-servicecatalog-nonp": ("Customer & Digital", "Non-prod"),
+            "mc-aifoundations-prod": ("AI & ML", "Prod"),
             "mc-paymentgateway-prod-123456789012": ("Payments & Cards", "Prod"),
             "mc-log-archive-prod": ("Logging & Monitoring", "Prod"),
             "mc-somethingelse-uat": ("Other accounts", "Stage"),
@@ -123,7 +132,7 @@ class AwsCopiesExportConnectionTests(unittest.TestCase):
             exported = client.get("/api/aws-accounts/export")
             self.assertIn("attachment", exported.headers["content-disposition"])
             body = exported.json()
-            self.assertIn("77-mc-infra-design-eng-readonly", body["common_roles"])
+            self.assertEqual(body["common_roles"]["aws_role"], "77-mc-infra-design-eng-readonly")
             self.assertEqual(body["total_accounts"], 4)
             self.assertEqual(list(body["categories"]), ["Data & Analytics", "Networking", "Other accounts"])
             self.assertEqual(body["categories"]["Data & Analytics"][0]["account_id"], "987654321098")

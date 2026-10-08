@@ -2174,3 +2174,5 @@ body {
 /* Navigation: a small eye beside trees tracked in Confluence Tracker. */
 .bookmark-root-tracked { display: inline-flex; align-self: center; color: #1f8a5b; flex-shrink: 0; opacity: .85; }
 :root[data-theme="dark"] .bookmark-root-tracked { color: #72d5ad; }
+/* A page whose last refresh failed: a small red "!" beside its title (the reason is in the tooltip). */
+.tree-failed { display: inline-grid; place-items: center; flex: none; width: 16px; height: 16px; margin-left: 6px; border-radius: 50%; background: #d93025; color: #fff; font-size: 11px; font-weight: 800; line-height: 1; cursor: help; vertical-align: middle; }
