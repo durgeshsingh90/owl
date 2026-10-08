@@ -52,6 +52,18 @@
     return button(key, items.map(item => tracked.get(topPage(item))).find(Boolean), "this folder's tree");
   };
 
+  // Navigation list: a small eye only on trees tracked in Confluence Tracker, like the star.
+  window.bookmarkTrackedMark = path => {
+    const root = bookmarks
+      .filter(item => isConfluence(item) &&
+        JSON.stringify([item.space || "Pages", ...(item.breadcrumb || [])].slice(0, path.length)) === JSON.stringify(path))
+      .map(item => tracked.get(topPage(item)))
+      .find(Boolean);
+    if (!root) return "";
+    const title = `Tracked in Confluence Tracker (${root.title})`;
+    return `<span class="bookmark-root-tracked" role="img" aria-label="${esc(title)}" title="${esc(title)}"><svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z" fill="none" stroke="currentColor" stroke-width="2.2"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg></span>`;
+  };
+
   async function track(url, key) {
     if (key) pending.add(key);
     render();

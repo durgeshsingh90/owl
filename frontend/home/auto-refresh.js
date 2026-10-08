@@ -4,7 +4,7 @@
 (() => {
   const APPS = {
     bitbucket: {name: "Bitbucket", endpoint: "/api/refresh-schedule", href: "/bitbucket/"},
-    naas: {name: "NAAS Update", endpoint: "/naas/api/refresh-schedule", href: "/naas/"},
+    naas: {name: "NAAS and Networking", endpoint: "/naas/api/refresh-schedule", href: "/naas/"},
     network: {name: "Network Automation", endpoint: "/network-automation/api/refresh-schedule", href: "/network-automation/"},
     bookmarks: {name: "Bookmarks", endpoint: "/api/bookmarks/refresh-schedule", href: "/bookmarks/"},
     tracker: {name: "Confluence Tracker", endpoint: "/api/confluence-tracker/refresh-schedule", href: "/confluence-tracker/"},
@@ -146,12 +146,18 @@
       }</tbody></table>`;
     };
     for (const app of Object.keys(APPS)) {
+      let timer = 0;
       const poll = async () => {
+        clearTimeout(timer);
         try { states[app] = await load(app); }
         catch { states[app] = null; }
         render();
-        setTimeout(poll, states[app]?.status === "running" ? 10000 : 30000);
+        timer = setTimeout(poll, states[app]?.status === "running" ? 10000 : 30000);
       };
+      // Refresh-all (or a page) starting or ending a refresh updates the table now.
+      window.addEventListener("owl-auto-refresh-changed", event => {
+        if (!event.detail || event.detail === app) void poll();
+      });
       void poll();
     }
     render();

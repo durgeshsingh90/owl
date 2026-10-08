@@ -7,8 +7,12 @@ const BOOKMARK_FIELD_WEIGHT = {title: 3, notes: 2, url: 1.5, content: 1};
 const BOOKMARK_TIER = {PHRASE: 3, ALL: 2, SOME: 1};
 const CONTENT_LIMIT = 60000;
 
+// Same rule as search.js: _ - . / + separate words like spaces ("aws_for_ide").
+function relevanceWords(value) {
+  return String(value || "").toLocaleLowerCase().replace(/[_\-./\\+]+/g, " ").replace(/\s+/g, " ").trim();
+}
 function bookmarkSearchTerms(query) {
-  query = searchWords(query);
+  query = relevanceWords(query);
   const words = [...new Set(query.split(/\s+/).filter(Boolean))];
   const significant = words.filter(word => !BOOKMARK_STOPWORDS.has(word));
   return {
@@ -51,7 +55,7 @@ function termWindow(text, terms) {
 }
 
 function bookmarkFieldTexts(item, fields, notes) {
-  const normal = searchWords;
+  const normal = relevanceWords;
   const texts = {};
   if (fields.includes("title")) texts.title = normal(item.title);
   if (fields.includes("notes")) texts.notes = normal(notes);

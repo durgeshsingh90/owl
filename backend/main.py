@@ -37,6 +37,10 @@ async def lifespan(app):
     refresh_task = asyncio.create_task(run_scheduler())
     tracker_task = asyncio.create_task(run_tracker_scheduler())
     bitbucket_task = asyncio.create_task(run_bitbucket_scheduler(app.state.jobs))
+    # Each library's pull runner, for Home's refresh-all.
+    app.state.library_jobs = {"pdf": app.state.jobs} | {
+        name: sub_app.state.jobs for name, sub_app in text_apps.items()
+    }
     # NAAS and Network Automation refresh on the same daily schedule, each in its own
     # library: a task copies the library selection active when it is created.
     library_tasks = []
@@ -184,7 +188,7 @@ from app.api.workspace import workspace as library_workspace
 from app.api.workspace import workspace_revision as library_workspace_revision
 
 text_apps = {}
-for name, title in (("naas", "NAAS Update"), ("network", "Network Automation")):
+for name, title in (("naas", "NAAS and Networking"), ("network", "Network Automation")):
     sub_app = FastAPI(title=title)
     sub_app.add_middleware(LibraryMiddleware, name=name)
     sub_app.add_exception_handler(ValueError, invalid_value)

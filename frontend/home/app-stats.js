@@ -1,5 +1,5 @@
 "use strict";
-// Statistics for NAAS Update, Network Automation, AWS Accounts and Confluence Tracker,
+// Statistics for NAAS and Networking, Network Automation, AWS Accounts and Confluence Tracker,
 // plus the sticky "Jump to" bar that links every app's statistics section.
 (() => {
   const $ = id => document.getElementById(id);
@@ -42,7 +42,7 @@
   };
   const emptyState = (text, href, action) => `<div class="app-stats-blank"><p>${esc(text)}</p><a href="${esc(href)}">${esc(action)} ↗</a></div>`;
 
-  // NAAS Update and Network Automation share the Bitbucket library API under their own prefix.
+  // NAAS and Networking and Network Automation share the Bitbucket library API under their own prefix.
   async function renderLibrary(key, prefix, noun) {
     const body = $(`stats-${key}-body`);
     try {

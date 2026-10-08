@@ -36,13 +36,19 @@ class HomeTests(unittest.TestCase):
             self.assertGreater(sizes["bitbucket"], sizes["compare"])
             self.assertLessEqual(sum(sizes.values()), storage["total_bytes"])
             self.assertEqual({file["name"] for file in storage["files"]} & {"owl.db"}, {"owl.db"})
-            result = client.post("/api/home/refresh-all").json()["started"]
-            self.assertTrue(result["bitbucket"])
-            self.assertTrue(result["bookmarks"])
+            result = client.post("/api/home/refresh-all").json()["apps"]
+            # No Bitbucket connection saved here, no tracked trees; Bookmarks starts now.
+            self.assertEqual(
+                result,
+                {"bitbucket": "not set up", "naas": "not set up", "network": "not set up", "bookmarks": "started", "tracker": "not set up"},
+            )
             with connection() as db:
-                due = db.execute("SELECT next_attempt FROM bitbucket_sync_schedule").fetchone()[0]
-                self.assertLess(due, time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() + 5)))
-                self.assertEqual(db.execute("SELECT next_run FROM bookmark_refresh_schedule").fetchone()[0], 0)
+                db.execute("UPDATE bookmark_refresh_schedule SET lease_until=?", (time.time() + 600,))
+                db.execute("INSERT INTO confluence_tracker_roots(base_url,page_id,url,title,created_at,next_run) VALUES('w','1','u','T','2026',9999999999)")
+            result = client.post("/api/home/refresh-all").json()["apps"]
+            self.assertEqual((result["bookmarks"], result["tracker"]), ("running", "started"))
+            with connection() as db:
+                self.assertEqual(db.execute("SELECT next_run,status FROM confluence_tracker_roots").fetchone()[:], (0, "queued"))
 
 
 class OpenCountTests(unittest.TestCase):

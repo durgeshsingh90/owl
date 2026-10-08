@@ -241,6 +241,29 @@ def show(state):
     print(f"Logs: {RUNTIME}")
 
 
+def launch_supervisor(command, log):
+    """Start the supervisor so it outlives this terminal.
+
+    macOS/Linux: a new session, so closing the terminal (SIGHUP) does not reach it.
+    Windows: its own hidden console instead of this terminal's, so closing the window
+    does not end it; the backend and frontend share that hidden console, which lets
+    `dev.py stop` shut them down cleanly. Where allowed it also leaves the terminal's
+    job object, which some terminals close together with every process in it.
+    """
+    options = dict(cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+    if not WINDOWS:
+        return subprocess.Popen(command, start_new_session=True, **options)
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    try:
+        return subprocess.Popen(
+            command, creationflags=flags | subprocess.CREATE_BREAKAWAY_FROM_JOB, **options
+        )
+    except OSError:
+        # The terminal's job does not allow leaving it; the hidden console still
+        # keeps OWL running when the window closes.
+        return subprocess.Popen(command, creationflags=flags, **options)
+
+
 def start(args):
     state = read_state()
     if owned(state):
@@ -275,7 +298,7 @@ def start(args):
         available(port)
     token = uuid.uuid4().hex
     with (RUNTIME / "supervisor.log").open("ab") as log:
-        process = subprocess.Popen(
+        process = launch_supervisor(
             [
                 sys.executable,
                 str(ROOT / "dev.py"),
@@ -287,15 +310,7 @@ def start(args):
                 "--backend-port",
                 str(args.backend_port),
             ],
-            cwd=ROOT,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=log,
-            **(
-                {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-                if WINDOWS
-                else {"start_new_session": True}
-            ),
+            log,
         )
     state = {
         "pid": process.pid,
@@ -593,6 +608,8 @@ Examples:
 Notes:
   Log options apply to logs only. --lines is per source, before level filtering;
   --lines 0 follows new output only. Ctrl+C stops log following, not OWL.
+  start returns once OWL is up; OWL keeps running after the terminal is closed.
+  Stop it with: python dev.py stop
   Port options apply when starting/restarting services; valid range: 1–65535.
   On macOS/Linux, use python3 instead of python if needed.
 

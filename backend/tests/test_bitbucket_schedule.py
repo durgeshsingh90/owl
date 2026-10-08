@@ -220,6 +220,17 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
             state = status(self.jobs)
             self.assertEqual((state["status"], state["next_run"]), ("scheduled", (done + timedelta(days=1)).timestamp()))
 
+    def test_start_now_begins_a_background_pull_unless_one_runs(self):
+        from app.pdfs.schedule import start_now
+
+        self.assertEqual(start_now(self.jobs), "started")
+        self.assertTrue(self.jobs.current["background"])
+        with connection() as db:
+            self.assertEqual(db.execute("SELECT job_id FROM bitbucket_sync_schedule").fetchone()[0], "test-job")
+        self.assertEqual(start_now(self.jobs), "running")
+        self.assertEqual(self.jobs.started, 1)
+        self.assertEqual(status(self.jobs)["status"], "running")
+
 
 class FakeJobs:
     def __init__(self):

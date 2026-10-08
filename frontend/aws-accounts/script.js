@@ -367,8 +367,9 @@
   // Where the AWS config file is. OWL reads it again by itself whenever it changes.
   function openConfig() {
     const config = data?.config || configState || {};
-    $('config-path').value = config.custom ? config.path : '';
-    $('config-path').placeholder = config.default_path || '~/.aws/config';
+    // The default is ~/.aws/config (C:\Users\you\.aws\config on Windows); it is filled in.
+    $('config-path').value = config.custom ? config.path : '~/.aws/config';
+    $('config-path').placeholder = '~/.aws/config';
     $('config-note').textContent = config.loaded_at
       ? `Reading ${config.path} · last read ${displayDate(config.loaded_at)}. Leave empty for the default: ${config.default_path}.`
       : `Leave empty for the default: ${config.default_path || '~/.aws/config'}.`;
@@ -378,13 +379,18 @@
     $('config-path').focus();
   }
   async function saveConfig(path) {
+    // ~/.aws/config is the default itself, so it follows the user's home folder.
+    if (path.replace(/\\/g, '/').replace(/^"|"$/g, '') === '~/.aws/config') path = '';
     try {
       const state = await api('/api/aws-accounts/config', {method: 'PUT', body: JSON.stringify({path})});
       $('config-dialog').close();
       toast(`Reading AWS accounts from ${state.path}`);
       await load();
     } catch (failure) {
-      $('config-error').textContent = failure.message;
+      // "Not Found" means the running backend predates this setting.
+      $('config-error').textContent = failure.message === 'Not Found'
+        ? 'This OWL backend is older than the page. Restart OWL (python dev.py restart), then try again.'
+        : failure.message;
       $('config-error').hidden = false;
     }
   }

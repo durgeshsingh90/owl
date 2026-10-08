@@ -228,5 +228,5 @@ class NaasTests(unittest.TestCase):
             self.assertEqual(empty_workspace["documents"], [])
             self.assertEqual(len(empty_workspace["projects"][0]["repos"]), 1)
             self.assertFalse(any(path.endswith("/repos") for path in calls))
-            self.assertIn("NAAS Update", client.get("/naas/").text)
+            self.assertIn("NAAS and Networking", client.get("/naas/").text)
             self.assertIn("Bitbucket PDF Explorer", client.get("/bitbucket/").text)

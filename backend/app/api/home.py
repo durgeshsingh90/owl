@@ -1,19 +1,20 @@
 """Home: refresh every app in the background, and how much each app stores."""
 
+import asyncio
 import os
 import threading
 import time
 
 from app.core.database import connection, database_path
 from app.core.library import library
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/api/home")
 
 APPS = {
     "bitbucket": "Bitbucket",
-    "naas": "NAAS Update",
+    "naas": "NAAS and Networking",
     "network": "Network Automation",
     "bookmarks": "Bookmarks",
     "tracker": "Confluence Tracker",
@@ -131,32 +132,49 @@ def storage(fresh: bool = False):
 
 
 @router.post("/refresh-all")
-def refresh_all():
-    """Make every app's automatic refresh due now; each runs in the background."""
+async def refresh_all(request: Request):
+    """Refresh every idle app now, in the background; apps already refreshing are left.
+
+    Bitbucket, NAAS and Network Automation start a Git pull, Bookmarks updates its
+    saved pages and Confluence Tracker checks every tracked tree.
+    """
+    from app.bookmarks import refresh as bookmarks
+    from app.pdfs import schedule
+
     now = time.time()
-    started = {}
+    result = {}
+    jobs = getattr(request.app.state, "library_jobs", {})
     for name, app in (("pdf", "bitbucket"), ("naas", "naas"), ("network", "network")):
         token = library.set(name)
         try:
-            with connection() as db:
-                db.execute(
-                    "CREATE TABLE IF NOT EXISTS bitbucket_sync_schedule (server TEXT PRIMARY KEY, next_attempt TEXT NOT NULL, job_id TEXT, last_success TEXT, error TEXT NOT NULL DEFAULT '')"
-                )
-                started[app] = db.execute(
-                    "UPDATE bitbucket_sync_schedule SET next_attempt=? WHERE job_id IS NULL",
-                    (time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(now - 1)),),
-                ).rowcount
+            result[app] = schedule.start_now(jobs[name]) if name in jobs else "not set up"
+        except ValueError as error:
+            result[app] = "running" if "already running" in str(error) else f"failed: {error}"
         finally:
             library.reset(token)
     with connection() as db:
-        started["bookmarks"] = db.execute(
-            "UPDATE bookmark_refresh_schedule SET next_run=0 WHERE id=1 AND lease_until<=?",
-            (now,),
+        lease = db.execute("SELECT lease_until FROM bookmark_refresh_schedule WHERE id=1").fetchone()
+    if lease and lease[0] > now:
+        result["bookmarks"] = "running"
+    else:
+        with connection() as db:
+            db.execute("UPDATE bookmark_refresh_schedule SET next_run=0 WHERE id=1 AND lease_until<=?", (now,))
+        task = asyncio.create_task(bookmarks.run_due())
+        _background.add(task)
+        task.add_done_callback(_background.discard)
+        result["bookmarks"] = "started"
+    with connection() as db:
+        roots = db.execute("SELECT COUNT(*) FROM confluence_tracker_roots").fetchone()[0]
+        idle = db.execute(
+            "UPDATE confluence_tracker_roots SET next_run=0,status='queued',error='' WHERE lease_until<=?", (now,)
         ).rowcount
-        started["tracker"] = db.execute(
-            "UPDATE confluence_tracker_roots SET next_run=0 WHERE lease_until<=?", (now,)
-        ).rowcount
-    return {"started": {app: bool(count) for app, count in started.items()}}
+    # The tracker's scheduler picks queued trees up within seconds.
+    result["tracker"] = "not set up" if not roots else "started" if idle else "running"
+    return {"apps": result}
+
+
+# Background refreshes started here, kept until they finish.
+_background = set()
 
 
 class Opened(BaseModel):

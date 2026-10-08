@@ -1,6 +1,6 @@
 "use strict";
 
-const FILES_PER_PAGE = 1000;
+const FILES_PER_PAGE = 500;
 const COMMIT_TIME_ZONE = "Europe/Dublin";
 const CALENDAR_DAY_MS = 24 * 60 * 60 * 1000;
 const COMMIT_CALENDAR_FORMATTER = new Intl.DateTimeFormat("en-GB", {

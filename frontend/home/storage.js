@@ -17,7 +17,7 @@
     element.textContent = message;
     element.hidden = false;
     clearTimeout(element.timer);
-    element.timer = setTimeout(() => { element.hidden = true; }, 3000);
+    element.timer = setTimeout(() => { element.hidden = true; }, 6000);
   });
   const escape = value => String(value ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"})[c]);
 
@@ -49,11 +49,19 @@
     try {
       const response = await fetch("/api/home/refresh-all", {method: "POST"});
       if (!response.ok) throw new Error();
-      const {started} = await response.json();
-      const count = Object.values(started).filter(Boolean).length;
-      window.owlToast?.(count ? `Refreshing ${count} ${count === 1 ? "app" : "apps"} in the background` : "Every app is already refreshing or not set up");
-      // The schedulers pick it up within a minute; the labels follow.
-      for (const delay of [1500, 6000, 20000, 65000]) setTimeout(() => window.dispatchEvent(new CustomEvent("owl-auto-refresh-changed")), delay);
+      const {apps} = await response.json();
+      const names = {bitbucket: "Bitbucket", naas: "NAAS and Networking", network: "Network Automation", bookmarks: "Bookmarks", tracker: "Confluence Tracker"};
+      const by = state => Object.entries(apps).filter(([, value]) => value === state).map(([app]) => names[app] || app);
+      const started = by("started"), running = by("running"), idle = by("not set up");
+      const failed = Object.entries(apps).filter(([, value]) => value.startsWith("failed")).map(([app, value]) => `${names[app] || app} (${value.slice(8)})`);
+      window.owlToast?.([
+        started.length && `Refreshing now: ${started.join(", ")}`,
+        running.length && `Already refreshing: ${running.join(", ")}`,
+        idle.length && `Not set up: ${idle.join(", ")}`,
+        failed.length && `Could not start: ${failed.join(", ")}`,
+      ].filter(Boolean).join(" · ") || "Nothing to refresh");
+      // Show the new status on the labels straight away, then as the refreshes move on.
+      for (const delay of [300, 2000, 6000, 15000]) setTimeout(() => window.dispatchEvent(new CustomEvent("owl-auto-refresh-changed")), delay);
     } catch {
       window.owlToast?.("Could not start the refresh. Check that OWL is running.");
     } finally {

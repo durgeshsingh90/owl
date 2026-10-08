@@ -255,6 +255,37 @@ def status(jobs):
     return state
 
 
+def start_now(jobs):
+    """Start a background Git pull of every tracked repository right away, as the
+    schedule would; returns "started", "running" or "not set up"."""
+    try:
+        settings = load_settings()
+    except ValueError:
+        return "not set up"
+    setup()
+    with connection() as db:
+        projects = [
+            row[0]
+            for row in db.execute("SELECT id FROM tracked_projects WHERE server=?", (settings.base_url,))
+        ]
+    if not projects:
+        return "not set up"
+    if jobs.active():
+        return "running"
+    job = jobs.start(projects)
+    job["background"] = True
+    jobs.save()
+    now = datetime.now(timezone.utc).isoformat()
+    with connection() as db:
+        # The schedule follows this pull like one it started: done, or retried in two hours.
+        db.execute(
+            "INSERT INTO bitbucket_sync_schedule(server,next_attempt,job_id) VALUES(?,?,?) "
+            "ON CONFLICT(server) DO UPDATE SET job_id=excluded.job_id,error=''",
+            (settings.base_url, now, job["id"]),
+        )
+    return "started"
+
+
 async def run_scheduler(jobs):
     setup()
     while True:

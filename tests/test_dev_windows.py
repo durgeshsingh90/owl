@@ -15,6 +15,32 @@ spec.loader.exec_module(dev)
 
 
 class WindowsLauncherTests(unittest.TestCase):
+    def test_supervisor_outlives_the_terminal(self):
+        flags = {"CREATE_NEW_PROCESS_GROUP": 0x200, "CREATE_NO_WINDOW": 0x08000000, "CREATE_BREAKAWAY_FROM_JOB": 0x01000000}
+        calls = []
+
+        def popen(command, **options):
+            calls.append(options)
+            if options["creationflags"] & flags["CREATE_BREAKAWAY_FROM_JOB"] and len(calls) == 1 and refuse:
+                raise PermissionError("Access is denied")
+            return "process"
+
+        for refuse in (False, True):
+            calls.clear()
+            with (
+                patch.object(dev, "WINDOWS", True),
+                patch.multiple(dev.subprocess, create=True, **flags),
+                patch.object(dev.subprocess, "Popen", side_effect=popen),
+            ):
+                self.assertEqual(dev.launch_supervisor(["python", "dev.py", "_serve"], None), "process")
+            final = calls[-1]["creationflags"]
+            # Its own hidden console, never the terminal's; leaves the terminal's job when allowed.
+            self.assertTrue(final & flags["CREATE_NO_WINDOW"] and final & flags["CREATE_NEW_PROCESS_GROUP"])
+            self.assertEqual(bool(final & flags["CREATE_BREAKAWAY_FROM_JOB"]), not refuse)
+            self.assertEqual(len(calls), 2 if refuse else 1)
+        with patch.object(dev, "WINDOWS", False), patch.object(dev.subprocess, "Popen", side_effect=lambda command, **options: options) as started:
+            self.assertTrue(dev.launch_supervisor(["python"], None)["start_new_session"])
+
     def test_windows_venv(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
