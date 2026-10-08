@@ -2,109 +2,103 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
   <title>OWL · JSON Visualizer</title>
   <link rel="icon" href="../bitbucket/assets/owl.png">
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css?v=3">
   <script src="../bitbucket/theme.js?v=20260914-current-mode"></script>
 </head>
-<body>
+<body data-screen="home">
 <header class="topbar">
-  <a class="brand" href="../home/" aria-label="OWL home"><img src="../bitbucket/assets/owl.png" alt=""><span>OWL<small>JSON Visualizer</small></span></a>
-  <div class="top-actions">
-    <button id="open-button" type="button" title="Open JSON, JSONL, JSON5 or .gz files (Ctrl+O)">Open</button>
-    <button id="paste-button" type="button" title="Paste JSON from the clipboard (Ctrl+V)">Paste</button>
-    <label class="format-pick" title="Format: detected automatically, or choose one to read the file again">
-      <span class="sr-only">Format</span>
-      <select id="format-select" disabled>
-        <option value="auto">Auto format</option><option value="json">JSON</option><option value="jsonl">JSON Lines</option><option value="json5">JSON5</option>
-      </select>
-    </label>
+  <a class="brand" href="../home/" title="OWL home"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H6a2 2 0 0 0-2 2v4a2 2 0 0 1-2 2 2 2 0 0 1 2 2v4a2 2 0 0 0 2 2h2"></path><path d="M16 3h2a2 2 0 0 1 2 2v4a2 2 0 0 0 2 2 2 2 0 0 0-2 2v4a2 2 0 0 1-2 2h-2"></path></svg><span>Cloud JSON Visualizer</span></a>
+  <div id="view-switch" class="segmented" role="group" aria-label="View" hidden>
+    <button type="button" data-view="tree" aria-pressed="false">Tree</button>
+    <button type="button" data-view="table" aria-pressed="false">Table</button>
+    <button type="button" data-view="card" aria-pressed="false">Cards</button>
+    <button type="button" data-view="raw" aria-pressed="false">Raw</button>
   </div>
-  <div class="views" role="group" aria-label="View">
-    <button type="button" data-view="auto" aria-pressed="true" title="Choose the view from the data's shape">Auto <small id="auto-view"></small></button>
-    <button type="button" data-view="tree" aria-pressed="false" title="Collapsible tree">Tree</button>
-    <button type="button" data-view="table" aria-pressed="false" title="Arrays of objects as a table">Table</button>
-    <button type="button" data-view="card" aria-pressed="false" title="Objects as key/value cards">Card</button>
-    <button type="button" data-view="raw" aria-pressed="false" title="Formatted JSON with line numbers and folding">Raw</button>
-  </div>
-  <nav>
-    <div class="menu-wrap">
-      <button id="export-button" type="button" aria-haspopup="menu" aria-expanded="false" disabled>Export ▾</button>
-      <div id="export-menu" class="popover" role="menu" hidden>
-        <button type="button" role="menuitem" data-export="csv">Table as CSV (visible rows and columns)</button>
-        <button type="button" role="menuitem" data-export="table-json">Table rows as JSON</button>
-        <button type="button" role="menuitem" data-export="json">Current node as formatted JSON</button>
-        <button type="button" role="menuitem" data-export="min">Current node as minified JSON</button>
-      </div>
+  <form id="search-form" class="header-search" role="search">
+    <div id="header-search" class="search-box" hidden>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+      <label class="sr-only" for="search-input">Search keys and values</label>
+      <input id="search-input" type="search" placeholder="Search keys and values" autocomplete="off" spellcheck="false">
+      <span id="search-count" class="search-count" aria-live="polite"></span>
+      <button id="search-prev" type="button" class="icon-button" aria-label="Previous match" title="Previous match (Shift+Enter)">▴</button>
+      <button id="search-next" type="button" class="icon-button" aria-label="Next match" title="Next match (Enter)">▾</button>
+      <button id="search-options" type="button" class="icon-button" aria-label="Search options" title="Match case, whole word, regex, keys or values">Aa</button>
+      <button id="search-cancel" type="button" class="icon-button" title="Stop searching" hidden>Stop</button>
     </div>
-    <button id="tz-toggle" type="button" title="Show times in local time or UTC">Local time</button>
-    <a href="../home/">Home ↗</a>
-    <button id="theme-toggle" type="button" aria-label="Switch color theme"><span>◐</span></button>
+  </form>
+  <nav class="top-actions" aria-label="Actions">
+    <button id="open-button" type="button" title="Open JSON, JSONL, JSON5 or .gz files (⌘O)">Open…</button>
+    <button id="paste-button" type="button" title="Paste JSON from the clipboard (⌘V)">Paste</button>
+    <button id="run-button" type="button" title="Run a read-only aws, az, kubectl or gcloud command">Run command</button>
+    <button id="compare-button" type="button" title="Compare two documents or snapshots">Compare</button>
+    <button id="export-button" type="button" hidden>Export</button>
+    <button id="diff-export" type="button" hidden>Export diff</button>
+    <button id="diff-close" type="button" class="primary" hidden>Close compare</button>
+    <button id="palette-button" type="button" class="muted-button" aria-label="Command palette" title="Command palette (⌘K)">⌘K</button>
+    <button id="settings-button" type="button" class="icon-button" aria-label="Settings" title="Settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg></button>
+    <button id="theme-toggle" type="button" class="icon-button" aria-label="Switch color theme"><span>◐</span></button>
+    <a class="home-link" href="../home/">OWL ↗</a>
   </nav>
 </header>
 
-<div id="tabs" class="tabs" role="tablist" aria-label="Open documents"></div>
+<nav id="tabs" class="tabs" role="tablist" aria-label="Open files"></nav>
 
-<main id="workspace" class="workspace" hidden>
-  <aside class="left" aria-label="Document outline">
-    <section id="outline"></section>
-    <section class="recent-side"><div class="side-title">Recent files <button id="clear-history" class="link" type="button" title="Delete every saved recent file">Clear</button></div><div id="recent-side"></div></section>
-  </aside>
+<main id="home" class="home">
+  <div class="hero">
+    <h1>Make CLI output readable.</h1>
+    <p>Drop AWS, Azure, kubectl or Terraform JSON and explore it as tables, trees and cards. Click any key to copy its value.</p>
+  </div>
+  <section class="drop-zone" aria-label="Drop zone">
+    <div class="drop-icon"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"></path><path d="m7 8 5-5 5 5"></path><path d="M20 15v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4"></path></svg></div>
+    <div class="drop-text"><div class="drop-title">Drop JSON, JSONL or JSON5 files here</div><div class="muted">or paste with ⌘V · .json .jsonl .ndjson .json5 .gz</div></div>
+    <div class="drop-actions"><button id="home-open" type="button" class="pill-button primary">Choose files</button><button id="home-paste" type="button" class="pill-button">Paste from clipboard</button><button id="home-url" type="button" class="pill-button">Open a URL</button></div>
+    <div class="drop-chips"><span id="home-limit">Up to 50 MB parsed in your browser</span><span>Larger files via local server</span><span>Nothing leaves this machine</span></div>
+  </section>
+  <section id="home-recent" class="home-recent"></section>
+</main>
+
+<div id="workspace" class="workspace" hidden>
+  <aside id="outline" class="outline" aria-label="Outline"></aside>
   <section class="center">
     <div class="center-head">
       <nav id="breadcrumb" class="breadcrumb" aria-label="Path"></nav>
       <div id="view-tools" class="view-tools"></div>
-      <form id="goto-form" class="goto" title="Go to a path, for example Reservations[0].Instances[2]"><input id="goto-input" placeholder="Go to path…" autocomplete="off" spellcheck="false"></form>
+      <form id="goto-form" class="goto"><label class="sr-only" for="goto-input">Go to path</label><input id="goto-input" placeholder="Go to path…" autocomplete="off" spellcheck="false" title="Go to a path, for example Reservations[0].Instances[2]"></form>
     </div>
+    <div id="dashboard" class="dashboard"></div>
+    <div id="chips" class="chips-row"></div>
     <div id="view" class="view"></div>
+    <div id="query-bar" class="query-bar" hidden></div>
+    <div id="status" class="status"></div>
   </section>
-  <aside id="detail" class="detail" aria-label="Details"></aside>
-</main>
+  <aside id="detail" class="detail" aria-label="Selected"></aside>
+</div>
 
-<section id="empty" class="empty">
-  <div class="drop-card">
-    <div class="drop-icon">{ }</div>
-    <h1>Drop JSON here</h1>
-    <p>AWS, Azure, kubectl, Terraform or any JSON, JSON Lines or JSON5 output (also .gz). Everything is read in your browser; nothing is uploaded.</p>
-    <div class="drop-actions"><button id="empty-open" class="primary" type="button">Open files</button><button id="empty-paste" type="button">Paste JSON</button></div>
-    <small>Or press Ctrl+V anywhere on this page.</small>
-    <div id="recent-empty" class="recent-empty"></div>
-  </div>
-</section>
-
-<footer id="bottom" class="bottom" hidden>
-  <form id="search-form" class="search" role="search">
-    <input id="search-input" type="search" placeholder="Search keys and values (Ctrl+F)" autocomplete="off" spellcheck="false">
-    <div class="search-options" role="group" aria-label="Search options">
-      <button type="button" data-option="caseSensitive" aria-pressed="false" title="Match case">Aa</button>
-      <button type="button" data-option="wholeWord" aria-pressed="false" title="Whole word">W</button>
-      <button type="button" data-option="regex" aria-pressed="false" title="Regular expression">.*</button>
-      <select id="search-scope" title="Search keys, values or both"><option value="both">Keys + values</option><option value="keys">Keys only</option><option value="values">Values only</option></select>
-    </div>
-    <span id="search-count" class="search-count" aria-live="polite"></span>
-    <button id="search-prev" type="button" title="Previous match (Shift+Enter)">↑</button>
-    <button id="search-next" type="button" title="Next match (Enter)">↓</button>
-    <button id="search-cancel" type="button" title="Stop searching" hidden>Stop</button>
-  </form>
-  <div id="status" class="status"></div>
-</footer>
+<main id="diff" class="diff" hidden></main>
 
 <div id="drop-overlay" class="drop-overlay" hidden><div>Drop to open · drop on a tab to replace it</div></div>
 <div id="menu" class="context-menu" role="menu" hidden></div>
-<div id="popover" class="popover floating" hidden></div>
-<dialog id="paste-dialog">
-  <form method="dialog" id="paste-form">
-    <h2>Paste JSON</h2>
-    <textarea id="paste-text" spellcheck="false" placeholder="Paste JSON, JSON Lines or JSON5 here"></textarea>
-    <div class="dialog-actions"><button value="cancel" type="submit">Cancel</button><button value="open" class="primary" type="submit">Open</button></div>
-  </form>
-</dialog>
+<div id="popover" class="popover" hidden></div>
+<dialog id="app-dialog" aria-label="Dialog"></dialog>
 <input id="file-input" type="file" multiple accept=".json,.jsonl,.ndjson,.json5,.txt,.gz,application/json,text/plain" hidden>
 <div id="toast" class="toast" role="status" hidden></div>
-<script src="model.js?v=2"></script>
-<script src="cloud.js?v=2"></script>
-<script src="search.js?v=2"></script>
-<script src="app.js?v=2"></script>
+<script src="model.js?v=3"></script>
+<script src="cloud.js?v=3"></script>
+<script src="search.js?v=3"></script>
+<script src="parse.js?v=3"></script>
+<script src="jmespath.js?v=3"></script>
+<script src="jq.js?v=3"></script>
+<script src="exporters.js?v=3"></script>
+<script src="secrets.js?v=3"></script>
+<script src="diff.js?v=3"></script>
+<script src="util.js?v=3"></script>
+<script src="app.js?v=3"></script>
+<script src="views.js?v=3"></script>
+<script src="panels.js?v=3"></script>
+<script src="server.js?v=3"></script>
 <script src="/home/app-open.js?v=1" data-app="json"></script>
 </body>
 </html>

@@ -76,7 +76,8 @@
   }
 
   // JSON5: comments, trailing commas, unquoted keys, single quotes, hex, +/-Infinity, NaN.
-  function parseJson5(text) {
+  // options.bigInts keeps integers beyond 2^53 as exact strings instead of rounding them.
+  function parseJson5(text, options = {}) {
     let at = 0;
     const fail = (message, index = at) => { throw new ParseError(message, locate(text, index)); };
     const IDENT = /[A-Za-z_$][A-Za-z0-9_$]*/y;
@@ -162,6 +163,7 @@
         if (body === "Infinity") return sign * Infinity;
         if (body === "NaN") return NaN;
         if (/^0x/i.test(body)) return sign * parseInt(body, 16);
+        if (options.bigInts && /^-?\d+$/.test(number) && !Number.isSafeInteger(Number(number))) { options.found = (options.found || 0) + 1; return number; }
         return Number(number);
       }
       fail(`Unexpected character ${JSON.stringify(char)}`);
@@ -202,6 +204,13 @@
     try { JSON.parse(lines[0]); return true; } catch { return false; }
   }
 
+  const BIG_INT = /[:[,]\s*-?\d{16,}\s*[,\]}]/;
+  function exact(notices) {
+    const options = {bigInts: true};
+    Object.defineProperty(options, "found", {set(count) { this._found = count; if (count === 1) notices.push("Big integers (beyond 2^53) are kept exactly, as text."); }, get() { return this._found; }});
+    return options;
+  }
+
   // name: the file name (its extension is a hint); format: auto, json, jsonl or json5.
   function parseDocument(text, {name = "", format = "auto"} = {}) {
     const notices = [];
@@ -220,9 +229,16 @@
       if (!records.length && errors.length) throw new ParseError(`No valid JSON lines: line ${errors[0].line}: ${errors[0].message}`, {line: errors[0].line, column: errors[0].column, snippet: errors[0].snippet});
       return {value: records, format: "jsonl", lines, errors, notices};
     }
-    if (chosen === "json5") return {value: parseJson5(text), format: "json5", errors: [], notices};
+    if (chosen === "json5") return {value: parseJson5(text, exact(notices)), format: "json5", errors: [], notices};
     try {
-      return {value: JSON.parse(text), format: "json", errors: [], notices};
+      const value = JSON.parse(text);
+      // Integers beyond 2^53 would be rounded: read those files again keeping them exact.
+      if (BIG_INT.test(text)) {
+        const options = exact(notices);
+        const precise = parseJson5(text, options);
+        if (options.found) return {value: precise, format: "json", errors: [], notices};
+      }
+      return {value, format: "json", errors: [], notices};
     } catch (error) {
       if (chosen === "json") throw nativeError(error, text);
       if (looksLikeLines(text)) {
@@ -230,7 +246,7 @@
         return {value: records, format: "jsonl", lines, errors, notices};
       }
       try {
-        return {value: parseJson5(text), format: "json5", errors: [], notices};
+        return {value: parseJson5(text, exact(notices)), format: "json5", errors: [], notices};
       } catch (json5Error) {
         const native = nativeError(error, text);
         // The browser's own message and position when it gave one, else the JSON5 reader's.

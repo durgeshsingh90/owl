@@ -149,6 +149,7 @@ from app.api.aws_accounts import router as aws_accounts_router
 from app.api.bookmarks import router as bookmarks_router
 from app.api.compare import router as compare_router
 from app.api.home import router as home_router
+from app.api.json_visualizer import router as json_visualizer_router
 from app.api.confluence_library import router as confluence_library_router
 from app.api.compat import router as compat_router
 from app.api.tracker import router as tracker_router
@@ -158,6 +159,7 @@ app.include_router(aws_accounts_router)
 app.include_router(bookmarks_router)
 app.include_router(compare_router)
 app.include_router(home_router)
+app.include_router(json_visualizer_router)
 app.include_router(workspace_router)
 app.include_router(tracker_router)
 app.include_router(confluence_library_router)

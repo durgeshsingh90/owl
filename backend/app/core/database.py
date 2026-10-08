@@ -170,6 +170,18 @@ def initialize(*, recover_jobs=False):
             token TEXT PRIMARY KEY, payload TEXT NOT NULL,
             created_at REAL NOT NULL, updated_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS json_viz_snapshots (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, size INTEGER NOT NULL, stored INTEGER NOT NULL,
+            sha256 TEXT NOT NULL, format TEXT NOT NULL, source TEXT NOT NULL,
+            labels TEXT NOT NULL DEFAULT '{}', command TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS json_viz_snapshots_created ON json_viz_snapshots(created_at);
+        CREATE TABLE IF NOT EXISTS json_viz_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS json_viz_commands (
+            id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, tool TEXT NOT NULL, args TEXT NOT NULL,
+            profile TEXT NOT NULL DEFAULT '', region TEXT NOT NULL DEFAULT '', extra TEXT NOT NULL DEFAULT '{}',
+            created_at REAL NOT NULL, last_run_at REAL
+        );
         """)
         if "folder_path" not in {
             row["name"]

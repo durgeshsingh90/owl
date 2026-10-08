@@ -2,7 +2,7 @@
 // One worker per open document: it reads the file (gzip included), parses it, keeps
 // the parsed value for searching and answers searches in slices so they can be
 // cancelled. Closing or cancelling a document terminates its worker.
-importScripts("parse.js?v=2", "search.js?v=2");
+importScripts("parse.js?v=3", "search.js?v=3");
 
 let document = null;
 let searchId = 0;

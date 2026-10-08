@@ -30,6 +30,7 @@ PREFIXES = (
     ("tracker_", "tracker"),
     ("compare_", "compare"),
     ("aws_", "aws"),
+    ("json_viz_", "json"),
 )
 BITBUCKET_TABLES = {
     "documents", "repositories", "tracked_projects", "failed_documents", "jobs",
@@ -110,6 +111,18 @@ def measure():
                 sizes[app] += share
         finally:
             library.reset(token)
+    # JSON Visualizer's snapshots and open server documents are files beside the database.
+    from app.jsonviz import storage as json_storage
+
+    token = library.set("pdf")
+    try:
+        json_bytes = json_storage.folder_bytes()
+        json_folder = json_storage.folder()
+    finally:
+        library.reset(token)
+    if json_bytes:
+        sizes["json"] += json_bytes
+        files.append({"name": json_folder.name, "bytes": json_bytes})
     return {
         "apps": [{"app": app, "name": APPS[app], "bytes": sizes[app]} for app in APPS],
         "total_bytes": sum(item["bytes"] for item in files),

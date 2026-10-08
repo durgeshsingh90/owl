@@ -131,6 +131,16 @@
       columns: ["name", "type", "resourceGroup", "location", "provisioningState"]},
     {name: "Terraform resources", test: record => "address" in record && "type" in record && "values" in record,
       columns: ["address", "type", "name", "provider_name", "mode"]},
+    {name: "CloudTrail events", test: record => "eventName" in record && "eventSource" in record,
+      columns: ["eventTime", "eventName", "eventSource", "userIdentity.arn", "sourceIPAddress", "awsRegion", "errorCode"]},
+    {name: "CloudTrail lookup", test: record => "EventName" in record && "EventId" in record,
+      columns: ["EventTime", "EventName", "Username", "EventSource", "EventId"]},
+    {name: "CloudWatch log events", test: record => "message" in record && ("timestamp" in record || "ingestionTime" in record),
+      columns: ["timestamp", "logStreamName", "message"]},
+    {name: "Lambda functions", test: record => "FunctionName" in record && "Runtime" in record,
+      columns: ["FunctionName", "Runtime", "Handler", "MemorySize", "Timeout", "LastModified"]},
+    {name: "gcloud instances", test: record => typeof record.selfLink === "string" && "machineType" in record,
+      columns: ["name", "zone", "machineType", "status", "creationTimestamp"]},
   ];
   function template(records) {
     const sample = records.find(isObject);

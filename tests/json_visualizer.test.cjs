@@ -87,3 +87,9 @@ test('a JSON5 file that starts with a comment is not treated as CLI noise', () =
  const result = P.parseDocument('// settings\n{a: 1}');
  assert.equal(result.format, 'json5'); assert.deepEqual(result.notices, []);
 });
+test('integers beyond 2^53 are kept exactly as text', () => {
+ const result = P.parseDocument('{"id": 12345678901234567890, "small": 5, "list": [9007199254740993]}');
+ assert.equal(result.value.id, '12345678901234567890'); assert.equal(result.value.small, 5); assert.equal(result.value.list[0], '9007199254740993');
+ assert.match(result.notices.join(' '), /Big integers/);
+ assert.deepEqual(P.parseDocument('{"a": 1}').notices, []);
+});
