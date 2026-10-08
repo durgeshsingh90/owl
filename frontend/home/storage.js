@@ -46,6 +46,10 @@
   button?.addEventListener("click", async () => {
     button.disabled = true;
     button.classList.add("spinning");
+    // Every app says "Preparing to refresh…" straight away, until its refresh is running.
+    window.dispatchEvent(new CustomEvent("owl-auto-refresh-preparing", {detail: ["bitbucket", "naas", "network", "bookmarks", "tracker"]}));
+    window.dispatchEvent(new CustomEvent("owl-auto-refresh-changed"));
+    window.owlToast?.("Preparing to refresh every app…");
     try {
       const response = await fetch("/api/home/refresh-all", {method: "POST"});
       if (!response.ok) throw new Error();
@@ -53,6 +57,8 @@
       const names = {bitbucket: "Bitbucket", naas: "NAAS and Networking", network: "Network Automation", bookmarks: "Bookmarks", tracker: "Confluence Tracker"};
       const by = state => Object.entries(apps).filter(([, value]) => value === state).map(([app]) => names[app] || app);
       const started = by("started"), running = by("running"), idle = by("not set up");
+      // Apps that are not starting stop saying "Preparing".
+      window.dispatchEvent(new CustomEvent("owl-auto-refresh-prepared", {detail: Object.keys(apps).filter(app => apps[app] !== "started")}));
       const failed = Object.entries(apps).filter(([, value]) => value.startsWith("failed")).map(([app, value]) => `${names[app] || app} (${value.slice(8)})`);
       window.owlToast?.([
         started.length && `Refreshing now: ${started.join(", ")}`,

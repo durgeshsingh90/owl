@@ -28,7 +28,31 @@
   }
 
   // Bookmarks keeps its original "scheduled" status; trackers report a failure as "retrying".
-  function describe(state) {
+  // Refreshes asked for (refresh-all) but not yet reported running: app -> until when.
+  const preparing = new Map();
+  window.addEventListener("owl-auto-refresh-preparing", event => {
+    // Clocks may differ a little between browser and backend.
+    for (const app of event.detail || []) preparing.set(app, {until: Date.now() + 90000, since: Date.now() / 1000 - 5});
+  });
+  window.addEventListener("owl-auto-refresh-prepared", event => {
+    for (const app of event.detail || []) preparing.delete(app);
+    window.dispatchEvent(new CustomEvent("owl-auto-refresh-changed"));
+  });
+  // What every label and the Home table show for an app: one wording everywhere.
+  function view(app, state) {
+    const asked = preparing.get(app);
+    // Done preparing once the refresh runs, or has already been tried since the click.
+    if (asked && (state?.status === "running" || Number(state?.last_attempt) >= asked.since || Number(state?.last_success) >= asked.since)) {
+      preparing.delete(app);
+    }
+    if (preparing.has(app) && preparing.get(app).until > Date.now()) {
+      return {tone: "running", text: "Preparing to refresh…", detail: "Starting in the background; this takes a few seconds."};
+    }
+    preparing.delete(app);
+    return state ? describe(state, app) : null;
+  }
+
+  function describe(state, app = "") {
     const now = Date.now() / 1000;
     const next = Number(state.next_run);
     const eta = Number.isFinite(next) && next > 0
@@ -38,7 +62,9 @@
     const last = state.last_success ? `Last success ${ago(state.last_success)}` : "No successful refresh yet";
     switch (state.status) {
       case "running": {
-        const progress = state.total ? ` ${state.completed}/${state.total}` : "";
+        // Bookmarks and Confluence Tracker count pages.
+        const unit = app === "bookmarks" || app === "tracker" ? " pages" : "";
+        const progress = state.total ? ` · updating ${state.completed}/${state.total}${unit}` : "";
         const failed = state.failed ? ` · ${state.failed} failed` : "";
         const remaining = Number(state.eta_seconds) > 0 && state.completed > 0 ? ` · about ${duration(state.eta_seconds)} left` : "";
         // A manual Update all in Bookmarks runs in the browser rather than in the background.
@@ -86,7 +112,7 @@
     .owl-ar-table thead th{border-top:0;font-size:11px;font-weight:600;opacity:.7}
     .owl-ar-table tbody th a{color:inherit;font-weight:600;text-decoration:none}
     .owl-ar-table tbody th a:hover{text-decoration:underline}
-    .owl-ar-table .owl-auto-refresh{margin:0;white-space:nowrap}
+    .owl-ar-table .owl-auto-refresh{margin:0}
     @keyframes owl-ar-pulse{50%{opacity:.35}}
     @media (prefers-reduced-motion: reduce){.owl-auto-refresh .owl-ar-dot{animation:none!important}}`;
   function injectStyle() {
@@ -104,10 +130,10 @@
     element.innerHTML = '<span class="owl-ar-dot" aria-hidden="true"></span><span class="owl-ar-text">Checking automatic refresh…</span>';
     let state = null;
     const render = () => {
-      const view = state ? describe(state) : {tone: "unknown", text: "Auto refresh status unavailable", detail: "OWL must be running to refresh automatically."};
-      element.dataset.tone = view.tone;
-      element.querySelector(".owl-ar-text").textContent = view.text;
-      element.title = view.detail;
+      const shown = view(app, state) || {tone: "unknown", text: "Auto refresh status unavailable", detail: "OWL must be running to refresh automatically."};
+      element.dataset.tone = shown.tone;
+      element.querySelector(".owl-ar-text").textContent = shown.text;
+      element.title = shown.detail;
     };
     let timer = 0;
     async function poll() {
@@ -131,17 +157,17 @@
     const states = {};
     const escape = value => String(value ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"})[c]);
     const render = () => {
-      element.innerHTML = `<table class="owl-ar-table"><thead><tr><th scope="col">App</th><th scope="col">Status</th><th scope="col">Next refresh</th><th scope="col">Last success</th><th scope="col">Details</th></tr></thead><tbody>${
+      element.innerHTML = `<table class="owl-ar-table"><thead><tr><th scope="col">App</th><th scope="col">Status</th><th scope="col">Next refresh</th><th scope="col">Last success</th><th scope="col">Note</th></tr></thead><tbody>${
         Object.entries(APPS).map(([app, config]) => {
           const state = states[app];
-          const view = state ? describe(state) : {tone: "unknown", text: state === null ? "Status unavailable" : "Checking…", detail: ""};
+          const shown = view(app, state) || {tone: "unknown", text: state === null ? "Status unavailable" : "Checking…", detail: ""};
           const next = Number(state?.next_run);
-          const nextText = !state || state.status === "idle" || state.status === "not_configured" ? "—"
-            : state.status === "running" ? "Running now"
+          const nextText = shown.tone === "running" ? "Now"
+            : !state || state.status === "idle" || state.status === "not_configured" ? "—"
             : Number.isFinite(next) && next > 0 ? `${when(next)} (${next <= Date.now() / 1000 ? "due now" : "in " + duration(next - Date.now() / 1000)})` : "Shortly";
-          const detail = state?.status === "running" || state?.status === "retrying" || state?.status === "idle" || state?.status === "not_configured"
-            ? (state.status === "running" ? view.text.replace("Refreshing in background", "Progress") : state.message || "") : "";
-          return `<tr><th scope="row"><a href="${config.href}">${escape(config.name)}</a></th><td><span class="owl-auto-refresh" data-tone="${view.tone}"><span class="owl-ar-dot" aria-hidden="true"></span><span class="owl-ar-text">${escape({running: "Refreshing", retrying: "Retrying", ok: "Scheduled", idle: "Not set up", unknown: view.text}[view.tone])}</span></span></td><td>${escape(nextText)}</td><td>${state?.last_success ? `${escape(when(state.last_success))} (${escape(ago(state.last_success))})` : "—"}</td><td>${escape(detail)}</td></tr>`;
+          // The status reads exactly as on the app's card; the note only explains a problem.
+          const note = shown.tone === "running" ? "" : state?.message || "";
+          return `<tr><th scope="row"><a href="${config.href}">${escape(config.name)}</a></th><td><span class="owl-auto-refresh" data-tone="${shown.tone}"><span class="owl-ar-dot" aria-hidden="true"></span><span class="owl-ar-text">${escape(shown.text)}</span></span></td><td>${escape(nextText)}</td><td>${state?.last_success ? `${escape(when(state.last_success))} (${escape(ago(state.last_success))})` : "—"}</td><td>${escape(note)}</td></tr>`;
         }).join("")
       }</tbody></table>`;
     };

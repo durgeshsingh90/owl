@@ -230,6 +230,11 @@ class ScheduleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(start_now(self.jobs), "running")
         self.assertEqual(self.jobs.started, 1)
         self.assertEqual(status(self.jobs)["status"], "running")
+        # Once it ends, the outcome shows at once, before the scheduler records it.
+        self.jobs.current["discovery_failed"] = True
+        self.jobs.finish("failed", self.now)
+        state = status(self.jobs)
+        self.assertEqual((state["status"], state["next_run"]), ("retrying", (self.now + timedelta(hours=2)).timestamp()))
 
 
 class FakeJobs:

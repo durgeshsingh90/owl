@@ -226,6 +226,19 @@ def status(jobs):
         state["message"] = row["error"]
         if row["error"]:
             state["status"] = "retrying"
+    if job and job["status"] not in {"queued", "running", "paused"}:
+        # A pull that just ended, before the scheduler's next check records it: show
+        # its outcome now rather than the schedule from before it ran.
+        progress = json.loads(job["progress"])
+        finished = progress.get("completed_at")
+        if finished:
+            if completed(job["status"], progress):
+                state.update(status="scheduled", message="", last_success=epoch(finished),
+                             next_run=epoch(finished) + INTERVAL.total_seconds())
+            else:
+                state.update(status="retrying", message="The pull stopped before reading every repository. Retrying in two hours.",
+                             next_run=epoch(finished) + RETRY.total_seconds())
+            state["last_attempt"] = epoch(progress.get("started_at"))
     current = jobs.current if jobs.active() else None
     if job and job["status"] in {"queued", "running", "paused"} or current:
         progress = current or json.loads(job["progress"])
