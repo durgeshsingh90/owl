@@ -85,21 +85,41 @@ def inventory():
             for row in db.execute("SELECT profile FROM aws_account_stars ORDER BY starred_at")
         ]
         projects = _projects(db)
+        custom = [row[0] for row in db.execute("SELECT name FROM aws_custom_categories ORDER BY created_at,name")]
+        overrides = {row[0]: row[1] for row in db.execute("SELECT profile,category FROM aws_category_overrides")}
     counts = {"profile": {}, "account_id": {}, "role": {}}
     for copy in copies:
         counts[copy["kind"]][copy["value"]] = copy["count"]
     source = source_state()
     if row is None:
         return {"imported": False, "copies": counts, "stars": stars, "projects": projects, "config": source}
+    payload = json.loads(row["payload"])
+    payload["categories"] = _apply_categories(payload.get("categories", {}), custom, overrides)
     return {
         "imported": True,
         "imported_at": row["imported_at"],
-        **json.loads(row["payload"]),
+        **payload,
+        "custom_categories": custom,
+        "category_overrides": overrides,
         "copies": counts,
         "stars": stars,
         "projects": projects,
         "config": source,
     }
+
+
+def _apply_categories(categories, custom, overrides):
+    """Accounts moved by hand go to their chosen category; categories made by hand
+    show even while empty. Each category keeps its accounts' order."""
+    result = {name: [account for account in accounts if account["profile"] not in overrides] for name, accounts in categories.items()}
+    for name in custom:
+        result.setdefault(name, [])
+    moved = [account for accounts in categories.values() for account in accounts if account["profile"] in overrides]
+    for account in moved:
+        result.setdefault(overrides[account["profile"]], []).append(account)
+    # Automatic categories left empty disappear; hand-made ones stay.
+    keep = {name.lower() for name in custom}
+    return {name: accounts for name, accounts in result.items() if accounts or name.lower() in keep}
 
 
 class ConfigPath(BaseModel):
@@ -271,6 +291,89 @@ class Profile(BaseModel):
     profile: str = Field(max_length=128)
 
 
+class CategoryName(BaseModel):
+    name: str = Field(max_length=100)
+
+    @field_validator("name")
+    @classmethod
+    def clean(cls, value):
+        value = " ".join(value.split())
+        if not value:
+            raise ValueError("Enter a category name.")
+        return value
+
+
+class CategoryMove(BaseModel):
+    profiles: list[str] = Field(min_length=1, max_length=5000)
+    # None puts the accounts back in the category OWL chose from their names.
+    category: str | None = Field(default=None, max_length=100)
+
+
+@router.post("/aws-accounts/categories")
+def create_category(value: CategoryName):
+    with connection() as db:
+        if db.execute("SELECT 1 FROM aws_custom_categories WHERE name=?", (value.name,)).fetchone():
+            raise HTTPException(409, f'A category named "{value.name}" already exists.')
+        db.execute(
+            "INSERT INTO aws_custom_categories(name,created_at) VALUES(?,?)",
+            (value.name, datetime.now(timezone.utc).isoformat()),
+        )
+    return {"name": value.name}
+
+
+@router.patch("/aws-accounts/categories/{name}")
+def rename_category(name: str, value: CategoryName):
+    """Rename a category: a hand-made one, or an automatic one (which then becomes
+    hand-made and keeps its accounts)."""
+    with connection() as db:
+        if value.name.lower() != name.lower() and db.execute("SELECT 1 FROM aws_custom_categories WHERE name=?", (value.name,)).fetchone():
+            raise HTTPException(409, f'A category named "{value.name}" already exists.')
+        payload = db.execute("SELECT payload FROM aws_accounts WHERE id=1").fetchone()
+        automatic = json.loads(payload[0]).get("categories", {}).get(name, []) if payload else []
+        custom = db.execute("SELECT 1 FROM aws_custom_categories WHERE name=?", (name,)).fetchone()
+        if not custom and not automatic:
+            raise HTTPException(404, "Category not found.")
+        db.execute("DELETE FROM aws_custom_categories WHERE name=?", (name,))
+        db.execute(
+            "INSERT OR IGNORE INTO aws_custom_categories(name,created_at) VALUES(?,?)",
+            (value.name, datetime.now(timezone.utc).isoformat()),
+        )
+        db.execute("UPDATE aws_category_overrides SET category=? WHERE category=? COLLATE NOCASE", (value.name, name))
+        overridden = {row[0] for row in db.execute("SELECT profile FROM aws_category_overrides")}
+        db.executemany(
+            "INSERT OR IGNORE INTO aws_category_overrides(profile,category) VALUES(?,?)",
+            [(account["profile"], value.name) for account in automatic if account["profile"] not in overridden],
+        )
+    return {"name": value.name}
+
+
+@router.delete("/aws-accounts/categories/{name}")
+def delete_category(name: str):
+    """Delete a hand-made category; its accounts go back to their automatic categories."""
+    with connection() as db:
+        removed = db.execute("DELETE FROM aws_custom_categories WHERE name=?", (name,)).rowcount
+        moved = db.execute("DELETE FROM aws_category_overrides WHERE category=? COLLATE NOCASE", (name,)).rowcount
+    if not removed and not moved:
+        raise HTTPException(404, "Category not found.")
+    return {"ok": True, "returned": moved}
+
+
+@router.put("/aws-accounts/category-accounts")
+def move_accounts(value: CategoryMove):
+    with connection() as db:
+        if value.category is None:
+            db.executemany("DELETE FROM aws_category_overrides WHERE profile=?", [(profile,) for profile in value.profiles])
+        else:
+            category = " ".join(value.category.split())
+            if not category:
+                raise HTTPException(400, "Choose a category.")
+            db.executemany(
+                "INSERT INTO aws_category_overrides(profile,category) VALUES(?,?) ON CONFLICT(profile) DO UPDATE SET category=excluded.category",
+                [(profile, category) for profile in value.profiles],
+            )
+    return {"ok": True, "moved": len(value.profiles)}
+
+
 @router.get("/aws-accounts/connection")
 def connection_state(refresh: bool = False):
     return aws.check() if refresh else aws.state()
@@ -307,6 +410,8 @@ def delete_all(value: DeleteAll):
         copies = db.execute("DELETE FROM aws_account_copies").rowcount
         stars = db.execute("DELETE FROM aws_account_stars").rowcount
         db.execute("DELETE FROM aws_project_accounts")
+        db.execute("DELETE FROM aws_category_overrides")
+        db.execute("DELETE FROM aws_custom_categories")
         projects = db.execute("DELETE FROM aws_projects").rowcount
     return {
         "ok": True, "inventory": accounts, "copies": copies, "stars": stars, "projects": projects,

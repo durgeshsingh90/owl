@@ -40,6 +40,7 @@
   <button type="button" id="swap" title="Swap the two sides">⇄ Swap</button>
   <label class="check"><input id="ignore-whitespace" type="checkbox" checked> Ignore leading and trailing spaces</label>
   <label class="check"><input id="ignore-blank-lines" type="checkbox" checked> Ignore empty lines</label>
+  <label class="check" title="Wrap long lines on both sides"><input id="word-wrap" type="checkbox"> Wrap long lines</label>
   <div class="legend" aria-label="Colour key">
     <span class="key key-changed">Changed <strong id="count-changed">0</strong></span>
     <span class="key key-removed">Only left <strong id="count-removed">0</strong></span>
@@ -78,7 +79,7 @@
 <input id="file-input" type="file" hidden>
 <div id="toast" class="toast" role="status" hidden></div>
 <script src="../vendor/monaco/vs/loader.js"></script>
-<script src="script.js?v=10"></script>
+<script src="script.js?v=11"></script>
   <script src="/home/app-open.js?v=1" data-app="compare"></script>
 </body>
 </html>

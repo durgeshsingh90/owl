@@ -129,6 +129,12 @@ def initialize(*, recover_jobs=False):
         CREATE TABLE IF NOT EXISTS aws_account_stars (
             profile TEXT PRIMARY KEY, starred_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS aws_custom_categories (
+            name TEXT PRIMARY KEY COLLATE NOCASE, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS aws_category_overrides (
+            profile TEXT PRIMARY KEY, category TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS aws_projects (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, created_at TEXT NOT NULL
         );

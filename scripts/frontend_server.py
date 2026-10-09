@@ -6,6 +6,14 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 
+CHUNK = 1024 * 1024
+# Response headers the browser needs from the backend.
+PASS_THROUGH = (
+    "Content-Type", "Content-Length", "Content-Disposition", "X-Request-ID",
+    "X-File-Name", "X-File-Size", "Location",
+)
+
+
 class Handler(SimpleHTTPRequestHandler):
     backend_port = 8000
 
@@ -30,34 +38,50 @@ class Handler(SimpleHTTPRequestHandler):
         if origin and origin != "http://" + self.headers.get("Host", ""):
             self.send_error(403)
             return
-        length = int(self.headers.get("Content-Length", "0"))
-        if length > 64 * 1024 * 1024:
-            self.send_error(413)
-            return
-        body = self.rfile.read(length) if length else None
+        # Bodies are streamed both ways: big-file uploads (JSON Visualizer server
+        # mode, snapshots) and downloads can be gigabytes.
+        length = int(self.headers.get("Content-Length", "0") or 0)
         headers = {
             key: value
             for key, value in self.headers.items()
             if key.lower()
-            not in ("host", "connection", "origin", "accept-encoding", "content-length")
+            not in ("host", "connection", "origin", "accept-encoding", "content-length", "transfer-encoding")
         }
-        conn = http.client.HTTPConnection("127.0.0.1", self.backend_port, timeout=40)
+        conn = http.client.HTTPConnection("127.0.0.1", self.backend_port, timeout=600)
         try:
-            conn.request(self.command, self.path, body=body, headers=headers)
+            conn.putrequest(self.command, self.path, skip_accept_encoding=True)
+            for key, value in headers.items():
+                conn.putheader(key, value)
+            if length:
+                conn.putheader("Content-Length", str(length))
+            conn.endheaders()
+            remaining = length
+            while remaining > 0:
+                chunk = self.rfile.read(min(CHUNK, remaining))
+                if not chunk:
+                    break
+                conn.send(chunk)
+                remaining -= len(chunk)
             response = conn.getresponse()
-            data = response.read()
             self.send_response(response.status)
-            self.send_header(
-                "Content-Type", response.getheader("Content-Type", "application/json")
-            )
-            if response.getheader("X-Request-ID"):
-                self.send_header("X-Request-ID", response.getheader("X-Request-ID"))
-            self.send_header("Content-Length", str(len(data)))
+            for key in PASS_THROUGH:
+                value = response.getheader(key)
+                if value is not None:
+                    self.send_header(key, value)
+            if response.getheader("Content-Type") is None:
+                self.send_header("Content-Type", "application/json")
             self.end_headers()
             if self.command != "HEAD":
-                self.wfile.write(data)
+                while True:
+                    chunk = response.read(CHUNK)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
         except (OSError, http.client.HTTPException):
-            self.send_error(502, "OWL backend unavailable")
+            try:
+                self.send_error(502, "OWL backend unavailable")
+            except OSError:
+                pass
         finally:
             conn.close()
 

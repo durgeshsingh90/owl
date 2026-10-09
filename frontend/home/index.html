@@ -10,39 +10,12 @@
       content="Your OWL apps, repository insights and document activity in one place."
     />
     <script src="../bitbucket/theme.js?v=20260914-current-mode"></script>
-    <link rel="stylesheet" href="style.css?v=app-stats-2" />
+    <link rel="stylesheet" href="style.css?v=no-rail-1" />
   </head>
   <body>
-    <aside class="rail">
-      <a class="brand" href="./"
-        ><img src="../bitbucket/assets/owl.png" alt="" /><strong>OWL</strong></a
-      ><span class="rail-label">WORKSPACE</span
-      ><a class="nav active" href="./"><span>⌂</span> Overview</a
-      ><a class="nav" href="../bitbucket/"
-        ><span>▱</span> Bitbucket <span class="arrow">↗</span></a
-      ><a class="nav" href="../naas/"
-        ><span>▱</span> NAAS and Networking <span class="arrow">↗</span></a
-      ><a class="nav" href="../network-automation/"
-        ><span>▱</span> Network Automation <span class="arrow">↗</span></a
-      ><a class="nav" href="../bookmarks/"
-        ><span>▣</span> Bookmarks <span class="arrow">↗</span></a
-      ><a class="nav" href="../confluence-tracker/"
-        ><span>◷</span> Confluence Tracker <span class="arrow">↗</span></a
-      ><a class="nav" href="../aws-accounts/"
-        ><span>☁</span> AWS Accounts <span class="arrow">↗</span></a
-      ><a class="nav" href="../compare/"
-        ><span>⇄</span> Compare <span class="arrow">↗</span></a
-      ><a class="nav" href="../json-visualizer/"
-        ><span>{}</span> JSON Visualizer <span class="arrow">↗</span></a
-      >
-      <div class="rail-bottom">
-        <div class="avatar">O</div>
-        <div>OWL workspace<small>Your knowledge, connected.</small></div>
-      </div>
-    </aside>
     <div class="page">
       <header>
-        <span>Workspace <span class="slash">/</span> Overview</span>
+        <a class="top-brand" href="./"><img src="../bitbucket/assets/owl.png" alt="" /><strong>OWL</strong><span class="slash">/</span><span>Overview</span></a>
         <div class="header-actions">
           <span class="sample-badge">Database records</span
           ><button id="refresh-all" type="button" title="Refresh every app now, in the background" aria-label="Refresh every app now, in the background"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8M4 4v4h4M4 13a8 8 0 0 0 14.3 4.9L20 16m0 4v-4h-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button
@@ -65,22 +38,18 @@
           <a class="app-card" href="../aws-accounts/"><span class="app-opens" data-app-opens="aws" hidden></span>
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h10a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.2 9.5 4.3 4.3 0 0 0 7 18Z" /></svg></div>
             <div><div class="app-title"><h3>AWS Accounts</h3><span>Account inventory</span></div><p>Reads your ~/.aws/config profiles.<br />Grouped by category and environment; copy names, IDs and roles.</p></div>
-            <span class="launch">Open app ↗</span>
           </a>
           <a class="app-card" href="../naas/"><span class="app-opens" data-app-opens="naas" hidden></span>
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h12l4 4v14H4V3Zm5 6h6M9 13h6M9 17h4" /></svg></div>
             <div><div class="app-title"><h3>NAAS and Networking</h3><span>YAML &amp; README</span></div><p>Track configuration and documentation.<br />Search repositories, changes and file history.</p><p class="owl-auto-refresh" data-auto-refresh="naas" data-show-last></p></div>
-            <span class="launch">Open app ↗</span>
           </a>
           <a class="app-card" href="../network-automation/"><span class="app-opens" data-app-opens="network" hidden></span>
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H6a2 2 0 0 0-2 2v4l-2 2 2 2v4a2 2 0 0 0 2 2h2M16 4h2a2 2 0 0 1 2 2v4l2 2-2 2v4a2 2 0 0 1-2 2h-2" /></svg></div>
             <div><div class="app-title"><h3>Network Automation</h3><span>JSON &amp; README</span></div><p>Track network automation data.<br />Search repositories, changes and file history.</p><p class="owl-auto-refresh" data-auto-refresh="network" data-show-last></p></div>
-            <span class="launch">Open app ↗</span>
           </a>
           <a class="app-card" href="../confluence-tracker/"><span class="app-opens" data-app-opens="tracker" hidden></span>
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h12l4 4v14H4V3Zm5 6h6M9 13h6M9 17h4" /></svg></div>
             <div><div class="app-title"><h3>Confluence Tracker</h3><span>Page changes</span></div><p>Follow an entire page tree.<br />See new pages and updates with daily sync.</p><p class="owl-auto-refresh" data-auto-refresh="tracker" data-show-last></p></div>
-            <span class="launch">Open app ↗</span>
           </a>
           <a class="app-card bookmark-card" href="../bookmarks/"
             ><span class="app-opens" data-app-opens="bookmarks" hidden></span><div class="app-icon">
@@ -98,8 +67,7 @@
                 resources.
               </p>
               <p class="owl-auto-refresh" data-auto-refresh="bookmarks" data-show-last></p>
-            </div>
-            <span class="launch">Open app ↗</span></a
+            </div></a
           >
           <a class="app-card" href="../bitbucket/"
             ><span class="app-opens" data-app-opens="bitbucket" hidden></span><div class="app-icon">
@@ -117,17 +85,14 @@
                 document history.
               </p>
               <p class="owl-auto-refresh" data-auto-refresh="bitbucket" data-show-last></p>
-            </div>
-            <span class="launch">Open app ↗</span></a
+            </div></a
           >
           <a class="app-card" href="../compare/"><span class="app-opens" data-app-opens="compare" hidden></span>
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v16H4zM13 4h7v16h-7zM6.5 8h2M6.5 12h2M15.5 8h2M15.5 12h2M15.5 16h2" /></svg></div>
             <div><div class="app-title"><h3>Compare</h3><span>Text diff</span></div><p>Compare two texts or files side by side.<br />See changed words, added and removed lines.</p></div>
-            <span class="launch">Open app ↗</span>
           <a class="app-card" href="../json-visualizer/"><span class="app-opens" data-app-opens="json" hidden></span>
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4c-2 0-3 1-3 3v2c0 1.5-1 3-2 3 1 0 2 1.5 2 3v2c0 2 1 3 3 3M16 4c2 0 3 1 3 3v2c0 1.5 1 3 2 3-1 0-2 1.5-2 3v2c0 2-1 3-3 3" /></svg></div>
             <div><div class="app-title"><h3>JSON Visualizer</h3><span>Cloud CLI output</span></div><p>AWS, Azure, kubectl and Terraform JSON as tables, cards and trees.<br />Search it and copy any value or path in one click.</p></div>
-            <span class="launch">Open app ↗</span>
           </a>
         </section>
         <section class="panel auto-refresh-panel" aria-labelledby="auto-refresh-title">

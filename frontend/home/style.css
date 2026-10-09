@@ -967,3 +967,53 @@ main > .insight {
 .app-card { position: relative; }
 .app-opens { position: absolute; top: 10px; right: 14px; font-size: 10px; color: var(--muted); opacity: .55; font-variant-numeric: tabular-nums; pointer-events: auto; }
 .app-card:hover .app-opens { opacity: .85; }
+
+/* No side rail: the page uses the full width, and scales up on very large screens. */
+.page {
+  margin-left: 0;
+}
+.top-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  font-size: 13px;
+}
+.top-brand img {
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
+}
+.top-brand strong {
+  font-size: 17px;
+  letter-spacing: 3px;
+}
+.top-brand .slash {
+  padding: 0 4px;
+}
+main {
+  max-width: 2200px;
+  padding: clamp(18px, 2.4vw, 48px) clamp(16px, 3vw, 64px) 0;
+}
+header {
+  padding: 0 clamp(16px, 3vw, 64px);
+}
+.app-card {
+  padding-bottom: 22px;
+}
+@media (max-width: 1000px) {
+  .page {
+    margin-left: 0;
+  }
+}
+/* 4K and other big screens at 100% scaling: everything a little larger. */
+@media (min-width: 2400px) {
+  body {
+    zoom: 1.25;
+  }
+}
+@media (min-width: 3200px) {
+  body {
+    zoom: 1.6;
+  }
+}

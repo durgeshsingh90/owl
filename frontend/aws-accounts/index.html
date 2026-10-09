@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>OWL · AWS Accounts</title>
   <link rel="icon" href="../bitbucket/assets/owl.png">
-  <link rel="stylesheet" href="style.css?v=most-used-1">
+  <link rel="stylesheet" href="style.css?v=categories-2">
 </head>
 <body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
@@ -40,7 +40,7 @@
       <div class="side-heading"><span class="eyebrow">PROJECTS</span><button id="new-project" class="mini" type="button" data-drop-new title="Create a project (or drop an account here)">＋ New</button></div>
       <nav id="project-nav" class="category-nav" aria-label="Projects"></nav>
       <p id="project-hint" class="side-hint">Create a project, then drag accounts onto it.</p>
-      <div class="side-heading"><span class="eyebrow">CATEGORIES</span>
+      <div class="side-heading"><span class="eyebrow">CATEGORIES</span><button id="new-category" class="mini" type="button" data-drop-new-category title="Create a category (or drop an account here to move it into a new one)">＋ New</button>
         <div id="sort" class="sort" role="group" aria-label="Sort categories"><button type="button" data-sort="az" title="Sort A to Z">A–Z</button><button type="button" data-sort="count" title="Most accounts first">Count</button><button type="button" data-sort="file" title="Order in the JSON file">File</button></div>
       </div>
       <nav id="category-nav" class="category-nav" aria-label="Categories"></nav>
@@ -83,6 +83,16 @@
   <p class="commands">Check: <code id="check-command"></code><br>Connect: <code id="login-command"></code></p>
   <div class="dialog-actions"><button id="check-now" type="button">↻ Check now</button><button id="dialog-login" class="primary" type="button">Connect with aws sso login</button></div>
 </dialog>
+<dialog id="category-dialog" class="project-dialog">
+  <form id="category-form">
+    <div class="dialog-heading"><h2 id="category-dialog-title">New category</h2><button type="button" data-close-category aria-label="Close">×</button></div>
+    <label for="category-name">Category name</label>
+    <input id="category-name" maxlength="100" autocomplete="off" required placeholder="e.g. Payments core">
+    <p id="category-dialog-note" class="project-note" hidden></p>
+    <p id="category-error" class="dialog-error" hidden></p>
+    <div class="dialog-actions"><button type="button" data-close-category>Cancel</button><button type="submit" class="primary" id="category-save">Create category</button></div>
+  </form>
+</dialog>
 <dialog id="project-dialog" class="project-dialog">
   <form id="project-form">
     <div class="dialog-heading"><h2 id="project-dialog-title">New project</h2><button type="button" data-close-project aria-label="Close">×</button></div>
@@ -107,7 +117,7 @@
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script src="connection.js?v=2"></script>
 <script src="/home/short-count.js?v=1"></script>
-<script src="script.js?v=most-used-1"></script>
+<script src="script.js?v=categories-2"></script>
   <script src="/home/app-open.js?v=1" data-app="aws"></script>
 </body>
 </html>

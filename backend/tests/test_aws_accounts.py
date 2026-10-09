@@ -81,6 +81,46 @@ class AwsAccountsTests(unittest.TestCase):
                 self.assertEqual(saved["categories"]["Shared Services"][0]["profile"], "mc-centralizednetworking-prod")
                 self.assertEqual(client.put("/api/aws-accounts", json={"categories": {}}).status_code, 405)
 
+    def test_categories_made_and_changed_by_hand(self):
+        with (
+            tempfile.TemporaryDirectory() as folder,
+            patch.dict(os.environ, {"OWL_DB_PATH": folder + "/db", "AWS_CONFIG_FILE": folder + "/missing"}),
+            TestClient(app) as client,
+        ):
+            use_config(client, folder)
+            self.assertEqual(client.post("/api/aws-accounts/categories", json={"name": "  Payments   core "}).json(), {"name": "Payments core"})
+            self.assertEqual(client.post("/api/aws-accounts/categories", json={"name": "payments core"}).status_code, 409)
+            self.assertEqual(client.post("/api/aws-accounts/categories", json={"name": " "}).status_code, 422)
+            saved = client.get("/api/aws-accounts").json()
+            self.assertEqual(saved["categories"]["Payments core"], [])
+            self.assertEqual(saved["custom_categories"], ["Payments core"])
+            # Both environments of a name move together; the old category keeps the rest.
+            moved = client.put("/api/aws-accounts/category-accounts", json={"profiles": ["mc-databricks-prod", "mc-databricks-nonp"], "category": "Payments core"})
+            self.assertEqual(moved.json()["moved"], 2)
+            saved = client.get("/api/aws-accounts").json()
+            self.assertEqual({a["profile"] for a in saved["categories"]["Payments core"]}, {"mc-databricks-prod", "mc-databricks-nonp"})
+            self.assertNotIn("Data & Analytics", saved["categories"])
+            # Moving to an automatic category works too, and None puts an account back.
+            client.put("/api/aws-accounts/category-accounts", json={"profiles": ["mc-databricks-prod"], "category": "Networking"})
+            saved = client.get("/api/aws-accounts").json()
+            self.assertEqual({a["profile"] for a in saved["categories"]["Networking"]}, {"mc-networking-work", "mc-databricks-prod"})
+            client.put("/api/aws-accounts/category-accounts", json={"profiles": ["mc-databricks-prod"], "category": None})
+            saved = client.get("/api/aws-accounts").json()
+            self.assertEqual([a["profile"] for a in saved["categories"]["Data & Analytics"]], ["mc-databricks-prod"])
+            # Renaming an automatic category keeps its accounts under the new name.
+            self.assertEqual(client.patch("/api/aws-accounts/categories/Networking", json={"name": "Network team"}).status_code, 200)
+            saved = client.get("/api/aws-accounts").json()
+            self.assertNotIn("Networking", saved["categories"])
+            self.assertEqual([a["profile"] for a in saved["categories"]["Network team"]], ["mc-networking-work"])
+            self.assertEqual(client.patch("/api/aws-accounts/categories/Nothing", json={"name": "X"}).status_code, 404)
+            # Deleting a hand-made category sends its accounts back.
+            self.assertEqual(client.delete("/api/aws-accounts/categories/Payments core").json()["returned"], 1)
+            saved = client.get("/api/aws-accounts").json()
+            self.assertNotIn("Payments core", saved["categories"])
+            self.assertIn("mc-databricks-nonp", {a["profile"] for a in saved["categories"]["Data & Analytics"]})
+            delete_all(client)
+            self.assertEqual(client.get("/api/aws-accounts").json().get("custom_categories", []), [])
+
     def test_grouping_rules(self):
         from app.aws import profiles
 

@@ -397,7 +397,7 @@
         lineNumbers: line => String(p.numbers[line - 1] ?? ""),
         lineNumbersMinChars: 4,
         scrollBeyondLastLine: false,
-        wordWrap: "off",
+        wordWrap: wrapOn() ? "on" : "off",
         fontSize: 13,
         lineHeight: 22,
         glyphMargin: false,
@@ -421,7 +421,12 @@
         const other = pane[side === "original" ? "modified" : "original"].editor;
         if (!state.syncing) {
           state.syncing = true;
-          other.setScrollTop(p.editor.getScrollTop());
+          // Wrapped lines differ in height between the sides, so keep the same top line instead of the same pixels.
+          if (wrapOn()) {
+            const line = p.editor.getVisibleRanges()[0]?.startLineNumber || 1;
+            const offset = p.editor.getScrollTop() - p.editor.getTopForLineNumber(line);
+            other.setScrollTop(other.getTopForLineNumber(line) + Math.max(0, offset));
+          } else other.setScrollTop(p.editor.getScrollTop());
           other.setScrollLeft(p.editor.getScrollLeft());
           state.syncing = false;
         }
@@ -499,6 +504,14 @@
     });
   }
 
+  // Word wrap for both sides together, remembered in this browser.
+  const WRAP_KEY = "owl-compare-wrap";
+  let wrap = null;
+  function wrapOn() {
+    if (wrap === null) { try { wrap = localStorage.getItem(WRAP_KEY) === "1"; } catch { wrap = false; } }
+    return wrap;
+  }
+
   // Start: a share link wins over the saved draft.
   async function start() {
     createEditors();
@@ -506,6 +519,12 @@
     bindRecent();
     document.querySelectorAll("[data-format]").forEach(button => button.addEventListener("click", () => formatSide(button.dataset.format)));
     $("#ignore-blank-lines").addEventListener("change", () => compare());
+    $("#word-wrap").checked = wrapOn();
+    $("#word-wrap").addEventListener("change", event => {
+      try { localStorage.setItem(WRAP_KEY, event.target.checked ? "1" : "0"); } catch { /* this page only */ }
+      wrap = event.target.checked;
+      for (const side of SIDES) pane[side].editor.updateOptions({wordWrap: wrap ? "on" : "off"});
+    });
     let saved = null;
     const token = new URLSearchParams(location.search).get("share");
     if (token) {

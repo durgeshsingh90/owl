@@ -163,30 +163,47 @@
     <button class="name" type="button" data-copy="${esc(item.profile)}" data-account="${esc(item.profile)}" data-label="Account name" title="Copy account name · ${esc(item.profile)}"><span class="text">${highlight(item.profile, query)}</span></button>
     <span class="env ${ENV_CLASS[item.env] || 'other'}">${esc(item.env)}</span>
     <button class="id" type="button" data-copy="${esc(item.account_id)}" data-account="${esc(item.profile)}" data-label="Account ID" title="Copy account ID"><span class="text">${highlight(String(item.account_id), query)}</span></button>
-    <span class="count-cell">${accountBadge(item.profile, item.account_id)}<button class="row-action" type="button" data-add-menu="${esc(item.profile)}" title="Add ${esc(item.profile)} to a project" aria-label="Add to a project">⊕</button>${project ? `<button class="row-action remove" type="button" data-remove="${esc(item.profile)}" data-project="${project.id}" title="Remove from ${esc(project.name)}" aria-label="Remove from project">×</button>` : ''}</span>
+    <span class="count-cell">${accountBadge(item.profile, item.account_id)}<button class="row-action" type="button" data-move-menu="${esc(item.profile)}" title="Move ${esc(item.profile)} to another category" aria-label="Move to another category">⇄</button><button class="row-action" type="button" data-add-menu="${esc(item.profile)}" title="Add ${esc(item.profile)} to a project" aria-label="Add to a project">⊕</button>${project ? `<button class="row-action remove" type="button" data-remove="${esc(item.profile)}" data-project="${project.id}" title="Remove from ${esc(project.name)}" aria-label="Remove from project">×</button>` : ''}</span>
   </div>`;
 
-  // Inside a category, accounts sit under their environment, each part opening and closing.
-  function envGroups(name, items, query, stars) {
-    const byEnv = new Map();
+  // Inside a category, accounts with the same name (x-prod, x-nonp, x-work) share one row;
+  // its + lists every environment of that name. A name with one account is a plain row.
+  const OPEN_NAMES_KEY = 'owl-aws-accounts-open-names';
+  let openNames = new Set();
+  try { openNames = new Set(JSON.parse(localStorage.getItem(OPEN_NAMES_KEY) || '[]')); } catch { /* per page only */ }
+  function nameGroups(name, items, query, stars) {
+    const byName = new Map();
     for (const item of items) {
-      if (!byEnv.has(item.env)) byEnv.set(item.env, []);
-      byEnv.get(item.env).push(item);
+      if (!byName.has(item.base)) byName.set(item.base, []);
+      byName.get(item.base).push(item);
     }
-    if (byEnv.size < 2 && !byEnv.has('') ) {
-      const [[env, list]] = [...byEnv];
-      return envBlock(name, env, list, query, stars);
-    }
-    return [...byEnv.keys()].sort(envSort).map(env => envBlock(name, env, byEnv.get(env), query, stars)).join('');
+    const bases = [...byName.keys()].sort((a, b) => a.localeCompare(b, undefined, {sensitivity: 'base', numeric: true}));
+    return `<div class="rows">${bases.map(base => {
+      const list = byName.get(base).slice().sort((a, b) => envSort(a.env, b.env));
+      if (list.length === 1) return row({...list[0], last: true}, query, null, stars);
+      const key = `${name}|${base}`;
+      // Searching opens the groups so the matching accounts show.
+      const open = Boolean(query) || openNames.has(key);
+      const count = list.reduce((sum, item) => sum + accountCount(item.profile, item.account_id), 0);
+      return `<div class="name-group${open ? ' open' : ''}">
+        <div class="row group-row" draggable="true" data-profiles="${esc(list.map(item => item.profile).join('\n'))}">
+          <button class="plus" type="button" data-open-name="${esc(key)}" aria-expanded="${open}" title="${open ? 'Hide' : 'Show'} the ${list.length} environments of ${esc(base)}" aria-label="${open ? 'Hide' : 'Show'} environments of ${esc(base)}">${open ? '−' : '+'}</button>
+          <button class="name base" type="button" data-open-name="${esc(key)}" title="${list.map(item => item.profile).join('\n')}"><span class="text">${highlight(base, query)}</span></button>
+          <span class="envs">${list.map(item => `<span class="env ${ENV_CLASS[item.env] || 'other'}">${esc(item.env || 'no env')}</span>`).join('')}</span>
+          <span class="count-cell">${count ? `<span class="copies" title="Copied ${count} time${count === 1 ? '' : 's'} across these accounts">⧉ ${short(count)}</span>` : ''}<button class="row-action" type="button" data-move-menu="${esc(list.map(item => item.profile).join('\n'))}" title="Move all ${list.length} ${esc(base)} accounts to another category" aria-label="Move these accounts to another category">⇄</button></span>
+        </div>
+        ${open ? `<div class="variants">${list.map(item => row({...item, last: true}, query, null, stars)).join('')}</div>` : ''}
+      </div>`;
+    }).join('')}</div>`;
   }
-  function envBlock(name, env, list, query, stars) {
-    const key = `${name}\u0000${env}`;
-    list = list.slice().sort((a, b) => a.profile.localeCompare(b.profile));
-    return `<details class="env-group" data-env-group="${esc(key)}" ${closedEnvs.has(key) ? '' : 'open'}>
-      <summary><span class="env ${ENV_CLASS[env] || 'other'}">${esc(env || 'no env')}</span><span class="count">${list.length} account${list.length === 1 ? '' : 's'}</span></summary>
-      <div class="rows">${list.map(item => row({...item, last: true}, query, null, stars)).join('')}</div>
-    </details>`;
-  }
+  document.addEventListener('click', event => {
+    const toggle = event.target.closest('[data-open-name]');
+    if (!toggle) return;
+    const key = toggle.dataset.openName;
+    openNames.has(key) ? openNames.delete(key) : openNames.add(key);
+    store(OPEN_NAMES_KEY, JSON.stringify([...openNames]));
+    render();
+  });
 
   function render() {
     const query = $('search').value.trim().toLowerCase();
@@ -228,7 +245,7 @@
     $('category-nav').innerHTML = navItem('', everything, 'All accounts', false) +
       [...matches].filter(([name]) => !name.startsWith(PROJECT)).map(([name, items]) => name === STARRED
         ? navItem(name, items.length, 'Starred accounts', true).replace('class="pinned', 'class="starred-nav pinned')
-        : `<div class="nav-group">${toggle(name)}${navItem(name, items.length, label(name), pinned.has(name))}</div>${envList(name, items)}`).join('');
+        : `<div class="nav-group">${toggle(name)}${navItem(name, items.length, label(name), pinned.has(name)).replace('<button ', `<button data-drop-category="${esc(name)}" `)}</div>${envList(name, items)}`).join('');
     const sections = [];
     let shown = 0;
     const filtering = Boolean(query) || envFilter !== 'all';
@@ -236,7 +253,7 @@
       if (selected && name !== selected) continue;
       const project = projectFor(name);
       // Empty projects stay visible as drop targets unless a search or filter is active.
-      if (!items.length && !(project && !filtering)) continue;
+      if (!items.length && !((project || isCustom(name)) && !filtering)) continue;
       if (!extra(name) || selected === name) shown += items.length;
       if (project) {
         sections.push({compact: !selected, html: `<section class="category project${!selected ? ' compact' : ''}" data-category="${esc(name)}" data-drop-project="${project.id}">
@@ -248,15 +265,16 @@
         </section>`});
         continue;
       }
-      if (!items.length) continue;
+      if (!items.length && !(isCustom(name) && !filtering)) continue;
       const isStarred = name === STARRED;
       const isPinned = isStarred || pinned.has(name);
       // Every category is a card in one column flow; one chosen category gets the full width.
       const compact = !selected;
-      sections.push({compact, html: `<section class="category${isPinned ? ' pinned' : ''}${isStarred ? ' starred' : ''}${compact ? ' compact' : ''}" data-category="${esc(name)}">
+      sections.push({compact, html: `<section class="category${isPinned ? ' pinned' : ''}${isStarred ? ' starred' : ''}${compact ? ' compact' : ''}" data-category="${esc(name)}"${isStarred ? '' : ` data-drop-category="${esc(name)}"`}>
         <header><h2>${isStarred ? '★ Starred accounts' : esc(label(name))}</h2><span class="count">${items.length} account${items.length === 1 ? '' : 's'}</span>
-          ${isStarred ? '' : `<button class="pin" type="button" data-pin="${esc(name)}" aria-pressed="${isPinned}" title="${isPinned ? 'Remove highlight from' : 'Highlight'} category ${esc(label(name))}">${isPinned ? '★' : '☆'}</button>`}</header>
-        ${isStarred ? `<div class="rows">${items.map((item, index) => row(item, query, items[index + 1], stars)).join('')}</div>` : envGroups(name, items, query, stars)}
+          ${isStarred ? '' : `<button class="pin" type="button" data-rename-category="${esc(name)}" title="Rename ${esc(label(name))}" aria-label="Rename ${esc(label(name))}">✎</button>${isCustom(name) ? `<button class="pin" type="button" data-delete-category="${esc(name)}" title="Delete ${esc(label(name))}; its accounts go back to their own categories" aria-label="Delete ${esc(label(name))}">🗑</button>` : ''}<button class="pin" type="button" data-pin="${esc(name)}" aria-pressed="${isPinned}" title="${isPinned ? 'Remove highlight from' : 'Highlight'} category ${esc(label(name))}">${isPinned ? '★' : '☆'}</button>`}
+          ${!items.length ? '<div class="drop-zone">Drag accounts here, or use ⇄ on any account row</div>' : ''}</header>
+        ${isStarred ? `<div class="rows">${items.map((item, index) => row(item, query, items[index + 1], stars)).join('')}</div>` : nameGroups(name, items, query, stars)}
       </section>`});
     }
     // Consecutive small categories share one row of boxes.
@@ -441,6 +459,95 @@
     }
   }
 
+  // Categories made by hand, and accounts moved between categories (all environments
+  // of a name move together). Saved by OWL, so they survive a new AWS config file.
+  const isCustom = name => (data?.custom_categories || []).some(item => item.toLowerCase() === String(name).toLowerCase());
+  const categoryOf = profile => Object.keys(data?.categories || {}).find(name => data.categories[name].some(account => account.profile === profile));
+  let categoryRename = null, categoryProfiles = null;
+  function openCategoryDialog(rename = null, profiles = null) {
+    categoryRename = rename; categoryProfiles = profiles;
+    $('category-dialog-title').textContent = rename ? 'Rename category' : 'New category';
+    $('category-save').textContent = rename ? 'Save' : profiles ? 'Create and move' : 'Create category';
+    $('category-name').value = rename ? label(rename) : '';
+    $('category-dialog-note').textContent = profiles ? `${profiles.length === 1 ? profiles[0] : `${profiles.length} accounts`} will move to the new category.` : rename && !isCustom(rename) ? 'The accounts in it keep the new name, even when the AWS config file changes.' : '';
+    $('category-dialog-note').hidden = !$('category-dialog-note').textContent;
+    $('category-error').hidden = true;
+    $('category-dialog').showModal();
+    $('category-name').select();
+  }
+  $('category-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const name = $('category-name').value.trim().replace(/\s+/g, ' ');
+    if (!name) return;
+    try {
+      if (categoryRename) {
+        await api(`/api/aws-accounts/categories/${encodeURIComponent(categoryRename)}`, {method:'PATCH', body:JSON.stringify({name})});
+        if (pinned.delete(categoryRename)) { pinned.add(name); store(PIN_KEY, JSON.stringify([...pinned])); }
+        if (selected === categoryRename) { selected = name; store(SELECTED_KEY, name); }
+        toast(`Renamed to ${name}`);
+      } else {
+        await api('/api/aws-accounts/categories', {method:'POST', body:JSON.stringify({name})});
+        if (categoryProfiles) await api('/api/aws-accounts/category-accounts', {method:'PUT', body:JSON.stringify({profiles: categoryProfiles, category: name})});
+        toast(`Created ${name}${categoryProfiles ? ` and moved ${categoryProfiles.length === 1 ? categoryProfiles[0] : `${categoryProfiles.length} accounts`}` : ''}`);
+      }
+      $('category-dialog').close();
+      await load();
+    } catch (failure) {
+      $('category-error').textContent = failure.message;
+      $('category-error').hidden = false;
+    }
+  });
+  document.querySelectorAll('[data-close-category]').forEach(button => button.addEventListener('click', () => $('category-dialog').close()));
+  async function moveTo(profiles, category) {
+    try {
+      await api('/api/aws-accounts/category-accounts', {method:'PUT', body:JSON.stringify({profiles, category})});
+      toast(category ? `Moved ${profiles.length === 1 ? profiles[0] : `${profiles.length} accounts`} to ${label(category)}` : `${profiles.length === 1 ? profiles[0] : `${profiles.length} accounts`} back in ${profiles.length === 1 ? 'its' : 'their'} own category`);
+      await load();
+    } catch (failure) { error(`Could not move: ${failure.message}`); }
+  }
+  async function deleteCategory(name) {
+    const count = data.categories[name]?.length || 0;
+    if (!confirm(`Delete category "${label(name)}"?${count ? ` Its ${count} account(s) go back to their own categories.` : ''}`)) return;
+    try {
+      await api(`/api/aws-accounts/categories/${encodeURIComponent(name)}`, {method:'DELETE'});
+      if (selected === name) { selected = null; store(SELECTED_KEY, null); }
+      toast(`Deleted ${label(name)}`);
+      await load();
+    } catch (failure) { error(`Could not delete ${label(name)}: ${failure.message}`); }
+  }
+  function openMoveMenu(anchor, profiles) {
+    const menu = $('project-menu');
+    const current = categoryOf(profiles[0]);
+    const moved = profiles.some(profile => data.category_overrides?.[profile]);
+    const names = Object.keys(data.categories).sort((a, b) => label(a).localeCompare(label(b)));
+    menu.innerHTML = `<div class="menu-title">Move ${esc(profiles.length === 1 ? profiles[0] : `${profiles.length} accounts`)} to</div>` +
+      names.map(name => `<button type="button" role="menuitem" data-move-to="${esc(name)}"${name === current ? ' disabled' : ''}>${esc(label(name))}${name === current ? ' <small>here now</small>' : isCustom(name) ? ' <small>yours</small>' : ''}</button>`).join('') +
+      (moved ? `<button type="button" role="menuitem" data-move-to="" class="menu-new">↺ Back to its own category</button>` : '') +
+      `<button type="button" role="menuitem" class="menu-new" data-move-to="@new">＋ New category…</button>`;
+    menu.dataset.profiles = profiles.join('\n');
+    menu.hidden = false;
+    const box = anchor.getBoundingClientRect();
+    menu.style.top = `${Math.min(box.bottom + 4, window.innerHeight - menu.offsetHeight - 8)}px`;
+    menu.style.left = `${Math.max(8, Math.min(box.right - menu.offsetWidth, window.innerWidth - menu.offsetWidth - 8))}px`;
+    menu.querySelector('button:not([disabled])')?.focus();
+  }
+  document.addEventListener('click', event => {
+    const move = event.target.closest('[data-move-menu]');
+    if (move) { event.stopPropagation(); return openMoveMenu(move, move.dataset.moveMenu.split('\n')); }
+    const target = event.target.closest('[data-move-to]');
+    if (target) {
+      const profiles = $('project-menu').dataset.profiles.split('\n');
+      closeMenu();
+      if (target.dataset.moveTo === '@new') return openCategoryDialog(null, profiles);
+      return moveTo(profiles, target.dataset.moveTo || null);
+    }
+    if (event.target.closest('#new-category')) return openCategoryDialog();
+    const rename = event.target.closest('[data-rename-category]');
+    if (rename) return openCategoryDialog(rename.dataset.renameCategory);
+    const remove = event.target.closest('[data-delete-category]');
+    if (remove) return deleteCategory(remove.dataset.deleteCategory);
+  }, true);
+
   // Projects: personal groupings of accounts. Accounts stay in their categories too.
   let dialogProject = null, dialogProfile = null;
   function openProjectDialog(project = null, profile = null) {
@@ -536,10 +643,11 @@
     dropTarget?.classList.add('drop-over');
   };
   document.addEventListener('dragstart', event => {
-    const source = event.target.closest?.('.row[data-profile]');
+    const source = event.target.closest?.('.row[data-profile],.row[data-profiles]');
     if (!source) return;
-    event.dataTransfer.setData(ACCOUNT_TYPE, source.dataset.profile);
-    event.dataTransfer.setData('text/plain', source.dataset.profile);
+    const dragged = source.dataset.profile || source.dataset.profiles;
+    event.dataTransfer.setData(ACCOUNT_TYPE, dragged);
+    event.dataTransfer.setData('text/plain', dragged.replace(/\n/g, ', '));
     event.dataTransfer.effectAllowed = 'copy';
     source.classList.add('dragging');
     document.body.classList.add('dragging-account');
@@ -552,21 +660,27 @@
   });
   document.addEventListener('dragover', event => {
     if (!isAccountDrag(event)) return;
-    const target = event.target.closest('[data-drop-project],[data-drop-new]');
+    const target = event.target.closest('[data-drop-project],[data-drop-new],[data-drop-category],[data-drop-new-category]');
     setDropTarget(target);
     if (target) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; }
   });
   document.addEventListener('drop', event => {
     if (!isAccountDrag(event)) return;
-    const target = event.target.closest('[data-drop-project],[data-drop-new]');
+    const target = event.target.closest('[data-drop-project],[data-drop-new],[data-drop-category],[data-drop-new-category]');
     setDropTarget(null);
     document.body.classList.remove('dragging-account');
     if (!target) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    const profile = event.dataTransfer.getData(ACCOUNT_TYPE);
-    if (target.dataset.dropNew !== undefined) openProjectDialog(null, profile);
-    else addToProject(Number(target.dataset.dropProject), profile);
+    const profiles = event.dataTransfer.getData(ACCOUNT_TYPE).split('\n');
+    // Onto a category: move (a name group moves all its environments). Onto a project: add.
+    if (target.dataset.dropNewCategory !== undefined) return openCategoryDialog(null, profiles);
+    if (target.dataset.dropCategory !== undefined) {
+      if (categoryOf(profiles[0]) === target.dataset.dropCategory) return;
+      return moveTo(profiles, target.dataset.dropCategory);
+    }
+    if (target.dataset.dropNew !== undefined) openProjectDialog(null, profiles[0]);
+    else for (const profile of profiles) addToProject(Number(target.dataset.dropProject), profile);
   }, true);
 
   function toast(message) {
