@@ -12,6 +12,10 @@ Draw.loadPlugin(function(ui)
 	var STORE = 'owl.patterns';
 	var TABS_HEIGHT = 36;
 	var sidebar = ui.sidebar;
+
+	// Counts this visit for OWL Home's Most used ordering.
+	fetch('/api/home/opened', {method: 'POST', headers: {'Content-Type': 'application/json'},
+		body: JSON.stringify({app: 'diagrams'})}).catch(function() {});
 	var container = sidebar.container;
 
 	function load(key, fallback)
