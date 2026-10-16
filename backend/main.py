@@ -182,6 +182,7 @@ for name in (
     "aws-accounts",
     "compare",
     "json-visualizer",
+    "drawio",
     "vendor",
 ):
     app.mount("/" + name, StaticFiles(directory=frontend / name, html=True), name=name)
