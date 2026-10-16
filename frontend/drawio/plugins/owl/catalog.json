@@ -1,0 +1,80 @@
+{
+  "about": "What Patterns mode offers. SAMPLE entries only: replace them with your approved data centers and the AWS and Azure resources your teams use. An item's shape is 'Group/Title' from shapes-aws.json or shapes-azure.json (run scripts/drawio_shape_index.js to rebuild those).",
+  "categories": [
+    {
+      "id": "datacenters",
+      "label": "Data Centers",
+      "library": "aws",
+      "items": [
+        { "id": "us-traditional", "label": "US Traditional", "shape": "Groups/Corporate data center", "w": 400, "h": 300 },
+        { "id": "us-central", "label": "US Central", "shape": "Groups/Corporate data center", "w": 400, "h": 300 }
+      ]
+    },
+    {
+      "id": "aws",
+      "label": "AWS",
+      "library": "aws",
+      "items": [
+        { "id": "account", "label": "AWS Account", "shape": "Groups/AWS Account", "w": 400, "h": 300 },
+        { "id": "region", "label": "Region", "shape": "Groups/Region", "w": 400, "h": 300 },
+        { "id": "vpc", "label": "VPC", "shape": "Groups/VPC", "w": 360, "h": 260 },
+        { "id": "az", "label": "Availability Zone", "shape": "Groups/Availability Zone", "w": 300, "h": 220 },
+        { "id": "private-subnet", "label": "Private subnet", "shape": "Groups/Private subnet", "w": 260, "h": 180 },
+        { "id": "public-subnet", "label": "Public subnet", "shape": "Groups/Public subnet", "w": 260, "h": 180 },
+        { "id": "security-group", "label": "Security group", "shape": "Groups/Security group", "w": 200, "h": 140 },
+        { "id": "nacl", "label": "Network ACL", "shape": "Network Content Delivery/Network Access Control List" },
+        { "id": "direct-connect", "label": "Direct Connect", "shape": "Network Content Delivery/Direct Connect" },
+        { "id": "transit-gateway", "label": "Transit Gateway", "shape": "Network Content Delivery/Transit Gateway" },
+        { "id": "privatelink", "label": "PrivateLink", "shape": "Network Content Delivery/PrivateLink" },
+        { "id": "vpc-endpoint", "label": "VPC Endpoint", "shape": "Network Content Delivery/Endpoint" },
+        { "id": "nlb", "label": "Network Load Balancer", "shape": "Network Content Delivery/Network Load Balancer" },
+        { "id": "alb", "label": "Application Load Balancer", "shape": "Network Content Delivery/Application Load Balancer" },
+        { "id": "nat-gateway", "label": "NAT Gateway", "shape": "Network Content Delivery/NAT Gateway" },
+        { "id": "route53", "label": "Route 53", "shape": "Network Content Delivery/Route 53" },
+        { "id": "route53-resolver", "label": "Route 53 Resolver", "shape": "Network Content Delivery/Route 53 Resolver" },
+        { "id": "api-gateway", "label": "API Gateway", "shape": "Application Integration/API Gateway" },
+        { "id": "eks", "label": "EKS", "shape": "Containers/Elastic Kubernetes Service" },
+        { "id": "ec2", "label": "EC2", "shape": "Compute/EC2" },
+        { "id": "lambda", "label": "Lambda", "shape": "Compute/Lambda" },
+        { "id": "rds", "label": "RDS", "shape": "Database/RDS" },
+        { "id": "s3", "label": "S3", "shape": "Storage/Simple Storage Service (S3)" },
+        { "id": "kms", "label": "KMS", "shape": "Security Identity Compliance/Key Management Service" },
+        { "id": "secrets-manager", "label": "Secrets Manager", "shape": "Security Identity Compliance/Secrets Manager" },
+        { "id": "waf", "label": "WAF", "shape": "Security Identity Compliance/WAF" },
+        { "id": "network-firewall", "label": "Network Firewall", "shape": "Security Identity Compliance/Network Firewall" },
+        { "id": "cloudwatch", "label": "CloudWatch", "shape": "Management Governance/CloudWatch" }
+      ]
+    },
+    {
+      "id": "azure",
+      "label": "Azure",
+      "library": "azure",
+      "items": [
+        { "id": "subscription", "label": "Subscription", "shape": "General/Subscriptions" },
+        { "id": "resource-group", "label": "Resource Group", "shape": "General/Resource Groups" },
+        { "id": "vnet", "label": "Virtual Network", "shape": "Networking/Virtual Networks" },
+        { "id": "subnet", "label": "Subnet", "shape": "Networking/Subnet" },
+        { "id": "nsg", "label": "Network Security Group", "shape": "Networking/Network Security Groups" },
+        { "id": "expressroute", "label": "ExpressRoute", "shape": "Networking/ExpressRoute Circuits" },
+        { "id": "vpn-gateway", "label": "Virtual Network Gateway", "shape": "Networking/Virtual Network Gateways" },
+        { "id": "private-endpoint", "label": "Private Endpoint", "shape": "Networking/Private Endpoint" },
+        { "id": "private-link", "label": "Private Link", "shape": "Networking/Private Link" },
+        { "id": "firewall", "label": "Azure Firewall", "shape": "Networking/Firewalls" },
+        { "id": "app-gateway", "label": "Application Gateway", "shape": "Networking/Application Gateways" },
+        { "id": "load-balancer", "label": "Load Balancer", "shape": "Networking/Load Balancers" },
+        { "id": "front-door", "label": "Front Door", "shape": "Networking/Front Doors" },
+        { "id": "private-dns", "label": "DNS Private Resolver", "shape": "Networking/DNS Private Resolver" },
+        { "id": "apim", "label": "API Management", "shape": "Integration/API Management Services" },
+        { "id": "aks", "label": "AKS", "shape": "Containers/Kubernetes Services" },
+        { "id": "vm", "label": "Virtual Machine", "shape": "Compute/Virtual Machine" },
+        { "id": "storage", "label": "Storage Account", "shape": "Storage/Storage Accounts" },
+        { "id": "sql", "label": "SQL Database", "shape": "Databases/SQL Database" },
+        { "id": "key-vault", "label": "Key Vault", "shape": "Security/Key Vaults" },
+        { "id": "entra", "label": "Entra Managed Identities", "shape": "Identity/Entra Managed Identities" },
+        { "id": "databricks", "label": "Databricks", "shape": "Analytics/Databricks" },
+        { "id": "log-analytics", "label": "Log Analytics", "shape": "Monitor/Log Analytics Workspaces" },
+        { "id": "monitor", "label": "Monitor", "shape": "Monitor/Monitor" }
+      ]
+    }
+  ]
+}
