@@ -256,5 +256,3 @@ __marimo__/
 backend/data/
 backend/config.ini
 
-# draw.io editor (vendored in frontend/drawio): its shape icons live in img/lib
-!frontend/drawio/img/lib/
