@@ -250,3 +250,35 @@ Open `/network-automation/` from OWL Home to track `.json` and README files. It 
 The PDF explorer checks for a scheduled pull every minute while OWL is running. The next regular run is three Monday–Friday days after a completed scheduled pull (weekdays counted in UTC). On first setup it uses the last completed pull date, or waits three weekdays if no pull exists. Each automatic attempt tests the configured connection before starting. Failed connection checks, partial failures, interrupted jobs and cancellations retry after two hours until a complete success. The schedule and current job are stored in SQLite, survive restart, and never overlap an active manual pull. There is no scheduler for NAAS in this change.
 
 Scheduled pulls update progress quietly and do not reload the document table or change the current selection. Refresh after completion to see newly indexed records. Both manual and scheduled Bitbucket pulls now test the connection first. NAAS and Bitbucket imports accept HTTPS clone URLs such as `/stash/scm/KEY/repository.git`, converting them to the same-server browser repository address without creating a local checkout.
+
+## Architecture Analyser
+
+`/architecture/` checks a project's AWS connectivity against its requirements and
+explains every PASS, FAIL, WARNING and UNKNOWN with evidence. Code: `app/architecture/`
+(models, normalizer, engine, store, download) and `app/api/architecture.py`.
+
+Data lives beside the database (`backend/data/`):
+
+- `architecture/projects/*.json`: a project, its environments → accounts, `aws_accounts`
+  (the only accounts a refresh downloads, with type, regions and optional profile),
+  applications with per-environment placement, and connectivity requirements.
+- `architecture/services/*.json`, `architecture/external/*.json`: shared/central services
+  and on-premises/third-party systems used by every project.
+- `architecture/rules/*.json`: standards; they add to or override `app/architecture/rules/`.
+- `architecture/snapshots/<id>/`: normalized inventories the analysis runs on.
+- `media/aws/<account>/<region>/<service>.json`: raw AWS output shared by all projects
+  (override with `OWL_MEDIA_DIR`).
+
+**Project setup** (in the app) picks the accounts from the AWS config, maps environments,
+places applications on real subnets and security groups, and describes flows. A flow is
+either source → destination (the route is found) or **hop by hop**: every resource is
+picked (the exact NAT gateway, VPC endpoint, endpoint service, NLB, EKS cluster, TGW,
+firewall, subnet, VPC) and each link is checked: routing passes through the chosen
+gateways, PrivateLink endpoint ↔ service ↔ NLB, NLB listener → target group → healthy
+targets inside the cluster, and security groups and NACLs on both ends. A hop's `port`
+sets the port from that hop on (NLB 443 → pods 8443).
+
+The refresh button downloads a project's accounts with boto3 using the AWS config file
+the AWS Accounts app reads; only describe/list/get calls are made. Profiles that use
+`aws login` need `boto3[crt]` (in requirements). AWS JSON can also be imported from
+the Import page. The first run adds a sample Payment Platform project and snapshot.

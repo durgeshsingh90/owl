@@ -1,0 +1,19 @@
+{
+  "Account": {
+    "Id": "222222222222",
+    "Name": "payments-prod",
+    "Type": "application",
+    "Region": "eu-west-2",
+    "Environments": [
+      "MTF",
+      "PROD"
+    ],
+    "Tags": [
+      {
+        "Key": "owl:account:type",
+        "Value": "application"
+      }
+    ]
+  },
+  "Region": "eu-west-2"
+}

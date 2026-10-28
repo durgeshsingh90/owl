@@ -1,0 +1,263 @@
+{
+  "TransitGateways": [
+    {
+      "TransitGatewayId": "tgw-0central0000001",
+      "OwnerId": "666666666666",
+      "State": "available",
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "central-tgw"
+        }
+      ]
+    }
+  ],
+  "TransitGatewayAttachments": [
+    {
+      "TransitGatewayAttachmentId": "tgw-attach-0nonprod",
+      "TransitGatewayId": "tgw-0central0000001",
+      "ResourceType": "vpc",
+      "ResourceId": "vpc-0a11",
+      "ResourceOwnerId": "111111111111",
+      "State": "available",
+      "SubnetIds": [
+        "subnet-0a11tgw-a"
+      ]
+    },
+    {
+      "TransitGatewayAttachmentId": "tgw-attach-0prod",
+      "TransitGatewayId": "tgw-0central0000001",
+      "ResourceType": "vpc",
+      "ResourceId": "vpc-0b22",
+      "ResourceOwnerId": "222222222222",
+      "State": "available",
+      "SubnetIds": [
+        "subnet-0b22tgw-a"
+      ]
+    },
+    {
+      "TransitGatewayAttachmentId": "tgw-attach-0shared",
+      "TransitGatewayId": "tgw-0central0000001",
+      "ResourceType": "vpc",
+      "ResourceId": "vpc-0c33",
+      "ResourceOwnerId": "333333333333",
+      "State": "available",
+      "SubnetIds": [
+        "subnet-0c33tgw-a"
+      ]
+    },
+    {
+      "TransitGatewayAttachmentId": "tgw-attach-0ingress",
+      "TransitGatewayId": "tgw-0central0000001",
+      "ResourceType": "vpc",
+      "ResourceId": "vpc-0d44",
+      "ResourceOwnerId": "444444444444",
+      "State": "available",
+      "SubnetIds": [
+        "subnet-0d44tgw-a"
+      ]
+    },
+    {
+      "TransitGatewayAttachmentId": "tgw-attach-0egress",
+      "TransitGatewayId": "tgw-0central0000001",
+      "ResourceType": "vpc",
+      "ResourceId": "vpc-0e55",
+      "ResourceOwnerId": "555555555555",
+      "State": "available",
+      "SubnetIds": [
+        "subnet-0e55tgw-a"
+      ]
+    },
+    {
+      "TransitGatewayAttachmentId": "tgw-attach-0dx",
+      "TransitGatewayId": "tgw-0central0000001",
+      "ResourceType": "direct-connect-gateway",
+      "ResourceId": "dxgw-0corp",
+      "ResourceOwnerId": "666666666666",
+      "State": "available",
+      "SubnetIds": []
+    },
+    {
+      "TransitGatewayAttachmentId": "tgw-attach-0secure",
+      "TransitGatewayId": "tgw-0central0000001",
+      "ResourceType": "vpc",
+      "ResourceId": "vpc-0f88",
+      "ResourceOwnerId": "888888888888",
+      "State": "available",
+      "SubnetIds": [
+        "subnet-0f88tgw-a"
+      ]
+    }
+  ],
+  "TransitGatewayRouteTables": [
+    {
+      "TransitGatewayRouteTableId": "tgw-rtb-0spoke",
+      "TransitGatewayId": "tgw-0central0000001",
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "spoke"
+        }
+      ],
+      "Associations": [
+        {
+          "TransitGatewayAttachmentId": "tgw-attach-0nonprod"
+        },
+        {
+          "TransitGatewayAttachmentId": "tgw-attach-0prod"
+        }
+      ],
+      "Routes": [
+        {
+          "DestinationCidrBlock": "0.0.0.0/0",
+          "Type": "static",
+          "State": "active",
+          "TransitGatewayAttachments": [
+            {
+              "TransitGatewayAttachmentId": "tgw-attach-0egress"
+            }
+          ]
+        },
+        {
+          "DestinationCidrBlock": "10.30.0.0/16",
+          "Type": "static",
+          "State": "active",
+          "TransitGatewayAttachments": [
+            {
+              "TransitGatewayAttachmentId": "tgw-attach-0shared"
+            }
+          ]
+        },
+        {
+          "DestinationCidrBlock": "10.40.0.0/16",
+          "Type": "static",
+          "State": "active",
+          "TransitGatewayAttachments": [
+            {
+              "TransitGatewayAttachmentId": "tgw-attach-0ingress"
+            }
+          ]
+        },
+        {
+          "DestinationCidrBlock": "10.100.0.0/16",
+          "Type": "static",
+          "State": "active",
+          "TransitGatewayAttachments": [
+            {
+              "TransitGatewayAttachmentId": "tgw-attach-0dx"
+            }
+          ]
+        },
+        {
+          "DestinationCidrBlock": "10.101.0.0/16",
+          "Type": "static",
+          "State": "active",
+          "TransitGatewayAttachments": [
+            {
+              "TransitGatewayAttachmentId": "tgw-attach-0dx"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "TransitGatewayRouteTableId": "tgw-rtb-0central",
+      "TransitGatewayId": "tgw-0central0000001",
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "central"
+        }
+      ],
+      "Associations": [
+        {
+          "TransitGatewayAttachmentId": "tgw-attach-0shared"
+        },
+        {
+          "TransitGatewayAttachmentId": "tgw-attach-0ingress"
+        },
+        {
+          "TransitGatewayAttachmentId": "tgw-attach-0egress"
+        },
+        {
+          "TransitGatewayAttachmentId": "tgw-attach-0dx"
+        },
+        {
+          "TransitGatewayAttachmentId": "tgw-attach-0secure"
+        }
+      ],
+      "Routes": [
+        {
+          "DestinationCidrBlock": "10.10.0.0/16",
+          "Type": "propagated",
+          "State": "active",
+          "TransitGatewayAttachments": [
+            {
+              "TransitGatewayAttachmentId": "tgw-attach-0nonprod"
+            }
+          ]
+        },
+        {
+          "DestinationCidrBlock": "10.20.0.0/16",
+          "Type": "propagated",
+          "State": "active",
+          "TransitGatewayAttachments": [
+            {
+              "TransitGatewayAttachmentId": "tgw-attach-0prod"
+            }
+          ]
+        },
+        {
+          "DestinationCidrBlock": "10.30.0.0/16",
+          "Type": "propagated",
+          "State": "active",
+          "TransitGatewayAttachments": [
+            {
+              "TransitGatewayAttachmentId": "tgw-attach-0shared"
+            }
+          ]
+        },
+        {
+          "DestinationCidrBlock": "10.40.0.0/16",
+          "Type": "propagated",
+          "State": "active",
+          "TransitGatewayAttachments": [
+            {
+              "TransitGatewayAttachmentId": "tgw-attach-0ingress"
+            }
+          ]
+        },
+        {
+          "DestinationCidrBlock": "10.60.0.0/16",
+          "Type": "propagated",
+          "State": "active",
+          "TransitGatewayAttachments": [
+            {
+              "TransitGatewayAttachmentId": "tgw-attach-0secure"
+            }
+          ]
+        },
+        {
+          "DestinationCidrBlock": "10.100.0.0/16",
+          "Type": "propagated",
+          "State": "active",
+          "TransitGatewayAttachments": [
+            {
+              "TransitGatewayAttachmentId": "tgw-attach-0dx"
+            }
+          ]
+        },
+        {
+          "DestinationCidrBlock": "10.101.0.0/16",
+          "Type": "propagated",
+          "State": "active",
+          "TransitGatewayAttachments": [
+            {
+              "TransitGatewayAttachmentId": "tgw-attach-0dx"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

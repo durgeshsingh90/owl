@@ -1,0 +1,181 @@
+{
+  "Vpcs": [
+    {
+      "VpcId": "vpc-0f88",
+      "CidrBlock": "10.60.0.0/16",
+      "OwnerId": "888888888888",
+      "State": "available",
+      "CidrBlockAssociationSet": [
+        {
+          "CidrBlock": "10.60.0.0/16",
+          "CidrBlockState": {
+            "State": "associated"
+          }
+        }
+      ],
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "secure-access"
+        }
+      ]
+    }
+  ],
+  "Subnets": [
+    {
+      "SubnetId": "subnet-0f88pam-a",
+      "VpcId": "vpc-0f88",
+      "CidrBlock": "10.60.1.0/24",
+      "OwnerId": "888888888888",
+      "AvailabilityZone": "eu-west-2a",
+      "MapPublicIpOnLaunch": false,
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "secure-access-gw-a"
+        }
+      ]
+    },
+    {
+      "SubnetId": "subnet-0f88tgw-a",
+      "VpcId": "vpc-0f88",
+      "CidrBlock": "10.60.255.0/28",
+      "OwnerId": "888888888888",
+      "AvailabilityZone": "eu-west-2a",
+      "MapPublicIpOnLaunch": false,
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "secure-access-tgw-a"
+        }
+      ]
+    }
+  ],
+  "RouteTables": [
+    {
+      "RouteTableId": "rtb-0f88gw",
+      "VpcId": "vpc-0f88",
+      "OwnerId": "888888888888",
+      "Associations": [
+        {
+          "RouteTableAssociationId": "rtbassoc-0f88gw0",
+          "SubnetId": "subnet-0f88pam-a",
+          "Main": false
+        }
+      ],
+      "Routes": [
+        {
+          "DestinationCidrBlock": "10.60.0.0/16",
+          "GatewayId": "local",
+          "State": "active"
+        },
+        {
+          "DestinationCidrBlock": "10.0.0.0/8",
+          "TransitGatewayId": "tgw-0central0000001",
+          "State": "active"
+        }
+      ]
+    },
+    {
+      "RouteTableId": "rtb-0f88main",
+      "VpcId": "vpc-0f88",
+      "OwnerId": "888888888888",
+      "Associations": [
+        {
+          "RouteTableAssociationId": "rtbassoc-0f88main0",
+          "SubnetId": "subnet-0f88tgw-a",
+          "Main": false
+        },
+        {
+          "RouteTableAssociationId": "rtbassoc-0f88mainm",
+          "Main": true
+        }
+      ],
+      "Routes": [
+        {
+          "DestinationCidrBlock": "10.60.0.0/16",
+          "GatewayId": "local",
+          "State": "active"
+        }
+      ]
+    }
+  ],
+  "SecurityGroups": [
+    {
+      "GroupId": "sg-0f88gw",
+      "GroupName": "secure-access-gateway",
+      "VpcId": "vpc-0f88",
+      "OwnerId": "888888888888",
+      "IpPermissions": [
+        {
+          "IpProtocol": "tcp",
+          "IpRanges": [
+            {
+              "CidrIp": "10.30.20.0/23"
+            }
+          ],
+          "UserIdGroupPairs": [],
+          "FromPort": 443,
+          "ToPort": 443
+        }
+      ],
+      "IpPermissionsEgress": [
+        {
+          "IpProtocol": "-1",
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "UserIdGroupPairs": []
+        }
+      ]
+    }
+  ],
+  "NetworkAcls": [
+    {
+      "NetworkAclId": "acl-0f88",
+      "VpcId": "vpc-0f88",
+      "OwnerId": "888888888888",
+      "IsDefault": true,
+      "Associations": [
+        {
+          "SubnetId": "subnet-0f88pam-a"
+        },
+        {
+          "SubnetId": "subnet-0f88tgw-a"
+        }
+      ],
+      "Entries": [
+        {
+          "RuleNumber": 100,
+          "Protocol": "-1",
+          "RuleAction": "allow",
+          "Egress": false,
+          "CidrBlock": "0.0.0.0/0"
+        },
+        {
+          "RuleNumber": 32767,
+          "Protocol": "-1",
+          "RuleAction": "deny",
+          "Egress": false,
+          "CidrBlock": "0.0.0.0/0"
+        },
+        {
+          "RuleNumber": 100,
+          "Protocol": "-1",
+          "RuleAction": "allow",
+          "Egress": true,
+          "CidrBlock": "0.0.0.0/0"
+        },
+        {
+          "RuleNumber": 32767,
+          "Protocol": "-1",
+          "RuleAction": "deny",
+          "Egress": true,
+          "CidrBlock": "0.0.0.0/0"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+[
+  {
+    "id": "OUTBOUND-CENTRAL-EGRESS",
+    "name": "Production outbound traffic must use Central Egress",
+    "description": "Internet-bound traffic from MTF and PROD goes through the transit gateway to Central Egress, where Network Firewall inspects it before NAT.",
+    "type": "connectivity",
+    "severity": "critical",
+    "direction": "outbound",
+    "conditions": {"environment": ["PROD", "MTF"], "destination_type": ["third-party"]},
+    "required_path": ["application", "tgw", "central-egress", "firewall", "internet"]
+  },
+  {
+    "id": "NO-DIRECT-INTERNET",
+    "name": "Application VPCs must not reach the internet directly",
+    "description": "Application VPCs have no route to their own internet gateway; all internet traffic uses Central Egress or Central Ingress.",
+    "type": "connectivity",
+    "severity": "critical",
+    "conditions": {"source_kind": ["application"]},
+    "forbidden_path": ["internet-gateway@application"]
+  },
+  {
+    "id": "INBOUND-CENTRAL-INGRESS",
+    "name": "Inbound traffic enters through Central Ingress and a load balancer",
+    "description": "Requests reach applications from Central Ingress over the transit gateway and through the application's load balancer.",
+    "type": "connectivity",
+    "severity": "high",
+    "direction": "inbound",
+    "conditions": {"destination_type": ["aws"]},
+    "required_path": ["central-ingress", "tgw", "load-balancer", "application"]
+  },
+  {
+    "id": "ONPREM-VIA-DIRECT-CONNECT",
+    "name": "On-premises traffic uses the transit gateway and Direct Connect",
+    "description": "Traffic to on-premises networks routes through the central transit gateway to Direct Connect; no VPN or VGW per account.",
+    "type": "connectivity",
+    "severity": "high",
+    "conditions": {"destination_type": ["on-prem"]},
+    "required_path": ["application", "tgw", "direct-connect"]
+  }
+]

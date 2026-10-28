@@ -1,0 +1,8 @@
+[
+  {"id": "central-ingress", "name": "Central Ingress", "kind": "central-ingress", "description": "Internet-facing WAF and reverse proxy fleet; forwards to application load balancers over the transit gateway.",
+   "placement": {"*": {"account": "444444444444", "vpc": "vpc-0d44", "subnets": ["subnet-0d44proxy-a"], "security_groups": ["sg-0d44proxy"]}}},
+  {"id": "central-egress", "name": "Central Egress", "kind": "central-egress", "description": "Inspected internet egress: Network Firewall, then NAT.",
+   "placement": {"*": {"account": "555555555555", "vpc": "vpc-0e55", "subnets": ["subnet-0e55tgw-a"]}}},
+  {"id": "central-network", "name": "Central Network", "kind": "central-network", "description": "Transit gateway and Direct Connect to the corporate data centre.",
+   "placement": {"*": {"account": "666666666666"}}}
+]

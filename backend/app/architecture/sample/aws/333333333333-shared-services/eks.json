@@ -1,0 +1,22 @@
+{
+  "Region": "eu-west-2",
+  "Clusters": [
+    {
+      "name": "risk-engine",
+      "arn": "arn:aws:eks:eu-west-2:333333333333:cluster/risk-engine",
+      "version": "1.31",
+      "status": "ACTIVE",
+      "resourcesVpcConfig": {
+        "vpcId": "vpc-0c33",
+        "subnetIds": [
+          "subnet-0c33eks-a",
+          "subnet-0c33eks-b"
+        ],
+        "securityGroupIds": [],
+        "clusterSecurityGroupId": "sg-0c33eks",
+        "endpointPublicAccess": false,
+        "endpointPrivateAccess": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "LoadBalancers": [
+    {
+      "LoadBalancerArn": "arn:aws:elasticloadbalancing:eu-west-2:333333333333:loadbalancer/net/risk-nlb/6a8f2c1d9e0b3a47",
+      "LoadBalancerName": "risk-nlb",
+      "Type": "network",
+      "Scheme": "internal",
+      "VpcId": "vpc-0c33",
+      "AvailabilityZones": [
+        {
+          "ZoneName": "eu-west-2a",
+          "SubnetId": "subnet-0c33nlb-a"
+        }
+      ]
+    }
+  ],
+  "Listeners": [
+    {
+      "ListenerArn": "arn:aws:elasticloadbalancing:eu-west-2:333333333333:listener/net/risk-nlb/6a8f2c1d9e0b3a47/443",
+      "LoadBalancerArn": "arn:aws:elasticloadbalancing:eu-west-2:333333333333:loadbalancer/net/risk-nlb/6a8f2c1d9e0b3a47",
+      "Port": 443,
+      "Protocol": "TLS",
+      "DefaultActions": [
+        {
+          "Type": "forward",
+          "TargetGroupArn": "arn:aws:elasticloadbalancing:eu-west-2:333333333333:targetgroup/risk-engine-pods/0c1e9a7b5d3f2e18"
+        }
+      ]
+    }
+  ],
+  "TargetGroups": [
+    {
+      "TargetGroupArn": "arn:aws:elasticloadbalancing:eu-west-2:333333333333:targetgroup/risk-engine-pods/0c1e9a7b5d3f2e18",
+      "TargetGroupName": "risk-engine-pods",
+      "Protocol": "TCP",
+      "Port": 8443,
+      "VpcId": "vpc-0c33",
+      "TargetType": "ip",
+      "LoadBalancerArns": [
+        "arn:aws:elasticloadbalancing:eu-west-2:333333333333:loadbalancer/net/risk-nlb/6a8f2c1d9e0b3a47"
+      ],
+      "TargetHealthDescriptions": [
+        {
+          "Target": {
+            "Id": "10.30.20.15",
+            "Port": 8443
+          },
+          "TargetHealth": {
+            "State": "healthy"
+          }
+        },
+        {
+          "Target": {
+            "Id": "10.30.21.16",
+            "Port": 8443
+          },
+          "TargetHealth": {
+            "State": "healthy"
+          }
+        }
+      ]
+    }
+  ]
+}

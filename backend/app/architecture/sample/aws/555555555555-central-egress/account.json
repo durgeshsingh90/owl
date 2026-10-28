@@ -1,0 +1,16 @@
+{
+  "Account": {
+    "Id": "555555555555",
+    "Name": "central-egress",
+    "Type": "central-egress",
+    "Region": "eu-west-2",
+    "Environments": [],
+    "Tags": [
+      {
+        "Key": "owl:account:type",
+        "Value": "central-egress"
+      }
+    ]
+  },
+  "Region": "eu-west-2"
+}

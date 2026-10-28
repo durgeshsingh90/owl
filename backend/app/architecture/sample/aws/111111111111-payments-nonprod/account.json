@@ -1,0 +1,19 @@
+{
+  "Account": {
+    "Id": "111111111111",
+    "Name": "payments-nonprod",
+    "Type": "application",
+    "Region": "eu-west-2",
+    "Environments": [
+      "DEV",
+      "STAGE"
+    ],
+    "Tags": [
+      {
+        "Key": "owl:account:type",
+        "Value": "application"
+      }
+    ]
+  },
+  "Region": "eu-west-2"
+}

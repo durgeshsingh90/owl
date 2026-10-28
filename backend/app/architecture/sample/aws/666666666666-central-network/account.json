@@ -1,0 +1,16 @@
+{
+  "Account": {
+    "Id": "666666666666",
+    "Name": "central-network",
+    "Type": "central-network",
+    "Region": "eu-west-2",
+    "Environments": [],
+    "Tags": [
+      {
+        "Key": "owl:account:type",
+        "Value": "central-network"
+      }
+    ]
+  },
+  "Region": "eu-west-2"
+}

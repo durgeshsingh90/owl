@@ -1,0 +1,290 @@
+{
+  "Vpcs": [
+    {
+      "VpcId": "vpc-0a11",
+      "CidrBlock": "10.10.0.0/16",
+      "OwnerId": "111111111111",
+      "State": "available",
+      "CidrBlockAssociationSet": [
+        {
+          "CidrBlock": "10.10.0.0/16",
+          "CidrBlockState": {
+            "State": "associated"
+          }
+        }
+      ],
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "payments-nonprod"
+        }
+      ]
+    }
+  ],
+  "VpcAttributes": [
+    {
+      "VpcId": "vpc-0a11",
+      "EnableDnsSupport": {
+        "Value": true
+      },
+      "EnableDnsHostnames": {
+        "Value": true
+      }
+    }
+  ],
+  "Subnets": [
+    {
+      "SubnetId": "subnet-0a11dev-a",
+      "VpcId": "vpc-0a11",
+      "CidrBlock": "10.10.10.0/24",
+      "OwnerId": "111111111111",
+      "AvailabilityZone": "eu-west-2a",
+      "MapPublicIpOnLaunch": false,
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "dev-app-a"
+        }
+      ]
+    },
+    {
+      "SubnetId": "subnet-0a11stg-a",
+      "VpcId": "vpc-0a11",
+      "CidrBlock": "10.10.20.0/24",
+      "OwnerId": "111111111111",
+      "AvailabilityZone": "eu-west-2a",
+      "MapPublicIpOnLaunch": false,
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "stage-app-a"
+        }
+      ]
+    },
+    {
+      "SubnetId": "subnet-0a11lb-a",
+      "VpcId": "vpc-0a11",
+      "CidrBlock": "10.10.1.0/24",
+      "OwnerId": "111111111111",
+      "AvailabilityZone": "eu-west-2a",
+      "MapPublicIpOnLaunch": false,
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "nonprod-lb-a"
+        }
+      ]
+    },
+    {
+      "SubnetId": "subnet-0a11tgw-a",
+      "VpcId": "vpc-0a11",
+      "CidrBlock": "10.10.255.0/28",
+      "OwnerId": "111111111111",
+      "AvailabilityZone": "eu-west-2a",
+      "MapPublicIpOnLaunch": false,
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "nonprod-tgw-a"
+        }
+      ]
+    }
+  ],
+  "RouteTables": [
+    {
+      "RouteTableId": "rtb-0a11app",
+      "VpcId": "vpc-0a11",
+      "OwnerId": "111111111111",
+      "Associations": [
+        {
+          "RouteTableAssociationId": "rtbassoc-0a11app0",
+          "SubnetId": "subnet-0a11dev-a",
+          "Main": false
+        },
+        {
+          "RouteTableAssociationId": "rtbassoc-0a11app1",
+          "SubnetId": "subnet-0a11stg-a",
+          "Main": false
+        },
+        {
+          "RouteTableAssociationId": "rtbassoc-0a11app2",
+          "SubnetId": "subnet-0a11lb-a",
+          "Main": false
+        }
+      ],
+      "Routes": [
+        {
+          "DestinationCidrBlock": "10.10.0.0/16",
+          "GatewayId": "local",
+          "State": "active"
+        },
+        {
+          "DestinationCidrBlock": "0.0.0.0/0",
+          "TransitGatewayId": "tgw-0central0000001",
+          "State": "active"
+        }
+      ]
+    },
+    {
+      "RouteTableId": "rtb-0a11main",
+      "VpcId": "vpc-0a11",
+      "OwnerId": "111111111111",
+      "Associations": [
+        {
+          "RouteTableAssociationId": "rtbassoc-0a11main0",
+          "SubnetId": "subnet-0a11tgw-a",
+          "Main": false
+        },
+        {
+          "RouteTableAssociationId": "rtbassoc-0a11mainm",
+          "Main": true
+        }
+      ],
+      "Routes": [
+        {
+          "DestinationCidrBlock": "10.10.0.0/16",
+          "GatewayId": "local",
+          "State": "active"
+        }
+      ]
+    }
+  ],
+  "SecurityGroups": [
+    {
+      "GroupId": "sg-0a11app",
+      "GroupName": "payment-api-nonprod",
+      "VpcId": "vpc-0a11",
+      "OwnerId": "111111111111",
+      "IpPermissions": [
+        {
+          "IpProtocol": "tcp",
+          "IpRanges": [],
+          "UserIdGroupPairs": [
+            {
+              "GroupId": "sg-0a11lb"
+            }
+          ],
+          "FromPort": 8080,
+          "ToPort": 8080
+        }
+      ],
+      "IpPermissionsEgress": [
+        {
+          "IpProtocol": "tcp",
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "UserIdGroupPairs": [],
+          "FromPort": 443,
+          "ToPort": 443
+        },
+        {
+          "IpProtocol": "tcp",
+          "IpRanges": [
+            {
+              "CidrIp": "10.100.0.0/15"
+            }
+          ],
+          "UserIdGroupPairs": [],
+          "FromPort": 8443,
+          "ToPort": 8443
+        },
+        {
+          "IpProtocol": "udp",
+          "IpRanges": [
+            {
+              "CidrIp": "10.0.0.0/8"
+            }
+          ],
+          "UserIdGroupPairs": [],
+          "FromPort": 53,
+          "ToPort": 53
+        }
+      ]
+    },
+    {
+      "GroupId": "sg-0a11lb",
+      "GroupName": "payments-nonprod-alb",
+      "VpcId": "vpc-0a11",
+      "OwnerId": "111111111111",
+      "IpPermissions": [
+        {
+          "IpProtocol": "tcp",
+          "IpRanges": [
+            {
+              "CidrIp": "10.40.0.0/16"
+            }
+          ],
+          "UserIdGroupPairs": [],
+          "FromPort": 1234,
+          "ToPort": 1234
+        }
+      ],
+      "IpPermissionsEgress": [
+        {
+          "IpProtocol": "-1",
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "UserIdGroupPairs": []
+        }
+      ]
+    }
+  ],
+  "NetworkAcls": [
+    {
+      "NetworkAclId": "acl-0a11",
+      "VpcId": "vpc-0a11",
+      "OwnerId": "111111111111",
+      "IsDefault": true,
+      "Associations": [
+        {
+          "SubnetId": "subnet-0a11dev-a"
+        },
+        {
+          "SubnetId": "subnet-0a11stg-a"
+        },
+        {
+          "SubnetId": "subnet-0a11lb-a"
+        },
+        {
+          "SubnetId": "subnet-0a11tgw-a"
+        }
+      ],
+      "Entries": [
+        {
+          "RuleNumber": 100,
+          "Protocol": "-1",
+          "RuleAction": "allow",
+          "Egress": false,
+          "CidrBlock": "0.0.0.0/0"
+        },
+        {
+          "RuleNumber": 32767,
+          "Protocol": "-1",
+          "RuleAction": "deny",
+          "Egress": false,
+          "CidrBlock": "0.0.0.0/0"
+        },
+        {
+          "RuleNumber": 100,
+          "Protocol": "-1",
+          "RuleAction": "allow",
+          "Egress": true,
+          "CidrBlock": "0.0.0.0/0"
+        },
+        {
+          "RuleNumber": 32767,
+          "Protocol": "-1",
+          "RuleAction": "deny",
+          "Egress": true,
+          "CidrBlock": "0.0.0.0/0"
+        }
+      ]
+    }
+  ]
+}

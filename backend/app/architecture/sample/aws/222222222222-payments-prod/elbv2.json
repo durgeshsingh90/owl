@@ -1,0 +1,88 @@
+{
+  "LoadBalancers": [
+    {
+      "LoadBalancerArn": "arn:aws:elasticloadbalancing:eu-west-2:222222222222:loadbalancer/app/payments-prod-alb/50dc6c495c0c9188",
+      "LoadBalancerName": "payments-prod-alb",
+      "Type": "application",
+      "Scheme": "internal",
+      "VpcId": "vpc-0b22",
+      "DNSName": "internal-payments-prod-alb-123.eu-west-2.elb.amazonaws.com",
+      "AvailabilityZones": [
+        {
+          "ZoneName": "eu-west-2a",
+          "SubnetId": "subnet-0b22lb-a"
+        }
+      ],
+      "SecurityGroups": [
+        "sg-0b22lb"
+      ]
+    },
+    {
+      "LoadBalancerArn": "arn:aws:elasticloadbalancing:eu-west-2:222222222222:loadbalancer/app/payments-mtf-alb/50dc6c495c0c9188",
+      "LoadBalancerName": "payments-mtf-alb",
+      "Type": "application",
+      "Scheme": "internal",
+      "VpcId": "vpc-0b22",
+      "DNSName": "internal-payments-mtf-alb-123.eu-west-2.elb.amazonaws.com",
+      "AvailabilityZones": [
+        {
+          "ZoneName": "eu-west-2a",
+          "SubnetId": "subnet-0b22lbm-a"
+        }
+      ],
+      "SecurityGroups": [
+        "sg-0b22lbm"
+      ]
+    }
+  ],
+  "Listeners": [
+    {
+      "ListenerArn": "arn:aws:elasticloadbalancing:eu-west-2:222222222222:listener/app/payments-prod-alb/50dc6c495c0c9188/1234",
+      "LoadBalancerArn": "arn:aws:elasticloadbalancing:eu-west-2:222222222222:loadbalancer/app/payments-prod-alb/50dc6c495c0c9188",
+      "Port": 1234,
+      "Protocol": "HTTPS",
+      "DefaultActions": [
+        {
+          "Type": "forward",
+          "TargetGroupArn": "arn:aws:elasticloadbalancing:eu-west-2:222222222222:targetgroup/payment-api-prod/73e2d6bc24d8a067"
+        }
+      ]
+    },
+    {
+      "ListenerArn": "arn:aws:elasticloadbalancing:eu-west-2:222222222222:listener/app/payments-mtf-alb/50dc6c495c0c9188/1234",
+      "LoadBalancerArn": "arn:aws:elasticloadbalancing:eu-west-2:222222222222:loadbalancer/app/payments-mtf-alb/50dc6c495c0c9188",
+      "Port": 1234,
+      "Protocol": "HTTPS",
+      "DefaultActions": [
+        {
+          "Type": "forward",
+          "TargetGroupArn": "arn:aws:elasticloadbalancing:eu-west-2:222222222222:targetgroup/payment-api-mtf/73e2d6bc24d8a067"
+        }
+      ]
+    }
+  ],
+  "TargetGroups": [
+    {
+      "TargetGroupArn": "arn:aws:elasticloadbalancing:eu-west-2:222222222222:targetgroup/payment-api-prod/73e2d6bc24d8a067",
+      "TargetGroupName": "payment-api-prod",
+      "Protocol": "HTTP",
+      "Port": 8080,
+      "VpcId": "vpc-0b22",
+      "LoadBalancerArns": [
+        "arn:aws:elasticloadbalancing:eu-west-2:222222222222:loadbalancer/app/payments-prod-alb/50dc6c495c0c9188"
+      ],
+      "TargetType": "ip"
+    },
+    {
+      "TargetGroupArn": "arn:aws:elasticloadbalancing:eu-west-2:222222222222:targetgroup/payment-api-mtf/73e2d6bc24d8a067",
+      "TargetGroupName": "payment-api-mtf",
+      "Protocol": "HTTP",
+      "Port": 8080,
+      "VpcId": "vpc-0b22",
+      "LoadBalancerArns": [
+        "arn:aws:elasticloadbalancing:eu-west-2:222222222222:loadbalancer/app/payments-mtf-alb/50dc6c495c0c9188"
+      ],
+      "TargetType": "ip"
+    }
+  ]
+}

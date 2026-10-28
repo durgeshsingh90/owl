@@ -1,0 +1,247 @@
+{
+  "Vpcs": [
+    {
+      "VpcId": "vpc-0d44",
+      "CidrBlock": "10.40.0.0/16",
+      "OwnerId": "444444444444",
+      "State": "available",
+      "CidrBlockAssociationSet": [
+        {
+          "CidrBlock": "10.40.0.0/16",
+          "CidrBlockState": {
+            "State": "associated"
+          }
+        }
+      ],
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "central-ingress"
+        }
+      ]
+    }
+  ],
+  "Subnets": [
+    {
+      "SubnetId": "subnet-0d44pub-a",
+      "VpcId": "vpc-0d44",
+      "CidrBlock": "10.40.0.0/24",
+      "OwnerId": "444444444444",
+      "AvailabilityZone": "eu-west-2a",
+      "MapPublicIpOnLaunch": true,
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "ingress-public-a"
+        }
+      ]
+    },
+    {
+      "SubnetId": "subnet-0d44proxy-a",
+      "VpcId": "vpc-0d44",
+      "CidrBlock": "10.40.1.0/24",
+      "OwnerId": "444444444444",
+      "AvailabilityZone": "eu-west-2a",
+      "MapPublicIpOnLaunch": false,
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "ingress-proxy-a"
+        }
+      ]
+    },
+    {
+      "SubnetId": "subnet-0d44tgw-a",
+      "VpcId": "vpc-0d44",
+      "CidrBlock": "10.40.255.0/28",
+      "OwnerId": "444444444444",
+      "AvailabilityZone": "eu-west-2a",
+      "MapPublicIpOnLaunch": false,
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "ingress-tgw-a"
+        }
+      ]
+    }
+  ],
+  "RouteTables": [
+    {
+      "RouteTableId": "rtb-0d44pub",
+      "VpcId": "vpc-0d44",
+      "OwnerId": "444444444444",
+      "Associations": [
+        {
+          "RouteTableAssociationId": "rtbassoc-0d44pub0",
+          "SubnetId": "subnet-0d44pub-a",
+          "Main": false
+        }
+      ],
+      "Routes": [
+        {
+          "DestinationCidrBlock": "10.40.0.0/16",
+          "GatewayId": "local",
+          "State": "active"
+        },
+        {
+          "DestinationCidrBlock": "0.0.0.0/0",
+          "GatewayId": "igw-0d44",
+          "State": "active"
+        }
+      ]
+    },
+    {
+      "RouteTableId": "rtb-0d44proxy",
+      "VpcId": "vpc-0d44",
+      "OwnerId": "444444444444",
+      "Associations": [
+        {
+          "RouteTableAssociationId": "rtbassoc-0d44proxy0",
+          "SubnetId": "subnet-0d44proxy-a",
+          "Main": false
+        }
+      ],
+      "Routes": [
+        {
+          "DestinationCidrBlock": "10.40.0.0/16",
+          "GatewayId": "local",
+          "State": "active"
+        },
+        {
+          "DestinationCidrBlock": "10.0.0.0/8",
+          "TransitGatewayId": "tgw-0central0000001",
+          "State": "active"
+        }
+      ]
+    },
+    {
+      "RouteTableId": "rtb-0d44main",
+      "VpcId": "vpc-0d44",
+      "OwnerId": "444444444444",
+      "Associations": [
+        {
+          "RouteTableAssociationId": "rtbassoc-0d44main0",
+          "SubnetId": "subnet-0d44tgw-a",
+          "Main": false
+        },
+        {
+          "RouteTableAssociationId": "rtbassoc-0d44mainm",
+          "Main": true
+        }
+      ],
+      "Routes": [
+        {
+          "DestinationCidrBlock": "10.40.0.0/16",
+          "GatewayId": "local",
+          "State": "active"
+        }
+      ]
+    }
+  ],
+  "SecurityGroups": [
+    {
+      "GroupId": "sg-0d44proxy",
+      "GroupName": "ingress-proxy",
+      "VpcId": "vpc-0d44",
+      "OwnerId": "444444444444",
+      "IpPermissions": [
+        {
+          "IpProtocol": "tcp",
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "UserIdGroupPairs": [],
+          "FromPort": 443,
+          "ToPort": 443
+        }
+      ],
+      "IpPermissionsEgress": [
+        {
+          "IpProtocol": "tcp",
+          "IpRanges": [
+            {
+              "CidrIp": "10.0.0.0/8"
+            }
+          ],
+          "UserIdGroupPairs": [],
+          "FromPort": 1234,
+          "ToPort": 1234
+        },
+        {
+          "IpProtocol": "tcp",
+          "IpRanges": [
+            {
+              "CidrIp": "10.0.0.0/8"
+            }
+          ],
+          "UserIdGroupPairs": [],
+          "FromPort": 8443,
+          "ToPort": 8443
+        }
+      ]
+    }
+  ],
+  "NetworkAcls": [
+    {
+      "NetworkAclId": "acl-0d44",
+      "VpcId": "vpc-0d44",
+      "OwnerId": "444444444444",
+      "IsDefault": true,
+      "Associations": [
+        {
+          "SubnetId": "subnet-0d44pub-a"
+        },
+        {
+          "SubnetId": "subnet-0d44proxy-a"
+        },
+        {
+          "SubnetId": "subnet-0d44tgw-a"
+        }
+      ],
+      "Entries": [
+        {
+          "RuleNumber": 100,
+          "Protocol": "-1",
+          "RuleAction": "allow",
+          "Egress": false,
+          "CidrBlock": "0.0.0.0/0"
+        },
+        {
+          "RuleNumber": 32767,
+          "Protocol": "-1",
+          "RuleAction": "deny",
+          "Egress": false,
+          "CidrBlock": "0.0.0.0/0"
+        },
+        {
+          "RuleNumber": 100,
+          "Protocol": "-1",
+          "RuleAction": "allow",
+          "Egress": true,
+          "CidrBlock": "0.0.0.0/0"
+        },
+        {
+          "RuleNumber": 32767,
+          "Protocol": "-1",
+          "RuleAction": "deny",
+          "Egress": true,
+          "CidrBlock": "0.0.0.0/0"
+        }
+      ]
+    }
+  ],
+  "InternetGateways": [
+    {
+      "InternetGatewayId": "igw-0d44",
+      "OwnerId": "444444444444",
+      "Attachments": [
+        {
+          "VpcId": "vpc-0d44",
+          "State": "available"
+        }
+      ]
+    }
+  ]
+}

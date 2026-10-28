@@ -145,6 +145,7 @@ async def validation_error(request, error):
     )
 
 
+from app.api.architecture import router as architecture_router
 from app.api.aws_accounts import router as aws_accounts_router
 from app.api.bookmarks import router as bookmarks_router
 from app.api.compare import router as compare_router
@@ -155,6 +156,7 @@ from app.api.compat import router as compat_router
 from app.api.tracker import router as tracker_router
 from app.api.workspace import router as workspace_router
 
+app.include_router(architecture_router)
 app.include_router(aws_accounts_router)
 app.include_router(bookmarks_router)
 app.include_router(compare_router)
@@ -182,6 +184,7 @@ for name in (
     "aws-accounts",
     "compare",
     "json-visualizer",
+    "architecture",
     "vendor",
 ):
     app.mount("/" + name, StaticFiles(directory=frontend / name, html=True), name=name)
