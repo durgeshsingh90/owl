@@ -88,6 +88,15 @@
         element.textContent = (window.shortCount || String)(entry.count);
         element.title = `Opened ${entry.count.toLocaleString()} times · last ${new Date(entry.last_opened * 1000).toLocaleString()}`;
       });
+      // Most used apps first; ties keep the page order, unopened apps go last.
+      const area = document.querySelector(".app-area");
+      if (area) {
+        const cards = [...area.querySelectorAll(":scope > .app-card")];
+        const count = card => opens[card.querySelector("[data-app-opens]")?.dataset.appOpens]?.count || 0;
+        cards.map((card, index) => ({card, index, uses: count(card)}))
+          .sort((a, b) => b.uses - a.uses || a.index - b.index)
+          .forEach(({card}) => area.append(card));
+      }
     } catch { /* The counts are a nicety; the page works without them. */ }
   }
 
