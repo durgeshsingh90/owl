@@ -7,6 +7,7 @@ top-level section below that page, document = page, commit = the latest create/u
 """
 
 import json
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -14,8 +15,9 @@ from datetime import datetime, timedelta, timezone
 from app.bookmarks import confluence
 from app.core.database import connection
 from app.pdfs.search import CONFLUENCE_INDEX, ranked_matches
-from app.tracker import service
+from app.tracker import changes, service
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/api/confluence-library")
@@ -387,6 +389,69 @@ async def versions(document_id: int):
             row["base_url"] + f"/pages/viewpage.action?pageId={row['page_id']}&pageVersion={item['number']}"
         )
     return {"name": row["title"], "pageId": row["page_id"], "versions": items}
+
+
+async def version_text(page_id, number):
+    """The text of an older version of a page, read the same way as the current text."""
+    data = await confluence.get(
+        confluence.load(),
+        f"content/{page_id}",
+        {"status": "historical", "version": number, "expand": "body.view,body.storage,version"},
+    )
+    body = data.get("body", {})
+    parser = confluence.TextContent()
+    parser.feed(body.get("view", {}).get("value") or body.get("storage", {}).get("value", ""))
+    return parser.text()
+
+
+@router.get("/document/{document_id}/changes", response_class=HTMLResponse)
+async def page_changes(document_id: int, download: bool = False):
+    """Only what was added and removed in the page's latest update, as an HTML page."""
+    with connection() as db:
+        row = page_row(db, document_id)
+        stored = db.execute(
+            "SELECT metadata,previous_content FROM confluence_tracker_pages WHERE rowid=?",
+            (document_id,),
+        ).fetchone()
+    data = json.loads(stored["metadata"])
+    after = data.get("contentText") or ""
+    version = row["version"]
+    note = ""
+    if data.get("contentError"):
+        note = "The latest text of this page could not be read: " + data["contentError"]
+    if stored["previous_content"] is not None:
+        before, earlier = stored["previous_content"], data.get("previousVersion")
+    elif isinstance(version, int) and version > 1:
+        # Recorded before OWL kept the earlier text: read the previous version once.
+        earlier = version - 1
+        try:
+            before = await version_text(row["page_id"], earlier)
+        except (HTTPException, ValueError) as error:
+            raise HTTPException(
+                502, "Could not read the previous version from Confluence: "
+                + str(getattr(error, "detail", error)),
+            ) from None
+    else:
+        before, earlier = "", None
+        note = note or "This is a new page: all of its text is shown as added."
+    when, who = latest_activity(row)
+    title = row["title"] or "Page " + row["page_id"]
+    page = changes.render(
+        title=title,
+        url=page_url(row["base_url"], row["page_id"]),
+        before_label=f"v{earlier}" if earlier else ("previous" if before else "new page"),
+        after_label=f"v{version}" if version else "current",
+        before=before,
+        after=after,
+        updated="Updated " + (str(when or "")[:16].replace("T", " ") or "at an unknown time") + (f" by {who}" if who else ""),
+        note=note,
+        download_url="" if download else "?download=1",
+    )
+    headers = {}
+    if download:
+        name = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-")[:80] or "page"
+        headers["Content-Disposition"] = f'attachment; filename="{name}-changes-v{version}.html"'
+    return HTMLResponse(page, headers=headers)
 
 
 class SearchRequest(BaseModel):

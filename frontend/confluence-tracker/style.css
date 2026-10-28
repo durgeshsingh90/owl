@@ -1723,7 +1723,13 @@ tbody tr.selected td:first-child {
   letter-spacing: 0;
 }
 .timeline-table .actions-column {
-  width: 125px;
+  width: 200px;
+}
+/* What changed: opens the added/removed text in a new tab. */
+.timeline-actions .changes-button {
+  color: var(--blue);
+  border-color: var(--blue-line);
+  text-decoration: none;
 }
 .timeline-date-row th {
   position: relative;

@@ -135,6 +135,39 @@ class ConfluenceLibraryTests(unittest.TestCase):
         self.assertEqual(details["path"], "Runbooks")
         self.assertEqual(self.client.get("/api/confluence-library/document/99999").status_code, 404)
 
+    def test_changes_page_shows_only_added_and_removed_text(self):
+        import asyncio
+
+        self.sync()
+        page = {doc["name"]: doc for doc in self.client.get("/api/confluence-library/workspace").json()["documents"]}["Restart Service"]["id"]
+        # Recorded before the earlier text was kept: the previous version is read once.
+        fetch = self.wiki.get
+
+        async def historical(settings, path, params=None):
+            if (params or {}).get("status") == "historical":
+                self.assertEqual((path, params["version"]), ("content/301", 2))
+                return {"body": {"storage": {"value": "<p>restart the server</p><p>call the team</p>"}}}
+            return await fetch(settings, path, params)
+
+        with patch.object(confluence, "get", side_effect=historical):
+            html = self.client.get(f"/api/confluence-library/document/{page}/changes").text
+        self.assertIn("v2 → v3", html)
+        self.assertIn("+1 added", html)
+        self.assertIn("−2 removed", html)
+        self.assertIn("call the team", html)
+
+        # A later update keeps the earlier text, so no extra Confluence call is needed.
+        self.wiki.pages["301"].update(text="restart the service\nthen check the logs", version=4, updated=NOW.isoformat())
+        self.client.post("/api/confluence-tracker/roots/1/sync")
+        asyncio.run(service.sync(service.claim()))
+        with patch.object(confluence, "get", side_effect=AssertionError("not needed")):
+            response = self.client.get(f"/api/confluence-library/document/{page}/changes?download=1")
+        self.assertIn("v3 → v4", response.text)
+        self.assertIn("then check the logs", response.text)
+        self.assertIn("+1 added", response.text)
+        self.assertIn("−0 removed", response.text)
+        self.assertIn('filename="Restart-Service-changes-v4.html"', response.headers["content-disposition"])
+
     def test_jobs_failures_and_deleting_a_tree(self):
         self.sync()
         project = self.client.get("/api/confluence-library/workspace").json()["projects"][0]

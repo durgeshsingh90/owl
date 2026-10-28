@@ -244,7 +244,12 @@ def save_pages(root, pages, start_day):
                 continue
             created = str(page.get("writtenAt") or "")[:10]
             kind = "new" if not old and created >= start_day else "updated"
-            before = json.loads(old["metadata"]).get("version") if old else None
+            previous = json.loads(old["metadata"]) if old else {}
+            before = previous.get("version")
+            # The text before this update, so "what changed" can be shown without
+            # going back to Confluence (none when that text could not be read).
+            earlier = previous.get("contentText") if old and not previous.get("contentError") else None
+            page["previousVersion"] = before if earlier is not None else None
             db.execute(
                 "INSERT INTO confluence_tracker_changes(root_id,page_id,kind,detected_at,summary) VALUES(?,?,?,?,?)",
                 (
@@ -267,9 +272,9 @@ def save_pages(root, pages, start_day):
             ancestors = page["ancestors"]
             parent = ancestors[-1]["page_id"] if ancestors and page["page_id"] != root["page_id"] else None
             db.execute(
-                "INSERT INTO confluence_tracker_pages(root_id,page_id,parent_id,metadata,fingerprint,first_seen,last_checked,changed_at,change_kind) VALUES(?,?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(root_id,page_id) DO UPDATE SET parent_id=excluded.parent_id,metadata=excluded.metadata,fingerprint=excluded.fingerprint,last_checked=excluded.last_checked,changed_at=excluded.changed_at,change_kind=excluded.change_kind,present=1",
-                (root["id"], page["page_id"], parent, json.dumps(page), digest, now, now, now, kind),
+                "INSERT INTO confluence_tracker_pages(root_id,page_id,parent_id,metadata,fingerprint,previous_content,first_seen,last_checked,changed_at,change_kind) VALUES(?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(root_id,page_id) DO UPDATE SET parent_id=excluded.parent_id,metadata=excluded.metadata,fingerprint=excluded.fingerprint,previous_content=excluded.previous_content,last_checked=excluded.last_checked,changed_at=excluded.changed_at,change_kind=excluded.change_kind,present=1",
+                (root["id"], page["page_id"], parent, json.dumps(page), digest, earlier, now, now, now, kind),
             )
             recorded += 1
         db.execute(
