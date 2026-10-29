@@ -2,7 +2,7 @@
 // Architecture Analyser: state, loading, routing, the analysis drawer and the evidence viewer.
 (() => {
   const {esc, api, toast, store} = AA;
-  const VIEWS = ["setup", "overview", "architecture", "connectivity", "requirements", "findings", "environments", "accounts", "tad", "import", "standards"];
+  const VIEWS = ["setup", "download", "timeline", "overview", "architecture", "connectivity", "requirements", "findings", "environments", "accounts", "tad", "import", "standards"];
   const main = document.querySelector("#main");
   const drawer = document.querySelector("#drawer");
   const modal = document.querySelector("#modal");
@@ -71,12 +71,18 @@
     body.innerHTML = `<div class="loading">Loading…</div>`;
     modal.hidden = false;
     try {
-      const data = await api(`/snapshots/${encodeURIComponent(app.analysis().snapshot.id)}/object?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(id)}`);
-      body.innerHTML = `<pre class="json">${esc(JSON.stringify(data.object, null, 2))}</pre>`;
+      const data = await api(`/snapshots/${encodeURIComponent(app.snapshotId())}/object?kind=${encodeURIComponent(kind)}&id=${encodeURIComponent(id)}`);
+      const t = data.times;
+      const line = (label, at, by, source, extra = "") => at ? `<dt>${label}</dt><dd>${esc(new Date(at).toLocaleString())}${by ? ` by <span class="mono">${esc(by)}</span>` : ""} <span class="muted small">(${esc(source)}${extra})</span></dd>` : "";
+      body.innerHTML = (t ? `<dl class="kv" style="margin-bottom:12px">${line("Created", t.created, t.created_by, t.created_source)}${line("Updated", t.updated, t.updated_by, t.updated_source, t.updated_event ? " · " + t.updated_event : "")}
+        ${t.changes ? `<dt>Changes</dt><dd>${t.changes} in the CloudTrail window</dd>` : ""}</dl>` : `<p class="small muted">Created and updated times not known for this resource.</p>`) +
+        `<pre class="json">${esc(JSON.stringify(data.object, null, 2))}</pre>`;
     } catch (error) {
       body.innerHTML = `<div class="error-box">${esc(error.message)}</div>`;
     }
   }
+
+  app.showObject = showObject;
 
   async function ensureAnalysis(env) {
     if (app.analyses[env]) return app.analyses[env];
@@ -156,9 +162,9 @@
   async function render() {
     const view = currentView();
     document.querySelectorAll("#sidebar a").forEach((a) => a.classList.toggle("active", a.dataset.view === view));
-    if (view === "setup") {
+    if (view === "setup" || view === "download" || view === "timeline") {
       try {
-        await AA.views.setup(main, app);
+        await AA.views[view](main, app);
       } catch (error) {
         main.innerHTML = `<div class="error-box">${esc(error.message)}</div>`;
       }

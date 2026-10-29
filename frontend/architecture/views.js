@@ -241,8 +241,9 @@ AA.views = (() => {
 
   // Accounts
 
-  const table = (rows, columns) => rows.length ? `<table class="data"><thead><tr>${columns.map(([label]) => `<th>${esc(label)}</th>`).join("")}</tr></thead>
+  const tableBase = (rows, columns) => rows.length ? `<table class="data"><thead><tr>${columns.map(([label]) => `<th>${esc(label)}</th>`).join("")}</tr></thead>
     <tbody>${rows.map((row) => `<tr>${columns.map(([, value]) => `<td>${value(row)}</td>`).join("")}</tr>`).join("")}</tbody></table>` : `<p class="muted small">None.</p>`;
+  const table = tableBase;
   const section = (label, count, body, open = false) => `<details class="inv" ${open ? "open" : ""}><summary>${esc(label)} <span class="muted">${count}</span></summary><div class="inner">${body}</div></details>`;
   const ports = (r) => r.from_port == null || r.from_port === -1 ? "all" : r.from_port === r.to_port ? r.from_port : `${r.from_port}-${r.to_port}`;
   const ruleText = (rules) => rules.map((r) => `${esc(r.protocol)} ${esc(ports(r))} ${esc([...r.cidrs, ...r.groups, ...r.prefix_lists].join(", "))}`).join("<br>") || `<span class="muted">none</span>`;
@@ -272,6 +273,16 @@ AA.views = (() => {
       return;
     }
     const d = await api(`/snapshots/${encodeURIComponent(app.snapshotId())}/accounts/${encodeURIComponent(current)}`);
+    const stamps = d.timestamps || {};
+    const short = (iso) => new Date(iso).toLocaleString(undefined, {dateStyle: "medium", timeStyle: "short"});
+    const timeCell = (id) => {
+      const t = stamps[id];
+      if (!t) return '<span class="muted small">unknown</span>';
+      const tip = [t.created && `Created ${t.created} (${t.created_source})${t.created_by ? " by " + t.created_by : ""}`,
+        t.updated && `Updated ${t.updated} (${t.updated_source})${t.updated_by ? " by " + t.updated_by : ""}${t.updated_event ? " · " + t.updated_event : ""}`].filter(Boolean).join("\n");
+      return `<span class="small" title="${esc(tip)}">${t.created ? `Created ${esc(short(t.created))}` : ""}${t.created && t.updated ? "<br>" : ""}${t.updated ? `Updated ${esc(short(t.updated))}` : ""}${t.updated_by ? `<br><span class="muted">${esc(t.updated_by)}</span>` : ""}</span>`;
+    };
+    const table = (rows, columns) => tableBase(rows, [...columns, ["Created / updated", (row) => timeCell(row.id)]]);
     const tableFor = Object.fromEntries(d.route_tables.flatMap((t) => t.subnets.map((s) => [s, t.id])));
     const naclFor = Object.fromEntries(d.nacls.flatMap((n) => n.subnets.map((s) => [s, n.id])));
     const acct = d.account;

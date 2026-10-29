@@ -9,11 +9,12 @@ the file, a 12-digit folder or file name, or the resources' OwnerId.
 
 import ipaddress
 import re
+from datetime import datetime, timezone
 
 from pydantic import ValidationError
 
 from app.architecture.models import (
-    COLLECTIONS, Account, DnsRecord, EksCluster, EndpointConnection, EndpointService, Target, Firewall, FirewallRule, FirewallRuleGroup,
+    COLLECTIONS, Account, DnsRecord, ResourceTimes, EksCluster, EndpointConnection, EndpointService, Target, Firewall, FirewallRule, FirewallRuleGroup,
     HostedZone, InternetGateway, Inventory, Listener, LoadBalancer, Nacl, NaclRule,
     NatGateway, ResolverEndpoint, ResolverRule, Route, RouteTable, SecurityGroup,
     SgRule, Subnet, TargetGroup, TgwAttachment, TgwRoute, TgwRouteTable,
@@ -29,8 +30,39 @@ KNOWN_KEYS = {
     "InternetGateways", "VpcEndpoints", "LoadBalancers", "Listeners", "TargetGroups",
     "Firewalls", "FirewallPolicies", "RuleGroups", "HostedZones", "ResolverRules",
     "ResolverRuleAssociations", "ResolverEndpoints", "Clusters", "ServiceConfigurations",
-    "VpcEndpointConnections",
+    "VpcEndpointConnections", "ConfigResources", "ResourceHistory",
 }
+# Resources whose own API response says when they were created (and changed).
+TIME_FIELDS = [
+    ("NatGateways", "NatGatewayId", "CreateTime", None),
+    ("VpcEndpoints", "VpcEndpointId", "CreationTimestamp", None),
+    ("TransitGateways", "TransitGatewayId", "CreationTime", None),
+    ("TransitGatewayAttachments", "TransitGatewayAttachmentId", "CreationTime", None),
+    ("TransitGatewayRouteTables", "TransitGatewayRouteTableId", "CreationTime", None),
+    ("LoadBalancers", "LoadBalancerArn", "CreatedTime", None),
+    ("Clusters", "arn", "createdAt", None),
+    ("ResolverRules", "Id", "CreationTime", "ModificationTime"),
+    ("ResolverEndpoints", "Id", "CreationTime", "ModificationTime"),
+]
+
+
+def iso(value):
+    """A timestamp as ISO 8601 UTC to the second, or "" when it can't be read."""
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, timezone.utc).isoformat(timespec="seconds")
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        text = str(value).strip().replace(" ", "T", 1).replace("Z", "+00:00")
+        try:
+            moment = datetime.fromisoformat(text)
+        except ValueError:
+            return ""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def tags(item):
@@ -67,6 +99,9 @@ class Normalizer:
         self._resolver_associations = []
         self._raw_firewalls = []
         self._endpoint_connections = []
+        self._config_items = []
+        self._history = {}
+        self._firewall_changes = {}  # policy or rule group ARN -> last modified
 
     # Entry points
 
@@ -93,6 +128,7 @@ class Normalizer:
 
     def finish(self):
         self._join()
+        self._join_times()
         self._validate()
         return self.inv
 
@@ -102,6 +138,7 @@ class Normalizer:
         partial = Inventory.model_validate(document)
         for collection in COLLECTIONS:
             getattr(self.inv, collection).update(getattr(partial, collection))
+        self.inv.timestamps.update(partial.timestamps)
 
     # Raw AWS CLI output
 
@@ -141,6 +178,22 @@ class Normalizer:
 
     def _add_raw(self, d, account, region, name):
         inv = self.inv
+        for key, id_field, created, updated in TIME_FIELDS:
+            for item in d.get(key, []) or []:
+                if item.get(id_field):
+                    self.times(item[id_field], created=item.get(created), updated=item.get(updated) if updated else None, source="aws")
+        for item in d.get("FirewallPolicies", []) or []:
+            response = item.get("FirewallPolicyResponse") or {}
+            if response.get("FirewallPolicyArn") and response.get("LastModifiedTime"):
+                self._firewall_changes[response["FirewallPolicyArn"]] = iso(response["LastModifiedTime"])
+        for item in d.get("RuleGroups", []) or []:
+            response = item.get("RuleGroupResponse") or {}
+            if response.get("RuleGroupArn") and response.get("LastModifiedTime"):
+                self._firewall_changes[response["RuleGroupArn"]] = iso(response["LastModifiedTime"])
+                self.times(response["RuleGroupArn"], updated=response["LastModifiedTime"], source="aws")
+        self._config_items.extend(d.get("ConfigResources", []) or [])
+        for resource_id, summary in (d.get("ResourceHistory") or {}).items():
+            self._history[resource_id] = summary
         for item in d.get("Vpcs", []) or []:
             cidrs = [a["CidrBlock"] for a in item.get("CidrBlockAssociationSet", []) if a.get("CidrBlock")]
             if not cidrs and item.get("CidrBlock"):
@@ -362,6 +415,51 @@ class Normalizer:
         )
 
     # Pieces joined after every file has been read
+
+    def times(self, resource_id, created=None, updated=None, source="", created_by="", updated_by="", event="", changes=0):
+        """Merge what one source says about a resource's times. A resource's own API
+        field wins for creation; the latest change from any source wins for updates."""
+        entry = self.inv.timestamps.setdefault(resource_id, ResourceTimes())
+        rank = {"aws": 0, "config": 1, "cloudtrail": 2, "": 3}
+        created = iso(created)
+        if created and (not entry.created or rank[source] < rank[entry.created_source]
+                        or (source == entry.created_source and created < entry.created)):
+            entry.created, entry.created_source, entry.created_by = created, source, created_by or entry.created_by
+        elif created and created_by and not entry.created_by and created == entry.created:
+            entry.created_by = created_by
+        updated = iso(updated)
+        if updated and updated > entry.updated:
+            entry.updated, entry.updated_source, entry.updated_by, entry.updated_event = updated, source, updated_by, event
+        entry.changes += changes
+
+    def _join_times(self):
+        inv = self.inv
+        # Config and CloudTrail name some resources by name; the inventory keys them by ARN.
+        alias = {}
+        for collection in ("load_balancers", "eks_clusters", "firewalls"):
+            for item in getattr(inv, collection).values():
+                alias[item.name] = item.id
+                alias[item.id.split("/")[-1]] = alias.get(item.id.split("/")[-1], item.id)
+        resolve = lambda key: key if key in alias.values() else alias.get(key, key)
+        for item in self._config_items:
+            key = resolve(item.get("resourceId", "")) if item.get("resourceId") else ""
+            if not key:
+                continue
+            self.times(key, created=item.get("resourceCreationTime"), updated=item.get("configurationItemCaptureTime"), source="config",
+                       event="AWS Config: configuration recorded")
+        for key, summary in self._history.items():
+            self.times(resolve(key), created=(summary.get("created") or {}).get("time"), source="cloudtrail",
+                       created_by=(summary.get("created") or {}).get("by", ""))
+            last = summary.get("updated") or {}
+            self.times(resolve(key), updated=last.get("time"), source="cloudtrail", updated_by=last.get("by", ""),
+                       event=last.get("event", ""), changes=int(summary.get("changes") or 0))
+        for firewall in inv.firewalls.values():
+            changes = [self._firewall_changes[a] for a in [firewall.policy] + [g.id for g in firewall.rule_groups] if a in self._firewall_changes]
+            if changes:
+                self.times(firewall.id, updated=max(changes), source="aws", event="Firewall policy or rule group changed")
+        # Keep only resources the inventory has (and the rule groups inside firewalls).
+        known = {i for c in COLLECTIONS for i in getattr(inv, c)} | {g.id for f in inv.firewalls.values() for g in f.rule_groups}
+        inv.timestamps = {k: v for k, v in sorted(inv.timestamps.items()) if k in known and (v.created or v.updated)}
 
     def _join(self):
         inv = self.inv

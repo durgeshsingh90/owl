@@ -167,6 +167,59 @@ def resources(snapshot_id: str, kind: str, account: str = ""):
     return {"items": sorted(items, key=lambda i: (i["label"].lower(), i["id"]))}
 
 
+@router.get("/download")
+def download_settings():
+    """The central download list, every account in the AWS config to choose from, and what's downloaded."""
+    config = download.download_config()
+    try:
+        found, error = download.profiles_by_account(), ""
+    except (OSError, ValueError) as problem:
+        found, error = {}, str(problem)
+    ids = sorted(set(found) | {a["account_id"] for a in config["accounts"]})
+    have = download.downloaded(ids)
+    return {
+        "config": config, "aws_config": download.config_path(), "aws_config_error": error,
+        "media": str(download.media_folder()), "job": download.status("all"),
+        "available": [{"account_id": i, "profiles": [p["profile"] for p in found.get(i, [])],
+                       "region": next((p.get("region") for p in found.get(i, []) if p.get("region")), ""),
+                       "downloaded": have.get(i)} for i in ids],
+    }
+
+
+class DownloadAccount(BaseModel):
+    account_id: str = Field(pattern=r"^\d{12}$")
+    name: str = Field("", max_length=200)
+    type: str = Field("application", max_length=50)
+    regions: list[str] = Field([], max_length=40)
+    profile: str = Field("", max_length=200)
+
+
+class DownloadSettings(BaseModel):
+    accounts: list[DownloadAccount] = Field(max_length=5000)
+    regions: list[str] = Field([], max_length=40)
+    history: dict = {}
+
+
+@router.put("/download")
+def save_download_settings(value: DownloadSettings):
+    return download.save_download_config(value.model_dump())
+
+
+@router.post("/download/start", status_code=202)
+def start_download():
+    """Download every account in the central list (read-only), then snapshot them."""
+    try:
+        import boto3  # noqa: F401
+    except ImportError:
+        raise HTTPException(400, "boto3 is not installed: run pip install -r backend/requirements.txt.") from None
+    return download.start_all()
+
+
+@router.get("/download/status")
+def download_status():
+    return download.status("all")
+
+
 @router.get("/catalog")
 def catalog():
     """Services, external systems and rules every project can use."""
@@ -223,7 +276,7 @@ def account(snapshot_id: str, account_id: str):
         return [i.model_dump() for i in sorted(getattr(inv, collection).values(), key=lambda i: i.id) if getattr(i, key, "") in ids]
 
     attachments = [a.model_dump() for a in sorted(inv.tgw_attachments.values(), key=lambda a: a.id) if a.resource in ids or a.resource_account == account_id]
-    return {
+    result = {
         "account": inv.accounts[account_id].model_dump(),
         "vpcs": [v.model_dump() for v in vpcs],
         "subnets": within("subnets"), "route_tables": within("route_tables"),
@@ -239,6 +292,54 @@ def account(snapshot_id: str, account_id: str):
             "resolver_rules": [r.model_dump() for r in inv.resolver_rules.values() if set(r.vpcs) & ids or r.account == account_id],
         },
     }
+    shown = {item["id"] for value in result.values() if isinstance(value, list) for item in value if isinstance(item, dict) and "id" in item}
+    shown |= {item["id"] for value in result["dns"].values() for item in value} | set(ids)
+    result["timestamps"] = {k: v.model_dump() for k, v in inv.timestamps.items() if k in shown}
+    return result
+
+
+TIMELINE_KINDS = {
+    "vpcs": "VPC", "subnets": "Subnet", "route_tables": "Route table", "security_groups": "Security group", "nacls": "NACL",
+    "nat_gateways": "NAT gateway", "internet_gateways": "Internet gateway", "vpc_endpoints": "VPC endpoint",
+    "endpoint_services": "Endpoint service", "transit_gateways": "Transit gateway", "tgw_attachments": "TGW attachment",
+    "tgw_route_tables": "TGW route table", "load_balancers": "Load balancer", "target_groups": "Target group",
+    "eks_clusters": "EKS cluster", "firewalls": "Network Firewall", "hosted_zones": "Hosted zone",
+    "resolver_rules": "Resolver rule", "resolver_endpoints": "Resolver endpoint",
+}
+
+
+@router.get("/snapshots/{snapshot_id}/timeline")
+def timeline(snapshot_id: str):
+    """Every known creation and change, newest first: one row per event."""
+    try:
+        meta, inv = store.inventory(snapshot_id)
+    except KeyError as error:
+        _missing(error)
+    where = {}
+    for collection, kind in TIMELINE_KINDS.items():
+        for item in getattr(inv, collection).values():
+            vpc = getattr(item, "vpc", "") or ""
+            account = getattr(item, "account", "") or (inv.vpcs[vpc].account if vpc in inv.vpcs else "")
+            where[item.id] = (collection, kind, _label(item), account, vpc)
+    for firewall in inv.firewalls.values():
+        for group in firewall.rule_groups:
+            where[group.id] = ("firewall_rule_groups", "Firewall rule group", group.name or group.id, firewall.account, firewall.vpc)
+    events = []
+    for resource_id, times in inv.timestamps.items():
+        if resource_id not in where:
+            continue
+        collection, kind, label, account, vpc = where[resource_id]
+        base = {"id": resource_id, "collection": collection, "kind": kind, "label": label, "account": account,
+                "account_name": inv.accounts[account].name if account in inv.accounts else "", "vpc": vpc}
+        if times.created:
+            events.append({**base, "action": "Created", "time": times.created, "by": times.created_by, "source": times.created_source, "event": ""})
+        if times.updated and times.updated != times.created:
+            events.append({**base, "action": "Updated", "time": times.updated, "by": times.updated_by, "source": times.updated_source,
+                           "event": times.updated_event, "changes": times.changes})
+    events.sort(key=lambda e: (e["time"], e["action"] == "Updated", e["id"]), reverse=True)
+    unknown = sum(1 for i in where if i not in inv.timestamps)
+    return {"snapshot": {"id": meta["id"], "name": meta["name"], "created": meta["created"]}, "events": events,
+            "resources": len(where), "without_times": unknown}
 
 
 @router.get("/snapshots/{snapshot_id}/object")
@@ -257,14 +358,16 @@ def evidence_object(snapshot_id: str, kind: str, id: str = Query(max_length=2000
         for firewall in inv.firewalls.values():
             group = next((g for g in firewall.rule_groups if g.id == id), None)
             if group:
-                return {"kind": kind, "id": id, "object": group.model_dump()}
+                times = inv.timestamps.get(id)
+                return {"kind": kind, "id": id, "object": group.model_dump(), "times": times.model_dump() if times else None}
         raise HTTPException(404, f"Rule group {id} not found.")
     if kind not in COLLECTIONS:
         raise HTTPException(400, f"Unknown kind {kind}.")
     item = getattr(inv, kind).get(id)
     if not item:
         raise HTTPException(404, f"{id} is not in this snapshot.")
-    return {"kind": kind, "id": id, "object": item.model_dump()}
+    times = inv.timestamps.get(id)
+    return {"kind": kind, "id": id, "object": item.model_dump(), "times": times.model_dump() if times else None}
 
 
 @router.post("/snapshots/validate")

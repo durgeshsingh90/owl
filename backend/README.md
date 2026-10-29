@@ -278,6 +278,14 @@ gateways, PrivateLink endpoint ↔ service ↔ NLB, NLB listener → target grou
 targets inside the cluster, and security groups and NACLs on both ends. A hop's `port`
 sets the port from that hop on (NLB 443 → pods 8443).
 
+**AWS download** lists every account in the AWS config (on Windows
+`C:\Users\<you>\.aws\config`, or the path set in the AWS Accounts app); tick the ones to
+download and press Download. The list is saved in `architecture/download.json`. Besides
+configuration it records when each resource was created and last changed: from the
+resource's own API field where AWS has one, AWS Config where it records, and CloudTrail
+write events (who and what, last 1–90 days). **Timeline** shows these newest first under
+Today / Yesterday / This week / ... / month headings, like the Bitbucket timeline.
+
 The refresh button downloads a project's accounts with boto3 using the AWS config file
 the AWS Accounts app reads; only describe/list/get calls are made. Profiles that use
 `aws login` need `boto3[crt]` (in requirements). AWS JSON can also be imported from

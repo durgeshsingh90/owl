@@ -284,6 +284,88 @@ class Flows(Base):
         self.assertIn("No load balancer no-such-nlb", self.failing(result)[0].actual)
 
 
+class Times(Base):
+    """Created and updated times: a resource's own API field, AWS Config and CloudTrail."""
+
+    def test_sources_merge(self):
+        files = [
+            ("123456789012/eu-west-2/ec2.json", {"Region": "eu-west-2",
+                "Vpcs": [{"VpcId": "vpc-1", "CidrBlock": "10.0.0.0/16"}],
+                "NatGateways": [{"NatGatewayId": "nat-1", "VpcId": "vpc-1", "SubnetId": "s", "CreateTime": "2025-01-02 03:04:05+00:00"}]}),
+            ("123456789012/eu-west-2/config.json", {"Region": "eu-west-2", "ConfigResources": [
+                {"resourceId": "vpc-1", "resourceType": "AWS::EC2::VPC", "resourceCreationTime": "2024-05-01T10:00:00.000Z",
+                 "configurationItemCaptureTime": "2026-01-01T09:00:00.000Z"},
+                {"resourceId": "nat-1", "resourceType": "AWS::EC2::NatGateway", "resourceCreationTime": "2025-01-02T03:10:00Z"},
+                {"resourceId": "vpc-gone", "resourceType": "AWS::EC2::VPC", "resourceCreationTime": "2024-01-01T00:00:00Z"}]}),
+            ("123456789012/eu-west-2/cloudtrail.json", {"Region": "eu-west-2", "ResourceHistory": {
+                "vpc-1": {"changes": 3, "updated": {"time": "2026-10-20T08:00:00+00:00", "by": "alice", "event": "ModifyVpcAttribute"}}}}),
+        ]
+        inventory, errors, _ = normalize(files)
+        self.assertEqual(errors, [])
+        nat, vpc = inventory.timestamps["nat-1"], inventory.timestamps["vpc-1"]
+        self.assertEqual((nat.created, nat.created_source), ("2025-01-02T03:04:05+00:00", "aws"))  # the API's own field wins
+        self.assertEqual((vpc.created, vpc.created_source), ("2024-05-01T10:00:00+00:00", "config"))
+        self.assertEqual((vpc.updated, vpc.updated_source, vpc.updated_by, vpc.changes), ("2026-10-20T08:00:00+00:00", "cloudtrail", "alice", 3))
+        self.assertNotIn("vpc-gone", inventory.timestamps)  # only resources in the inventory
+
+    def test_cloudtrail_summary(self):
+        from datetime import datetime, timezone
+        from app.architecture import download
+
+        events = [
+            {"EventName": "AuthorizeSecurityGroupIngress", "EventTime": datetime(2026, 10, 2, tzinfo=timezone.utc), "Username": "bob",
+             "Resources": [{"ResourceName": "sg-0123456789abcdef0"}], "CloudTrailEvent": json.dumps({"requestParameters": {"groupId": "sg-0123456789abcdef0"}})},
+            {"EventName": "CreateSecurityGroup", "EventTime": datetime(2026, 9, 1, tzinfo=timezone.utc), "Username": "alice",
+             "CloudTrailEvent": json.dumps({"requestParameters": {"vpcId": "vpc-0123456789abcdef0"}, "responseElements": {"groupId": "sg-0123456789abcdef0"}})},
+            {"EventName": "RevokeSecurityGroupIngress", "EventTime": datetime(2026, 10, 3, tzinfo=timezone.utc), "Username": "eve",
+             "CloudTrailEvent": json.dumps({"errorCode": "UnauthorizedOperation", "requestParameters": {"groupId": "sg-0123456789abcdef0"}})},
+        ]
+
+        class Pages:
+            def paginate(self, **kwargs):
+                return [{"Events": events}]
+
+        class Client:
+            def get_paginator(self, name):
+                return Pages()
+
+        class Session:
+            def client(self, *args, **kwargs):
+                return Client()
+
+        history, window = download._cloudtrail(Session(), "eu-west-2", download.Recorder(), 90, 1000)
+        sg = history["sg-0123456789abcdef0"]
+        self.assertEqual(sg["created"]["by"], "alice")
+        self.assertEqual((sg["updated"]["by"], sg["updated"]["event"], sg["changes"]), ("bob", "AuthorizeSecurityGroupIngress", 1))
+        self.assertEqual(window["events"], 3)
+
+    def test_timeline_newest_first(self):
+        from app.architecture.models import ResourceTimes
+
+        self.inv.timestamps = {
+            "vpc-0b22": ResourceTimes(created="2025-01-01T00:00:00+00:00", created_source="config"),
+            "sg-0b22app": ResourceTimes(created="2025-02-01T00:00:00+00:00", created_source="cloudtrail", updated="2026-10-01T12:00:00+00:00",
+                                        updated_by="bob", updated_source="cloudtrail", updated_event="AuthorizeSecurityGroupIngress", changes=2),
+        }
+        meta = store.snapshot_meta()
+        with patch("app.architecture.store.inventory", return_value=(meta, self.inv)):
+            body = TestClient(app).get(f"/api/architecture/snapshots/{meta['id']}/timeline").json()
+        self.assertEqual([(e["id"], e["action"]) for e in body["events"]],
+                         [("sg-0b22app", "Updated"), ("sg-0b22app", "Created"), ("vpc-0b22", "Created")])
+        self.assertEqual((body["events"][0]["kind"], body["events"][0]["by"], body["events"][0]["account"]), ("Security group", "bob", "222222222222"))
+
+    def test_download_settings(self):
+        client = TestClient(app)
+        with patch("app.architecture.download.config_path", return_value=str(Path(self.temp.name) / "none")):
+            body = client.get("/api/architecture/download").json()
+        self.assertEqual(body["config"]["accounts"], [])
+        saved = client.put("/api/architecture/download", json={"accounts": [{"account_id": "123456789012", "regions": ["eu-west-2"]}],
+                                                               "history": {"days": 30}}).json()
+        self.assertEqual(saved["history"]["days"], 30)
+        self.assertEqual(client.put("/api/architecture/download", json={"accounts": [{"account_id": "123456789012", "regions": ["mars-1"]}]}).status_code, 400)
+        self.assertEqual(client.put("/api/architecture/download", json={"accounts": [{"account_id": "12"}]}).status_code, 422)
+
+
 class Api(Base):
     def setUp(self):
         super().setUp()
@@ -360,7 +442,7 @@ class Download(Base):
 
         sample = {p.parent.name.split("-")[0] + "/" + p.name: json.loads(p.read_text()) for p in (SAMPLE / "aws").rglob("*.json")}
 
-        def fake(account, progress=lambda t: None):
+        def fake(account, progress=lambda t: None, history=None):
             folder = download.media_folder() / account["account_id"]
             for name, data in sample.items():
                 if name.startswith(account["account_id"]) and not name.endswith("account.json"):

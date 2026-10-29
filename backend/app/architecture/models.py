@@ -304,6 +304,23 @@ class ResolverEndpoint(Model):
     security_groups: list[str] = []
 
 
+class ResourceTimes(Model):
+    """When a resource was created and last changed, and where that came from.
+
+    Sources: "aws" (the resource's own API field), "config" (AWS Config) or
+    "cloudtrail" (write events in the CloudTrail lookup window). Empty = not known.
+    """
+
+    created: str = ""
+    created_by: str = ""
+    created_source: str = ""
+    updated: str = ""
+    updated_by: str = ""
+    updated_source: str = ""
+    updated_event: str = ""
+    changes: int = 0  # CloudTrail write events seen in the window
+
+
 class Inventory(Model):
     """Everything known about AWS, keyed by resource id."""
 
@@ -328,12 +345,13 @@ class Inventory(Model):
     hosted_zones: dict[str, HostedZone] = {}
     resolver_rules: dict[str, ResolverRule] = {}
     resolver_endpoints: dict[str, ResolverEndpoint] = {}
+    timestamps: dict[str, ResourceTimes] = {}  # by resource id
 
     model_config = {"extra": "ignore", "populate_by_name": True}
 
 
 COLLECTIONS = [
-    name for name in Inventory.model_fields if name not in ("schema_",)
+    name for name in Inventory.model_fields if name not in ("schema_", "timestamps")
 ]
 
 

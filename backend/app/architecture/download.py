@@ -21,7 +21,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.architecture import store
@@ -223,8 +223,105 @@ def _eks(session, region, run):
     for name in run("eks list-clusters", lambda: _all(eks, "list_clusters", "clusters")):
         cluster = run(f"eks describe-cluster {name}", lambda n=name: eks.describe_cluster(name=n)["cluster"], default={})
         if cluster:
-            clusters.append({k: cluster.get(k) for k in ("name", "arn", "version", "status", "resourcesVpcConfig")})
+            clusters.append({k: cluster.get(k) for k in ("name", "arn", "version", "status", "resourcesVpcConfig", "createdAt")})
     return {"Region": region, "Clusters": clusters}
+
+
+CONFIG_TYPES = [
+    "AWS::EC2::VPC", "AWS::EC2::Subnet", "AWS::EC2::RouteTable", "AWS::EC2::SecurityGroup", "AWS::EC2::NetworkAcl",
+    "AWS::EC2::NatGateway", "AWS::EC2::InternetGateway", "AWS::EC2::VPCEndpoint", "AWS::EC2::VPCEndpointService",
+    "AWS::EC2::TransitGateway", "AWS::EC2::TransitGatewayAttachment", "AWS::EC2::TransitGatewayRouteTable",
+    "AWS::ElasticLoadBalancingV2::LoadBalancer", "AWS::EKS::Cluster", "AWS::NetworkFirewall::Firewall",
+    "AWS::NetworkFirewall::FirewallPolicy", "AWS::NetworkFirewall::RuleGroup", "AWS::Route53Resolver::ResolverRule",
+    "AWS::Route53Resolver::ResolverEndpoint", "AWS::Route53::HostedZone",
+]
+# Resource ids and ARNs inside CloudTrail events.
+RESOURCE_ID = re.compile(
+    r"\b(?:vpc|subnet|rtb|sg|acl|nat|igw|vpce|vpce-svc|tgw|tgw-attach|tgw-rtb|eipalloc|rslvr-rr|rslvr-out|rslvr-in)-[0-9a-f]{8,17}\b"
+    r"|arn:aws[\w-]*:(?:elasticloadbalancing|eks|network-firewall):[^\s\"',]+")
+# Which ids a create event creates (its response also names the VPC, subnet ... it was created in).
+CREATED_BY = {
+    "CreateVpc": ("vpc-",), "CreateDefaultVpc": ("vpc-",), "CreateSubnet": ("subnet-",), "CreateDefaultSubnet": ("subnet-",),
+    "CreateSecurityGroup": ("sg-",), "CreateRouteTable": ("rtb-",), "CreateNetworkAcl": ("acl-",), "CreateNatGateway": ("nat-",),
+    "CreateInternetGateway": ("igw-",), "CreateVpcEndpoint": ("vpce-",), "CreateVpcEndpointServiceConfiguration": ("vpce-svc-",),
+    "CreateTransitGateway": ("tgw-",), "CreateTransitGatewayVpcAttachment": ("tgw-attach-",),
+    "CreateTransitGatewayPeeringAttachment": ("tgw-attach-",), "CreateTransitGatewayRouteTable": ("tgw-rtb-",),
+    "CreateLoadBalancer": (":loadbalancer/",), "CreateTargetGroup": (":targetgroup/",), "CreateCluster": (":cluster/",),
+    "CreateFirewall": (":firewall/",), "CreateFirewallPolicy": (":firewall-policy/",), "CreateRuleGroup": ("rulegroup/",),
+    "CreateResolverRule": ("rslvr-rr-",), "CreateResolverEndpoint": ("rslvr-out-", "rslvr-in-"),
+}
+# Events that mention network resources without changing them.
+NOT_A_CHANGE = {
+    "RunInstances", "TerminateInstances", "StartInstances", "StopInstances", "RebootInstances", "CreateNetworkInterface",
+    "DeleteNetworkInterface", "AttachNetworkInterface", "DetachNetworkInterface", "AssociateAddress", "DisassociateAddress",
+    "CreateVolume", "AttachVolume", "DetachVolume", "ModifyInstanceAttribute", "CreateLaunchTemplate", "CreateLaunchTemplateVersion",
+}
+
+
+def _config_times(session, region, run):
+    """Creation and last-change times from AWS Config's advanced query (needs a recorder)."""
+    config = session.client("config", region_name=region)
+    expression = ("SELECT resourceId, resourceType, resourceName, resourceCreationTime, configurationItemCaptureTime "
+                  "WHERE resourceType IN (" + ", ".join(f"'{t}'" for t in CONFIG_TYPES) + ")")
+
+    def query():
+        items, token = [], None
+        while True:
+            page = config.select_resource_config(Expression=expression, Limit=100, **({"NextToken": token} if token else {}))
+            items.extend(json.loads(row) for row in page.get("Results", []))
+            token = page.get("NextToken")
+            if not token:
+                return items
+
+    return run("config select-resource-config", query)
+
+
+def _cloudtrail(session, region, run, days, limit):
+    """Who created and last changed each resource, from CloudTrail write events in the window."""
+    trail = session.client("cloudtrail", region_name=region)
+    start = datetime.now(timezone.utc) - timedelta(days=days)
+    history, seen = {}, 0
+
+    def scan():
+        nonlocal seen
+        pages = trail.get_paginator("lookup_events").paginate(
+            LookupAttributes=[{"AttributeKey": "ReadOnly", "AttributeValue": "false"}], StartTime=start,
+            PaginationConfig={"MaxItems": limit, "PageSize": 50})
+        for page in pages:
+            for event in page.get("Events", []):
+                seen += 1
+                name, when = event.get("EventName", ""), event.get("EventTime")
+                who = event.get("Username", "")
+                try:
+                    detail = json.loads(event.get("CloudTrailEvent") or "{}")
+                except ValueError:
+                    detail = {}
+                if detail.get("errorCode"):
+                    continue
+                kinds = CREATED_BY.get(name, ())
+                created = {i for i in RESOURCE_ID.findall(json.dumps(detail.get("responseElements") or {}))
+                           if any(i.startswith(k) if k.endswith("-") else k in i for k in kinds)}
+                # vpce- also prefixes vpce-svc-: keep endpoint and service creations apart.
+                if name == "CreateVpcEndpoint":
+                    created = {i for i in created if not i.startswith("vpce-svc-")}
+                touched = set()
+                if name not in NOT_A_CHANGE:
+                    touched = {r.get("ResourceName", "") for r in event.get("Resources", []) or []}
+                    touched |= set(RESOURCE_ID.findall(json.dumps(detail.get("requestParameters") or {})))
+                stamp = when.isoformat() if hasattr(when, "isoformat") else str(when)
+                for resource in created:
+                    item = history.setdefault(resource, {"changes": 0})
+                    if not item.get("created") or stamp < item["created"]["time"]:
+                        item["created"] = {"time": stamp, "by": who, "event": name}
+                for resource in (touched - created) - {""}:
+                    item = history.setdefault(resource, {"changes": 0})
+                    item["changes"] += 1
+                    if not item.get("updated") or stamp > item["updated"]["time"]:
+                        item["updated"] = {"time": stamp, "by": who, "event": name}
+        return True
+
+    run(f"cloudtrail lookup-events ({days} days)", scan, default=False)
+    return history, {"days": days, "events": seen, "limit": limit, "truncated": seen >= limit}
 
 
 def _route53(session, run):
@@ -254,7 +351,7 @@ def _write(path, data):
     temporary.replace(path)
 
 
-def download_account(account, progress=lambda text: None):
+def download_account(account, progress=lambda text: None, history=None):
     """Download one account into the media folder. Returns its manifest."""
     import boto3
 
@@ -286,6 +383,14 @@ def download_account(account, progress=lambda text: None):
         _write(folder / region / "network-firewall.json", _network_firewall(session, region, run))
         progress(f"{account_id} {region}: Route 53 Resolver")
         _write(folder / region / "route53resolver.json", _resolver(session, region, run))
+        history = history or {}
+        if history.get("config", True):
+            progress(f"{account_id} {region}: creation and change times from AWS Config")
+            _write(folder / region / "config.json", {"Region": region, "ConfigResources": _config_times(session, region, run)})
+        if history.get("cloudtrail", True):
+            progress(f"{account_id} {region}: who changed what, from CloudTrail")
+            changes, window = _cloudtrail(session, region, run, int(history.get("days", 90)), int(history.get("max_events", 5000)))
+            _write(folder / region / "cloudtrail.json", {"Region": region, "ResourceHistory": changes, "HistoryWindow": window})
     progress(f"{account_id}: Route 53 hosted zones")
     _write(folder / "global" / "route53.json", _route53(session, run))
     previous = {}
@@ -340,18 +445,24 @@ def status(project_id):
 
 
 def start(project):
+    return start_job(project.id, project.name, involved_accounts(project))
+
+
+def start_job(key, name, accounts, history=None):
+    """Download the accounts in the background, then snapshot them. One job per key."""
     with _lock:
-        job = _jobs.get(project.id)
+        job = _jobs.get(key)
         if job and job["state"] == "running":
-            raise ValueError("A refresh is already running for this project.")
-        accounts = involved_accounts(project)
-        _jobs[project.id] = {
+            raise ValueError("A download is already running.")
+        if not accounts:
+            raise ValueError("No accounts to download.")
+        _jobs[key] = {
             "state": "running", "started": time.time(), "finished": None, "message": "Starting…",
             "accounts": [{"account_id": a["account_id"], "state": "queued", "error": "", "warnings": 0} for a in accounts],
             "snapshot": None, "error": "",
         }
-    threading.Thread(target=_run, args=(project, accounts), name=f"architecture-refresh-{project.id}", daemon=True).start()
-    return status(project.id)
+    threading.Thread(target=_run, args=(key, name, accounts, history), name=f"architecture-download-{key}", daemon=True).start()
+    return status(key)
 
 
 def _update(project_id, **fields):
@@ -366,27 +477,79 @@ def _account_state(project_id, account_id, **fields):
                 item.update(fields)
 
 
-def _run(project, accounts):
-    event("architecture.refresh.started", project=project.id, accounts=len(accounts))
+def _run(key, name, accounts, history=None):
+    event("architecture.refresh.started", key=key, accounts=len(accounts))
     ok = 0
+    if history is None:
+        history = download_config().get("history", {})
     for account in accounts:
-        _account_state(project.id, account["account_id"], state="running")
+        _account_state(key, account["account_id"], state="running")
         try:
-            manifest = download_account(account, progress=lambda text: _update(project.id, message=text))
+            manifest = download_account(account, progress=lambda text: _update(key, message=text), history=history)
             ok += 1
-            _account_state(project.id, account["account_id"], state="done", warnings=len(manifest["Download"]["errors"]),
+            _account_state(key, account["account_id"], state="done", warnings=len(manifest["Download"]["errors"]),
                            error="; ".join(manifest["Download"]["errors"][:3]))
         except Exception as error:  # noqa: BLE001 - report per account and continue
-            _account_state(project.id, account["account_id"], state="failed", error=str(error)[:500])
+            _account_state(key, account["account_id"], state="failed", error=str(error)[:500])
     files = snapshot_files([a["account_id"] for a in accounts])
     if not files:
-        _update(project.id, state="failed", finished=time.time(), message="", error="Nothing was downloaded, so no snapshot was made.")
-        event("architecture.refresh.failed", project=project.id)
+        _update(key, state="failed", finished=time.time(), message="", error="Nothing was downloaded, so no snapshot was made.")
+        event("architecture.refresh.failed", key=key)
         return
     try:
-        _update(project.id, message="Building the snapshot")
-        meta = store.import_snapshot(f"{project.name} · AWS download", files)
-        _update(project.id, state="done" if ok == len(accounts) else "partial", finished=time.time(), message="", snapshot=meta["id"])
-        event("architecture.refresh.completed", project=project.id, accounts=ok)
+        _update(key, message="Building the snapshot")
+        meta = store.import_snapshot(f"{name} · AWS download", files)
+        _update(key, state="done" if ok == len(accounts) else "partial", finished=time.time(), message="", snapshot=meta["id"])
+        event("architecture.refresh.completed", key=key, accounts=ok)
     except ValueError as error:
-        _update(project.id, state="failed", finished=time.time(), message="", error=str(error)[:500])
+        _update(key, state="failed", finished=time.time(), message="", error=str(error)[:500])
+
+
+# The central download list: every account to download, shared by all projects.
+
+DEFAULT_CONFIG = {"accounts": [], "regions": [], "history": {"config": True, "cloudtrail": True, "days": 90, "max_events": 5000}}
+
+
+def config_file():
+    return store.ensure() / "download.json"
+
+
+def download_config():
+    path = config_file()
+    value = json.loads(path.read_text()) if path.exists() else {}
+    return {**DEFAULT_CONFIG, **value, "history": {**DEFAULT_CONFIG["history"], **(value.get("history") or {})}}
+
+
+def save_download_config(value):
+    accounts, seen = [], set()
+    for item in value.get("accounts", []):
+        account_id = str(item.get("account_id", "")).strip()
+        if not ACCOUNT.match(account_id):
+            raise ValueError(f"{account_id!r} is not a 12-digit AWS account id.")
+        if account_id in seen:
+            continue
+        seen.add(account_id)
+        regions = [r for r in item.get("regions", []) if r]
+        bad = [r for r in regions if not REGION.match(r)]
+        if bad:
+            raise ValueError(f"Unknown region {bad[0]!r} for {account_id}.")
+        accounts.append({"account_id": account_id, "name": str(item.get("name", ""))[:200], "type": str(item.get("type", "") or "application"),
+                         "regions": regions, "profile": str(item.get("profile", ""))[:200]})
+    regions = [r for r in value.get("regions", []) if r]
+    if any(not REGION.match(r) for r in regions):
+        raise ValueError("Default regions must look like eu-west-2.")
+    history = value.get("history") or {}
+    days = int(history.get("days", 90))
+    if not 1 <= days <= 90:
+        raise ValueError("CloudTrail history covers 1 to 90 days.")
+    saved = {"accounts": accounts, "regions": regions, "history": {
+        "config": bool(history.get("config", True)), "cloudtrail": bool(history.get("cloudtrail", True)), "days": days,
+        "max_events": max(100, min(int(history.get("max_events", 5000)), 100000))}}
+    _write(config_file(), saved)
+    return saved
+
+
+def start_all():
+    config = download_config()
+    accounts = [{**a, "regions": a["regions"] or config["regions"], "environments": []} for a in config["accounts"]]
+    return start_job("all", "All accounts", accounts, history=config["history"])

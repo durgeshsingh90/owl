@@ -32,7 +32,7 @@ button.link{height:auto;border:0;background:none;padding:0;color:var(--accent);f
 button.link:hover{text-decoration:underline;background:none}
 button.danger{color:var(--fail)}
 input,textarea{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px}
-input[type="checkbox"],input[type="radio"]{accent-color:var(--accent);width:15px;height:15px;padding:0;margin:0 4px 0 0;vertical-align:-2px}
+:root input[type="checkbox"],:root input[type="radio"]{accent-color:var(--accent);width:15px;height:15px;padding:0;margin:0 4px 0 0;vertical-align:-2px}
 label.small{display:inline-flex;align-items:center;white-space:nowrap}
 :focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 a{color:var(--accent);text-decoration:none}
@@ -236,6 +236,16 @@ ol.hops li{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 ol.hops li::marker{color:var(--muted);font-size:12px}
 ol.hops .hop-resource{min-width:280px;max-width:420px}
 .segmented.small button{height:26px;padding:0 10px;font-size:12px}
+
+/* Timeline (same pattern as the Bitbucket PDF timeline) */
+table.timeline .timeline-date-row th{position:relative;padding:12px 14px 8px 40px;background:var(--side);font-size:12px;font-weight:500;color:var(--text);border-bottom:1px solid var(--line)}
+table.timeline .timeline-date-row strong{margin-right:8px}
+.timeline-marker{position:absolute;left:17px;top:17px;width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+table.timeline td:first-child{padding-left:22px;border-left:2px solid var(--line);}
+.nowrap{white-space:nowrap}
+.action{font:600 11px/18px var(--sans);padding:1px 8px;border-radius:6px;white-space:nowrap}
+.action.created{background:var(--pass-bg);color:var(--pass)}
+.action.updated{background:var(--accent-soft);color:var(--accent)}
 
 /* Standards */
 .rule-path{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
