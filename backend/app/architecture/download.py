@@ -683,7 +683,9 @@ def account_details(profile, known=()):
 
 
 def test_account(account_id, wanted=""):
-    """`aws sts get-caller-identity` for one account: can its profile sign in, to that account?"""
+    """`aws sts get-caller-identity` for one account: can its profile sign in, to that account?
+    Kept to that one command so hundreds of accounts test quickly; access is checked on download.
+    The created date is read once, the first time it's connected."""
     if not ACCOUNT.match(account_id):
         raise ValueError(f"{account_id!r} is not a 12-digit AWS account id.")
     try:
@@ -697,11 +699,15 @@ def test_account(account_id, wanted=""):
               "allowed": [], "denied": [], "errors": {}}
     if identity:
         known = denied_types(account_id)
-        result.update(check_access(profile, profile_for(account_id, wanted)[1], known))
-        details = account_details(profile, known)
-        newly = result["denied"] + ([ACCOUNT_DETAILS] if details.pop("details_denied", False) else [])
-        note_denied(account_id, newly)
-        result.update(details)
+        result["denied"] = [k for k in known if k != ACCOUNT_DETAILS]
+        saved = account_info().get(account_id, {})
+        if saved.get("created"):
+            result.update({"created": saved["created"], "account_name": saved.get("account_name", ""), "created_error": ""})
+        else:
+            details = account_details(profile, known)
+            if details.pop("details_denied", False):
+                note_denied(account_id, [ACCOUNT_DETAILS])
+            result.update(details)
     remember(account_id, connected=result["ok"], checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), arn=result["arn"], error=result["error"],
              denied=result["denied"], errors=result["errors"], allowed=len(result["allowed"]),
              **{k: result[k] for k in ("created", "account_name", "created_error") if k in result})

@@ -1,14 +1,16 @@
 "use strict";
 // AWS download: one line per account, the name shown once. Click a stage to select it, test
-// one line or all selected, click a status icon to sign in, then download what's connected.
+// one line, all selected or all tested before, then download what's connected. Signing in to
+// AWS happens outside this page.
 AA.views.download = (() => {
   const {esc, api, toast} = AA;
-  const TESTS_AT_ONCE = 6;
+  const TESTS_AT_ONCE = 20;
   const SHARED = "../bitbucket/assets/";
   const ICONS = {connected: `${SHARED}connected.png?v=2`, checking: `${SHARED}no-connection.gif?v=2`, failed: `${SHARED}disconnected.png?v=2`, unknown: "assets/not-tested.png"};
-  let data = null, search = "", onlySelected = false, polling = null, login = null;
+  let data = null, search = "", onlySelected = false, polling = null;
   const running = new Set();
   let searchTyping, ticker, editingTag = "", tagFilter = "";
+  const everTested = (a) => a.info?.connected === true || a.info?.connected === false;
 
   const accounts = () => data.groups.flatMap((g) => g.accounts);
   const chosen = () => accounts().filter((a) => a.selected);
@@ -19,10 +21,10 @@ AA.views.download = (() => {
   function statusOf(a) {
     if (running.has(a.account_id)) return ["checking", "Testing…", ""];
     const i = a.info || {};
-    if (isConnected(a)) return ["connected", "Connected", `${i.arn || ""}. Last tested ${stamp(i.checked_at)}. Click to test again.`];
-    if (a.connects > 0 || i.connected === true) return ["failed", "Disconnected", `${i.error || "The session has ended."} Click to sign in again.`];
-    if (i.connected === false) return ["failed", "Not connected", `${i.error || ""} Click to sign in.`];
-    return ["unknown", "Not tested", "Click to sign in."];
+    if (isConnected(a)) return ["connected", "Connected", `${i.arn || ""}. Last tested ${stamp(i.checked_at)}.`];
+    if (a.connects > 0 || i.connected === true) return ["failed", "Disconnected", i.error || "The session has ended."];
+    if (i.connected === false) return ["failed", "Not connected", i.error || ""];
+    return ["unknown", "Not tested", "Not tested yet."];
   }
 
   function jobLabel(job) {
@@ -90,7 +92,7 @@ AA.views.download = (() => {
       <td class="small nowrap">${job ? esc(job) : '<span class="muted">Never</span>'}</td>
       <td><div class="dl-tags">${(a.tags || []).map((t) => `<span class="dl-tag">${esc(t)}<button type="button" data-untag="${esc(t)}" data-account="${esc(a.account_id)}" aria-label="Remove tag ${esc(t)}">×</button></span>`).join("")}${editingTag === a.account_id ? `<input class="dl-tag-input" data-tag-input="${esc(a.account_id)}" list="dl-tag-list" placeholder="New or existing" aria-label="Add a tag" maxlength="40">` : `<button type="button" class="dl-tag-add" data-tag-add="${esc(a.account_id)}" title="Add a tag" aria-label="Add a tag">+</button>`}</div></td>
       <td class="dl-count" title="New connections made: testing again during a live session doesn't count">${a.connects || 0}</td>
-      <td><button type="button" class="dl-status ${state}" data-status="${esc(a.account_id)}" title="${esc(tip)}"><img src="${ICONS[state]}" alt="">${esc(label)}</button>${state === "connected" && a.session ? `<div class="dl-timer" data-expires="${esc(a.session.expires_at)}" data-account="${esc(a.account_id)}" title="${esc(a.session.source === "sso" ? `Session ends ${stamp(a.session.expires_at)}, from the AWS sign-in` : `About 12 hours from the first successful test, ending ${stamp(a.session.expires_at)}`)}">${esc(timeLeft(a.session))}</div>` : ""}${state === "connected" && denied.length ? `<div class="dl-partial">${denied.length} type${denied.length === 1 ? "" : "s"} denied</div>` : ""}</td>
+      <td><span class="dl-status ${state}" title="${esc(tip)}"><img src="${ICONS[state]}" alt="">${esc(label)}</span>${state === "connected" && a.session ? `<div class="dl-timer" data-expires="${esc(a.session.expires_at)}" data-account="${esc(a.account_id)}" title="${esc(a.session.source === "sso" ? `Session ends ${stamp(a.session.expires_at)}, from the AWS sign-in` : `About 12 hours from the first successful test, ending ${stamp(a.session.expires_at)}`)}">${esc(timeLeft(a.session))}</div>` : ""}${state === "connected" && denied.length ? `<div class="dl-partial">${denied.length} type${denied.length === 1 ? "" : "s"} denied</div>` : ""}</td>
       <td><button type="button" class="dl-test" data-test="${esc(a.account_id)}" ${running.has(a.account_id) ? "disabled" : ""}>Test</button></td></tr>${problems ? `<tr class="dl-note"><td colspan="8">${problems}</td></tr>` : ""}`;
   }
 
@@ -145,17 +147,15 @@ AA.views.download = (() => {
     start.title = connected ? "Downloads every connected account" : "Test the accounts you want first. Only connected accounts download.";
     all.textContent = running.size ? "Testing…" : `Test selected (${count})`;
     all.disabled = Boolean(running.size) || !count;
+    const again = main.querySelector("#dl-test-again");
+    const tested = accounts().filter(everTested).length;
+    again.textContent = running.size ? `Testing ${running.size} left…` : `Test all (${tested.toLocaleString()})`;
+    again.title = "Tests again only accounts tested before. Never-tested accounts are skipped.";
+    again.disabled = Boolean(running.size) || !tested;
     main.querySelector("#dl-total").textContent = data.total.toLocaleString();
     main.querySelector("#dl-unique").textContent = data.unique.toLocaleString();
     main.querySelector("#dl-selected").textContent = count.toLocaleString();
     main.querySelector("#dl-job").textContent = jobLabel(job);
-    const banner = main.querySelector("#dl-login");
-    banner.hidden = !login;
-    if (login) {
-      banner.innerHTML = login.login_status === "pending"
-        ? `Waiting for you to approve the sign-in for <span class="mono">${esc(login.profile)}</span> in your browser${login.login_url ? `: <a href="${esc(login.login_url)}" target="_blank" rel="noopener noreferrer">open the approval page</a>` : ""}${login.login_code ? ` · code <b>${esc(login.login_code)}</b>` : ""}`
-        : esc(login.error || "");
-    }
   }
 
   async function runTests(main, ids) {
@@ -185,46 +185,11 @@ AA.views.download = (() => {
     }
   }
 
-  async function connectionApi(path, options = {}) {
-    const response = await fetch("/api/aws-accounts/connection" + path, {cache: "no-store", ...options, headers: {"Content-Type": "application/json"}});
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(typeof body.detail === "string" ? body.detail : "The sign-in couldn't start.");
-    return body;
-  }
-
-  // OWL's sign-in: `aws sso login` for this account's profile. One approval usually covers
-  // every account in the same SSO session, so everything selected is tested again afterwards.
-  async function signIn(main, account) {
-    if (!account.profile) return toast("This account has no profile in the AWS config.");
-    try {
-      await connectionApi("", {method: "PUT", body: JSON.stringify({profile: account.profile})});
-      login = await connectionApi("/login", {method: "POST"});
-      list(main);
-      while (login.login_status === "pending" && main.querySelector("#dl-list")) {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-        login = await connectionApi("");
-        if (main.querySelector("#dl-list")) list(main);
-      }
-      const failed = login.login_status !== "approved" && login.status !== "connected";
-      if (failed && login.error) toast(login.error);
-      login = null;
-      if (main.querySelector("#dl-list")) {
-        list(main);
-        runTests(main, [...new Set([account.account_id, ...chosen().map((a) => a.account_id)])]);
-      }
-    } catch (error) {
-      login = null;
-      list(main);
-      toast(error.message);
-    }
-  }
-
   function render(main, app) {
     main.innerHTML = `<div class="dl-head"><h1>AWS download</h1>
         <div class="dl-counts"><span><b id="dl-total"></b> total</span><span><b id="dl-unique"></b> unique</span><span><b id="dl-selected"></b> selected</span></div>
-        <div class="dl-actions"><button type="button" id="dl-test-all"></button><button type="button" class="primary" id="dl-start"></button></div></div>
+        <div class="dl-actions"><button type="button" id="dl-test-again"></button><button type="button" id="dl-test-all"></button><button type="button" class="primary" id="dl-start"></button></div></div>
       ${data.error ? `<div class="error-box">${esc(data.error)}</div>` : ""}
-      <div id="dl-login" class="dl-login" hidden></div>
       <div class="filters dl-filters"><input type="search" id="dl-search" placeholder="Search anything: name, account number, stage, profile" value="${esc(search)}">
         <select id="dl-tag-filter" aria-label="Filter by tag" hidden></select><datalist id="dl-tag-list"></datalist>
         <label class="small"><input type="checkbox" id="dl-only" ${onlySelected ? "checked" : ""}> Selected only</label>
@@ -318,18 +283,14 @@ AA.views.download = (() => {
         const account = find(retry.dataset.retry);
         await api(`/download/denied/${account.account_id}/reset`, {method: "POST"});
         account.info = {...account.info, denied: [], denied_types: []};
-        runTests(main, [account.account_id]);
-      }
-      const status = e.target.closest("[data-status]");
-      if (status && !running.has(status.dataset.status) && !login) {
-        const account = find(status.dataset.status);
-        if (isConnected(account)) runTests(main, [account.account_id]);
-        else signIn(main, account);
+        toast("These types will be checked again on the next download.");
+        list(main);
       }
     };
     main.querySelector("#dl-list").addEventListener("click", onTableClick);
     main.querySelector("#dl-top").addEventListener("click", onTableClick);
     main.querySelector("#dl-recent").addEventListener("click", onTableClick);
+    main.querySelector("#dl-test-again").addEventListener("click", () => runTests(main, accounts().filter(everTested).map((a) => a.account_id)));
     main.querySelector("#dl-test-all").addEventListener("click", () => runTests(main, chosen().map((a) => a.account_id)));
     main.querySelector("#dl-start").addEventListener("click", async () => {
       try {

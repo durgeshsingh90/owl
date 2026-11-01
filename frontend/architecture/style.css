@@ -275,7 +275,6 @@ table.dl-table tr.dl-first td{border-top:1px solid var(--border)}
 .dl-note td{padding:0 14px 8px;font-size:12px;overflow-wrap:anywhere;border-top:0}
 .dl-problem{color:var(--fail)}
 .dl-denied{color:var(--warn)}
-.dl-login{padding:10px 14px;border-radius:10px;background:var(--accent-soft);font-size:13px;margin-bottom:12px}
 
 /* Search AWS */
 .ex-bar #ex-q{flex:1;min-width:260px;height:38px;font-size:14px}

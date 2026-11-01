@@ -595,8 +595,10 @@ class Times(Base):
             self.assertEqual(client.get("/api/architecture/download").json()["selected"], 1)
             self.assertEqual(client.put("/api/architecture/download/selection", json={"account_ids": ["12"]}).status_code, 400)
             with patch("app.aws.connection.run_sts", return_value=({"Account": "111111111111", "Arn": "arn:x"}, None)), \
-                    patch("app.architecture.download.check_access", return_value={"allowed": ["Vpcs"], "denied": ["Firewalls"], "errors": {}}), \
                     patch("app.architecture.download.account_details", return_value={"created": "2020-01-02T00:00:00+00:00", "account_name": "Payments", "created_error": ""}):
+                from app.architecture import download
+
+                download.note_denied("111111111111", ["Firewalls"])
                 tested = client.post("/api/architecture/download/test/111111111111").json()
                 self.assertEqual((tested["ok"], tested["denied"], tested["created"]), (True, ["Firewalls"], "2020-01-02T00:00:00+00:00"))
                 listing = client.get("/api/architecture/download").json()
@@ -750,10 +752,12 @@ class Times(Base):
                 self.assertEqual(download.denied_types("111111111111"), ["AccountDetails", "Firewalls"])
                 # Downloading and testing again never call what was refused.
                 manifest = download.download_account({"account_id": "111111111111"})
+                before = len(commands)
                 result = download.test_account("111111111111")
                 self.assertEqual((calls("list-firewalls"), calls("get-account-information")), (1, 1))
                 self.assertIn("Firewalls", manifest["Download"]["denied"])
                 self.assertIn("Firewalls", result["denied"])
+                self.assertEqual(len(commands), before)  # a test only signs in: nothing else runs
             # It's per account: another account still gets its own check.
             with patch("app.aws.connection.run_sts", return_value=identity("222222222222")):
                 download.download_account({"account_id": "222222222222"})
@@ -761,7 +765,7 @@ class Times(Base):
             with patch("app.aws.connection.run_sts", return_value=identity("111111111111")):
                 download.forget_denied("111111111111")
                 self.assertEqual(download.denied_types("111111111111"), [])
-                download.test_account("111111111111")
+                download.download_account({"account_id": "111111111111"})
                 self.assertEqual(calls("list-firewalls"), 3)
 
     def test_session_timer_uses_the_sso_cache_then_twelve_hours(self):
