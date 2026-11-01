@@ -266,7 +266,7 @@ Data lives beside the database (`backend/data/`):
   and on-premises/third-party systems used by every project.
 - `architecture/rules/*.json`: standards; they add to or override `app/architecture/rules/`.
 - `architecture/snapshots/<id>/`: normalized inventories the analysis runs on.
-- `media/aws/<account>/<region>/<service>.json`: raw AWS output shared by all projects
+- `media/aws/<account>-<name>/<env>/`: `state.json` and `<region>/<service>.json`, raw AWS output shared by all projects
   (override with `OWL_MEDIA_DIR`).
 
 **Project setup** (in the app) picks the accounts from the AWS config, maps environments,
@@ -279,14 +279,20 @@ targets inside the cluster, and security groups and NACLs on both ends. A hop's 
 sets the port from that hop on (NLB 443 → pods 8443).
 
 **AWS download** lists every account in the AWS config (on Windows
-`C:\Users\<you>\.aws\config`, or the path set in the AWS Accounts app); tick the ones to
-download and press Download. The list is saved in `architecture/download.json`. Besides
-configuration it records when each resource was created and last changed: from the
-resource's own API field where AWS has one, AWS Config where it records, and CloudTrail
-write events (who and what, last 1–90 days). **Timeline** shows these newest first under
+`C:\Users\<you>\.aws\config`, or the path set in the AWS Accounts app), one row per
+`mc-<name>-<stage>` name with a button per stage. Click stages to select them, test any
+one or all selected with `aws sts get-caller-identity`, then download the selected ones.
+The selection is saved in `architecture/download.json`. Each account's access is checked
+first (one item of each resource type); denied types are never called and show as UNKNOWN
+in the analysis. Private zone records, VPC endpoint and load balancer names and project
+hostnames are then resolved with `nslookup`; IPs, timeouts and not-found results are saved in
+`global/dns-lookups.json` and shown on the Accounts page. `state.json` lists every resource
+with all its properties (network, peering, VPN, Direct Connect, ingress, EKS and its compute), like the resources in a Terraform state file. No logs (CloudTrail,
+AWS Config) or firewall policies and rule groups are read, so firewall checks stay UNKNOWN.
+Created and updated times come from fields AWS returns on the resource itself. **Timeline** shows these newest first under
 Today / Yesterday / This week / ... / month headings, like the Bitbucket timeline.
 
-The refresh button downloads a project's accounts with boto3 using the AWS config file
-the AWS Accounts app reads; only describe/list/get calls are made. Profiles that use
-`aws login` need `boto3[crt]` (in requirements). AWS JSON can also be imported from
+The refresh button downloads a project's accounts with the `aws` command (run through
+subprocess; AWS CLI v2 must be on PATH) using the AWS config file
+the AWS Accounts app reads; only describe/list/get calls are made. AWS JSON can also be imported from
 the Import page. The first run adds a sample Payment Platform project and snapshot.

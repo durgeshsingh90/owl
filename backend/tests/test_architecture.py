@@ -308,37 +308,6 @@ class Times(Base):
         self.assertEqual((vpc.updated, vpc.updated_source, vpc.updated_by, vpc.changes), ("2026-10-20T08:00:00+00:00", "cloudtrail", "alice", 3))
         self.assertNotIn("vpc-gone", inventory.timestamps)  # only resources in the inventory
 
-    def test_cloudtrail_summary(self):
-        from datetime import datetime, timezone
-        from app.architecture import download
-
-        events = [
-            {"EventName": "AuthorizeSecurityGroupIngress", "EventTime": datetime(2026, 10, 2, tzinfo=timezone.utc), "Username": "bob",
-             "Resources": [{"ResourceName": "sg-0123456789abcdef0"}], "CloudTrailEvent": json.dumps({"requestParameters": {"groupId": "sg-0123456789abcdef0"}})},
-            {"EventName": "CreateSecurityGroup", "EventTime": datetime(2026, 9, 1, tzinfo=timezone.utc), "Username": "alice",
-             "CloudTrailEvent": json.dumps({"requestParameters": {"vpcId": "vpc-0123456789abcdef0"}, "responseElements": {"groupId": "sg-0123456789abcdef0"}})},
-            {"EventName": "RevokeSecurityGroupIngress", "EventTime": datetime(2026, 10, 3, tzinfo=timezone.utc), "Username": "eve",
-             "CloudTrailEvent": json.dumps({"errorCode": "UnauthorizedOperation", "requestParameters": {"groupId": "sg-0123456789abcdef0"}})},
-        ]
-
-        class Pages:
-            def paginate(self, **kwargs):
-                return [{"Events": events}]
-
-        class Client:
-            def get_paginator(self, name):
-                return Pages()
-
-        class Session:
-            def client(self, *args, **kwargs):
-                return Client()
-
-        history, window = download._cloudtrail(Session(), "eu-west-2", download.Recorder(), 90, 1000)
-        sg = history["sg-0123456789abcdef0"]
-        self.assertEqual(sg["created"]["by"], "alice")
-        self.assertEqual((sg["updated"]["by"], sg["updated"]["event"], sg["changes"]), ("bob", "AuthorizeSecurityGroupIngress", 1))
-        self.assertEqual(window["events"], 3)
-
     def test_timeline_newest_first(self):
         from app.architecture.models import ResourceTimes
 
@@ -356,14 +325,149 @@ class Times(Base):
 
     def test_download_settings(self):
         client = TestClient(app)
-        with patch("app.architecture.download.config_path", return_value=str(Path(self.temp.name) / "none")):
+        config = Path(self.temp.name) / "aws-config"
+        config.write_text("".join(f"[profile mc-{n}-{e}]\nsso_account_id = {a}\nregion = eu-west-2\n" for n, e, a in (
+            ("payments", "prod", "111111111111"), ("payments", "dev", "222222222222"), ("payments", "nonp", "333333333333"),
+            ("edge", "prod", "444444444444"))) + "[profile other]\nsso_account_id = 555555555555\n")
+        with patch("app.architecture.download.config_path", return_value=str(config)):
             body = client.get("/api/architecture/download").json()
-        self.assertEqual(body["config"]["accounts"], [])
-        saved = client.put("/api/architecture/download", json={"accounts": [{"account_id": "123456789012", "regions": ["eu-west-2"]}],
-                                                               "history": {"days": 30}}).json()
-        self.assertEqual(saved["history"]["days"], 30)
-        self.assertEqual(client.put("/api/architecture/download", json={"accounts": [{"account_id": "123456789012", "regions": ["mars-1"]}]}).status_code, 400)
-        self.assertEqual(client.put("/api/architecture/download", json={"accounts": [{"account_id": "12"}]}).status_code, 422)
+            self.assertEqual((body["total"], body["unique"], body["selected"]), (5, 3, 0))
+            payments = next(g for g in body["groups"] if g["name"] == "payments")
+            self.assertEqual([a["stage"] for a in payments["accounts"]], ["dev", "nonp", "prod"])
+            self.assertEqual(client.put("/api/architecture/download/selection", json={"account_ids": ["111111111111", "111111111111"]}).json(),
+                             {"selected": ["111111111111"]})
+            self.assertEqual(client.get("/api/architecture/download").json()["selected"], 1)
+            self.assertEqual(client.put("/api/architecture/download/selection", json={"account_ids": ["12"]}).status_code, 400)
+            with patch("app.aws.connection.run_sts", return_value=({"Account": "111111111111", "Arn": "arn:x"}, None)), \
+                    patch("app.architecture.download.check_access", return_value={"allowed": ["Vpcs"], "denied": ["Firewalls"], "errors": {}}):
+                tested = client.post("/api/architecture/download/test/111111111111").json()
+                self.assertEqual((tested["ok"], tested["denied"]), (True, ["Firewalls"]))
+                wrong = client.post("/api/architecture/download/test/222222222222").json()
+                self.assertFalse(wrong["ok"])
+                self.assertIn("signs in to 111111111111", wrong["error"])
+            with patch("app.aws.connection.run_sts", return_value=(None, "ExpiredToken")):
+                self.assertEqual(client.post("/api/architecture/download/test/111111111111").json()["error"], "ExpiredToken")
+            missing = client.post("/api/architecture/download/test/999999999999").json()
+            self.assertIn("No profile", missing["error"])
+
+    def test_download_runs_the_aws_command(self):
+        from types import SimpleNamespace
+        from app.architecture import download
+
+        config = Path(self.temp.name) / "aws-config"
+        config.write_text("[profile mc-a-prod]\nsso_account_id = 111111111111\nregion = eu-west-2\n")
+        commands = []
+
+        def fake(command, **kwargs):
+            if command[0] != "aws":  # nslookup
+                return SimpleNamespace(returncode=0, stderr="", stdout="")
+            commands.append(command)
+            operation = command[2]
+            if operation == "describe-vpcs":
+                return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({"Vpcs": [{"VpcId": "vpc-1", "CidrBlock": "10.0.0.0/16"}]}))
+            if operation == "list-firewalls":
+                return SimpleNamespace(returncode=254, stderr="\nAn error occurred (AccessDenied) when calling ListFirewalls\n", stdout="")
+            return SimpleNamespace(returncode=0, stderr="", stdout="{}")
+
+        with patch("app.architecture.download.config_path", return_value=str(config)), \
+                patch("app.aws.connection.run_sts", return_value=({"Account": "111111111111", "Arn": "arn:x"}, None)), \
+                patch("app.aws.connection._aws", return_value="aws"), patch("app.architecture.download.subprocess.run", side_effect=fake):
+            manifest = download.download_account({"account_id": "111111111111"})
+        self.assertTrue(all(c[0] == "aws" and c[c.index("--profile") + 1] == "mc-a-prod" and c[-2:] != [] for c in commands))
+        self.assertTrue(all(c[1] != "route53" or "--region" in c for c in commands))
+        self.assertEqual(next(c for c in commands if c[2] == "describe-vpcs")[-2:], ["--region", "eu-west-2"])
+        self.assertEqual(manifest["Download"]["denied"], ["Firewalls"])  # denied at the check: recorded, the rest still downloads
+        self.assertEqual(sum(c[2] == "list-firewalls" for c in commands), 1)  # the check's one try, never again
+        self.assertIn("--max-items", next(c for c in commands if c[2] == "list-firewalls"))
+        self.assertNotIn("--max-items", next(c for c in commands if c[2] == "describe-vpn-connections"))
+        self.assertTrue((download.media_folder() / "111111111111-a" / "prod" / "eu-west-2" / "ec2.json").exists())
+        self.assertEqual({c[1] for c in commands}, {"ec2", "elbv2", "eks", "network-firewall", "route53resolver", "route53", "directconnect", "elb", "apigateway", "apigatewayv2", "autoscaling"})
+        inventory, errors, _ = normalize(download.snapshot_files(["111111111111"]))
+        self.assertEqual(errors, [])
+        self.assertIn("vpc-1", inventory.vpcs)
+        state = download.state_of("111111111111")
+        self.assertEqual([(r["type"], r["id"]) for r in state["resources"]], [("aws_vpc", "vpc-1")])
+        self.assertEqual(state["resources"][0]["attributes"]["CidrBlock"], "10.0.0.0/16")
+        self.assertEqual(inventory.access_denied, {"111111111111": ["Firewalls"]})
+
+    def test_parse_nslookup_windows_and_unix(self):
+        from app.architecture import download
+
+        windows = ("Server:  dns.corp.example\nAddress:  10.1.1.1\n\nNon-authoritative answer:\nName:    app.corp.sep\n"
+                   "Addresses:  10.2.3.4\n          10.2.3.5\nAliases:  other.corp.sep\n")
+        self.assertEqual(download.parse_nslookup(windows), ("10.1.1.1", ["10.2.3.4", "10.2.3.5"]))
+        unix = ("Server:\t\t192.168.1.1\nAddress:\t192.168.1.1#53\n\nNon-authoritative answer:\napp.sep\tcanonical name = b.sep.\n"
+                "Name:\tb.sep\nAddress: 10.9.9.9\nName:\tb.sep\nAddress: fd00::1\n")
+        self.assertEqual(download.parse_nslookup(unix)[1], ["10.9.9.9", "fd00::1"])
+        self.assertEqual(download.parse_nslookup("Server: x\nAddress: 10.1.1.1\n\n*** x can't find a.sep: Non-existent domain\n")[1], [])
+
+    def test_nslookup_results_and_timeout_stop(self):
+        from types import SimpleNamespace
+        from app.architecture import download
+
+        def answer(output):
+            return SimpleNamespace(returncode=0, stdout=output, stderr="")
+
+        with patch("app.architecture.download.shutil.which", return_value="nslookup"):
+            with patch("app.architecture.download.subprocess.run", return_value=answer(";; connection timed out; no servers could be reached")):
+                self.assertEqual(download.nslookup("a.sep")["status"], "timeout")
+                many = {f"h{i}.sep": "Route 53" for i in range(40)}
+                results = download.run_lookups(many)
+                self.assertEqual(sum(r["status"] == "timeout" for r in results), download.LOOKUP_TRIAL)
+                self.assertEqual(sum(r["status"] == "not_tried" for r in results), 8)
+            with patch("app.architecture.download.subprocess.run", side_effect=download.subprocess.TimeoutExpired("nslookup", 20)):
+                self.assertEqual(download.nslookup("a.sep")["status"], "timeout")
+            with patch("app.architecture.download.subprocess.run", return_value=answer("Server: x\nAddress: 10.1.1.1\n\n*** can't find a.sep: Non-existent domain")):
+                self.assertEqual(download.nslookup("a.sep")["status"], "not_found")
+            with patch("app.architecture.download.subprocess.run", return_value=answer("Server: x\nAddress: 10.1.1.1\n\nName: a.sep\nAddress: 10.2.2.2")):
+                self.assertEqual(download.nslookup("a.sep")["ips"], ["10.2.2.2"])
+
+    def test_lookup_check_is_advisory(self):
+        from app.architecture.models import DnsLookup
+
+        analyzer = engine.Analyzer(self.inv, self.project, store.services(), store.externals(), store.rules())
+        self.inv.dns_lookups["a.sep"] = DnsLookup(name="a.sep", status="timeout", detail="The DNS server didn't answer in time.")
+        check = analyzer.lookup_check("A.sep")
+        self.assertEqual((check.status, check.blocking), ("UNKNOWN", False))
+        self.assertIn("Timed out", check.actual)
+        self.assertIsNone(analyzer.lookup_check("b.sep"))
+
+    def test_state_has_properties_and_no_rule_or_log_reads(self):
+        from app.architecture import download
+
+        folder = Path(self.temp.name) / "acct"
+        download._write(folder / "eu-west-2" / "elbv2.json", {"LoadBalancers": [{"LoadBalancerArn": "arn:lb", "LoadBalancerName": "n1", "CreatedTime": "2025-01-02T03:04:05Z",
+                        "Attributes": [{"Key": "deletion_protection.enabled", "Value": "true"}]}]})
+        download._write(folder / "global" / "route53.json", {"HostedZones": [{"Id": "/hostedzone/Z1", "Name": "a.sep.", "ResourceRecordSets": [{"Name": "b.a.sep.", "Type": "A"}]}]})
+        state = download.build_state(folder, "111111111111", "mc-a-prod", ["eu-west-2"])
+        lb = state["resources"][0]
+        self.assertEqual((lb["type"], lb["name"], lb["created_at"]), ("aws_lb", "n1", "2025-01-02T03:04:05+00:00"))
+        self.assertEqual(lb["attributes"]["Attributes"][0]["Value"], "true")
+        self.assertEqual([r["type"] for r in state["resources"][1:]], ["aws_route53_zone", "aws_route53_record"])
+        self.assertFalse({"Results", "Events"} & {p[0] for p in download.PROBES})
+
+    def test_no_access_downloads_nothing(self):
+        from types import SimpleNamespace
+        from app.architecture import download
+
+        config = Path(self.temp.name) / "aws-config"
+        config.write_text("[profile mc-a-prod]\nsso_account_id = 111111111111\nregion = eu-west-2\n")
+        denied = SimpleNamespace(returncode=254, stdout="", stderr="An error occurred (UnauthorizedOperation)")
+        with patch("app.architecture.download.config_path", return_value=str(config)), \
+                patch("app.aws.connection.run_sts", return_value=({"Account": "111111111111", "Arn": "arn:x"}, None)), \
+                patch("app.aws.connection._aws", return_value="aws"), patch("app.architecture.download.subprocess.run", return_value=denied):
+            with self.assertRaisesRegex(PermissionError, "nothing was downloaded"):
+                download.download_account({"account_id": "111111111111"})
+        self.assertIsNone(download.find_folder("111111111111"))
+
+    def test_denied_data_is_unknown_not_fail(self):
+        self.inv.access_denied = {"333333333333": ["LoadBalancers", "clusters"]}
+        del self.inv.load_balancers[next(k for k, v in self.inv.load_balancers.items() if v.name == "risk-nlb")]
+        result = self.result("PROD", "conn-007")
+        self.assertEqual(result.status, "UNKNOWN")
+        self.assertFalse(self.failing(result))
+        self.inv.access_denied = {}
+        self.assertEqual(self.result("PROD", "conn-007").status, "FAIL")  # without the denial, missing means missing
 
 
 class Api(Base):
@@ -411,7 +515,7 @@ class Api(Base):
 
 
 class Download(Base):
-    """Download from AWS: only the project's accounts, into the shared media folder. boto3 is stubbed."""
+    """Download from AWS: only the project's accounts, into the shared media folder. AWS is stubbed."""
 
     def setUp(self):
         super().setUp()
@@ -443,12 +547,12 @@ class Download(Base):
         sample = {p.parent.name.split("-")[0] + "/" + p.name: json.loads(p.read_text()) for p in (SAMPLE / "aws").rglob("*.json")}
 
         def fake(account, progress=lambda t: None, history=None):
-            folder = download.media_folder() / account["account_id"]
+            folder = download.media_folder() / f"{account['account_id']}-x" / "prod"
             for name, data in sample.items():
                 if name.startswith(account["account_id"]) and not name.endswith("account.json"):
                     download._write(folder / "eu-west-2" / name.split("/")[1], data)
             manifest = {"Account": {"Id": account["account_id"], "Type": account["type"] or "application", "Region": "eu-west-2"},
-                        "Download": {"errors": [], "downloaded_at": "now"}}
+                        "Download": {"errors": [], "denied": [], "downloaded_at": "now"}}
             download._write(folder / "account.json", manifest)
             return manifest
 
@@ -461,13 +565,13 @@ class Download(Base):
                     break
                 __import__("time").sleep(0.05)
         self.assertEqual(job["state"], "done", job)
-        self.assertTrue((download.media_folder() / "222222222222" / "eu-west-2" / "ec2.json").exists())
+        self.assertTrue((download.media_folder() / "222222222222-x" / "prod" / "eu-west-2" / "ec2.json").exists())
         meta = store.snapshot_meta(job["snapshot"])
         self.assertEqual(meta["errors"], [])
         self.assertIn("222222222222", meta["accounts"])
         listed = sorted(a["account_id"] for a in download.involved_accounts(self.project))
         self.assertEqual(meta["accounts"], listed)  # exactly the project's accounts
-        self.assertEqual(sorted(p.name for p in download.media_folder().iterdir()), listed)
+        self.assertEqual(sorted(p.name.split("-")[0] for p in download.media_folder().iterdir()), listed)
         info = client.get("/api/architecture/projects/payment-platform/aws").json()
         self.assertEqual(next(a for a in info["accounts"] if a["account_id"] == "222222222222")["profile"], "prod")
 

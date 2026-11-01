@@ -321,6 +321,19 @@ class ResourceTimes(Model):
     changes: int = 0  # CloudTrail write events seen in the window
 
 
+class DnsLookup(Model):
+    """What nslookup answered for a name, from the computer that ran the download."""
+
+    name: str
+    status: str  # resolved, timeout, not_found, error, not_tried
+    ips: list[str] = []
+    source: str = ""  # where the name came from: a hosted zone, load balancer, VPC endpoint, project
+    account: str = ""
+    server: str = ""
+    looked_up_at: str = ""
+    detail: str = ""
+
+
 class Inventory(Model):
     """Everything known about AWS, keyed by resource id."""
 
@@ -346,12 +359,14 @@ class Inventory(Model):
     resolver_rules: dict[str, ResolverRule] = {}
     resolver_endpoints: dict[str, ResolverEndpoint] = {}
     timestamps: dict[str, ResourceTimes] = {}  # by resource id
+    dns_lookups: dict[str, DnsLookup] = {}  # by lowercase name
+    access_denied: dict[str, list[str]] = {}  # account -> resource types its download couldn't read
 
     model_config = {"extra": "ignore", "populate_by_name": True}
 
 
 COLLECTIONS = [
-    name for name in Inventory.model_fields if name not in ("schema_", "timestamps")
+    name for name in Inventory.model_fields if name not in ("schema_", "timestamps", "access_denied", "dns_lookups")
 ]
 
 

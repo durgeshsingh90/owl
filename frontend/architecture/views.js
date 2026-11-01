@@ -311,9 +311,40 @@ AA.views = (() => {
       section("Firewalls", d.firewalls.length, table(d.firewalls, [["Firewall", (f) => esc(f.name)], ["Endpoints", (f) => esc(f.endpoints.join(", "))],
         ["Rule groups", (f) => f.rule_groups.map((g) => `${esc(g.name)} <span class="muted small">${g.rules.length} rules</span>`).join("<br>")], ["Default", (f) => esc(f.default_actions.join(", "))]])) +
       section("VPC endpoints", d.vpc_endpoints.length, table(d.vpc_endpoints, [["Endpoint", (e) => mono(e.id)], ["Type", (e) => esc(e.type)], ["Service", (e) => esc(e.service)]])) +
+      section("DNS lookups (nslookup)", d.dns.lookups.length, tableBase(d.dns.lookups, [["Name", (l) => mono(l.name)], ["IP addresses", (l) => esc(l.ips.join(", ")) || "—"],
+        ["Result", (l) => ({resolved: status("PASS", "Resolved"), timeout: status("UNKNOWN", "Timed out"), not_tried: status("UNKNOWN", "Not tried"), not_found: status("WARNING", "Not found")}[l.status] || status("UNKNOWN", l.status)) + (l.detail ? `<div class="small muted">${esc(l.detail)}</div>` : "")],
+        ["From", (l) => esc(l.source)], ["Looked up", (l) => esc(new Date(l.looked_up_at).toLocaleString())]])) +
       section("DNS associations", d.dns.hosted_zones.length + d.dns.resolver_rules.length,
         table(d.dns.hosted_zones, [["Hosted zone", (z) => `${esc(z.name)} ${z.private ? '<span class="muted small">private</span>' : ""}`], ["VPCs", (z) => esc(z.vpcs.join(", "))], ["Records", (z) => z.records.length]]) +
         table(d.dns.resolver_rules, [["Resolver rule", (r) => `${mono(r.id)} ${esc(r.domain)}`], ["Targets", (r) => esc(r.target_ips.join(", "))], ["VPCs", (r) => esc(r.vpcs.join(", "))]]));
+    // Every resource with all its properties, opened one at a time because accounts can be large.
+    const box = document.createElement("details");
+    box.className = "inv";
+    box.innerHTML = `<summary>All resource properties <span class="muted">state.json</span></summary><div class="inner"><div class="loading">Loading…</div></div>`;
+    main.querySelector("#account-body").appendChild(box);
+    box.addEventListener("toggle", async () => {
+      if (!box.open || box.dataset.loaded) return;
+      box.dataset.loaded = "1";
+      const inner = box.querySelector(".inner");
+      let state;
+      try {
+        state = await api(`/download/state/${encodeURIComponent(current)}`);
+      } catch (error) {
+        inner.innerHTML = `<p class="muted small">${esc(error.message)}</p>`;
+        return;
+      }
+      const types = [...new Set(state.resources.map((r) => r.type))];
+      inner.innerHTML = `<p class="small muted">${state.resources.length.toLocaleString()} resources · generated ${esc(new Date(state.generated_at).toLocaleString())}</p>` +
+        types.map((type) => {
+          const rows = state.resources.map((r, i) => [r, i]).filter(([r]) => r.type === type);
+          return `<details class="inv"><summary>${esc(type)} <span class="muted">${rows.length}</span></summary><div class="inner">${rows.map(([r, i]) =>
+            `<details data-resource="${i}"><summary class="mono">${esc(r.name ? `${r.name} · ` : "")}${esc(String(r.id).split("/").pop())}${r.created_at ? ` <span class="muted">created ${esc(short(r.created_at))}</span>` : ""}</summary><pre class="json"></pre></details>`).join("")}</div></details>`;
+        }).join("");
+      inner.querySelectorAll("[data-resource]").forEach((item) => item.addEventListener("toggle", () => {
+        const pre = item.querySelector("pre");
+        if (item.open && !pre.textContent) pre.textContent = JSON.stringify(state.resources[+item.dataset.resource].attributes, null, 2);
+      }));
+    });
   }
 
   // TAD

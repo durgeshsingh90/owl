@@ -176,6 +176,14 @@ class Analyzer:
             return self.subnet_nacl[subnet_id]
         return self.default_nacl.get(subnet.vpc) if subnet else None
 
+    def denied(self, account, *keys):
+        """Did this account's download lack permission for any of these resource types?"""
+        return bool(set(keys) & set(self.inv.access_denied.get(account, [])))
+
+    def missing_status(self, account, *keys):
+        """Not in the snapshot: FAIL, unless we simply weren't allowed to read it."""
+        return "UNKNOWN" if self.denied(account, *keys) else "FAIL"
+
     def vpc_role(self, vpc_id):
         vpc = self.inv.vpcs.get(vpc_id)
         return vpc.role if vpc else ""
@@ -229,6 +237,8 @@ class Analyzer:
             status, actual = "UNKNOWN", "No subnets are defined for this placement."
         elif missing and not account_known:
             status, actual = "UNKNOWN", f"Account {endpoint.account or '?'} is not in the imported snapshot."
+        elif missing and self.denied(endpoint.account, "Subnets"):
+            status, actual = "UNKNOWN", f"No read access to subnets in {endpoint.account}, so {', '.join(missing)} can't be confirmed."
         elif missing:
             status, actual = "FAIL", f"Not found in the snapshot: {', '.join(missing)}."
         else:
@@ -410,10 +420,11 @@ class Analyzer:
             if kind == "nat-gateway":
                 nat = inv.nat_gateways.get(route.target)
                 if not nat or nat.state != "available":
-                    add("NAT", f"NAT gateway {route.target}", "FAIL", "An available NAT gateway.",
-                        "Not in the snapshot." if not nat else f"State is {nat.state}.",
+                    status = "FAIL" if nat else self.missing_status(vpc.account if vpc else "", "NatGateways")
+                    add("NAT", f"NAT gateway {route.target}", status, "An available NAT gateway.",
+                        ("No read access to NAT gateways." if status == "UNKNOWN" else "Not in the snapshot.") if not nat else f"State is {nat.state}.",
                         [Evidence(kind="nat_gateways", id=route.target)] if nat else [])
-                    t.stopped = "FAIL"
+                    t.stopped = status
                     return t
                 add("NAT", f"NAT gateway {nat.id}", "PASS", "An available NAT gateway.",
                     f"{nat.id} in {nat.subnet}, public IP {', '.join(nat.public_ips) or '(not supplied)'}.",
@@ -430,10 +441,11 @@ class Analyzer:
             if kind == "internet-gateway":
                 igw = inv.internet_gateways.get(route.target)
                 if not igw or vpc_id not in igw.vpcs:
-                    add("Internet", f"Internet gateway {route.target}", "FAIL", f"An internet gateway attached to {vpc_id}.",
-                        "Not in the snapshot." if not igw else f"Attached to {', '.join(igw.vpcs) or 'nothing'}.",
+                    status = "FAIL" if igw else self.missing_status(vpc.account if vpc else "", "InternetGateways")
+                    add("Internet", f"Internet gateway {route.target}", status, f"An internet gateway attached to {vpc_id}.",
+                        ("No read access to internet gateways." if status == "UNKNOWN" else "Not in the snapshot.") if not igw else f"Attached to {', '.join(igw.vpcs) or 'nothing'}.",
                         [Evidence(kind="internet_gateways", id=route.target)] if igw else [])
-                    t.stopped = "FAIL"
+                    t.stopped = status
                     return t
                 t.hops.append(Hop(id=igw.id, label="Internet Gateway", kind="internet-gateway", role=self.vpc_role(vpc_id)))
                 if is_private(destination) and destination != "0.0.0.0/0":
@@ -786,6 +798,10 @@ class Analyzer:
                 check.status = "FAIL"
             check.actual = "\n".join(lines)
             return check
+        if not (rules or zones) and any(k in v for v in self.inv.access_denied.values() for k in ("HostedZones", "ResolverRules", "ResolverRuleAssociations")):
+            lines.append("? No read access to some hosted zones or resolver rules, so this name can't be traced")
+            check.actual = "\n".join(lines)
+            return check
         unassociated = [r for r in rules if vpc_id not in r.vpcs] + [z for z in zones if vpc_id not in z.vpcs]
         internal = dst and dst.kind == "on-prem" or any(suffix(d) for e in self.externals.values() if e.type == "on-prem" for d in e.dns_domains)
         if unassociated or internal:
@@ -812,6 +828,19 @@ class Analyzer:
         lines.append("? Public DNS is outside the supplied data")
         check.actual = "\n".join(lines)
         return check
+
+    def lookup_check(self, hostname):
+        """What nslookup said for this name when the data was downloaded. Advisory: it ran on
+        the downloading computer, whose DNS view can differ from the VPC's."""
+        lookup = self.inv.dns_lookups.get(hostname.lower().rstrip("."))
+        if not lookup:
+            return None
+        status = {"resolved": "PASS", "not_found": "WARNING"}.get(lookup.status, "UNKNOWN")
+        text = {"resolved": ", ".join(lookup.ips), "timeout": f"Timed out. {lookup.detail}", "not_tried": lookup.detail,
+                "not_found": lookup.detail}.get(lookup.status, lookup.detail)
+        return Check(id="nslookup", category="DNS", name=f"nslookup {hostname}", status=status, blocking=False,
+                     expected="The name resolves from the computer that downloaded the data.",
+                     actual=f"{text} (server {lookup.server or 'unknown'}, {lookup.looked_up_at})")
 
     # Requirements
 
@@ -876,6 +905,7 @@ class Analyzer:
             flow = (protocol, port, source_net, destination, hostname)
             if hostname:
                 checks.append(self.dns_check(hostname, src.vpc, dst))
+                checks.extend(filter(None, [self.lookup_check(hostname)]))
             primary = None
             for index, subnet in enumerate(src_subnets):
                 for network in dst.networks:
@@ -938,17 +968,20 @@ class Analyzer:
         checks = []
         lb = self.find_lb(dst.load_balancer)
         if not lb:
-            checks.append(Check(id="lb", category="Load Balancer", name=f"Load balancer {dst.load_balancer}", status="FAIL",
-                                expected=f"Load balancer {dst.load_balancer} in front of {dst.name}.", actual="Not in the snapshot."))
+            status = self.missing_status(dst.account, "LoadBalancers")
+            checks.append(Check(id="lb", category="Load Balancer", name=f"Load balancer {dst.load_balancer}", status=status,
+                                expected=f"Load balancer {dst.load_balancer} in front of {dst.name}.",
+                                actual="No read access to load balancers." if status == "UNKNOWN" else "Not in the snapshot."))
             return checks
         evidence = [Evidence(kind="load_balancers", id=lb.id, label=lb.name)]
         checks.append(Check(id="lb", category="Load Balancer", name=f"Load balancer {lb.name}", status="PASS",
                             expected=f"A load balancer in front of {dst.name}.", actual=f"{lb.type} {lb.scheme} in {lb.vpc}.", evidence=evidence))
         listener = next((l for l in lb.listeners if l.port == port), None)
         if not listener:
-            checks.append(Check(id="lb-listener", category="Load Balancer", name=f"Listener on {port}", status="FAIL",
+            status = self.missing_status(lb.account, "Listeners")
+            checks.append(Check(id="lb-listener", category="Load Balancer", name=f"Listener on {port}", status=status,
                                 expected=f"A listener on port {port}.",
-                                actual=f"No listener on {port}. Listeners: {', '.join(f'{l.protocol}/{l.port}' for l in lb.listeners) or '(none)'}.",
+                                actual="No read access to listeners." if status == "UNKNOWN" else f"No listener on {port}. Listeners: {', '.join(f'{l.protocol}/{l.port}' for l in lb.listeners) or '(none)'}.",
                                 evidence=evidence))
             return checks
         checks.append(Check(id="lb-listener", category="Load Balancer", name=f"Listener on {port}", status="PASS",

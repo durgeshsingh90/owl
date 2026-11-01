@@ -19,6 +19,11 @@ TITLES = {
     "internet-gateway": "Internet gateway", "tgw": "Transit gateway", "firewall": "Firewall", "vpc-endpoint": "VPC endpoint",
     "endpoint-service": "Endpoint service", "load-balancer": "Load balancer", "eks-cluster": "EKS cluster",
 }
+DENIED_KEYS = {
+    "subnet": ("Subnets",), "vpc": ("Vpcs",), "nat-gateway": ("NatGateways",), "internet-gateway": ("InternetGateways",),
+    "tgw": ("TransitGateways",), "firewall": ("Firewalls",), "vpc-endpoint": ("VpcEndpoints",),
+    "endpoint-service": ("ServiceConfigurations",), "load-balancer": ("LoadBalancers",), "eks-cluster": ("clusters",),
+}
 GRAPH_KIND = {"workload": "workload", "external": "external", "tgw": "tgw"}
 
 
@@ -118,6 +123,8 @@ class FlowChecker:
             status, actual = "PASS", f"{TITLES.get(kind, kind)} {node.name} found" + (f" in {node.vpc}" if node.vpc else "") + "."
         elif hop.account and hop.account not in inv.accounts:
             status, actual = "UNKNOWN", f"Account {hop.account} is not in the snapshot; refresh the project's AWS details."
+        elif self.a.denied(hop.account, *DENIED_KEYS.get(kind, ())):
+            status, actual = "UNKNOWN", f"No read access to {TITLES.get(kind, kind).lower()}s in {hop.account}, so {ref} can't be confirmed."
         else:
             status, actual = "FAIL", f"No {TITLES.get(kind, kind).lower()} {ref} in the snapshot" + (f" for account {hop.account}." if hop.account else ".")
         self.checks.append(Check(id=f"hop-{index}", category="Endpoint", name=f"{node.name} exists", status=status,
@@ -214,8 +221,9 @@ class FlowChecker:
         if listener:
             self.add("Load Balancer", f"{lb.name} listener on {self.port}", "PASS", f"A listener on {self.port}.", f"{listener.protocol}/{listener.port}.", evidence)
         else:
-            self.add("Load Balancer", f"{lb.name} listener on {self.port}", "FAIL", f"A listener on {self.port}.",
-                     f"Listeners: {', '.join(f'{l.protocol}/{l.port}' for l in lb.listeners) or 'none'}.", evidence)
+            status = self.a.missing_status(lb.account, "Listeners")
+            self.add("Load Balancer", f"{lb.name} listener on {self.port}", status, f"A listener on {self.port}.",
+                     "No read access to listeners." if status == "UNKNOWN" else f"Listeners: {', '.join(f'{l.protocol}/{l.port}' for l in lb.listeners) or 'none'}.", evidence)
         return listener
 
     def privatelink(self, endpoint_node, service_node):
@@ -240,6 +248,9 @@ class FlowChecker:
         if connection:
             self.add("PrivateLink", "Connection accepted by the provider", "PASS" if connection.state == "available" else "FAIL",
                      "Connection state available.", f"{endpoint.id} from {connection.owner}: {connection.state}.", evidence)
+        elif self.a.denied(service.account, "VpcEndpointConnections"):
+            self.add("PrivateLink", "Connection accepted by the provider", "UNKNOWN", f"A connection from {endpoint.id}.",
+                     "No read access to the provider's endpoint connections.", evidence)
         elif service.connections or service.acceptance_required:
             self.add("PrivateLink", "Connection accepted by the provider", "FAIL", f"A connection from {endpoint.id}.",
                      f"{service.id} lists no connection from {endpoint.id}.", evidence)
@@ -271,8 +282,9 @@ class FlowChecker:
             return
         groups = [self.inv.target_groups[g] for g in listener.target_groups if g in self.inv.target_groups]
         if not groups:
-            self.add("Load Balancer", f"{lb.name}:{self.port} target group", "FAIL", "The listener forwards to a target group.",
-                     "No target group in the snapshot for this listener.", [Evidence(kind="load_balancers", id=lb.id)])
+            status = self.a.missing_status(lb.account, "TargetGroups")
+            self.add("Load Balancer", f"{lb.name}:{self.port} target group", status, "The listener forwards to a target group.",
+                     "No read access to target groups." if status == "UNKNOWN" else "No target group in the snapshot for this listener.", [Evidence(kind="load_balancers", id=lb.id)])
             return
         cidrs = [self.inv.subnets[s].cidr for s in target.subnets if s in self.inv.subnets]
         best = None
@@ -331,6 +343,7 @@ class FlowChecker:
         hostname = requirement.hostname or nodes[-1].hostname
         if hostname and start.vpc:
             self.checks.append(self.a.dns_check(hostname, start.vpc, nodes[-1]))
+            self.checks.extend(filter(None, [self.a.lookup_check(hostname)]))
         self.hop(start)
         current, gateways, previous = start, [], start
         for index, node in enumerate(nodes[1:], 1):

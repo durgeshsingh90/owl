@@ -6,12 +6,20 @@ Read-only over AWS: inventories are imported JSON, never fetched from AWS.
 import json
 
 from app.architecture import download, engine, store
+from app.aws import connection as aws_connection
 from app.architecture.models import COLLECTIONS, Project
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 router = APIRouter(prefix="/api/architecture")
+
+
+def _require_aws_cli():
+    try:
+        aws_connection._aws()
+    except FileNotFoundError as error:
+        raise HTTPException(400, str(error)) from None
 
 
 def _missing(error):
@@ -97,10 +105,7 @@ def refresh(project_id: str):
         project = store.project(project_id)
     except KeyError as error:
         _missing(error)
-    try:
-        import boto3  # noqa: F401
-    except ImportError:
-        raise HTTPException(400, "boto3 is not installed: run pip install -r backend/requirements.txt.") from None
+    _require_aws_cli()
     return download.start(project)
 
 
@@ -169,49 +174,44 @@ def resources(snapshot_id: str, kind: str, account: str = ""):
 
 @router.get("/download")
 def download_settings():
-    """The central download list, every account in the AWS config to choose from, and what's downloaded."""
+    """Accounts in the AWS config grouped by name, which are selected, and the running download."""
+    return {**download.account_groups(), "aws_config": download.config_path(), "media": str(download.media_folder()),
+            "job": download.status("all")}
+
+
+class Selection(BaseModel):
+    account_ids: list[str] = Field(max_length=5000)
+
+
+@router.put("/download/selection")
+def save_selection(value: Selection):
+    """Choose the accounts to download; settings saved for accounts that stay are kept."""
     config = download.download_config()
-    try:
-        found, error = download.profiles_by_account(), ""
-    except (OSError, ValueError) as problem:
-        found, error = {}, str(problem)
-    ids = sorted(set(found) | {a["account_id"] for a in config["accounts"]})
-    have = download.downloaded(ids)
-    return {
-        "config": config, "aws_config": download.config_path(), "aws_config_error": error,
-        "media": str(download.media_folder()), "job": download.status("all"),
-        "available": [{"account_id": i, "profiles": [p["profile"] for p in found.get(i, [])],
-                       "region": next((p.get("region") for p in found.get(i, []) if p.get("region")), ""),
-                       "downloaded": have.get(i)} for i in ids],
-    }
+    kept = {a["account_id"]: a for a in config["accounts"]}
+    config["accounts"] = [kept.get(i) or {"account_id": i} for i in value.account_ids]
+    saved = download.save_download_config(config)
+    return {"selected": [a["account_id"] for a in saved["accounts"]]}
 
 
-class DownloadAccount(BaseModel):
-    account_id: str = Field(pattern=r"^\d{12}$")
-    name: str = Field("", max_length=200)
-    type: str = Field("application", max_length=50)
-    regions: list[str] = Field([], max_length=40)
-    profile: str = Field("", max_length=200)
+@router.get("/download/state/{account_id}")
+def resource_state(account_id: str):
+    """The account's latest resources with all their properties (state.json)."""
+    state = download.state_of(account_id)
+    if not state:
+        raise HTTPException(404, f"No resource properties downloaded for {account_id} yet.")
+    return state
 
 
-class DownloadSettings(BaseModel):
-    accounts: list[DownloadAccount] = Field(max_length=5000)
-    regions: list[str] = Field([], max_length=40)
-    history: dict = {}
-
-
-@router.put("/download")
-def save_download_settings(value: DownloadSettings):
-    return download.save_download_config(value.model_dump())
+@router.post("/download/test/{account_id}")
+def test_connectivity(account_id: str):
+    """Sign in with `aws sts get-caller-identity`, then check what the profile can read."""
+    return download.test_account(account_id)
 
 
 @router.post("/download/start", status_code=202)
 def start_download():
     """Download every account in the central list (read-only), then snapshot them."""
-    try:
-        import boto3  # noqa: F401
-    except ImportError:
-        raise HTTPException(400, "boto3 is not installed: run pip install -r backend/requirements.txt.") from None
+    _require_aws_cli()
     return download.start_all()
 
 
@@ -294,6 +294,7 @@ def account(snapshot_id: str, account_id: str):
     }
     shown = {item["id"] for value in result.values() if isinstance(value, list) for item in value if isinstance(item, dict) and "id" in item}
     shown |= {item["id"] for value in result["dns"].values() for item in value} | set(ids)
+    result["dns"]["lookups"] = [l.model_dump() for _, l in sorted(inv.dns_lookups.items()) if l.account == account_id]
     result["timestamps"] = {k: v.model_dump() for k, v in inv.timestamps.items() if k in shown}
     return result
 

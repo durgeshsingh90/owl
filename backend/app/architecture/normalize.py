@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pydantic import ValidationError
 
 from app.architecture.models import (
-    COLLECTIONS, Account, DnsRecord, ResourceTimes, EksCluster, EndpointConnection, EndpointService, Target, Firewall, FirewallRule, FirewallRuleGroup,
+    COLLECTIONS, Account, DnsLookup, DnsRecord, ResourceTimes, EksCluster, EndpointConnection, EndpointService, Target, Firewall, FirewallRule, FirewallRuleGroup,
     HostedZone, InternetGateway, Inventory, Listener, LoadBalancer, Nacl, NaclRule,
     NatGateway, ResolverEndpoint, ResolverRule, Route, RouteTable, SecurityGroup,
     SgRule, Subnet, TargetGroup, TgwAttachment, TgwRoute, TgwRouteTable,
@@ -30,7 +30,7 @@ KNOWN_KEYS = {
     "InternetGateways", "VpcEndpoints", "LoadBalancers", "Listeners", "TargetGroups",
     "Firewalls", "FirewallPolicies", "RuleGroups", "HostedZones", "ResolverRules",
     "ResolverRuleAssociations", "ResolverEndpoints", "Clusters", "ServiceConfigurations",
-    "VpcEndpointConnections", "ConfigResources", "ResourceHistory",
+    "VpcEndpointConnections", "ConfigResources", "ResourceHistory", "AccessDenied", "DnsLookups",
 }
 # Resources whose own API response says when they were created (and changed).
 TIME_FIELDS = [
@@ -139,6 +139,8 @@ class Normalizer:
         for collection in COLLECTIONS:
             getattr(self.inv, collection).update(getattr(partial, collection))
         self.inv.timestamps.update(partial.timestamps)
+        self.inv.access_denied.update(partial.access_denied)
+        self.inv.dns_lookups.update(partial.dns_lookups)
 
     # Raw AWS CLI output
 
@@ -191,6 +193,11 @@ class Normalizer:
             if response.get("RuleGroupArn") and response.get("LastModifiedTime"):
                 self._firewall_changes[response["RuleGroupArn"]] = iso(response["LastModifiedTime"])
                 self.times(response["RuleGroupArn"], updated=response["LastModifiedTime"], source="aws")
+        if d.get("AccessDenied") and account:
+            inv.access_denied[account] = list(d["AccessDenied"])
+        for item in d.get("DnsLookups", []) or []:
+            lookup = DnsLookup.model_validate({**item, "account": item.get("account") or account})
+            inv.dns_lookups[lookup.name] = lookup
         self._config_items.extend(d.get("ConfigResources", []) or [])
         for resource_id, summary in (d.get("ResourceHistory") or {}).items():
             self._history[resource_id] = summary
