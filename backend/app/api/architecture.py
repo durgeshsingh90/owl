@@ -208,17 +208,28 @@ def resource_state(account_id: str):
     return state
 
 
+@router.post("/download/denied/{account_id}/reset")
+def retry_denied(account_id: str):
+    """Forget the account's denied types, so the next test or download tries them again."""
+    download.forget_denied(account_id)
+    return {"account_id": account_id, "denied_types": []}
+
+
 @router.post("/download/test/{account_id}")
 def test_connectivity(account_id: str):
     """Sign in with `aws sts get-caller-identity`, then check what the profile can read."""
     return download.test_account(account_id)
 
 
+class StartDownload(BaseModel):
+    everything: bool = False
+
+
 @router.post("/download/start", status_code=202)
-def start_download():
-    """Download every account in the central list (read-only), then snapshot them."""
+def start_download(value: StartDownload | None = None):
+    """Download the selected accounts, or all of them (read-only), then snapshot them."""
     _require_aws_cli()
-    return download.start_all()
+    return download.start_all(bool(value and value.everything))
 
 
 @router.get("/download/status")

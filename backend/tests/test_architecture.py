@@ -236,6 +236,22 @@ class Scenarios(Base):
         self.assertEqual(critical[0].title, "PROD Payment API cannot reach Payment Provider over TCP/443.")
 
 
+class DownloadAll(Base):
+    def test_everything_covers_every_account_with_a_profile(self):
+        from app.architecture import download
+
+        config = Path(self.temp.name) / "aws-config"
+        config.write_text("[profile mc-a-prod]\nsso_account_id = 111111111111\n[profile mc-b-prod]\nsso_account_id = 222222222222\n")
+        with patch("app.architecture.download.config_path", return_value=str(config)), \
+                patch("app.architecture.download.start_job", return_value={}) as job, patch("app.aws.connection._aws", return_value="aws"):
+            client = TestClient(app)
+            client.put("/api/architecture/download/selection", json={"account_ids": ["111111111111"]})
+            client.post("/api/architecture/download/start")
+            self.assertEqual([a["account_id"] for a in job.call_args[0][2]], ["111111111111"])
+            client.post("/api/architecture/download/start", json={"everything": True})
+            self.assertEqual([a["account_id"] for a in job.call_args[0][2]], ["111111111111", "222222222222"])
+
+
 class Hybrid(Base):
     """Peering, VPN to another cloud and Direct Connect in the analysis."""
 
@@ -555,6 +571,67 @@ class Times(Base):
         self.assertEqual(lb["attributes"]["Attributes"][0]["Value"], "true")
         self.assertEqual([r["type"] for r in state["resources"][1:]], ["aws_route53_zone", "aws_route53_record"])
         self.assertFalse({"Results", "Events"} & {p[0] for p in download.PROBES})
+
+    def test_denied_types_are_remembered_per_account(self):
+        from types import SimpleNamespace
+        from app.architecture import download
+
+        config = Path(self.temp.name) / "aws-config"
+        config.write_text("[profile mc-a-prod]\nsso_account_id = 111111111111\nregion = eu-west-2\n[profile mc-b-prod]\nsso_account_id = 222222222222\nregion = eu-west-2\n")
+        commands = []
+
+        def fake(command, **kwargs):
+            if command[0] != "aws":
+                return SimpleNamespace(returncode=0, stderr="", stdout="")
+            commands.append(command)
+            if command[2] in ("list-firewalls", "get-account-information"):
+                return SimpleNamespace(returncode=254, stdout="", stderr="An error occurred (AccessDeniedException)")
+            return SimpleNamespace(returncode=0, stderr="", stdout="{}")
+
+        def identity(account):
+            return ({"Account": account, "Arn": "arn:x"}, None)
+
+        def calls(operation):
+            return sum(c[2] == operation for c in commands)
+
+        with patch("app.architecture.download.config_path", return_value=str(config)), patch("app.aws.connection._aws", return_value="aws"), \
+                patch("app.architecture.download.subprocess.run", side_effect=fake):
+            with patch("app.aws.connection.run_sts", return_value=identity("111111111111")):
+                download.download_account({"account_id": "111111111111"})
+                self.assertEqual((calls("list-firewalls"), calls("get-account-information")), (1, 1))
+                self.assertEqual(download.denied_types("111111111111"), ["AccountDetails", "Firewalls"])
+                # Downloading and testing again never call what was refused.
+                manifest = download.download_account({"account_id": "111111111111"})
+                result = download.test_account("111111111111")
+                self.assertEqual((calls("list-firewalls"), calls("get-account-information")), (1, 1))
+                self.assertIn("Firewalls", manifest["Download"]["denied"])
+                self.assertIn("Firewalls", result["denied"])
+            # It's per account: another account still gets its own check.
+            with patch("app.aws.connection.run_sts", return_value=identity("222222222222")):
+                download.download_account({"account_id": "222222222222"})
+                self.assertEqual(calls("list-firewalls"), 2)
+            with patch("app.aws.connection.run_sts", return_value=identity("111111111111")):
+                download.forget_denied("111111111111")
+                self.assertEqual(download.denied_types("111111111111"), [])
+                download.test_account("111111111111")
+                self.assertEqual(calls("list-firewalls"), 3)
+
+    def test_most_used_and_recent_are_calculated(self):
+        from app.architecture import download
+
+        config = Path(self.temp.name) / "aws-config"
+        config.write_text("".join(f"[profile mc-{n}-prod]\nsso_account_id = {a}\n" for n, a in (("a", "111111111111"), ("b", "222222222222"), ("c", "333333333333"))))
+        with patch("app.architecture.download.config_path", return_value=str(config)):
+            self.assertEqual((download.account_groups()["top"], download.account_groups()["recent"]), ([], []))  # nothing used yet: nothing listed
+            download.remember("111111111111")
+            download.remember("111111111111")
+            later = download.datetime(2030, 1, 1, tzinfo=download.timezone.utc)
+            with patch("app.architecture.download.datetime") as clock:
+                clock.now.return_value = later
+                download.remember("222222222222")
+            groups = download.account_groups()
+        self.assertEqual(groups["top"], ["111111111111", "222222222222"])  # by count
+        self.assertEqual(groups["recent"], ["222222222222", "111111111111"])  # by time
 
     def test_no_access_downloads_nothing(self):
         from types import SimpleNamespace

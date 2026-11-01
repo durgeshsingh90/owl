@@ -25,21 +25,26 @@ AA.views.download = (() => {
 
   function jobLabel(job) {
     if (job.state === "running") {
-      const done = job.accounts.filter((a) => a.state === "done" || a.state === "failed").length;
-      return `Downloading ${done} of ${job.accounts.length} · ${job.message || ""}`;
+      const finished = job.accounts.filter((a) => a.state === "done" || a.state === "failed");
+      const failed = finished.filter((a) => a.state === "failed").length;
+      return `${finished.length}/${job.accounts.length} accounts${failed ? ` · ${failed} failed` : ""} · ${job.message || ""}`;
     }
     if (!job.finished) return "";
     const failed = job.accounts.filter((a) => a.state === "failed").length;
-    return `Last download ${new Date(job.finished * 1000).toLocaleString()}${failed ? ` · ${failed} failed` : ""}${job.error ? ` · ${job.error}` : ""}`;
+    return `Last download ${new Date(job.finished * 1000).toLocaleString()} · ${job.accounts.length - failed}/${job.accounts.length} downloaded${failed ? ` · ${failed} failed` : ""}${job.error ? ` · ${job.error}` : ""}`;
   }
+
+  const deniedOf = (a, s) => [...new Set([...(a.info?.denied_types || []), ...(a.info?.denied || []), ...(s?.denied || [])])].sort();
+
+  const downloadingNow = (job) => job.state === "running";
 
   function notes(a, states) {
     const s = states[a.account_id], i = a.info || {};
-    const denied = s?.denied?.length ? s.denied : i.denied || [];
+    const denied = deniedOf(a, s);
     return [
       ...(s?.state === "failed" || s?.error ? [`<div class="dl-problem">${esc(s.error)}</div>`] : i.connected === false && i.error ? [`<div class="dl-problem">${esc(i.error)}</div>`] : []),
       ...Object.entries(i.errors || {}).slice(0, 5).map(([k, v]) => `<div class="dl-denied">${esc(k)}: ${esc(v)}</div>`),
-      ...(denied.length ? [`<div class="dl-denied">No access: ${esc(denied.join(", "))}</div>`] : []),
+      ...(denied.length ? [`<div class="dl-denied">No access, not called again: ${esc(denied.join(", "))} <button type="button" class="link" data-retry="${esc(a.account_id)}">Try again</button></div>`] : []),
     ].join("");
   }
 
@@ -47,7 +52,7 @@ AA.views.download = (() => {
   function line(a, states, nameCell, first) {
     const [state, label, tip] = statusOf(a);
     const s = states[a.account_id], i = a.info || {};
-    const denied = s?.denied?.length ? s.denied : i.denied || [];
+    const denied = deniedOf(a, s);
     const problems = notes(a, states);
     const job = s?.state === "running" ? "Downloading…" : s?.state === "queued" ? "Queued" : stamp(a.downloaded_at);
     return `<tr class="${first ? "dl-first" : ""}">${nameCell}
@@ -82,15 +87,30 @@ AA.views.download = (() => {
     }).join("");
     main.querySelector("#dl-list").innerHTML = rows || `<tr><td colspan="7" class="empty">No accounts match.</td></tr>`;
     const groupOf = new Map(data.groups.flatMap((g) => g.accounts.map((a) => [a.account_id, [g, a]])));
-    const top = words.length || onlySelected ? [] : (data.top || []).map((id) => groupOf.get(id)).filter(Boolean);
-    main.querySelector("#dl-top-box").hidden = !top.length;
-    main.querySelector("#dl-top-count").textContent = top.length;
-    main.querySelector("#dl-top").innerHTML = top.map(([g, a]) => line(a, states, `<td class="dl-name" rowspan="${notes(a, states) ? 2 : 1}">${nameOf(g, a)}</td>`, true)).join("");
+    const browsing = !words.length && !onlySelected;
+    const section = (ids, box, body, count, extra) => {
+      const items = browsing ? (ids || []).map((id) => groupOf.get(id)).filter(Boolean) : [];
+      main.querySelector(box).hidden = !items.length;
+      main.querySelector(count).textContent = items.length;
+      main.querySelector(body).innerHTML = items.map(([g, a]) => line(a, states, `<td class="dl-name" rowspan="${notes(a, states) ? 2 : 1}">${nameOf(g, a)}<div class="small muted dl-aws-name">${esc(extra(a))}</div></td>`, true)).join("");
+    };
+    section(data.top, "#dl-top-box", "#dl-top", "#dl-top-count", (a) => `Used ${a.uses} time${a.uses === 1 ? "" : "s"}`);
+    section(data.recent, "#dl-recent-box", "#dl-recent", "#dl-recent-count", (a) => `Last used ${stamp(a.last_used)}`);
+    const progress = main.querySelector("#dl-progress");
+    progress.hidden = !downloadingNow(job);
+    if (job.accounts) {
+      progress.max = job.accounts.length || 1;
+      progress.value = job.accounts.filter((a) => a.state === "done" || a.state === "failed").length;
+    }
     const count = chosen().length;
     const downloading = job.state === "running";
     const start = main.querySelector("#dl-start"), all = main.querySelector("#dl-test-all");
     start.textContent = downloading ? "Downloading…" : `Download selected (${count})`;
     start.disabled = downloading || !count;
+    const everything = main.querySelector("#dl-all");
+    const withProfile = accounts().filter((a) => a.profile).length;
+    everything.textContent = `Download all (${withProfile.toLocaleString()})`;
+    everything.disabled = downloading || !withProfile;
     all.textContent = running.size ? "Testing…" : `Test selected (${count})`;
     all.disabled = Boolean(running.size) || !count;
     main.querySelector("#dl-total").textContent = data.total.toLocaleString();
@@ -125,6 +145,11 @@ AA.views.download = (() => {
         if (main.querySelector("#dl-list")) list(main);
       }
     }));
+    if (!running.size && main.querySelector("#dl-list")) {  // Recent and Most used changed
+      const job = data.job;
+      data = {...(await api("/download")), job};
+      list(main);
+    }
   }
 
   async function connectionApi(path, options = {}) {
@@ -164,15 +189,18 @@ AA.views.download = (() => {
   function render(main, app) {
     main.innerHTML = `<div class="dl-head"><h1>AWS download</h1>
         <div class="dl-counts"><span><b id="dl-total"></b> total</span><span><b id="dl-unique"></b> unique</span><span><b id="dl-selected"></b> selected</span></div>
-        <div class="dl-actions"><button type="button" id="dl-test-all"></button><button type="button" class="primary" id="dl-start"></button></div></div>
+        <div class="dl-actions"><button type="button" id="dl-test-all"></button><button type="button" id="dl-all"></button><button type="button" class="primary" id="dl-start"></button></div></div>
       ${data.error ? `<div class="error-box">${esc(data.error)}</div>` : ""}
       <div id="dl-login" class="dl-login" hidden></div>
       <div class="filters dl-filters"><input type="search" id="dl-search" placeholder="Search anything: name, account number, stage, profile" value="${esc(search)}">
         <label class="small"><input type="checkbox" id="dl-only" ${onlySelected ? "checked" : ""}> Selected only</label>
         <span id="dl-job" class="small muted" aria-live="polite"></span></div>
-      <div id="dl-top-box" hidden><h2 class="dl-section">Most used <span class="muted small">top <span id="dl-top-count"></span></span></h2>
-        <div class="table-wrap"><table class="data dl-table"><thead><tr><th>Name</th><th>Stage</th><th>Account number</th><th>Account created</th><th>Last download</th><th>Status</th><th>Test</th></tr></thead><tbody id="dl-top"></tbody></table></div>
-        <h2 class="dl-section">All accounts</h2></div>
+      <progress id="dl-progress" class="dl-progress" hidden></progress>
+      <div id="dl-recent-box" hidden><h2 class="dl-section">Recent <span class="muted small">latest <span id="dl-recent-count"></span> tested, downloaded or copied in AWS Accounts</span></h2>
+        <div class="table-wrap"><table class="data dl-table"><thead><tr><th>Name</th><th>Stage</th><th>Account number</th><th>Account created</th><th>Last download</th><th>Status</th><th>Test</th></tr></thead><tbody id="dl-recent"></tbody></table></div></div>
+      <div id="dl-top-box" hidden><h2 class="dl-section">Most used <span class="muted small">top <span id="dl-top-count"></span> by tests, downloads and AWS Accounts copies</span></h2>
+        <div class="table-wrap"><table class="data dl-table"><thead><tr><th>Name</th><th>Stage</th><th>Account number</th><th>Account created</th><th>Last download</th><th>Status</th><th>Test</th></tr></thead><tbody id="dl-top"></tbody></table></div></div>
+      <h2 class="dl-section">All accounts</h2>
       <div class="table-wrap"><table class="data dl-table"><thead><tr><th>Name</th><th>Stage</th><th>Account number</th><th>Account created</th><th>Last download</th><th>Status</th><th>Test</th></tr></thead><tbody id="dl-list"></tbody></table></div>
       <p class="small muted">Accounts from <span class="mono">${esc(data.aws_config)}</span>, saved to <span class="mono">${esc(data.media)}</span>. Read-only.</p>`;
     main.querySelector("#dl-search").addEventListener("input", (e) => {
@@ -201,6 +229,13 @@ AA.views.download = (() => {
       }
       const test = e.target.closest("[data-test]");
       if (test && !running.has(test.dataset.test)) runTests(main, [test.dataset.test]);
+      const retry = e.target.closest("[data-retry]");
+      if (retry && !running.has(retry.dataset.retry)) {
+        const account = find(retry.dataset.retry);
+        await api(`/download/denied/${account.account_id}/reset`, {method: "POST"});
+        account.info = {...account.info, denied: [], denied_types: []};
+        runTests(main, [account.account_id]);
+      }
       const status = e.target.closest("[data-status]");
       if (status && !running.has(status.dataset.status) && !login) {
         const account = find(status.dataset.status);
@@ -210,15 +245,21 @@ AA.views.download = (() => {
     };
     main.querySelector("#dl-list").addEventListener("click", onTableClick);
     main.querySelector("#dl-top").addEventListener("click", onTableClick);
+    main.querySelector("#dl-recent").addEventListener("click", onTableClick);
     main.querySelector("#dl-test-all").addEventListener("click", () => runTests(main, chosen().map((a) => a.account_id)));
-    main.querySelector("#dl-start").addEventListener("click", async () => {
+    const begin = async (everything) => {
       try {
-        data.job = await api("/download/start", {method: "POST"});
+        data.job = await api("/download/start", {method: "POST", body: {everything}});
         list(main);
         poll(main, app);
       } catch (error) {
         toast(error.message);
       }
+    };
+    main.querySelector("#dl-start").addEventListener("click", () => begin(false));
+    main.querySelector("#dl-all").addEventListener("click", () => {
+      const count = accounts().filter((a) => a.profile).length;
+      if (confirm(`Download all ${count} accounts? This can take a long time and makes many read-only AWS calls.`)) begin(true);
     });
     list(main);
   }

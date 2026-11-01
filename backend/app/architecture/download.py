@@ -46,6 +46,7 @@ CALL_TIMEOUT = 600  # seconds for one `aws` command; CloudTrail reads slowly
 ACCOUNTS_AT_ONCE = 4
 PROFILE_NAME = re.compile(r"mc-(.+)-([^-]+)", re.IGNORECASE)
 TOP_ACCOUNTS = 20
+ACCOUNT_DETAILS = "AccountDetails"  # the denied-type name for get-account-information
 PROBES_AT_ONCE = 6
 PROBE_TIMEOUT = 60  # seconds for one access check call
 LOOKUPS_AT_ONCE = 16
@@ -220,8 +221,9 @@ def _listing(cli, run, region, service, operation, key, *arguments):
     return run(label, lambda: cli.call(service, operation, *arguments, region=region).get(key, []), key=key)
 
 
-def check_access(profile, region):
-    """Which resource types this profile can read: one item of each, nothing saved."""
+def check_access(profile, region, known=()):
+    """Which resource types this profile can read: one item of each, nothing saved.
+    Types already known to be denied aren't tried again."""
     cli = AwsCli(profile, region or "us-east-1", timeout=PROBE_TIMEOUT)
 
     def probe(item):
@@ -233,8 +235,9 @@ def check_access(profile, region):
             return key, "denied" if DENIED.search(str(error)) else "error", str(error)[:300]
 
     with ThreadPoolExecutor(PROBES_AT_ONCE) as pool:
-        results = list(pool.map(probe, PROBES + [(e[1], e[2], e[3]) for e in EXTRAS]))
-    return {"allowed": [k for k, state, _ in results if state == "allowed"], "denied": [k for k, state, _ in results if state == "denied"],
+        results = list(pool.map(probe, [p for p in PROBES + [(e[1], e[2], e[3]) for e in EXTRAS] if p[0] not in known]))
+    return {"allowed": [k for k, state, _ in results if state == "allowed"],
+            "denied": sorted({k for k, state, _ in results if state == "denied"} | set(known)),
             "errors": {k: text for k, state, text in results if state == "error"}}
 
 
@@ -569,16 +572,41 @@ def remember(account_id, **fields):
     with _lock:
         info = account_info()
         before = info.get(account_id, {})
-        info[account_id] = {**before, **fields, "uses": before.get("uses", 0) + 1}
+        info[account_id] = {**before, **fields, "uses": before.get("uses", 0) + 1,
+                            "last_used": datetime.now(timezone.utc).isoformat(timespec="seconds")}
         _write(info_file(), info)
 
 
-def account_details(profile):
+def denied_types(account_id):
+    """Resource types this account's profile was refused: not called again until Try again."""
+    return list(account_info().get(account_id, {}).get("denied_types", []))
+
+
+def note_denied(account_id, types):
+    with _lock:
+        info = account_info()
+        entry = info.setdefault(account_id, {})
+        entry["denied_types"] = sorted(set(entry.get("denied_types", [])) | set(types))
+        _write(info_file(), info)
+
+
+def forget_denied(account_id):
+    with _lock:
+        info = account_info()
+        if account_id in info:
+            info[account_id]["denied_types"] = []
+            info[account_id]["denied"] = []
+            _write(info_file(), info)
+
+
+def account_details(profile, known=()):
     """The account's created date and name. AWS may not let a read-only role see them."""
+    if ACCOUNT_DETAILS in known:
+        return {"created_error": "No read access to the account's details."}
     try:
         answer = AwsCli(profile, timeout=PROBE_TIMEOUT).call("account", "get-account-information")
     except (CliError, OSError) as error:
-        return {"created_error": str(error)[:300]}
+        return {"created_error": str(error)[:300], "details_denied": bool(DENIED.search(str(error)))}
     return {"created": iso(answer.get("AccountCreatedDate")), "account_name": answer.get("AccountName", ""), "created_error": ""}
 
 
@@ -596,8 +624,12 @@ def test_account(account_id, wanted=""):
     result = {"account_id": account_id, "profile": profile, "ok": bool(identity), "arn": (identity or {}).get("Arn", ""), "error": error or "",
               "allowed": [], "denied": [], "errors": {}}
     if identity:
-        result.update(check_access(profile, profile_for(account_id, wanted)[1]))
-        result.update(account_details(profile))
+        known = denied_types(account_id)
+        result.update(check_access(profile, profile_for(account_id, wanted)[1], known))
+        details = account_details(profile, known)
+        newly = result["denied"] + ([ACCOUNT_DETAILS] if details.pop("details_denied", False) else [])
+        note_denied(account_id, newly)
+        result.update(details)
     remember(account_id, connected=result["ok"], checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), arn=result["arn"], error=result["error"],
              denied=result["denied"], errors=result["errors"], allowed=len(result["allowed"]),
              **{k: result[k] for k in ("created", "account_name", "created_error") if k in result})
@@ -615,15 +647,19 @@ def download_account(account, progress=lambda text: None):
         raise PermissionError(f"Profile {profile} can't sign in: {problem} Log in, then download again.")
     if identity.get("Account") != account_id:
         raise PermissionError(f"Profile {profile} signs in to {identity.get('Account')}, not {account_id}.")
-    details = account_details(profile)
+    known = denied_types(account_id)
+    details = account_details(profile, known)
+    if details.pop("details_denied", False):
+        known.append(ACCOUNT_DETAILS)
     remember(account_id, connected=True, checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), arn=identity.get("Arn", ""), error="", **details)
     progress(f"{account_id}: checking access")
-    access = check_access(profile, profile_region)
+    access = check_access(profile, profile_region, known)
+    note_denied(account_id, access["denied"] + known)
     if not access["allowed"]:
         raise PermissionError(f"No read access with profile {profile}; nothing was downloaded. Denied: {', '.join(access['denied']) or 'none'}."
                               + (f" {next(iter(access['errors'].values()))}" if access["errors"] else ""))
     # Types that failed the check for another reason aren't called either.
-    run = Recorder(denied=access["denied"] + list(access["errors"]))
+    run = Recorder(denied=access["denied"] + known + list(access["errors"]))
     run.errors.extend(f"{key}: {text}" for key, text in access["errors"].items())
     cli = AwsCli(profile, profile_region)
     regions = [r for r in account.get("regions") or [] if REGION.match(r)] or [profile_region or "us-east-1"]
@@ -672,6 +708,7 @@ def download_account(account, progress=lambda text: None):
         },
     }
     _write(folder / "account.json", manifest)
+    note_denied(account_id, manifest["Download"]["denied"])
     return manifest
 
 
@@ -836,13 +873,13 @@ def split_profile(profile):
 
 
 def copy_counts():
-    """How often the AWS Accounts app copied each profile and account id."""
+    """How often and when the AWS Accounts app last copied each profile and account id."""
     try:
         with database_connection() as db:
-            rows = db.execute("SELECT value,count FROM aws_account_copies WHERE kind IN ('profile','account_id')").fetchall()
+            rows = db.execute("SELECT value,count,last_copied FROM aws_account_copies WHERE kind IN ('profile','account_id')").fetchall()
     except sqlite3.Error:
         return {}
-    return {row[0]: row[1] for row in rows}
+    return {row[0]: (row[1], row[2]) for row in rows}
 
 
 def account_groups():
@@ -866,17 +903,25 @@ def account_groups():
             "account_id": account_id, "stage": stage or first or "account", "profile": first, "profiles": profile_names,
             "selected": account_id in selected, "downloaded_at": (have.get(account_id) or {}).get("downloaded_at", ""),
             "info": info.get(account_id, {}),
-            "uses": info.get(account_id, {}).get("uses", 0) + copies.get(account_id, 0) + sum(copies.get(p, 0) for p in profile_names),
+            "uses": info.get(account_id, {}).get("uses", 0) + sum(copies.get(k, (0, ""))[0] for k in [account_id, *profile_names]),
+            "last_used": max((iso(v) for v in [info.get(account_id, {}).get("last_used") or info.get(account_id, {}).get("checked_at"),
+                                               *(copies.get(k, (0, ""))[1] for k in [account_id, *profile_names])] if v), default=""),
         })
     order = {"dev": 0, "test": 1, "nonp": 2, "nonprod": 2, "stage": 3, "mtf": 4, "prod": 5}
     listing = [{"name": name, "accounts": sorted(items, key=lambda a: (order.get(a["stage"], 9), a["stage"]))}
                for name, items in sorted(groups.items())]
     used = sorted(((a["uses"], g["name"], a["stage"], a["account_id"]) for g in listing for a in g["accounts"] if a["uses"]), key=lambda i: (-i[0], i[1], i[2]))
-    return {"groups": listing, "top": [i[3] for i in used[:TOP_ACCOUNTS]], "total": sum(len(g["accounts"]) for g in listing), "unique": len(listing),
+    recent = sorted(((a["last_used"], a["account_id"]) for g in listing for a in g["accounts"] if a["last_used"]), reverse=True)
+    return {"groups": listing, "top": [i[3] for i in used[:TOP_ACCOUNTS]], "recent": [i[1] for i in recent[:TOP_ACCOUNTS]], "total": sum(len(g["accounts"]) for g in listing), "unique": len(listing),
             "selected": len(selected), "error": error}
 
 
-def start_all():
+def start_all(everything=False):
+    """Download the selected accounts, or every account in the AWS config that has a profile."""
     config = download_config()
-    accounts = [{**a, "regions": a["regions"] or config["regions"], "environments": []} for a in config["accounts"]]
-    return start_job("all", "All accounts", accounts)
+    if everything:
+        accounts = [{"account_id": i, "name": "", "type": "", "regions": config["regions"], "profile": "", "environments": []}
+                    for i in sorted(profiles_by_account())]
+    else:
+        accounts = [{**a, "regions": a["regions"] or config["regions"], "environments": []} for a in config["accounts"]]
+    return start_job("all", "All accounts" if everything else "Selected accounts", accounts)
