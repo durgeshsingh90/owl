@@ -9,7 +9,8 @@ AA.views.download = (() => {
   const ICONS = {connected: `${SHARED}connected.png?v=2`, checking: `${SHARED}no-connection.gif?v=2`, failed: `${SHARED}disconnected.png?v=2`, unknown: "assets/not-tested.png"};
   let data = null, search = "", onlySelected = false, polling = null;
   const running = new Set();
-  let searchTyping, editingTag = "", tagFilter = "";
+  let searchTyping, editingTag = "", editingHost = "", tagDraft = "", tagChoice = -1, tagFilter = "";
+  const TAG_SUGGESTIONS = 8;
   const everTested = (a) => a.info?.connected === true || a.info?.connected === false;
 
   const accounts = () => data.groups.flatMap((g) => g.accounts);
@@ -66,7 +67,7 @@ AA.views.download = (() => {
       <td class="mono">${esc(a.account_id)}</td>
       <td class="nowrap" ${i.created_error ? `title="${esc(i.created_error)}"` : ""}>${i.created ? esc(dateOnly(i.created)) : `<span class="muted">${i.created_error ? "No access" : "—"}</span>`}</td>
       <td class="small nowrap">${job ? esc(job) : '<span class="muted">Never</span>'}</td>
-      <td><div class="dl-tags">${(a.tags || []).map((t) => `<span class="dl-tag">${esc(t)}<button type="button" data-untag="${esc(t)}" data-account="${esc(a.account_id)}" aria-label="Remove tag ${esc(t)}">×</button></span>`).join("")}${editingTag === a.account_id ? `<input class="dl-tag-input" data-tag-input="${esc(a.account_id)}" list="dl-tag-list" placeholder="New or existing" aria-label="Add a tag" maxlength="40">` : `<button type="button" class="dl-tag-add" data-tag-add="${esc(a.account_id)}" title="Add a tag" aria-label="Add a tag">+</button>`}</div></td>
+      <td><div class="dl-tags">${(a.tags || []).map((t) => `<span class="dl-tag">${esc(t)}<button type="button" data-untag="${esc(t)}" data-account="${esc(a.account_id)}" aria-label="Remove tag ${esc(t)}">×</button></span>`).join("")}${editingTag === a.account_id ? `<input class="dl-tag-input" data-tag-input="${esc(a.account_id)}" placeholder="Type a tag" aria-label="Add a tag" maxlength="40" autocomplete="off" spellcheck="false">` : `<button type="button" class="dl-tag-add" data-tag-add="${esc(a.account_id)}" title="Add a tag" aria-label="Add a tag">+</button>`}</div></td>
       <td class="dl-count" title="New connections made: testing again during a live session doesn't count">${a.connects || 0}</td>
       <td><span class="dl-status ${state}" title="${esc(tip)}"><img src="${ICONS[state]}" alt="">${esc(label)}</span>${state === "connected" && denied.length ? `<div class="dl-partial">${denied.length} type${denied.length === 1 ? "" : "s"} denied</div>` : ""}</td>
       <td><button type="button" class="dl-test" data-test="${esc(a.account_id)}" ${running.has(a.account_id) ? "disabled" : ""}>Test</button></td></tr>${problems ? `<tr class="dl-note"><td colspan="8">${problems}</td></tr>` : ""}`;
@@ -96,7 +97,6 @@ AA.views.download = (() => {
     main.querySelector("#dl-list").innerHTML = rows || `<tr><td colspan="9" class="empty">No accounts match.</td></tr>`;
     const groupOf = new Map(data.groups.flatMap((g) => g.accounts.map((a) => [a.account_id, [g, a]])));
     const browsing = !words.length && !onlySelected && !tagFilter;
-    main.querySelector("#dl-tag-list").innerHTML = (data.all_tags || []).map((t) => `<option value="${esc(t)}">`).join("");
     const tagSelect = main.querySelector("#dl-tag-filter");
     tagSelect.innerHTML = `<option value="">Any tag</option>` + (data.all_tags || []).map((t) => `<option ${t === tagFilter ? "selected" : ""}>${esc(t)}</option>`).join("");
     tagSelect.hidden = !(data.all_tags || []).length;
@@ -132,6 +132,67 @@ AA.views.download = (() => {
     main.querySelector("#dl-unique").textContent = data.unique.toLocaleString();
     main.querySelector("#dl-selected").textContent = count.toLocaleString();
     main.querySelector("#dl-job").textContent = jobLabel(job);
+    showTagEditor(main);
+  }
+
+  // Tag box: suggestions come from tags already used, most used first; empty shows the top ones.
+  function tagCounts() {
+    const counts = new Map();
+    accounts().flatMap((a) => a.tags || []).forEach((t) => counts.set(t, (counts.get(t) || 0) + 1));
+    return counts;
+  }
+
+  function tagSuggestions(account, text) {
+    const typed = text.trim().toLowerCase();
+    const mine = new Set((account.tags || []).map((t) => t.toLowerCase()));
+    return [...tagCounts()].filter(([t]) => !mine.has(t.toLowerCase()) && t.toLowerCase().includes(typed))
+      .sort((a, b) => (typed ? b[0].toLowerCase().startsWith(typed) - a[0].toLowerCase().startsWith(typed) : 0) || b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, TAG_SUGGESTIONS);
+  }
+
+  function drawTagMenu(main) {
+    const menu = main.querySelector("#dl-tag-menu");
+    const input = editingHost && main.querySelector(`#${editingHost} [data-tag-input]`);
+    const account = input && accounts().find((a) => a.account_id === input.dataset.tagInput);
+    if (!account) {
+      menu.hidden = true;
+      return;
+    }
+    const text = input.value.trim();
+    const items = tagSuggestions(account, text);
+    tagChoice = Math.min(tagChoice, items.length - 1);
+    const exists = [...tagCounts().keys(), ...(account.tags || [])].some((t) => t.toLowerCase() === text.toLowerCase());
+    const hint = text && !exists ? `<div class="dl-tag-hint">Enter creates “${esc(text)}”</div>` : "";
+    const heading = !text && items.length ? `<div class="dl-tag-hint">Most used</div>` : "";
+    menu.innerHTML = heading + items.map(([tag, count], i) => `<button type="button" class="dl-tag-option ${i === tagChoice ? "active" : ""}" data-tag-choice="${esc(tag)}" tabindex="-1"><span>${esc(tag)}</span><span class="muted">${count}</span></button>`).join("") + hint;
+    menu.hidden = !(heading || items.length || hint);
+    const box = input.getBoundingClientRect();
+    menu.style.left = `${box.left}px`;
+    menu.style.top = `${box.bottom + 4}px`;
+  }
+
+  function showTagEditor(main) {
+    if (!editingTag) return drawTagMenu(main);
+    main.querySelectorAll("[data-tag-input]").forEach((input) => {
+      if (input.closest("tbody").id !== editingHost) input.closest(".dl-tags").querySelector("[data-tag-input]").hidden = true;
+    });
+    const input = main.querySelector(`#${editingHost} [data-tag-input]`);
+    if (!input) {
+      editingTag = "";
+      return drawTagMenu(main);
+    }
+    input.value = tagDraft;
+    input.focus();
+    input.setSelectionRange(tagDraft.length, tagDraft.length);
+    drawTagMenu(main);
+  }
+
+  function closeTagEditor(main) {
+    editingTag = "";
+    editingHost = "";
+    tagDraft = "";
+    tagChoice = -1;
+    list(main);
   }
 
   async function runTests(main, ids) {
@@ -167,7 +228,7 @@ AA.views.download = (() => {
         <div class="dl-actions"><button type="button" id="dl-test-again"></button><button type="button" id="dl-test-all"></button><button type="button" class="primary" id="dl-start"></button></div></div>
       ${data.error ? `<div class="error-box">${esc(data.error)}</div>` : ""}
       <div class="filters dl-filters"><input type="search" id="dl-search" placeholder="Search anything: name, account number, stage, profile" value="${esc(search)}">
-        <select id="dl-tag-filter" aria-label="Filter by tag" hidden></select><datalist id="dl-tag-list"></datalist>
+        <select id="dl-tag-filter" aria-label="Filter by tag" hidden></select>
         <label class="small"><input type="checkbox" id="dl-only" ${onlySelected ? "checked" : ""}> Selected only</label>
         <span id="dl-job" class="small muted" aria-live="polite"></span></div>
       <progress id="dl-progress" class="dl-progress" hidden></progress>
@@ -177,6 +238,7 @@ AA.views.download = (() => {
         <div class="table-wrap"><table class="data dl-table"><thead><tr><th>Name</th><th>Stage</th><th>Account number</th><th>Account created</th><th>Last download</th><th>Tags</th><th>Times connected</th><th>Status</th><th>Test</th></tr></thead><tbody id="dl-top"></tbody></table></div></div>
       <h2 class="dl-section">All accounts</h2>
       <div class="table-wrap"><table class="data dl-table"><thead><tr><th>Name</th><th>Stage</th><th>Account number</th><th>Account created</th><th>Last download</th><th>Tags</th><th>Times connected</th><th>Status</th><th>Test</th></tr></thead><tbody id="dl-list"></tbody></table></div>
+      <div id="dl-tag-menu" class="dl-tag-menu" hidden></div>
       <p class="small muted">Accounts from <span class="mono">${esc(data.aws_config)}</span>, saved to <span class="mono">${esc(data.media)}</span>. Read-only.</p>`;
     main.querySelector("#dl-search").addEventListener("input", (e) => {
       search = e.target.value;
@@ -205,31 +267,70 @@ AA.views.download = (() => {
       }
       list(main);
     };
+    // Use the existing spelling when a tag is typed in another case, so "Prod" and "prod" stay one tag.
+    const assignTag = (account, text) => {
+      const value = text.trim();
+      const existing = [...tagCounts().keys()].find((t) => t.toLowerCase() === value.toLowerCase());
+      tagDraft = "";
+      tagChoice = -1;
+      if (!value) return list(main);
+      saveTags(account, [...(account.tags || []), existing || value]);
+    };
     const onTagKey = (e) => {
       const input = e.target.closest("[data-tag-input]");
       if (!input) return;
-      if (e.type === "keydown" && e.key === "Escape") {
-        editingTag = "";
-        return list(main);
-      }
-      if (e.type === "keydown" && e.key !== "Enter") return;
       const account = accounts().find((a) => a.account_id === input.dataset.tagInput);
-      const value = input.value.trim();
-      if (!editingTag) return;
+      const items = tagSuggestions(account, input.value);
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        if (items.length) tagChoice = e.key === "ArrowDown" ? (tagChoice + 1) % items.length : (tagChoice <= 0 ? items.length : tagChoice) - 1;
+        drawTagMenu(main);
+      } else if (e.key === "Escape") {
+        closeTagEditor(main);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (!input.value.trim() && tagChoice < 0) return closeTagEditor(main);
+        assignTag(account, tagChoice >= 0 ? items[tagChoice][0] : input.value);
+      }
+    };
+    const onTagInput = (e) => {
+      if (!e.target.closest("[data-tag-input]")) return;
+      tagDraft = e.target.value;
+      tagChoice = -1;
+      drawTagMenu(main);
+    };
+    const onTagLeave = (e) => {
+      if (!e.target.closest("[data-tag-input]") || !editingTag) return;
+      const account = accounts().find((a) => a.account_id === e.target.dataset.tagInput);
+      const value = e.target.value;
       editingTag = "";
-      if (value) saveTags(account, [...(account.tags || []), value]);
+      editingHost = "";
+      tagDraft = "";
+      tagChoice = -1;
+      if (value.trim()) assignTag(account, value);
       else list(main);
     };
     for (const id of ["#dl-list", "#dl-top", "#dl-recent"]) {
       main.querySelector(id).addEventListener("keydown", onTagKey);
-      main.querySelector(id).addEventListener("focusout", onTagKey);
+      main.querySelector(id).addEventListener("input", onTagInput);
+      main.querySelector(id).addEventListener("focusout", onTagLeave);
     }
+    const menu = main.querySelector("#dl-tag-menu");
+    // mousedown, so choosing a suggestion doesn't first blur the box.
+    menu.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const option = e.target.closest("[data-tag-choice]");
+      if (option) assignTag(accounts().find((a) => a.account_id === editingTag), option.dataset.tagChoice);
+    });
+    main.addEventListener("scroll", () => drawTagMenu(main), {passive: true});
     const onTableClick = async (e) => {
       const add = e.target.closest("[data-tag-add]");
       if (add) {
         editingTag = add.dataset.tagAdd;
+        editingHost = add.closest("tbody").id;
+        tagDraft = "";
+        tagChoice = -1;
         list(main);
-        main.querySelector(`[data-tag-input="${editingTag}"]`)?.focus();
         return;
       }
       const untag = e.target.closest("[data-untag]");
