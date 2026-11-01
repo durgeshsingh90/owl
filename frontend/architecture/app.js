@@ -162,6 +162,8 @@
   async function render() {
     const view = currentView();
     document.querySelectorAll("#sidebar a").forEach((a) => a.classList.toggle("active", a.dataset.view === view));
+    // Project, environment and snapshot only show where they change the page.
+    document.querySelector("#context-bar").hidden = ["download", "timeline", "import"].includes(view);
     if (view === "setup" || view === "download" || view === "timeline") {
       try {
         await AA.views[view](main, app);

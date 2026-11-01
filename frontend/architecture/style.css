@@ -72,7 +72,9 @@ a:hover{text-decoration:underline}
 .nav-count{font-size:11px;font-weight:600;padding:0 6px;border-radius:999px;background:var(--fail-bg);color:var(--fail)}
 .nav-count:empty{display:none}
 .sidebar-note{margin:auto 8px 0;padding-top:16px;font-size:11px;color:var(--faint)}
-.main{flex:1;min-width:0;overflow:auto;padding:22px 28px 40px}
+.content{flex:1;min-width:0;display:flex;flex-direction:column}
+.context-bar{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:8px 28px;border-bottom:1px solid var(--line)}
+.main{flex:1;min-height:0;min-width:0;overflow:auto;padding:22px 28px 40px}
 .main:focus{outline:none}
 .loading,.empty{padding:40px;text-align:center;color:var(--muted)}
 .error-box{padding:14px 16px;border-radius:10px;background:var(--fail-bg);color:var(--fail)}
@@ -253,6 +255,8 @@ table.dl-table tr.dl-first td{border-top:1px solid var(--border)}
 .dl-pick[aria-pressed="true"],.dl-pick[aria-pressed="true"]:hover:not(:disabled){background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
 .dl-status{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 8px;border:0;background:transparent;font-size:12px}
 .dl-status img{width:22px;height:22px;object-fit:contain}
+:root[data-theme="dark"] .dl-status.unknown img,:root[data-theme="dark"] .dl-status.failed img{filter:invert(1)}
+.dl-status.unknown{color:var(--muted)}
 .dl-status.connected{color:var(--pass)}
 .dl-status.failed{color:var(--fail)}
 .dl-test{height:28px;padding:0 12px;font-size:12px}
@@ -294,6 +298,6 @@ table.timeline td:first-child{padding-left:22px;border-left:2px solid var(--line
 }
 @media print{
   body{overflow:visible;display:block}
-  .topbar,.sidebar,.drawer,.no-print{display:none!important}
+  .topbar,.sidebar,.drawer,.context-bar,.no-print{display:none!important}
   .main{overflow:visible;padding:0}
 }

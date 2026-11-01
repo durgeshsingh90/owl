@@ -4,7 +4,8 @@
 AA.views.download = (() => {
   const {esc, api, toast} = AA;
   const TESTS_AT_ONCE = 6;
-  const ICONS = {connected: "connected.png", checking: "no-connection.gif", failed: "disconnected.png", unknown: "no-connection.gif"};
+  const SHARED = "../bitbucket/assets/";
+  const ICONS = {connected: `${SHARED}connected.png`, checking: `${SHARED}no-connection.gif`, failed: `${SHARED}disconnected.png`, unknown: "assets/not-tested.png"};
   let data = null, search = "", onlySelected = false, polling = null, login = null;
   const running = new Set();
   let searchTyping;
@@ -54,7 +55,7 @@ AA.views.download = (() => {
       <td class="mono">${esc(a.account_id)}</td>
       <td class="nowrap" ${i.created_error ? `title="${esc(i.created_error)}"` : ""}>${i.created ? esc(dateOnly(i.created)) : `<span class="muted">${i.created_error ? "No access" : "—"}</span>`}</td>
       <td class="small nowrap">${job ? esc(job) : '<span class="muted">Never</span>'}</td>
-      <td><button type="button" class="dl-status ${state}" data-status="${esc(a.account_id)}" title="${esc(tip)}"><img src="../bitbucket/assets/${ICONS[state]}" alt="">${esc(label)}</button>${state === "connected" && denied.length ? `<div class="dl-partial">${denied.length} type${denied.length === 1 ? "" : "s"} denied</div>` : ""}</td>
+      <td><button type="button" class="dl-status ${state}" data-status="${esc(a.account_id)}" title="${esc(tip)}"><img src="${ICONS[state]}" alt="">${esc(label)}</button>${state === "connected" && denied.length ? `<div class="dl-partial">${denied.length} type${denied.length === 1 ? "" : "s"} denied</div>` : ""}</td>
       <td><button type="button" class="dl-test" data-test="${esc(a.account_id)}" ${running.has(a.account_id) ? "disabled" : ""}>Test</button></td></tr>${problems ? `<tr class="dl-note"><td colspan="6">${problems}</td></tr>` : ""}`;
   }
 
