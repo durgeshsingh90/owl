@@ -9,7 +9,7 @@ AA.views.download = (() => {
   const ICONS = {connected: `${SHARED}connected.png?v=2`, checking: `${SHARED}no-connection.gif?v=2`, failed: `${SHARED}disconnected.png?v=2`, unknown: "assets/not-tested.png"};
   let data = null, search = "", onlySelected = false, polling = null;
   const running = new Set();
-  let searchTyping, ticker, editingTag = "", tagFilter = "";
+  let searchTyping, editingTag = "", tagFilter = "";
   const everTested = (a) => a.info?.connected === true || a.info?.connected === false;
 
   const accounts = () => data.groups.flatMap((g) => g.accounts);
@@ -40,30 +40,6 @@ AA.views.download = (() => {
 
   const isConnected = (a) => a.info?.connected === true && (!a.session || new Date(a.session.expires_at).getTime() > Date.now());
 
-  function timeLeft(session) {
-    const left = Math.floor((new Date(session.expires_at).getTime() - Date.now()) / 1000);
-    if (left <= 0) return "Expired";
-    const pad = (n) => String(n).padStart(2, "0");
-    return `${session.source === "sso" ? "" : "~"}${Math.floor(left / 3600)}h ${pad(Math.floor(left / 60) % 60)}m ${pad(left % 60)}s left`;
-  }
-
-  // Counts down once a second without redrawing the table; at zero the row shows Not connected.
-  function tick(main) {
-    let expired = false;
-    main.querySelectorAll(".dl-timer").forEach((node) => {
-      const account = accounts().find((a) => a.account_id === node.dataset.account);
-      if (!account?.session) return;
-      node.textContent = timeLeft(account.session);
-      const left = new Date(account.session.expires_at).getTime() - Date.now();
-      node.classList.toggle("soon", left < 3600000);
-      if (left <= 0 && account.info?.connected) {
-        account.info = {...account.info, connected: false, error: "The session has ended."};
-        expired = true;
-      }
-    });
-    if (expired) list(main);
-  }
-
   const deniedOf = (a, s) => [...new Set([...(a.info?.denied_types || []), ...(a.info?.denied || []), ...(s?.denied || [])])].sort();
 
   const downloadingNow = (job) => job.state === "running";
@@ -92,7 +68,7 @@ AA.views.download = (() => {
       <td class="small nowrap">${job ? esc(job) : '<span class="muted">Never</span>'}</td>
       <td><div class="dl-tags">${(a.tags || []).map((t) => `<span class="dl-tag">${esc(t)}<button type="button" data-untag="${esc(t)}" data-account="${esc(a.account_id)}" aria-label="Remove tag ${esc(t)}">×</button></span>`).join("")}${editingTag === a.account_id ? `<input class="dl-tag-input" data-tag-input="${esc(a.account_id)}" list="dl-tag-list" placeholder="New or existing" aria-label="Add a tag" maxlength="40">` : `<button type="button" class="dl-tag-add" data-tag-add="${esc(a.account_id)}" title="Add a tag" aria-label="Add a tag">+</button>`}</div></td>
       <td class="dl-count" title="New connections made: testing again during a live session doesn't count">${a.connects || 0}</td>
-      <td><span class="dl-status ${state}" title="${esc(tip)}"><img src="${ICONS[state]}" alt="">${esc(label)}</span>${state === "connected" && a.session ? `<div class="dl-timer" data-expires="${esc(a.session.expires_at)}" data-account="${esc(a.account_id)}" title="${esc(a.session.source === "sso" ? `Session ends ${stamp(a.session.expires_at)}, from the AWS sign-in` : `About 12 hours from the first successful test, ending ${stamp(a.session.expires_at)}`)}">${esc(timeLeft(a.session))}</div>` : ""}${state === "connected" && denied.length ? `<div class="dl-partial">${denied.length} type${denied.length === 1 ? "" : "s"} denied</div>` : ""}</td>
+      <td><span class="dl-status ${state}" title="${esc(tip)}"><img src="${ICONS[state]}" alt="">${esc(label)}</span>${state === "connected" && denied.length ? `<div class="dl-partial">${denied.length} type${denied.length === 1 ? "" : "s"} denied</div>` : ""}</td>
       <td><button type="button" class="dl-test" data-test="${esc(a.account_id)}" ${running.has(a.account_id) ? "disabled" : ""}>Test</button></td></tr>${problems ? `<tr class="dl-note"><td colspan="8">${problems}</td></tr>` : ""}`;
   }
 
@@ -326,12 +302,6 @@ AA.views.download = (() => {
     main.innerHTML = `<div class="loading">Loading…</div>`;
     data = await api("/download");
     render(main, app);
-    clearInterval(ticker);
-    ticker = setInterval(() => {
-      if (!main.querySelector("#dl-list")) clearInterval(ticker);
-      else tick(main);
-    }, 1000);
-    tick(main);
     if (data.job?.state === "running") poll(main, app);
   };
 })();

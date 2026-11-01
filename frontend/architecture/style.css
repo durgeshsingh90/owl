@@ -261,8 +261,6 @@ table.dl-table tr.dl-first td{border-top:1px solid var(--border)}
 .dl-status.unknown{color:var(--muted)}
 .dl-status.connected{color:var(--pass)}
 .dl-status.failed{color:var(--fail)}
-.dl-timer{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;padding-left:8px;white-space:nowrap}
-.dl-timer.soon{color:var(--warn)}
 .dl-tags{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:3px}
 .dl-tag{display:inline-flex;align-items:center;gap:3px;padding:1px 7px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-size:11px;white-space:nowrap}
 .dl-tag button{height:auto;padding:0 0 0 2px;border:0;background:none;color:inherit;font-size:11px;line-height:1}
