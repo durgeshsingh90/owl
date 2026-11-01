@@ -596,7 +596,7 @@
     const doc = JV.active;
     if (!doc) return;
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => { doc.search.query = $("#search-input").value; JV.runSearch(doc); }, 250);
+    searchTimer = setTimeout(() => { doc.search.query = $("#search-input").value; JV.runSearch(doc); }, 1000);
   });
   $("#search-input").addEventListener("keydown", event => {
     if (event.key === "Enter" && event.shiftKey) { event.preventDefault(); if (JV.active) JV.goToMatch(JV.active, JV.active.search.index - 1); }

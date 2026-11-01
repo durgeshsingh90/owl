@@ -88,16 +88,23 @@
         element.textContent = (window.shortCount || String)(entry.count);
         element.title = `Opened ${entry.count.toLocaleString()} times · last ${new Date(entry.last_opened * 1000).toLocaleString()}`;
       });
-      // Most used apps first; ties keep the page order, unopened apps go last.
+      // Most used apps first; ties keep the page order, unopened apps go last. The order is saved
+      // for the next visit, which opens with it: cards already on screen are never moved.
       const area = document.querySelector(".app-area");
       if (area) {
-        const cards = [...area.querySelectorAll(":scope > .app-card")];
-        const count = card => opens[card.querySelector("[data-app-opens]")?.dataset.appOpens]?.count || 0;
-        cards.map((card, index) => ({card, index, uses: count(card)}))
-          .sort((a, b) => b.uses - a.uses || a.index - b.index)
-          .forEach(({card}) => area.append(card));
+        const appOf = card => card.querySelector("[data-app-opens]")?.dataset.appOpens;
+        const sorted = [...area.querySelectorAll(":scope > .app-card")].map((card, index) => ({card, index, uses: opens[appOf(card)]?.count || 0}))
+          .sort((a, b) => b.uses - a.uses || a.index - b.index);
+        try {
+          localStorage.setItem("owl-home-app-order", JSON.stringify(sorted.map(({card}) => appOf(card))));
+        } catch { /* Storage may be unavailable. */ }
+        if (!window.owlHomeOrdered) sorted.forEach(({card}) => area.append(card));
       }
     } catch { /* The counts are a nicety; the page works without them. */ }
+    finally {
+      const area = document.querySelector(".app-area");
+      if (area) area.style.visibility = "";
+    }
   }
 
   void load();

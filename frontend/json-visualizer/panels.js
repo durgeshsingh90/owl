@@ -431,7 +431,7 @@
     if (!doc || event.target.id !== "query-input") return;
     doc.query.text = event.target.value;
     clearTimeout(queryTimer);
-    queryTimer = setTimeout(() => runQuery(doc), 250);
+    queryTimer = setTimeout(() => runQuery(doc), 1000);
   });
   $("#query-bar").addEventListener("change", event => {
     const doc = JV.active;

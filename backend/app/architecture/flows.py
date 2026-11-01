@@ -12,16 +12,17 @@ checked through its listener, target group and target health.
 from app.architecture.engine import EPHEMERAL, Endpoint, contains, describe_flow, flow_of, worst
 from app.architecture.models import Check, Evidence, Hop, RequirementResult
 
-GATEWAYS = ("nat-gateway", "internet-gateway", "tgw", "firewall")
+GATEWAYS = ("nat-gateway", "internet-gateway", "tgw", "firewall", "vpc-peering", "vpn-connection", "dx-gateway")
 LOGICAL = ("endpoint-service",)
 TITLES = {
     "workload": "Workload", "external": "External system", "subnet": "Subnet", "vpc": "VPC", "nat-gateway": "NAT gateway",
-    "internet-gateway": "Internet gateway", "tgw": "Transit gateway", "firewall": "Firewall", "vpc-endpoint": "VPC endpoint",
+    "internet-gateway": "Internet gateway", "tgw": "Transit gateway", "firewall": "Firewall", "vpc-peering": "VPC peering", "vpn-connection": "VPN connection", "dx-gateway": "Direct Connect gateway", "vpc-endpoint": "VPC endpoint",
     "endpoint-service": "Endpoint service", "load-balancer": "Load balancer", "eks-cluster": "EKS cluster",
 }
 DENIED_KEYS = {
     "subnet": ("Subnets",), "vpc": ("Vpcs",), "nat-gateway": ("NatGateways",), "internet-gateway": ("InternetGateways",),
-    "tgw": ("TransitGateways",), "firewall": ("Firewalls",), "vpc-endpoint": ("VpcEndpoints",),
+    "tgw": ("TransitGateways",), "firewall": ("Firewalls",), "vpc-peering": ("VpcPeeringConnections",),
+    "vpn-connection": ("VpnConnections",), "dx-gateway": ("DxGateways",), "vpc-endpoint": ("VpcEndpoints",),
     "endpoint-service": ("ServiceConfigurations",), "load-balancer": ("LoadBalancers",), "eks-cluster": ("clusters",),
 }
 GRAPH_KIND = {"workload": "workload", "external": "external", "tgw": "tgw"}
@@ -83,6 +84,12 @@ class FlowChecker:
             found = inv.transit_gateways[ref]
             node.name = hop.label or _name(found.tags, ref)
             evidence = [Evidence(kind="transit_gateways", id=ref)]
+        elif kind in ("vpc-peering", "vpn-connection", "dx-gateway"):
+            collection, label = {"vpc-peering": ("vpc_peerings", "VPC peering"), "vpn-connection": ("vpn_connections", "VPN"), "dx-gateway": ("dx_gateways", "Direct Connect")}[kind]
+            found = getattr(inv, collection).get(ref)
+            if found:
+                node.name = hop.label or f"{label} {ref}"
+                evidence = [Evidence(kind=collection, id=ref)]
         elif kind == "firewall":
             found = inv.firewalls.get(ref) or next((f for f in inv.firewalls.values() if f.name == ref), None)
             if found:
@@ -324,7 +331,8 @@ class FlowChecker:
     @staticmethod
     def _collection(node):
         return {"nat-gateway": "nat_gateways", "internet-gateway": "internet_gateways", "tgw": "transit_gateways",
-                "firewall": "firewalls"}.get(node.hop_kind, "vpcs")
+                "firewall": "firewalls", "vpc-peering": "vpc_peerings", "vpn-connection": "vpn_connections",
+                "dx-gateway": "dx_gateways"}.get(node.hop_kind, "vpcs")
 
     # The whole flow
 

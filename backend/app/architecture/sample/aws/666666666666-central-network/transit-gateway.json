@@ -87,6 +87,15 @@
       "SubnetIds": [
         "subnet-0f88tgw-a"
       ]
+    },
+    {
+      "TransitGatewayAttachmentId": "tgw-attach-0azure",
+      "TransitGatewayId": "tgw-0central0000001",
+      "ResourceType": "vpn",
+      "ResourceId": "vpn-0azure",
+      "ResourceOwnerId": "666666666666",
+      "State": "available",
+      "SubnetIds": []
     }
   ],
   "TransitGatewayRouteTables": [
@@ -157,6 +166,16 @@
               "TransitGatewayAttachmentId": "tgw-attach-0dx"
             }
           ]
+        },
+        {
+          "DestinationCidrBlock": "10.200.0.0/16",
+          "Type": "propagated",
+          "State": "active",
+          "TransitGatewayAttachments": [
+            {
+              "TransitGatewayAttachmentId": "tgw-attach-0azure"
+            }
+          ]
         }
       ]
     },
@@ -184,6 +203,9 @@
         },
         {
           "TransitGatewayAttachmentId": "tgw-attach-0secure"
+        },
+        {
+          "TransitGatewayAttachmentId": "tgw-attach-0azure"
         }
       ],
       "Routes": [

@@ -19,6 +19,26 @@
           "Value": "shared-services"
         }
       ]
+    },
+    {
+      "VpcId": "vpc-0g70",
+      "CidrBlock": "10.70.0.0/16",
+      "OwnerId": "333333333333",
+      "State": "available",
+      "CidrBlockAssociationSet": [
+        {
+          "CidrBlock": "10.70.0.0/16",
+          "CidrBlockState": {
+            "State": "associated"
+          }
+        }
+      ],
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "analytics"
+        }
+      ]
     }
   ],
   "Subnets": [
@@ -105,6 +125,20 @@
           "Value": "shared-tgw-a"
         }
       ]
+    },
+    {
+      "SubnetId": "subnet-0g70api-a",
+      "VpcId": "vpc-0g70",
+      "CidrBlock": "10.70.1.0/24",
+      "OwnerId": "333333333333",
+      "AvailabilityZone": "eu-west-2a",
+      "MapPublicIpOnLaunch": false,
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "analytics-api-a"
+        }
+      ]
     }
   ],
   "RouteTables": [
@@ -171,6 +205,30 @@
         {
           "DestinationCidrBlock": "10.30.0.0/16",
           "GatewayId": "local",
+          "State": "active"
+        }
+      ]
+    },
+    {
+      "RouteTableId": "rtb-0g70",
+      "VpcId": "vpc-0g70",
+      "OwnerId": "333333333333",
+      "Associations": [
+        {
+          "RouteTableAssociationId": "rtbassoc-0g70",
+          "SubnetId": "subnet-0g70api-a",
+          "Main": false
+        }
+      ],
+      "Routes": [
+        {
+          "DestinationCidrBlock": "10.70.0.0/16",
+          "GatewayId": "local",
+          "State": "active"
+        },
+        {
+          "DestinationCidrBlock": "10.20.0.0/16",
+          "VpcPeeringConnectionId": "pcx-0analytics",
           "State": "active"
         }
       ]
@@ -267,6 +325,36 @@
           "UserIdGroupPairs": []
         }
       ]
+    },
+    {
+      "GroupId": "sg-0g70api",
+      "GroupName": "analytics-api",
+      "VpcId": "vpc-0g70",
+      "OwnerId": "333333333333",
+      "IpPermissions": [
+        {
+          "IpProtocol": "tcp",
+          "FromPort": 443,
+          "ToPort": 443,
+          "IpRanges": [
+            {
+              "CidrIp": "10.20.0.0/16"
+            }
+          ],
+          "UserIdGroupPairs": []
+        }
+      ],
+      "IpPermissionsEgress": [
+        {
+          "IpProtocol": "-1",
+          "IpRanges": [
+            {
+              "CidrIp": "0.0.0.0/0"
+            }
+          ],
+          "UserIdGroupPairs": []
+        }
+      ]
     }
   ],
   "NetworkAcls": [
@@ -293,6 +381,47 @@
         },
         {
           "SubnetId": "subnet-0c33nlb-a"
+        }
+      ],
+      "Entries": [
+        {
+          "RuleNumber": 100,
+          "Protocol": "-1",
+          "RuleAction": "allow",
+          "Egress": false,
+          "CidrBlock": "0.0.0.0/0"
+        },
+        {
+          "RuleNumber": 32767,
+          "Protocol": "-1",
+          "RuleAction": "deny",
+          "Egress": false,
+          "CidrBlock": "0.0.0.0/0"
+        },
+        {
+          "RuleNumber": 100,
+          "Protocol": "-1",
+          "RuleAction": "allow",
+          "Egress": true,
+          "CidrBlock": "0.0.0.0/0"
+        },
+        {
+          "RuleNumber": 32767,
+          "Protocol": "-1",
+          "RuleAction": "deny",
+          "Egress": true,
+          "CidrBlock": "0.0.0.0/0"
+        }
+      ]
+    },
+    {
+      "NetworkAclId": "acl-0g70",
+      "VpcId": "vpc-0g70",
+      "OwnerId": "333333333333",
+      "IsDefault": true,
+      "Associations": [
+        {
+          "SubnetId": "subnet-0g70api-a"
         }
       ],
       "Entries": [

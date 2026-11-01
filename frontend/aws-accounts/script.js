@@ -741,7 +741,11 @@
   });
   window.addEventListener('scroll', trackScroll, {passive: true});
   window.addEventListener('resize', trackScroll);
-  $('search').addEventListener('input', render);
+  let searchTyping;
+  $('search').addEventListener('input', event => {
+    clearTimeout(searchTyping);
+    searchTyping = setTimeout(render, event.target.value.trim() ? 1000 : 0);
+  });
   $('settings-button').addEventListener('click', openConfig);
   $('empty-settings').addEventListener('click', openConfig);
   $('config-form').addEventListener('submit', event => { event.preventDefault(); saveConfig($('config-path').value.trim()); });

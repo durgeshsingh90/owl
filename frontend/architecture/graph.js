@@ -10,13 +10,13 @@ AA.graph = (() => {
     "load-balancer": "var(--k-network)", vpc: "var(--k-network)", "nat-gateway": "var(--k-network)",
     "internet-gateway": "var(--k-network)", internet: "var(--k-edge)", "direct-connect": "var(--k-network)", peering: "var(--k-network)",
     "vpc-endpoint": "var(--k-network)", "endpoint-service": "var(--k-network)", "eks-cluster": "var(--k-workload)", subnet: "var(--k-workload)",
-    tgw: "var(--k-network)",
+    tgw: "var(--k-network)", vpn: "var(--k-network)",
   };
   const KIND_TITLE = {
     workload: "", external: "", vpc: "VPC", firewall: "Network Firewall", "nat-gateway": "NAT", "internet-gateway": "IGW",
     internet: "Public internet", "direct-connect": "Hybrid connectivity", "load-balancer": "Load balancer", peering: "Peering",
     "vpc-endpoint": "PrivateLink endpoint", "endpoint-service": "Endpoint service", "eks-cluster": "EKS cluster", subnet: "Subnet",
-    tgw: "Transit gateway",
+    tgw: "Transit gateway", vpn: "Site-to-Site VPN",
   };
 
   function build(results) {

@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -33,6 +34,7 @@ from pathlib import Path
 from app.architecture import store
 from app.architecture.normalize import iso
 from app.aws import connection
+from app.core.database import connection as database_connection
 from app.core.database import database_path
 from app.core.logging import event
 
@@ -43,6 +45,7 @@ RECORD_LIMIT = 5000  # resource record sets per hosted zone
 CALL_TIMEOUT = 600  # seconds for one `aws` command; CloudTrail reads slowly
 ACCOUNTS_AT_ONCE = 4
 PROFILE_NAME = re.compile(r"mc-(.+)-([^-]+)", re.IGNORECASE)
+TOP_ACCOUNTS = 20
 PROBES_AT_ONCE = 6
 PROBE_TIMEOUT = 60  # seconds for one access check call
 LOOKUPS_AT_ONCE = 16
@@ -551,6 +554,34 @@ def profile_for(account_id, wanted=""):
     return profile, region
 
 
+def info_file():
+    return store.ensure() / "account-info.json"
+
+
+def account_info():
+    """What the last test or download learned about each account: created date, status."""
+    path = info_file()
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def remember(account_id, **fields):
+    """Save what a test or download learned; each one also counts as a use of the account."""
+    with _lock:
+        info = account_info()
+        before = info.get(account_id, {})
+        info[account_id] = {**before, **fields, "uses": before.get("uses", 0) + 1}
+        _write(info_file(), info)
+
+
+def account_details(profile):
+    """The account's created date and name. AWS may not let a read-only role see them."""
+    try:
+        answer = AwsCli(profile, timeout=PROBE_TIMEOUT).call("account", "get-account-information")
+    except (CliError, OSError) as error:
+        return {"created_error": str(error)[:300]}
+    return {"created": iso(answer.get("AccountCreatedDate")), "account_name": answer.get("AccountName", ""), "created_error": ""}
+
+
 def test_account(account_id, wanted=""):
     """`aws sts get-caller-identity` for one account: can its profile sign in, to that account?"""
     if not ACCOUNT.match(account_id):
@@ -566,6 +597,10 @@ def test_account(account_id, wanted=""):
               "allowed": [], "denied": [], "errors": {}}
     if identity:
         result.update(check_access(profile, profile_for(account_id, wanted)[1]))
+        result.update(account_details(profile))
+    remember(account_id, connected=result["ok"], checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), arn=result["arn"], error=result["error"],
+             denied=result["denied"], errors=result["errors"], allowed=len(result["allowed"]),
+             **{k: result[k] for k in ("created", "account_name", "created_error") if k in result})
     return result
 
 
@@ -580,6 +615,8 @@ def download_account(account, progress=lambda text: None):
         raise PermissionError(f"Profile {profile} can't sign in: {problem} Log in, then download again.")
     if identity.get("Account") != account_id:
         raise PermissionError(f"Profile {profile} signs in to {identity.get('Account')}, not {account_id}.")
+    details = account_details(profile)
+    remember(account_id, connected=True, checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), arn=identity.get("Arn", ""), error="", **details)
     progress(f"{account_id}: checking access")
     access = check_access(profile, profile_region)
     if not access["allowed"]:
@@ -626,7 +663,7 @@ def download_account(account, progress=lambda text: None):
         "Account": {
             "Id": account_id, "Name": account.get("name") or previous.get("Name") or profile,
             "Type": account.get("type") or previous.get("Type") or "application",
-            "Region": regions[0], "Environments": account.get("environments") or previous.get("Environments", []),
+            "Created": details.get("created", ""), "Region": regions[0], "Environments": account.get("environments") or previous.get("Environments", []),
         },
         "Download": {
             "profile": profile, "regions": regions, "caller": identity.get("Arn", ""), "calls": run.calls,
@@ -798,6 +835,16 @@ def split_profile(profile):
     return (match.group(1).lower(), match.group(2).lower()) if match else (profile, "")
 
 
+def copy_counts():
+    """How often the AWS Accounts app copied each profile and account id."""
+    try:
+        with database_connection() as db:
+            rows = db.execute("SELECT value,count FROM aws_account_copies WHERE kind IN ('profile','account_id')").fetchall()
+    except sqlite3.Error:
+        return {}
+    return {row[0]: row[1] for row in rows}
+
+
 def account_groups():
     """Every account in the AWS config, one group per name with an entry per stage, and the counts."""
     config = download_config()
@@ -808,6 +855,8 @@ def account_groups():
     except (OSError, ValueError) as problem:
         error = str(problem)
     have = downloaded(sorted(set(found) | selected))
+    info = account_info()
+    copies = copy_counts()
     groups = {}
     for account_id in sorted(set(found) | selected):
         profile_names = [p["profile"] for p in found.get(account_id, [])]
@@ -816,11 +865,14 @@ def account_groups():
         groups.setdefault(name, []).append({
             "account_id": account_id, "stage": stage or first or "account", "profile": first, "profiles": profile_names,
             "selected": account_id in selected, "downloaded_at": (have.get(account_id) or {}).get("downloaded_at", ""),
+            "info": info.get(account_id, {}),
+            "uses": info.get(account_id, {}).get("uses", 0) + copies.get(account_id, 0) + sum(copies.get(p, 0) for p in profile_names),
         })
     order = {"dev": 0, "test": 1, "nonp": 2, "nonprod": 2, "stage": 3, "mtf": 4, "prod": 5}
     listing = [{"name": name, "accounts": sorted(items, key=lambda a: (order.get(a["stage"], 9), a["stage"]))}
                for name, items in sorted(groups.items())]
-    return {"groups": listing, "total": sum(len(g["accounts"]) for g in listing), "unique": len(listing),
+    used = sorted(((a["uses"], g["name"], a["stage"], a["account_id"]) for g in listing for a in g["accounts"] if a["uses"]), key=lambda i: (-i[0], i[1], i[2]))
+    return {"groups": listing, "top": [i[3] for i in used[:TOP_ACCOUNTS]], "total": sum(len(g["accounts"]) for g in listing), "unique": len(listing),
             "selected": len(selected), "error": error}
 
 

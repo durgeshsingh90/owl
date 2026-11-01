@@ -100,6 +100,27 @@
             <div><div class="app-title"><h3>Architecture Analyser</h3><span>Interactive TAD</span></div><p>Checks a project's AWS connectivity, DNS and security against its requirements.<br />Every PASS, FAIL and UNKNOWN comes with evidence.</p></div>
           </a>
         </section>
+        <script>
+          // Inline on purpose: it runs before the first paint, so the cards never visibly move.
+          // storage.js saves the order from the latest counts; the next visit opens with it.
+          (() => {
+            const area = document.querySelector(".app-area");
+            let order = null;
+            try { order = JSON.parse(localStorage.getItem("owl-home-app-order")); } catch { /* Storage may be unavailable. */ }
+            if (!Array.isArray(order)) {
+              // First visit: keep the cards hidden for the moment the counts take to arrive.
+              area.style.visibility = "hidden";
+              setTimeout(() => { area.style.visibility = ""; }, 1500);
+              return;
+            }
+            window.owlHomeOrdered = true;
+            const rank = new Map(order.map((app, index) => [app, index]));
+            const key = card => rank.get(card.querySelector("[data-app-opens]")?.dataset.appOpens) ?? order.length;
+            [...area.querySelectorAll(":scope > .app-card")].map((card, index) => ({card, index}))
+              .sort((a, b) => key(a.card) - key(b.card) || a.index - b.index)
+              .forEach(({card}) => area.append(card));
+          })();
+        </script>
         <section class="panel auto-refresh-panel" aria-labelledby="auto-refresh-title">
           <div class="panel-heading"><h2 id="auto-refresh-title">Automatic refresh</h2><span>Daily in the background · failures retry every 2 hours until they succeed · a manual refresh counts as done</span></div>
           <div data-auto-refresh-table><p>Loading refresh status…</p></div>
@@ -320,6 +341,6 @@
     <script src="app-stats.js?v=6"></script>
     <script src="auto-refresh.js?v=11"></script>
     <script src="short-count.js?v=1"></script>
-    <script src="storage.js?v=7"></script>
+    <script src="storage.js?v=8"></script>
   </body>
 </html>

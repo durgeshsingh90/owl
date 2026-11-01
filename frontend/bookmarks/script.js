@@ -625,7 +625,8 @@ document
   .querySelector("#confluence-people-search")
   .addEventListener("input", (event) => {
     peopleQuery = event.target.value.trim().toLowerCase();
-    render();
+    clearTimeout(window.bookmarkPeopleTyping);
+    window.bookmarkPeopleTyping = setTimeout(render, peopleQuery ? 1000 : 0);
   });
 document
   .querySelector("#all-confluence-people")
@@ -662,7 +663,9 @@ document
     const add = document.querySelector("#add-bookmark");
     add.hidden = !pageId && (!url || bookmarks.some((item) => parseBookmarkUrl(item.url)?.href === url.href));
     add.textContent = pageId ? "Find / add page ↵" : "Add bookmark ↵";
-    render();
+    // Search one second after the last keystroke, so typing doesn't query the database each time.
+    clearTimeout(window.bookmarkSearchTyping);
+    window.bookmarkSearchTyping = setTimeout(render, query ? 1000 : 0);
   });
 document.querySelector("#bookmark-sort").addEventListener("change", render);
 document.querySelector("#show-search-branches").addEventListener("click", () => {

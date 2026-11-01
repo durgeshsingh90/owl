@@ -306,6 +306,13 @@ AA.views = (() => {
         ...["inbound", "outbound"].map((dir) => [title(dir), (n) => n[dir].map((r) => `#${r.number === 32767 ? "*" : r.number} ${esc(r.action)} ${esc(r.protocol)} ${esc(r.cidr)}${r.from_port != null ? " " + esc(ports(r)) : ""}`).join("<br>")])])) +
       section("Load balancers", d.load_balancers.length, table(d.load_balancers, [["Load balancer", (l) => `${esc(l.name)}<br><span class="small muted">${esc(l.type)} · ${esc(l.scheme)}</span>`],
         ["Listeners", (l) => l.listeners.map((x) => `${esc(x.protocol)}/${esc(x.port)}`).join(", ") || "none"], ["Subnets", (l) => l.subnets.map(mono).join("<br>")]])) +
+      section("VPC peering", d.vpc_peerings.length, table(d.vpc_peerings, [["Peering", (i) => mono(i.id)], ["Requester", (i) => `${mono(i.requester_vpc)}<br><span class="small muted">${esc(i.requester_account)} · ${esc(i.requester_cidrs.join(", "))}</span>`],
+        ["Accepter", (i) => `${mono(i.accepter_vpc)}<br><span class="small muted">${esc(i.accepter_account)} · ${esc(i.accepter_cidrs.join(", "))}</span>`], ["State", (i) => esc(i.state)]])) +
+      section("VPN connections", d.vpn_connections.length, table(d.vpn_connections, [["VPN", (i) => mono(i.id)], ["Attached to", (i) => mono(i.tgw || i.vpn_gateway)], ["Customer gateway", (i) => mono(i.customer_gateway)],
+        ["State", (i) => esc(i.state)], ["Tunnels", (i) => i.tunnels.map((x) => `${esc(x.outside_ip)} ${esc(x.status)}`).join("<br>") || "—"]])) +
+      section("Direct Connect", d.dx_gateways.length + d.dx_virtual_interfaces.length, table(d.dx_gateways, [["Gateway", (i) => `${mono(i.id)} ${esc(i.name)}`], ["State", (i) => esc(i.state)],
+        ["Associations", (i) => i.associations.map((a) => `${mono(a.gateway)} ${esc(a.state)}`).join("<br>") || "—"]]) + table(d.dx_virtual_interfaces, [["Virtual interface", (i) => `${mono(i.id)} ${esc(i.name)}`],
+        ["Type", (i) => esc(i.type)], ["State", (i) => esc(i.state)], ["BGP", (i) => esc(i.bgp.join(", ")) || "—"]])) +
       section("NAT gateways", d.nat_gateways.length, table(d.nat_gateways, [["NAT", (n) => mono(n.id)], ["Subnet", (n) => mono(n.subnet)], ["Public IPs", (n) => esc(n.public_ips.join(", "))]])) +
       section("Internet gateways", d.internet_gateways.length, table(d.internet_gateways, [["IGW", (i) => mono(i.id)], ["VPCs", (i) => esc(i.vpcs.join(", "))]])) +
       section("Firewalls", d.firewalls.length, table(d.firewalls, [["Firewall", (f) => esc(f.name)], ["Endpoints", (f) => esc(f.endpoints.join(", "))],
@@ -382,7 +389,7 @@ AA.views = (() => {
         `<h3 style="margin-top:12px">Central services</h3>` + table(services.filter((s) => s.kind.startsWith("central")), [["Service", (s) => esc(s.name)], ["Description", (s) => esc(s.description)]])],
       ["DNS", table(checksOf(["DNS"]), [["Requirement", ({r}) => esc(r.requirement.id)], ["Name", ({c}) => esc(c.name.replace("Resolve ", ""))], ["Result", ({c}) => status(c.status)],
         ["Resolution", ({c}) => esc(c.actual).replace(/\n/g, "<br>")]])],
-      ["On-Premises Connectivity", table(externals.filter((e) => e.type === "on-prem"), [["System", (e) => esc(e.name)], ["Networks", (e) => esc(e.networks.join(", "))],
+      ["On-Premises and Other-Cloud Connectivity", table(externals.filter((e) => e.type !== "third-party"), [["System", (e) => esc(e.name)], ["Networks", (e) => esc(e.networks.join(", "))],
         ["Connectivity", (e) => esc(e.connectivity?.type || "—")], ["Return routes", (e) => e.return_routes ? esc(e.return_routes.join(", ")) : `<span class="muted">not supplied</span>`],
         ["Requirements", (e) => results.filter((r) => r.destination.id === e.id).map((r) => `${esc(r.requirement.id)} ${status(r.status)}`).join(" ")]])],
       ["Third-Party Connectivity", table(externals.filter((e) => e.type === "third-party"), [["System", (e) => esc(e.name)], ["Endpoints", (e) => esc(e.endpoints.map((x) => `${x.hostname || ""} ${x.ip || "(no IP)"}`).join(", "))],

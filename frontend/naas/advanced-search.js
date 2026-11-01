@@ -56,7 +56,7 @@ function scheduleAdvancedSearch() {
       clearTimeout(timeout);
       if (version === advancedSearch.version) advancedSearch.pending = false;
     }
-  }, 200);
+  }, 0);
 }
 const searchPanel = document.querySelector('#advanced-search-panel');
 const searchToggle = document.querySelector('#advanced-search-toggle');

@@ -321,6 +321,79 @@ class ResourceTimes(Model):
     changes: int = 0  # CloudTrail write events seen in the window
 
 
+class VpcPeering(Model):
+    id: str
+    requester_vpc: str = ""
+    requester_account: str = ""
+    requester_cidrs: list[str] = []
+    accepter_vpc: str = ""
+    accepter_account: str = ""
+    accepter_cidrs: list[str] = []
+    state: str = ""
+    tags: dict[str, str] = {}
+
+
+class VpnTunnel(Model):
+    outside_ip: str = ""
+    status: str = ""
+    message: str = ""
+
+
+class VpnConnection(Model):
+    id: str
+    account: str = ""
+    state: str = ""
+    customer_gateway: str = ""
+    vpn_gateway: str = ""
+    tgw: str = ""
+    static_only: bool = False
+    static_routes: list[str] = []
+    tunnels: list[VpnTunnel] = []
+    tags: dict[str, str] = {}
+
+
+class VpnGateway(Model):
+    id: str
+    account: str = ""
+    state: str = ""
+    vpcs: list[str] = []  # attached
+    tags: dict[str, str] = {}
+
+
+class CustomerGateway(Model):
+    id: str
+    account: str = ""
+    state: str = ""
+    ip: str = ""
+    tags: dict[str, str] = {}
+
+
+class DxAssociation(Model):
+    gateway: str = ""  # the transit or virtual gateway
+    state: str = ""
+    allowed_prefixes: list[str] = []
+
+
+class DxGateway(Model):
+    id: str
+    name: str = ""
+    account: str = ""
+    state: str = ""
+    associations: list[DxAssociation] = []
+
+
+class DxVirtualInterface(Model):
+    id: str
+    name: str = ""
+    account: str = ""
+    type: str = ""
+    state: str = ""
+    connection: str = ""
+    dx_gateway: str = ""
+    vpn_gateway: str = ""
+    bgp: list[str] = []  # each peer's status
+
+
 class DnsLookup(Model):
     """What nslookup answered for a name, from the computer that ran the download."""
 
@@ -354,6 +427,12 @@ class Inventory(Model):
     internet_gateways: dict[str, InternetGateway] = {}
     vpc_endpoints: dict[str, VpcEndpoint] = {}
     endpoint_services: dict[str, EndpointService] = {}
+    vpc_peerings: dict[str, VpcPeering] = {}
+    vpn_connections: dict[str, VpnConnection] = {}
+    vpn_gateways: dict[str, VpnGateway] = {}
+    customer_gateways: dict[str, CustomerGateway] = {}
+    dx_gateways: dict[str, DxGateway] = {}
+    dx_virtual_interfaces: dict[str, DxVirtualInterface] = {}
     eks_clusters: dict[str, EksCluster] = {}
     hosted_zones: dict[str, HostedZone] = {}
     resolver_rules: dict[str, ResolverRule] = {}
@@ -404,7 +483,7 @@ class Endpoint(Model):
 class ExternalSystem(Model):
     id: str
     name: str = ""
-    type: Literal["on-prem", "third-party"] = "third-party"
+    type: Literal["on-prem", "other-cloud", "third-party"] = "third-party"  # other-cloud: Azure, GCP ... reached privately
     description: str = ""
     networks: list[str] = []
     dns_domains: list[str] = []
@@ -432,7 +511,7 @@ class ProjectAccount(Model):
 class FlowHop(Model):
     """One resource the architect says traffic passes through, in order."""
 
-    kind: str  # workload, external, subnet, vpc, nat-gateway, internet-gateway, tgw, firewall, vpc-endpoint, endpoint-service, load-balancer, eks-cluster
+    kind: str  # workload, external, subnet, vpc, nat-gateway, internet-gateway, tgw, firewall, vpc-peering, vpn-connection, dx-gateway, vpc-endpoint, endpoint-service, load-balancer, eks-cluster
     id: str
     account: str = ""
     label: str = ""

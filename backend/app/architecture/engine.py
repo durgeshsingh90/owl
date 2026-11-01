@@ -21,7 +21,9 @@ ROLE_TITLES = {
     "dns": "DNS",
 }
 SECURITY = ("Security Group", "NACL", "Firewall")
-NETWORK = ("Endpoint", "Routing", "TGW", "NAT", "Internet", "Load Balancer", "Direct Connect")
+NETWORK = ("Endpoint", "Routing", "TGW", "NAT", "Internet", "Load Balancer", "Direct Connect", "VPN", "Peering")
+# Reached privately, over Direct Connect or VPN.
+PRIVATE_EXTERNAL = ("on-prem", "other-cloud")
 
 
 def net(value):
@@ -266,14 +268,14 @@ class Analyzer:
 
     def _resolve_external(self, system: ExternalSystem, requirement):
         endpoint = Endpoint(id=system.id, name=system.name or system.id, kind=system.type, role=system.type, system=system)
-        if system.type == "on-prem":
+        if system.type in PRIVATE_EXTERNAL:
             endpoint.networks = list(system.networks)
             endpoint.hostname = requirement.hostname
             if not endpoint.networks:
                 endpoint.problems.append(Check(
                     id=f"networks-{system.id}", category="External", name=f"{endpoint.name} networks supplied",
-                    status="UNKNOWN", expected="On-premises CIDRs for the destination.",
-                    actual="No networks are defined for this on-premises system.",
+                    status="UNKNOWN", expected="Private CIDRs for the destination.",
+                    actual="No networks are defined for this system.",
                     evidence=[Evidence(kind="external", id=system.id)],
                 ))
             return endpoint
@@ -385,7 +387,7 @@ class Analyzer:
                 t.stopped = "FAIL"
                 return t
             if kind == "transit-gateway":
-                result = self._tgw_hop(t, add, route.target, vpc_id, destination, dst, return_leg)
+                result = self._tgw_hop(t, add, route.target, vpc_id, destination, dst, flow)
                 if result is None:
                     return t
                 if result == "exit":
@@ -464,20 +466,12 @@ class Analyzer:
                 t.reached, t.exit, t.final_vpc = True, "internet", vpc_id
                 return t
             if kind == "virtual-gateway":
-                t.hops.append(Hop(id=route.target, label="VPN / Direct Connect (VGW)", kind="direct-connect"))
-                return self._exit_on_prem(t, add, destination, dst, route.target)
-            if kind == "peering":
-                peer = next((v for v in sorted(inv.vpcs.values(), key=lambda v: v.id) if v.id != vpc_id and any(contains(c, destination) for c in v.cidrs)), None)
-                if not peer:
-                    add("Routing", f"Peering {route.target}", "UNKNOWN", "The peer VPC holding the destination.",
-                        "No VPC in the snapshot contains the destination.")
-                    t.stopped = "UNKNOWN"
-                    return t
-                t.hops.append(Hop(id=route.target, label="VPC Peering", kind="peering"))
-                add("Routing", f"Peering {route.target} to {peer.id}", "PASS", "A peer VPC containing the destination.",
-                    f"{peer.id} ({', '.join(peer.cidrs)}).", [Evidence(kind="vpcs", id=peer.id)])
-                t.reached, t.exit, t.final_vpc = True, "local", peer.id
+                self._vgw_checks(add, route.target, vpc_id, destination)
+                t.hops.append(Hop(id=route.target, label="Virtual Private Gateway", kind="vpn"))
+                self._exit_on_prem(t, add, destination, dst, route.target)
                 return t
+            if kind == "peering":
+                return self._peering_hop(t, add, route.target, vpc_id, destination)
             add("Routing", f"Route target {route.target}", "UNKNOWN", "A target the analyser understands.",
                 f"Target type {kind} is not analysed in this version.", [Evidence(kind="route_tables", id=table.id)])
             t.stopped = "UNKNOWN"
@@ -486,7 +480,121 @@ class Analyzer:
         t.stopped = "FAIL"
         return t
 
-    def _tgw_hop(self, t, add, tgw_id, vpc_id, destination, dst, return_leg):
+    def _peering_hop(self, t, add, peering_id, vpc_id, destination):
+        """Peering joins exactly two VPCs: it's active, and the destination is in the other one."""
+        peering = self.inv.vpc_peerings.get(peering_id)
+        evidence = [Evidence(kind="vpc_peerings", id=peering_id)] if peering else []
+        t.hops.append(Hop(id=peering_id, label="VPC Peering", kind="peering"))
+        if not peering:
+            owner = self.inv.vpcs[vpc_id].account if vpc_id in self.inv.vpcs else ""
+            add("Peering", f"Peering {peering_id}", "UNKNOWN", "The peering connection's details.",
+                "No read access to VPC peering." if self.denied(owner, "VpcPeeringConnections") else "Not in the snapshot.")
+            t.stopped = "UNKNOWN"
+            return t
+        if peering.state != "active":
+            add("Peering", f"Peering {peering_id}", "FAIL", "State active.", f"State is {peering.state or 'unknown'}.", evidence)
+            t.stopped = "FAIL"
+            return t
+        if vpc_id == peering.requester_vpc:
+            peer, account, cidrs = peering.accepter_vpc, peering.accepter_account, peering.accepter_cidrs
+        elif vpc_id == peering.accepter_vpc:
+            peer, account, cidrs = peering.requester_vpc, peering.requester_account, peering.requester_cidrs
+        else:
+            add("Peering", f"Peering {peering_id}", "FAIL", f"A peering that includes {vpc_id}.",
+                f"It joins {peering.requester_vpc} and {peering.accepter_vpc}.", evidence)
+            t.stopped = "FAIL"
+            return t
+        if peer in self.inv.vpcs:
+            cidrs = self.inv.vpcs[peer].cidrs or cidrs
+        if not any(contains(c, destination) for c in cidrs):
+            add("Peering", f"Destination is in {peer}", "FAIL", f"{destination} inside {peer}.",
+                f"{peer} has {', '.join(cidrs) or 'no known CIDRs'}. Peering isn't transitive: traffic can't continue through {peer}.", evidence)
+            t.stopped = "FAIL"
+            return t
+        add("Peering", f"Peering {peering_id} to {peer}", "PASS", f"An active peering to the VPC holding {destination}.",
+            f"Active, {vpc_id} ↔ {peer} (account {account or 'unknown'}, {', '.join(cidrs)}).", evidence)
+        t.reached, t.exit, t.final_vpc = True, "local", peer
+        return t
+
+    def _vpn_checks(self, add, vpn_id, destination):
+        """The tunnels are what carries traffic: all down fails, one down leaves no redundancy."""
+        vpn = self.inv.vpn_connections.get(vpn_id)
+        if not vpn:
+            add("VPN", f"VPN {vpn_id}", "UNKNOWN", "The VPN connection's state and tunnels.",
+                "No read access to VPN connections, or its account isn't in the snapshot.", blocking=False)
+            return
+        evidence = [Evidence(kind="vpn_connections", id=vpn.id)]
+        if vpn.state != "available":
+            add("VPN", f"VPN {vpn.id}", "FAIL", "State available.", f"State is {vpn.state or 'unknown'}.", evidence)
+            return
+        up = [x for x in vpn.tunnels if x.status == "UP"]
+        detail = ", ".join(f"{x.outside_ip or 'tunnel'} {x.status}" for x in vpn.tunnels)
+        if not vpn.tunnels:
+            add("VPN", f"VPN {vpn.id} tunnels", "UNKNOWN", "At least one tunnel UP.", "Tunnel status was not supplied.", evidence, blocking=False)
+        elif not up:
+            add("VPN", f"VPN {vpn.id} tunnels", "FAIL", "At least one tunnel UP.", f"All tunnels are down: {detail}.", evidence)
+        elif len(up) < len(vpn.tunnels):
+            add("VPN", f"VPN {vpn.id} tunnels", "WARNING", "All tunnels UP.", f"Only {len(up)} of {len(vpn.tunnels)} up, so no redundancy: {detail}.", evidence)
+        else:
+            add("VPN", f"VPN {vpn.id} tunnels", "PASS", "All tunnels UP.", detail, evidence)
+        if vpn.static_only and vpn.vpn_gateway and not any(contains(r, destination) for r in vpn.static_routes):
+            add("VPN", f"VPN {vpn.id} static route", "FAIL", f"A static route covering {destination}.",
+                f"Static routes: {', '.join(vpn.static_routes) or 'none'}.", evidence)
+        gateway = self.inv.customer_gateways.get(vpn.customer_gateway)
+        if gateway and gateway.state != "available":
+            add("VPN", f"Customer gateway {gateway.id}", "FAIL", "State available.", f"State is {gateway.state}.", [Evidence(kind="customer_gateways", id=gateway.id)])
+
+    def _dx_interfaces(self, add, interfaces, label):
+        evidence = [Evidence(kind="dx_virtual_interfaces", id=v.id, label=v.name) for v in interfaces]
+        if not interfaces:
+            add("Direct Connect", f"Virtual interfaces for {label}", "UNKNOWN", "An available virtual interface with BGP up.",
+                "No virtual interfaces in the snapshot; they may be owned by an account that wasn't downloaded.", blocking=False)
+            return
+        working = [v for v in interfaces if v.state == "available" and "up" in v.bgp]
+        detail = ", ".join(f"{v.id} {v.state}, BGP {'/'.join(v.bgp) or 'unknown'}" for v in interfaces)
+        status = "FAIL" if not working else "WARNING" if len(working) < len(interfaces) else "PASS"
+        add("Direct Connect", f"Virtual interfaces for {label}", status, "Every virtual interface available with BGP up.", detail, evidence)
+
+    def _dx_checks(self, add, gateway_id, tgw_id, source):
+        gateway = self.inv.dx_gateways.get(gateway_id)
+        if not gateway:
+            add("Direct Connect", f"Direct Connect gateway {gateway_id}", "UNKNOWN", "The gateway's state and associations.",
+                "No read access to Direct Connect, or its account isn't in the snapshot.", blocking=False)
+            return
+        evidence = [Evidence(kind="dx_gateways", id=gateway.id, label=gateway.name)]
+        if gateway.state != "available":
+            add("Direct Connect", f"Direct Connect gateway {gateway.id}", "FAIL", "State available.", f"State is {gateway.state or 'unknown'}.", evidence)
+            return
+        association = next((a for a in gateway.associations if a.gateway == tgw_id), None)
+        if not association or association.state != "associated":
+            add("Direct Connect", f"{gateway.id} associated with {tgw_id}", "FAIL", f"{tgw_id} associated with the gateway.",
+                f"Association state is {association.state}." if association else f"Associated with: {', '.join(a.gateway for a in gateway.associations) or 'nothing'}.", evidence)
+            return
+        add("Direct Connect", f"{gateway.id} associated with {tgw_id}", "PASS", f"{tgw_id} associated with the gateway.", "Associated.", evidence)
+        # Allowed prefixes are what AWS advertises: without the source, replies can't find their way back.
+        if association.allowed_prefixes and source:
+            covered = any(contains(p, source) for p in association.allowed_prefixes)
+            add("Direct Connect", "Source is advertised to the other side", "PASS" if covered else "FAIL", f"An allowed prefix covering {source}.",
+                f"Allowed prefixes: {', '.join(association.allowed_prefixes)}.", evidence)
+        self._dx_interfaces(add, [v for v in self.inv.dx_virtual_interfaces.values() if v.dx_gateway == gateway.id], gateway.id)
+
+    def _vgw_checks(self, add, vgw_id, vpc_id, destination):
+        """A route to a virtual private gateway: attached here, then its VPN or Direct Connect."""
+        gateway = self.inv.vpn_gateways.get(vgw_id)
+        if not gateway:
+            add("VPN", f"Virtual private gateway {vgw_id}", "UNKNOWN", f"A gateway attached to {vpc_id}.",
+                "No read access to VPN gateways, or it isn't in the snapshot.", blocking=False)
+        elif vpc_id not in gateway.vpcs:
+            add("VPN", f"Virtual private gateway {vgw_id}", "FAIL", f"Attached to {vpc_id}.",
+                f"Attached to {', '.join(gateway.vpcs) or 'nothing'}.", [Evidence(kind="vpn_gateways", id=vgw_id)])
+        vpns = sorted(v.id for v in self.inv.vpn_connections.values() if v.vpn_gateway == vgw_id)
+        interfaces = [v for v in self.inv.dx_virtual_interfaces.values() if v.vpn_gateway == vgw_id]
+        for vpn_id in vpns:
+            self._vpn_checks(add, vpn_id, destination)
+        if interfaces or not vpns:
+            self._dx_interfaces(add, interfaces, vgw_id)
+
+    def _tgw_hop(self, t, add, tgw_id, vpc_id, destination, dst, flow):
         inv = self.inv
         attachment = self.vpc_attachments.get((tgw_id, vpc_id))
         if tgw_id not in inv.transit_gateways and not attachment:
@@ -540,7 +648,12 @@ class Analyzer:
             f"{route.destination} → {target.id} ({target.type} {target.resource}, {route.type}).",
             [Evidence(kind="tgw_route_tables", id=table.id), Evidence(kind="tgw_attachments", id=target.id)])
         if target.type in ("direct-connect-gateway", "vpn"):
-            t.hops.append(Hop(id=target.id, label="Direct Connect" if target.type != "vpn" else "Site-to-site VPN", kind="direct-connect", role="central-network"))
+            vpn = target.type == "vpn"
+            t.hops.append(Hop(id=target.resource or target.id, label="Site-to-Site VPN" if vpn else "Direct Connect", kind="vpn" if vpn else "direct-connect", role="central-network"))
+            if vpn:
+                self._vpn_checks(add, target.resource, destination)
+            else:
+                self._dx_checks(add, target.resource, tgw_id, flow[2] if flow else "")
             return "exit" if self._exit_on_prem(t, add, destination, dst, target.id) else None
         if target.type != "vpc":
             add("TGW", f"Attachment type {target.type}", "UNKNOWN", "A VPC, Direct Connect or VPN attachment.",
@@ -568,10 +681,10 @@ class Analyzer:
         return next_vpc.id, subnet
 
     def _exit_on_prem(self, t, add, destination, dst, via):
-        system = dst.system if dst and dst.kind == "on-prem" else None
+        system = dst.system if dst and dst.kind in PRIVATE_EXTERNAL else None
         if not system:
-            add("Direct Connect", "Destination is on-premises", "FAIL", "An on-premises destination for this route.",
-                f"{destination} is routed to {via} (on-premises), but the destination is not an on-premises system.")
+            add("Direct Connect", "Destination is outside AWS", "FAIL", "An on-premises or other-cloud destination for this route.",
+                f"{destination} is routed out of AWS through {via}, but the destination isn't an on-premises or other-cloud system.")
             t.stopped = "FAIL"
             return False
         allowed = (system.connectivity or {}).get("attachments")
@@ -803,7 +916,7 @@ class Analyzer:
             check.actual = "\n".join(lines)
             return check
         unassociated = [r for r in rules if vpc_id not in r.vpcs] + [z for z in zones if vpc_id not in z.vpcs]
-        internal = dst and dst.kind == "on-prem" or any(suffix(d) for e in self.externals.values() if e.type == "on-prem" for d in e.dns_domains)
+        internal = dst and dst.kind in PRIVATE_EXTERNAL or any(suffix(d) for e in self.externals.values() if e.type in PRIVATE_EXTERNAL for d in e.dns_domains)
         if unassociated or internal:
             for item in unassociated:
                 label = f"Resolver rule {item.id} for {item.domain}" if hasattr(item, "domain") else f"Private hosted zone {item.name} ({item.id})"
@@ -1020,10 +1133,10 @@ class Analyzer:
             hops = back.hops
             checks.append(self._return_summary(back, f"{dst.name} → {src.name}"))
             return checks, hops
-        if dst.kind == "on-prem":
+        if dst.kind in PRIVATE_EXTERNAL:
             system = dst.system
-            dx = next((h.id for h in reversed(trace.hops) if h.kind == "direct-connect"), "")
-            attachment = self.inv.tgw_attachments.get(dx)
+            exit_id = next((h.id for h in reversed(trace.hops) if h.kind in ("direct-connect", "vpn")), "")
+            attachment = next((a for a in self.inv.tgw_attachments.values() if exit_id and exit_id in (a.resource, a.id)), None)
             if attachment:
                 table = self.inv.tgw_route_tables.get(attachment.route_table)
                 route, _ = self.best_route(table.routes, source_net) if table else (None, [])
@@ -1031,16 +1144,16 @@ class Analyzer:
                     target = self.inv.tgw_attachments.get(route.attachment)
                     ok = target and target.resource == src.vpc
                     checks.append(Check(
-                        id="ret-tgw", category="Return Path", name="Return: TGW route from Direct Connect",
+                        id="ret-tgw", category="Return Path", name="Return: TGW route back from outside AWS",
                         status="PASS" if ok else "WARNING", expected=f"{table.name or table.id} routes {source_net} back to {src.vpc}.",
                         actual=f"{route.destination} → {route.attachment}" + ("" if ok else " (not the source VPC's attachment: asymmetric?)"),
                         evidence=[Evidence(kind="tgw_route_tables", id=table.id)],
                     ))
                 else:
                     checks.append(Check(
-                        id="ret-tgw", category="Return Path", name="Return: TGW route from Direct Connect",
-                        status="FAIL" if table else "UNKNOWN", expected=f"A route for {source_net} in the Direct Connect attachment's TGW route table.",
-                        actual=(f"No active route for {source_net} in {table.name or table.id}." if table else "The Direct Connect attachment's route table is not in the snapshot."),
+                        id="ret-tgw", category="Return Path", name="Return: TGW route back from outside AWS",
+                        status="FAIL" if table else "UNKNOWN", expected=f"A route for {source_net} in the attachment's TGW route table.",
+                        actual=(f"No active route for {source_net} in {table.name or table.id}." if table else "The attachment's route table is not in the snapshot."),
                         evidence=[Evidence(kind="tgw_attachments", id=attachment.id)],
                     ))
             if system.return_routes is None:

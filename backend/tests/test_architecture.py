@@ -236,6 +236,98 @@ class Scenarios(Base):
         self.assertEqual(critical[0].title, "PROD Payment API cannot reach Payment Provider over TCP/443.")
 
 
+class Hybrid(Base):
+    """Peering, VPN to another cloud and Direct Connect in the analysis."""
+
+    def checks(self, result, category):
+        return [c for c in result.checks if c.category == category]
+
+    def test_peering_passes_both_ways(self):
+        result = self.result("PROD", "conn-010")
+        self.assertEqual(result.status, "PASS", result.summary)
+        self.assertEqual([h.kind for h in result.path], ["workload", "peering", "workload"])
+        self.assertIn("Active", self.checks(result, "Peering")[0].actual)
+        self.assertEqual(next(c for c in result.checks if c.id == "ret-route").status, "PASS")
+
+    def test_peering_not_active_fails(self):
+        self.inv.vpc_peerings["pcx-0analytics"].state = "pending-acceptance"
+        failed = self.failing(self.result("PROD", "conn-010"))
+        self.assertEqual(failed[0].category, "Peering")
+        self.assertIn("pending-acceptance", failed[0].actual)
+
+    def test_peering_is_not_transitive(self):
+        self.inv.vpcs["vpc-0g70"].cidrs = ["10.71.0.0/16"]
+        failed = self.failing(self.result("PROD", "conn-010"))
+        self.assertIn("isn't transitive", failed[0].actual)
+
+    def test_denied_peering_is_unknown(self):
+        del self.inv.vpc_peerings["pcx-0analytics"]
+        self.inv.access_denied = {"222222222222": ["VpcPeeringConnections"]}
+        result = self.result("PROD", "conn-010")
+        self.assertEqual(result.status, "UNKNOWN")
+        self.assertIn("No read access", self.checks(result, "Peering")[0].actual)
+
+    def test_vpn_to_azure(self):
+        result = self.result("PROD", "conn-009")
+        self.assertEqual(result.status, "PASS", result.summary)
+        self.assertEqual([h.kind for h in result.path], ["workload", "tgw", "vpn", "external"])
+        self.assertEqual(result.destination["kind"], "other-cloud")
+        self.assertEqual(next(c for c in result.checks if c.id == "ret-external").status, "PASS")
+        self.assertEqual(next(c for c in result.checks if c.id == "ret-tgw").status, "PASS")
+
+    def test_vpn_tunnels(self):
+        tunnels = self.inv.vpn_connections["vpn-0azure"].tunnels
+        tunnels[0].status = "DOWN"
+        self.assertEqual(self.result("PROD", "conn-009").status, "WARNING")
+        tunnels[1].status = "DOWN"
+        result = self.result("PROD", "conn-009")
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("All tunnels are down", self.failing(result)[0].actual)
+
+    def test_vpn_details_missing_is_advisory(self):
+        del self.inv.vpn_connections["vpn-0azure"]
+        result = self.result("PROD", "conn-009")
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(self.checks(result, "VPN")[0].status, "UNKNOWN")
+
+    def test_direct_connect(self):
+        result = self.result("PROD", "conn-003")
+        self.assertEqual(result.status, "PASS", result.summary)
+        self.assertEqual({c.status for c in self.checks(result, "Direct Connect")}, {"PASS"})
+        association = self.inv.dx_gateways["dxgw-0corp"].associations[0]
+        association.allowed_prefixes = ["10.10.0.0/16"]
+        self.assertIn("Allowed prefixes", self.failing(self.result("PROD", "conn-003"))[0].actual)
+        association.allowed_prefixes = ["10.0.0.0/8"]
+        self.inv.dx_virtual_interfaces["dxvif-0corp1"].bgp = ["down"]
+        self.assertIn("Virtual interfaces for dxgw-0corp", self.failing(self.result("PROD", "conn-003"))[0].name)
+        self.inv.dx_virtual_interfaces["dxvif-0corp1"].bgp = ["up"]
+        association.state = "disassociated"
+        self.assertIn("disassociated", self.failing(self.result("PROD", "conn-003"))[0].actual)
+
+    def test_route_to_virtual_gateway(self):
+        from app.architecture.models import ExternalSystem, Route, VpnConnection, VpnGateway, VpnTunnel
+
+        self.inv.vpn_gateways["vgw-1"] = VpnGateway(id="vgw-1", vpcs=["vpc-0b22"])
+        self.inv.vpn_connections["vpn-1"] = VpnConnection(id="vpn-1", state="available", vpn_gateway="vgw-1", static_only=True, static_routes=["10.99.0.0/16"],
+                                                          tunnels=[VpnTunnel(status="UP")])
+        table = self.inv.route_tables["rtb-0b22app"]
+        table.routes = [r for r in table.routes if r.target != "pcx-0analytics"] + [Route(destination="10.70.0.0/16", target="vgw-1", target_type="virtual-gateway")]
+        system = ExternalSystem(id="analytics-api", name="DC", type="on-prem", networks=["10.70.0.0/16"], return_routes=["10.20.0.0/16"])
+        analyzer = engine.Analyzer(self.inv, self.project, [], [system], [])
+        trace = analyzer.trace("subnet-0b22prd-a", "10.70.0.0/16", analyzer.resolve("analytics-api", "PROD", True, self.project.requirements[0]), ("tcp", 443, "10.20.10.0/24", "10.70.0.0/16", ""))
+        self.assertTrue(any(c.name == "VPN vpn-1 static route" and c.status == "FAIL" for c in trace.checks))
+
+    def test_declared_flow_through_peering_and_wrong_vpn(self):
+        from app.architecture.models import FlowHop, Requirement
+
+        self.project.requirements.append(Requirement(id="flow-1", environment="PROD", protocol="TCP", port=443, hops=[
+            FlowHop(kind="workload", id="payment-api"), FlowHop(kind="vpc-peering", id="pcx-0analytics"), FlowHop(kind="workload", id="analytics-api")]))
+        self.assertEqual(self.result("PROD", "flow-1").status, "PASS")
+        self.project.requirements.append(Requirement(id="flow-2", environment="PROD", protocol="TCP", port=443, hops=[
+            FlowHop(kind="workload", id="payment-api"), FlowHop(kind="vpn-connection", id="vpn-0azure"), FlowHop(kind="workload", id="analytics-api")]))
+        self.assertIn("not on the routed path", self.failing(self.result("PROD", "flow-2"))[0].actual)
+
+
 class Flows(Base):
     """Declared hop-by-hop flows: PrivateLink, NLB to EKS, the chosen NAT gateway."""
 
@@ -339,9 +431,14 @@ class Times(Base):
             self.assertEqual(client.get("/api/architecture/download").json()["selected"], 1)
             self.assertEqual(client.put("/api/architecture/download/selection", json={"account_ids": ["12"]}).status_code, 400)
             with patch("app.aws.connection.run_sts", return_value=({"Account": "111111111111", "Arn": "arn:x"}, None)), \
-                    patch("app.architecture.download.check_access", return_value={"allowed": ["Vpcs"], "denied": ["Firewalls"], "errors": {}}):
+                    patch("app.architecture.download.check_access", return_value={"allowed": ["Vpcs"], "denied": ["Firewalls"], "errors": {}}), \
+                    patch("app.architecture.download.account_details", return_value={"created": "2020-01-02T00:00:00+00:00", "account_name": "Payments", "created_error": ""}):
                 tested = client.post("/api/architecture/download/test/111111111111").json()
-                self.assertEqual((tested["ok"], tested["denied"]), (True, ["Firewalls"]))
+                self.assertEqual((tested["ok"], tested["denied"], tested["created"]), (True, ["Firewalls"], "2020-01-02T00:00:00+00:00"))
+                listing = client.get("/api/architecture/download").json()
+                self.assertEqual(listing["top"][0], "111111111111")  # tested, so it counts as used
+                saved = next(a for g in listing["groups"] for a in g["accounts"] if a["account_id"] == "111111111111")
+                self.assertEqual((saved["info"]["connected"], saved["info"]["created"]), (True, "2020-01-02T00:00:00+00:00"))
                 wrong = client.post("/api/architecture/download/test/222222222222").json()
                 self.assertFalse(wrong["ok"])
                 self.assertIn("signs in to 111111111111", wrong["error"])
@@ -381,7 +478,7 @@ class Times(Base):
         self.assertIn("--max-items", next(c for c in commands if c[2] == "list-firewalls"))
         self.assertNotIn("--max-items", next(c for c in commands if c[2] == "describe-vpn-connections"))
         self.assertTrue((download.media_folder() / "111111111111-a" / "prod" / "eu-west-2" / "ec2.json").exists())
-        self.assertEqual({c[1] for c in commands}, {"ec2", "elbv2", "eks", "network-firewall", "route53resolver", "route53", "directconnect", "elb", "apigateway", "apigatewayv2", "autoscaling"})
+        self.assertEqual({c[1] for c in commands}, {"ec2", "elbv2", "eks", "network-firewall", "route53resolver", "route53", "account", "directconnect", "elb", "apigateway", "apigatewayv2", "autoscaling"})
         inventory, errors, _ = normalize(download.snapshot_files(["111111111111"]))
         self.assertEqual(errors, [])
         self.assertIn("vpc-1", inventory.vpcs)
@@ -389,6 +486,18 @@ class Times(Base):
         self.assertEqual([(r["type"], r["id"]) for r in state["resources"]], [("aws_vpc", "vpc-1")])
         self.assertEqual(state["resources"][0]["attributes"]["CidrBlock"], "10.0.0.0/16")
         self.assertEqual(inventory.access_denied, {"111111111111": ["Firewalls"]})
+
+    def test_account_details(self):
+        from types import SimpleNamespace
+        from app.architecture import download
+
+        with patch("app.aws.connection._aws", return_value="aws"), patch("app.architecture.download.subprocess.run", return_value=SimpleNamespace(
+                returncode=0, stderr="", stdout=json.dumps({"AccountCreatedDate": "2025-09-09T01:41:20+00:00", "AccountName": "Pay"}))) as run:
+            self.assertEqual(download.account_details("mc-a-prod"), {"created": "2025-09-09T01:41:20+00:00", "account_name": "Pay", "created_error": ""})
+            self.assertEqual(run.call_args[0][0][1:3], ["account", "get-account-information"])
+        with patch("app.aws.connection._aws", return_value="aws"), patch("app.architecture.download.subprocess.run", return_value=SimpleNamespace(
+                returncode=254, stdout="", stderr="An error occurred (AccessDeniedException)")):
+            self.assertIn("AccessDenied", download.account_details("mc-a-prod")["created_error"])
 
     def test_parse_nslookup_windows_and_unix(self):
         from app.architecture import download
@@ -482,7 +591,7 @@ class Api(Base):
         response = self.client.get("/api/architecture/analysis", params={"project": "payment-platform", "environment": "PROD"})
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["health"]["connectivity"]["total"], 7)
+        self.assertEqual(body["health"]["connectivity"]["total"], 9)
         self.assertEqual([a["id"] for a in body["accounts"]], ["111111111111", "222222222222"])
         evidence = self.client.get(f"/api/architecture/snapshots/{snapshot}/object", params={"kind": "route_tables", "id": "rtb-0b22app"})
         self.assertEqual(evidence.json()["object"]["vpc"], "vpc-0b22")

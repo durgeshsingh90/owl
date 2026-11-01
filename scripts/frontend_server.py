@@ -7,6 +7,14 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 
 CHUNK = 1024 * 1024
+# Paths the backend answers; everything else is a static file. NAAS and Network Automation
+# have the same API under their own prefix.
+FORWARDED = ("/api/", "/bitbucket/settings/", "/bitbucket/workspace/", "/bookmarks/settings/", "/bookmarks/connection/")
+LIBRARIES = ("/naas", "/network-automation")
+
+
+def forwarded(path):
+    return path.startswith(FORWARDED) or any(path.startswith(library + prefix) for library in LIBRARIES for prefix in FORWARDED[:3])
 # Response headers the browser needs from the backend.
 PASS_THROUGH = (
     "Content-Type", "Content-Length", "Content-Disposition", "X-Request-ID",
@@ -23,13 +31,7 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def dispatch(self):
-        if not (
-            self.path.startswith("/api/")
-            or self.path.startswith("/bitbucket/settings/")
-            or self.path.startswith("/bitbucket/workspace/")
-            or self.path.startswith("/bookmarks/settings/")
-            or self.path.startswith("/bookmarks/connection/")
-        ):
+        if not forwarded(self.path):
             if self.command in ("GET", "HEAD"):
                 return getattr(super(), "do_" + self.command)()
             self.send_error(405)

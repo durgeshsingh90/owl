@@ -243,23 +243,24 @@ ol.hops .hop-resource{min-width:280px;max-width:420px}
 .dl-counts{display:flex;gap:18px;font-size:13px;color:var(--muted)}
 .dl-counts b{font-size:18px;color:var(--text);font-variant-numeric:tabular-nums;margin-right:3px}
 .dl-actions{display:flex;gap:8px;margin-left:auto}
-.dl-filters #dl-search{width:300px}
-.dl-list{padding:0;margin-bottom:10px}
-.dl-row{display:grid;grid-template-columns:minmax(160px,1fr) 2fr;gap:4px 16px;align-items:center;padding:8px 16px;border-top:1px solid var(--line-soft)}
-.dl-row:first-child{border-top:0}
-.dl-name{font-weight:600;overflow-wrap:anywhere}
-.dl-stages{display:flex;flex-wrap:wrap;gap:8px}
-.dl-stage{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
-.dl-stage.on{border-color:var(--accent)}
-.dl-stage button{height:28px;border:0;border-radius:0;font-size:12px;padding:0 10px}
-.dl-stage.on .dl-pick,.dl-stage.on .dl-pick:hover:not(:disabled){background:var(--accent);color:#fff;font-weight:600}
-.dl-test{border-left:1px solid var(--border)!important;color:var(--muted);min-width:42px}
-.dl-test.ok{color:var(--pass);font-weight:700}
-.dl-test.bad{color:var(--fail);font-weight:700}
-.dl-test.partial{color:var(--warn);font-weight:700}
-.dl-denied{grid-column:1/-1;font-size:12px;color:var(--warn);overflow-wrap:anywhere}
-.dl-problem{grid-column:1/-1;font-size:12px;color:var(--fail);overflow-wrap:anywhere}
-@media (max-width:720px){.dl-row{grid-template-columns:1fr}.dl-actions{margin-left:0}}
+.dl-filters #dl-search{width:360px}
+table.dl-table td{vertical-align:middle;padding:7px 14px}
+table.dl-table td.dl-name{font-weight:600;min-width:190px;overflow-wrap:break-word;vertical-align:top;background:var(--side);border-right:1px solid var(--line)}
+.dl-aws-name{font-weight:400}
+.dl-section{margin:18px 0 8px}
+table.dl-table tr.dl-first td{border-top:1px solid var(--border)}
+.dl-pick{height:28px;min-width:64px;padding:0 12px;font-size:12px}
+.dl-pick[aria-pressed="true"],.dl-pick[aria-pressed="true"]:hover:not(:disabled){background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.dl-status{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 8px;border:0;background:transparent;font-size:12px}
+.dl-status img{width:22px;height:22px;object-fit:contain}
+.dl-status.connected{color:var(--pass)}
+.dl-status.failed{color:var(--fail)}
+.dl-test{height:28px;padding:0 12px;font-size:12px}
+.dl-partial{color:var(--warn);font-size:11px}
+.dl-note td{padding:0 14px 8px;font-size:12px;overflow-wrap:anywhere;border-top:0}
+.dl-problem{color:var(--fail)}
+.dl-denied{color:var(--warn)}
+.dl-login{padding:10px 14px;border-radius:10px;background:var(--accent-soft);font-size:13px;margin-bottom:12px}
 
 /* Timeline (same pattern as the Bitbucket PDF timeline) */
 table.timeline .timeline-date-row th{position:relative;padding:12px 14px 8px 40px;background:var(--side);font-size:12px;font-weight:500;color:var(--text);border-bottom:1px solid var(--line)}

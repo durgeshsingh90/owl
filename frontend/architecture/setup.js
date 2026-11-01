@@ -6,7 +6,8 @@ AA.views.setup = (() => {
   const ACCOUNT_TYPES = ["application", "shared-services", "central-network", "central-ingress", "central-egress", "secure-access", "dns", "other"];
   const HOP_KINDS = [
     ["workload", "Application / service"], ["subnet", "Subnet"], ["vpc", "VPC"], ["nat-gateway", "NAT gateway"],
-    ["internet-gateway", "Internet gateway"], ["tgw", "Transit gateway"], ["firewall", "Network Firewall"],
+    ["internet-gateway", "Internet gateway"], ["tgw", "Transit gateway"], ["firewall", "Network Firewall"], ["vpc-peering", "VPC peering"],
+    ["vpn-connection", "VPN connection"], ["dx-gateway", "Direct Connect gateway"],
     ["vpc-endpoint", "VPC endpoint (PrivateLink)"], ["endpoint-service", "Endpoint service"], ["load-balancer", "Load balancer"],
     ["eks-cluster", "EKS cluster"], ["external", "External system"],
   ];
@@ -166,7 +167,7 @@ AA.views.setup = (() => {
         const box = main.querySelector("#account-search");
         box.focus();
         box.setSelectionRange(box.value.length, box.value.length);
-      }, 200);
+      }, 1000);
     });
     on("[data-env-account]", "change", (n) => (draft.environments[n.dataset.envAccount].account_id = n.value));
     on("[data-env-name]", "change", (n) => {

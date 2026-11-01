@@ -141,7 +141,7 @@
         document.getElementById('bookmark-summary').textContent=`${matches.length} bookmarks · ${downloaded.length} downloaded pages${query.trim() ? " matching search" : ""}`;
         document.getElementById('bookmark-total').textContent=`Showing ${matches.length} saved bookmarks and ${downloaded.length} downloaded pages${showSearchBranches && query.trim() ? ' · plus branch context' : ''}`;
       } catch {if(sequence===searchSequence){updateBookmarkSearchCount(savedMatches.length);document.getElementById('bookmark-search-count').textContent += ' · saved bookmarks only';showBookmarkFailure('Could not search downloaded pages. Saved bookmarks are still shown.');}}
-    },250);
+    },0);
   };
   document.addEventListener('DOMContentLoaded', () => {
     const toggle = document.getElementById('show-downloaded-pages');

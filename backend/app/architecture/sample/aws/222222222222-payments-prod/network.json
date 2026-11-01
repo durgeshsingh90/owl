@@ -1,0 +1,27 @@
+{
+  "Region": "eu-west-2",
+  "VpcPeeringConnections": [
+    {
+      "VpcPeeringConnectionId": "pcx-0analytics",
+      "Status": {
+        "Code": "active"
+      },
+      "RequesterVpcInfo": {
+        "VpcId": "vpc-0b22",
+        "OwnerId": "222222222222",
+        "CidrBlock": "10.20.0.0/16"
+      },
+      "AccepterVpcInfo": {
+        "VpcId": "vpc-0g70",
+        "OwnerId": "333333333333",
+        "CidrBlock": "10.70.0.0/16"
+      },
+      "Tags": [
+        {
+          "Key": "Name",
+          "Value": "payments-analytics"
+        }
+      ]
+    }
+  ]
+}

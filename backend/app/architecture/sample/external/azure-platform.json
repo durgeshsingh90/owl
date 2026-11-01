@@ -1,0 +1,19 @@
+{
+  "id": "azure-platform",
+  "name": "Azure Platform",
+  "type": "other-cloud",
+  "description": "Azure workloads reached over Site-to-Site VPN.",
+  "networks": [
+    "10.200.0.0/16"
+  ],
+  "connectivity": {
+    "type": "vpn",
+    "provider": "azure",
+    "attachments": [
+      "tgw-attach-0azure"
+    ]
+  },
+  "return_routes": [
+    "10.20.0.0/16"
+  ]
+}

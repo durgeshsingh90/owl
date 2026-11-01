@@ -4,7 +4,7 @@ window.AA = (() => {
   const STATUSES = ["FAIL", "UNKNOWN", "WARNING", "PASS"];
   const MARKS = {PASS: "✓", FAIL: "✗", WARNING: "!", UNKNOWN: "?"};
   // Checks in the order traffic meets them.
-  const CATEGORY_ORDER = ["Endpoint", "DNS", "Routing", "TGW", "Firewall", "NAT", "Internet", "Direct Connect", "Load Balancer",
+  const CATEGORY_ORDER = ["Endpoint", "DNS", "Routing", "TGW", "Firewall", "NAT", "Internet", "Peering", "VPN", "Direct Connect", "PrivateLink", "Load Balancer",
     "Security Group", "NACL", "Return Path", "External", "Standards"];
 
   function esc(value) {

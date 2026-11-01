@@ -89,7 +89,7 @@ AA.views.timeline = (() => {
           const box = main.querySelector('[data-f="text"]');
           box.focus();
           box.setSelectionRange(box.value.length, box.value.length);
-        }, 200);
+        }, 1000);
       } else render(main, app);
     }));
     main.querySelector("#tl-snapshot").addEventListener("change", async (e) => {

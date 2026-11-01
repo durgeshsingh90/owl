@@ -160,6 +160,11 @@
           "DestinationCidrBlock": "0.0.0.0/0",
           "TransitGatewayId": "tgw-0central0000001",
           "State": "active"
+        },
+        {
+          "DestinationCidrBlock": "10.70.0.0/16",
+          "VpcPeeringConnectionId": "pcx-0analytics",
+          "State": "active"
         }
       ]
     },

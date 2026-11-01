@@ -267,6 +267,26 @@
           "id": "payment-provider"
         }
       ]
+    },
+    {
+      "id": "conn-009",
+      "name": "Risk data to Azure over VPN",
+      "environment": "PROD",
+      "source": "payment-api",
+      "destination": "azure-platform",
+      "direction": "outbound",
+      "protocol": "TCP",
+      "port": 443
+    },
+    {
+      "id": "conn-010",
+      "name": "Reports to Analytics over peering",
+      "environment": "PROD",
+      "source": "payment-api",
+      "destination": "analytics-api",
+      "direction": "outbound",
+      "protocol": "TCP",
+      "port": 443
     }
   ],
   "aws_accounts": [

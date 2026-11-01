@@ -159,6 +159,9 @@ def resources(snapshot_id: str, kind: str, account: str = ""):
         "vpc-endpoint": lambda: [(e, f"{e.type} · {e.service}", e.vpc) for e in inv.vpc_endpoints.values()],
         "endpoint-service": lambda: [(e, f"{e.name} · {len(e.connections)} connections", "") for e in inv.endpoint_services.values()],
         "load-balancer": lambda: [(l, f"{l.type} · " + (", ".join(f"{x.protocol}/{x.port}" for x in l.listeners) or "no listeners"), l.vpc) for l in inv.load_balancers.values()],
+        "vpc-peering": lambda: [(i, f"{i.requester_vpc} ↔ {i.accepter_vpc} · {i.state}", "") for i in inv.vpc_peerings.values()],
+        "vpn-connection": lambda: [(i, f"{i.state} · {sum(t.status == 'UP' for t in i.tunnels)}/{len(i.tunnels)} tunnels up", "") for i in inv.vpn_connections.values()],
+        "dx-gateway": lambda: [(i, f"{i.state} · {len(i.associations)} associations", "") for i in inv.dx_gateways.values()],
         "eks-cluster": lambda: [(c, f"EKS {c.version} · {', '.join(cidr.get(s, s) for s in c.subnets)}", c.vpc) for c in inv.eks_clusters.values()],
     }
     if kind not in makers:
@@ -166,7 +169,10 @@ def resources(snapshot_id: str, kind: str, account: str = ""):
     items = []
     for item, detail, vpc in makers[kind]():
         item_account = owner(item) or (inv.transit_gateways[item.id].account if kind == "tgw" else "")
-        if account and item_account and item_account != account:
+        if account and kind == "vpc-peering":  # seen from both of its accounts
+            if account not in (item.requester_account, item.accepter_account):
+                continue
+        elif account and item_account and item_account != account:
             continue
         items.append({"id": item.id, "label": _label(item), "detail": detail, "vpc": vpc, "account": item_account})
     return {"items": sorted(items, key=lambda i: (i["label"].lower(), i["id"]))}
@@ -287,6 +293,10 @@ def account(snapshot_id: str, account_id: str):
         "transit_gateways": [t.model_dump() for t in inv.transit_gateways.values() if t.account == account_id],
         "tgw_route_tables": [t.model_dump() for t in inv.tgw_route_tables.values()
                              if inv.transit_gateways.get(t.tgw) and inv.transit_gateways[t.tgw].account == account_id],
+        "vpc_peerings": [i.model_dump() for i in inv.vpc_peerings.values() if account_id in (i.requester_account, i.accepter_account)],
+        "vpn_connections": [i.model_dump() for i in inv.vpn_connections.values() if i.account == account_id],
+        "dx_gateways": [i.model_dump() for i in inv.dx_gateways.values() if i.account == account_id],
+        "dx_virtual_interfaces": [i.model_dump() for i in inv.dx_virtual_interfaces.values() if i.account == account_id],
         "dns": {
             "hosted_zones": [z.model_dump() for z in inv.hosted_zones.values() if set(z.vpcs) & ids or z.account == account_id],
             "resolver_rules": [r.model_dump() for r in inv.resolver_rules.values() if set(r.vpcs) & ids or r.account == account_id],
@@ -304,7 +314,7 @@ TIMELINE_KINDS = {
     "nat_gateways": "NAT gateway", "internet_gateways": "Internet gateway", "vpc_endpoints": "VPC endpoint",
     "endpoint_services": "Endpoint service", "transit_gateways": "Transit gateway", "tgw_attachments": "TGW attachment",
     "tgw_route_tables": "TGW route table", "load_balancers": "Load balancer", "target_groups": "Target group",
-    "eks_clusters": "EKS cluster", "firewalls": "Network Firewall", "hosted_zones": "Hosted zone",
+    "eks_clusters": "EKS cluster", "vpc_peerings": "VPC peering", "vpn_connections": "VPN connection", "dx_gateways": "Direct Connect gateway", "firewalls": "Network Firewall", "hosted_zones": "Hosted zone",
     "resolver_rules": "Resolver rule", "resolver_endpoints": "Resolver endpoint",
 }
 

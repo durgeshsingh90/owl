@@ -1275,12 +1275,24 @@ function bindEvents() {
   elements.projectForm.addEventListener("submit", addProject);
   elements.repositoryUrls.addEventListener("input", clearFormError);
 
-  elements.searchInput.addEventListener("input", (event) => {
-    state.searchQuery = event.target.value;
+  // Search one second after the last keystroke, so typing doesn't query the database each time.
+  // Enter searches now; clearing the box needs no query.
+  let searchTyping;
+  const runSearch = () => {
+    clearTimeout(searchTyping);
+    state.searchQuery = elements.searchInput.value;
     state.selectedPdf = null;
     state.currentPage = 1;
     scheduleAdvancedSearch();
     elements.tableScroll.scrollTop = 0;
+  };
+  elements.searchInput.addEventListener("input", (event) => {
+    clearTimeout(searchTyping);
+    if (event.target.value.trim()) searchTyping = setTimeout(runSearch, 1000);
+    else runSearch();
+  });
+  elements.searchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") runSearch();
   });
 
   elements.commitDateBars.addEventListener("click", (event) => {
@@ -1358,12 +1370,17 @@ function bindEvents() {
     elements.tableScroll.scrollTop = 0;
   });
 
+  let peopleTyping;
   elements.peopleSearchInput.addEventListener("input", (event) => {
-    state.peopleQuery = event.target.value;
-    if (!state.peopleQuery.trim()) {
-      activePeopleFilter = "all";
-      refreshPeopleFilter();
-    } else renderPeople();
+    clearTimeout(peopleTyping);
+    const value = event.target.value;
+    peopleTyping = setTimeout(() => {
+      state.peopleQuery = value;
+      if (!state.peopleQuery.trim()) {
+        activePeopleFilter = "all";
+        refreshPeopleFilter();
+      } else renderPeople();
+    }, value.trim() ? 1000 : 0);
   });
 
   elements.modal.addEventListener("click", (event) => {

@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 from pydantic import ValidationError
 
 from app.architecture.models import (
-    COLLECTIONS, Account, DnsLookup, DnsRecord, ResourceTimes, EksCluster, EndpointConnection, EndpointService, Target, Firewall, FirewallRule, FirewallRuleGroup,
+    COLLECTIONS, Account, CustomerGateway, DnsLookup, DnsRecord, DxAssociation, DxGateway, DxVirtualInterface,
+    VpcPeering, VpnConnection, VpnGateway, VpnTunnel, ResourceTimes, EksCluster, EndpointConnection, EndpointService, Target, Firewall, FirewallRule, FirewallRuleGroup,
     HostedZone, InternetGateway, Inventory, Listener, LoadBalancer, Nacl, NaclRule,
     NatGateway, ResolverEndpoint, ResolverRule, Route, RouteTable, SecurityGroup,
     SgRule, Subnet, TargetGroup, TgwAttachment, TgwRoute, TgwRouteTable,
@@ -30,7 +31,8 @@ KNOWN_KEYS = {
     "InternetGateways", "VpcEndpoints", "LoadBalancers", "Listeners", "TargetGroups",
     "Firewalls", "FirewallPolicies", "RuleGroups", "HostedZones", "ResolverRules",
     "ResolverRuleAssociations", "ResolverEndpoints", "Clusters", "ServiceConfigurations",
-    "VpcEndpointConnections", "ConfigResources", "ResourceHistory", "AccessDenied", "DnsLookups",
+    "VpcEndpointConnections", "ConfigResources", "ResourceHistory", "AccessDenied", "DnsLookups", "VpcPeeringConnections", "VpnConnections", "VpnGateways",
+    "CustomerGateways", "DxGateways", "DxVirtualInterfaces",
 }
 # Resources whose own API response says when they were created (and changed).
 TIME_FIELDS = [
@@ -198,6 +200,7 @@ class Normalizer:
         for item in d.get("DnsLookups", []) or []:
             lookup = DnsLookup.model_validate({**item, "account": item.get("account") or account})
             inv.dns_lookups[lookup.name] = lookup
+        self._add_hybrid(d, account)
         self._config_items.extend(d.get("ConfigResources", []) or [])
         for resource_id, summary in (d.get("ResourceHistory") or {}).items():
             self._history[resource_id] = summary
@@ -370,6 +373,54 @@ class Normalizer:
                 subnets=[a["SubnetId"] for a in item.get("IpAddresses", []) or [] if a.get("SubnetId")],
                 ips=[a["Ip"] for a in item.get("IpAddresses", []) or [] if a.get("Ip")],
                 security_groups=item.get("SecurityGroupIds", []) or [],
+            )
+
+    def _add_hybrid(self, d, account):
+        """Peering, VPN and Direct Connect, however many accounts each is seen from."""
+        inv = self.inv
+
+        def cidrs(info):
+            found = [c["CidrBlock"] for c in info.get("CidrBlockSet", []) or [] if c.get("CidrBlock")]
+            return found or ([info["CidrBlock"]] if info.get("CidrBlock") else [])
+
+        for item in d.get("VpcPeeringConnections", []) or []:
+            requester, accepter = item.get("RequesterVpcInfo") or {}, item.get("AccepterVpcInfo") or {}
+            inv.vpc_peerings[item["VpcPeeringConnectionId"]] = VpcPeering(
+                id=item["VpcPeeringConnectionId"], state=str((item.get("Status") or {}).get("Code", "")).lower(), tags=tags(item),
+                requester_vpc=requester.get("VpcId", ""), requester_account=str(requester.get("OwnerId", "")), requester_cidrs=cidrs(requester),
+                accepter_vpc=accepter.get("VpcId", ""), accepter_account=str(accepter.get("OwnerId", "")), accepter_cidrs=cidrs(accepter),
+            )
+        for item in d.get("VpnConnections", []) or []:
+            inv.vpn_connections[item["VpnConnectionId"]] = VpnConnection(
+                id=item["VpnConnectionId"], account=account, state=str(item.get("State", "")).lower(), tags=tags(item),
+                customer_gateway=item.get("CustomerGatewayId", ""), vpn_gateway=item.get("VpnGatewayId", "") or "", tgw=item.get("TransitGatewayId", "") or "",
+                static_only=bool((item.get("Options") or {}).get("StaticRoutesOnly")),
+                static_routes=[r["DestinationCidrBlock"] for r in item.get("Routes", []) or [] if r.get("DestinationCidrBlock") and r.get("State", "available") == "available"],
+                tunnels=[VpnTunnel(outside_ip=t.get("OutsideIpAddress", ""), status=str(t.get("Status", "")).upper(), message=t.get("StatusMessage", "") or "")
+                         for t in item.get("VgwTelemetry", []) or []],
+            )
+        for item in d.get("VpnGateways", []) or []:
+            inv.vpn_gateways[item["VpnGatewayId"]] = VpnGateway(
+                id=item["VpnGatewayId"], account=account, state=str(item.get("State", "")).lower(), tags=tags(item),
+                vpcs=[a["VpcId"] for a in item.get("VpcAttachments", []) or [] if a.get("State") == "attached"],
+            )
+        for item in d.get("CustomerGateways", []) or []:
+            inv.customer_gateways[item["CustomerGatewayId"]] = CustomerGateway(
+                id=item["CustomerGatewayId"], account=account, state=str(item.get("State", "")).lower(), ip=item.get("IpAddress", "") or "", tags=tags(item))
+        for item in d.get("DxGateways", []) or []:
+            inv.dx_gateways[item["directConnectGatewayId"]] = DxGateway(
+                id=item["directConnectGatewayId"], name=item.get("directConnectGatewayName", ""), account=str(item.get("ownerAccount") or account),
+                state=str(item.get("directConnectGatewayState", "")).lower(),
+                associations=[DxAssociation(gateway=(a.get("associatedGateway") or {}).get("id") or a.get("virtualGatewayId", ""), state=str(a.get("associationState", "")).lower(),
+                                            allowed_prefixes=[p["cidr"] for p in a.get("allowedPrefixesToDirectConnectGateway", []) or [] if p.get("cidr")])
+                              for a in item.get("Associations", []) or []],
+            )
+        for item in d.get("DxVirtualInterfaces", []) or []:
+            inv.dx_virtual_interfaces[item["virtualInterfaceId"]] = DxVirtualInterface(
+                id=item["virtualInterfaceId"], name=item.get("virtualInterfaceName", ""), account=str(item.get("ownerAccount") or account),
+                type=item.get("virtualInterfaceType", ""), state=str(item.get("virtualInterfaceState", "")).lower(), connection=item.get("connectionId", ""),
+                dx_gateway=item.get("directConnectGatewayId", "") or "", vpn_gateway=item.get("virtualGatewayId", "") or "",
+                bgp=[str(p.get("bgpStatus", "")).lower() for p in item.get("bgpPeers", []) or []],
             )
 
     def _route(self, route):
@@ -606,7 +657,8 @@ def counts(inventory):
         "tgw_route_tables": "TGW route tables", "security_groups": "Security groups", "nacls": "NACLs",
         "load_balancers": "Load balancers", "target_groups": "Target groups", "firewalls": "Firewalls",
         "nat_gateways": "NAT gateways", "internet_gateways": "Internet gateways",
-        "vpc_endpoints": "VPC endpoints", "endpoint_services": "Endpoint services", "eks_clusters": "EKS clusters", "hosted_zones": "Route 53 zones",
+        "vpc_endpoints": "VPC endpoints", "endpoint_services": "Endpoint services", "vpc_peerings": "VPC peerings",
+        "vpn_connections": "VPN connections", "dx_gateways": "Direct Connect gateways", "eks_clusters": "EKS clusters", "hosted_zones": "Route 53 zones",
         "resolver_rules": "Resolver rules", "resolver_endpoints": "Resolver endpoints",
     }
     return {key: {"label": label, "count": len(getattr(inventory, key))} for key, label in labels.items()}
