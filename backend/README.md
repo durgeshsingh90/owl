@@ -298,6 +298,8 @@ words, most words, then near matches for typos. An IP also finds the CIDRs that 
 
 The refresh button downloads a project's accounts with the `aws` command (run through
 subprocess; AWS CLI v2 must be on PATH, and every aws command adds `--no-verify-ssl` unless
-`OWL_AWS_VERIFY_SSL=1` is set) using the AWS config file
+`OWL_AWS_VERIFY_SSL=1` is set; that flag doesn't reach the CLI's SSO credential call, so OWL
+also passes this computer's trusted certificates as `AWS_CA_BUNDLE`, or your own file from
+`OWL_AWS_CA_BUNDLE`) using the AWS config file
 the AWS Accounts app reads; only describe/list/get calls are made. AWS JSON can also be imported from
 the Import page. The first run adds a sample Payment Platform project and snapshot.

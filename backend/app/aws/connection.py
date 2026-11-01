@@ -8,11 +8,13 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
+import sys
 import threading
 import time
 
-from app.core.database import connection
+from app.core.database import connection, database_path
 from app.core.logging import event
 
 SESSION = 12 * 60 * 60
@@ -21,6 +23,9 @@ CHECK_TIMEOUT = 30
 PROFILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 URL = re.compile(r"https://\S+")
 CODE = re.compile(r"\b[A-Z0-9]{4}-[A-Z0-9]{4}\b")
+SERVER_AUTH = "1.3.6.1.5.5.7.3.1"
+BUNDLE_SECONDS = 24 * 60 * 60
+_bundle_lock = threading.Lock()
 _lock = threading.Lock()
 _login = None  # The running `aws sso login` process, owned by this backend.
 # The thread that reads the login's output and then checks the profile. A login is in
@@ -42,6 +47,47 @@ def ssl_args():
     return [] if os.environ.get("OWL_AWS_VERIFY_SSL") == "1" else ["--no-verify-ssl"]
 
 
+def _system_certificates():
+    """This computer's trusted certificates as PEM text; a company proxy's root is normally here."""
+    if os.name == "nt":
+        found = []
+        for store in ("ROOT", "CA"):
+            for cert, encoding, trust in ssl.enum_certificates(store):
+                if encoding == "x509_asn" and (trust is True or SERVER_AUTH in trust):
+                    found.append(ssl.DER_cert_to_PEM_cert(cert))
+        return "".join(dict.fromkeys(found))
+    if sys.platform == "darwin":
+        return subprocess.run(
+            ["security", "find-certificate", "-a", "-p", "/System/Library/Keychains/SystemRootCertificates.keychain",
+             "/Library/Keychains/System.keychain"], capture_output=True, text=True, timeout=CHECK_TIMEOUT).stdout
+    return ""
+
+
+def ca_bundle():
+    """A file of certificates for AWS_CA_BUNDLE. --no-verify-ssl doesn't reach the CLI's SSO
+    credential call, so behind an intercepting proxy that call needs to trust the proxy.
+    An AWS_CA_BUNDLE you set yourself wins, and OWL_AWS_CA_BUNDLE names your own file."""
+    if os.environ.get("AWS_CA_BUNDLE"):
+        return None
+    if os.environ.get("OWL_AWS_CA_BUNDLE"):
+        return os.environ["OWL_AWS_CA_BUNDLE"]
+    path = database_path().parent / "aws-ca-bundle.pem"
+    with _bundle_lock:
+        try:
+            if path.exists() and time.time() - path.stat().st_mtime < BUNDLE_SECONDS:
+                return str(path)
+            text = _system_certificates()
+            if "BEGIN CERTIFICATE" not in text:
+                return None
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+            event("aws.ca_bundle_written", certificates=text.count("BEGIN CERTIFICATE"))
+            return str(path)
+        except (OSError, ValueError, subprocess.SubprocessError, ssl.SSLError) as error:
+            event("aws.ca_bundle_failed", error=type(error).__name__)
+            return str(path) if path.exists() else None
+
+
 def _aws():
     path = shutil.which("aws")
     if not path:
@@ -51,8 +97,13 @@ def _aws():
     return path
 
 
+def cli_environment():
+    bundle = ca_bundle()
+    return {**os.environ, "AWS_PAGER": "", **({"AWS_CA_BUNDLE": bundle} if bundle else {})}
+
+
 def _options():
-    options = {"env": {**os.environ, "AWS_PAGER": ""}, "stdin": subprocess.DEVNULL}
+    options = {"env": cli_environment(), "stdin": subprocess.DEVNULL}
     if os.name == "nt":
         options["creationflags"] = subprocess.CREATE_NO_WINDOW
     return options

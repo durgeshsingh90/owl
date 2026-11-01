@@ -332,6 +332,38 @@ class GlobalSearch(Base):
         self.assertEqual(client.get("/api/architecture/explore/resource", params={"file": os.path.abspath(__file__), "index": 0}).status_code, 404)
 
 
+class CertificateBundle(Base):
+    def test_windows_store_becomes_the_bundle_for_every_aws_call(self):
+        import ssl as ssl_module
+        from app.aws import connection
+
+        der = ssl_module.PEM_cert_to_DER_cert("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+        stores = {"ROOT": [(der, "x509_asn", True), (b"x", "pkcs_7_asn", True)], "CA": [(der + b"1", "x509_asn", {"1.2.3"})]}
+        with patch.object(connection.os, "name", "nt"), patch.object(connection.ssl, "enum_certificates", side_effect=stores.get, create=True), patch.dict(os.environ, {"AWS_CA_BUNDLE": ""}):
+            text = connection._system_certificates()
+        self.assertEqual(text.count("BEGIN CERTIFICATE"), 1)  # server-auth roots only, one copy each
+
+    def test_bundle_goes_to_the_cli_and_your_own_setting_wins(self):
+        from app.aws import connection
+
+        pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+        with patch.dict(os.environ, {"AWS_CA_BUNDLE": "", "OWL_AWS_CA_BUNDLE": ""}), patch.object(connection, "_system_certificates", return_value=pem) as read:
+            path = connection._options()["env"]["AWS_CA_BUNDLE"]
+            self.assertEqual(Path(path).read_text(), pem)
+            connection._options()
+            self.assertEqual(read.call_count, 1)  # reused, not rebuilt on every command
+        with patch.dict(os.environ, {"AWS_CA_BUNDLE": "/mine.pem"}):
+            self.assertEqual(connection._options()["env"]["AWS_CA_BUNDLE"], "/mine.pem")
+        with patch.dict(os.environ, {"AWS_CA_BUNDLE": "", "OWL_AWS_CA_BUNDLE": "/corp.pem"}):
+            self.assertEqual(connection._options()["env"]["AWS_CA_BUNDLE"], "/corp.pem")
+
+    def test_no_certificates_leaves_the_cli_alone(self):
+        from app.aws import connection
+
+        with patch.dict(os.environ, {"AWS_CA_BUNDLE": "", "OWL_AWS_CA_BUNDLE": ""}), patch.object(connection, "_system_certificates", return_value=""):
+            self.assertIsNone(connection.ca_bundle())
+
+
 class DownloadConnected(Base):
     def test_only_connected_accounts_are_downloaded(self):
         from app.architecture import download

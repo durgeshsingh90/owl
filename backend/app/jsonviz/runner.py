@@ -258,7 +258,7 @@ def display(tool, args):
 
 
 def _platform():
-    options = {"stdin": subprocess.DEVNULL, "env": {**os.environ, "AWS_PAGER": ""}}
+    options = {"stdin": subprocess.DEVNULL, "env": aws_connection.cli_environment()}
     if os.name == "nt":
         options["creationflags"] = subprocess.CREATE_NO_WINDOW
     else:
