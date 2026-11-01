@@ -46,6 +46,9 @@ CALL_TIMEOUT = 600  # seconds for one `aws` command; CloudTrail reads slowly
 ACCOUNTS_AT_ONCE = 4
 PROFILE_NAME = re.compile(r"mc-(.+)-([^-]+)", re.IGNORECASE)
 TOP_ACCOUNTS = 20
+TESTS_AT_ONCE = 20
+BOOKKEEPING = {"generated_at", "looked_up_at", "downloaded_at", "calls"}  # change every run, aren't data
+REGION_FILES = 8  # files fetched per region
 ACCOUNT_DETAILS = "AccountDetails"  # the denied-type name for get-account-information
 PROBES_AT_ONCE = 6
 PROBE_TIMEOUT = 60  # seconds for one access check call
@@ -540,11 +543,29 @@ def state_of(account_id):
     return json.loads(path.read_text()) if path and path.exists() else None
 
 
+def _comparable(value):
+    """The data without its own bookkeeping times, to tell whether anything really changed."""
+    if isinstance(value, dict):
+        return {k: _comparable(v) for k, v in value.items() if k not in BOOKKEEPING}
+    if isinstance(value, list):
+        return [_comparable(v) for v in value]
+    return value
+
+
 def _write(path, data):
+    """Write the file only if its data changed. Returns whether it did."""
+    text = json.dumps(data, indent=1, default=str)
+    if path.exists():
+        try:
+            if _comparable(json.loads(path.read_text())) == _comparable(json.loads(text)):
+                return False
+        except ValueError:
+            pass  # unreadable: replace it
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(data, indent=1, default=str))
+    temporary.write_text(text)
     temporary.replace(path)
+    return True
 
 
 def profile_for(account_id, wanted=""):
@@ -714,8 +735,9 @@ def test_account(account_id, wanted=""):
     return result
 
 
-def download_account(account, progress=lambda text: None):
-    """Download one account into the media folder. Returns its manifest."""
+def download_account(account, progress=lambda *_: None):
+    """Fetch everything for one account again, and write to the media folder only what changed.
+    Only types denied for this account are skipped. Returns its manifest."""
     account_id = account["account_id"]
     if not ACCOUNT.match(account_id):
         raise ValueError(f"{account_id!r} is not a 12-digit AWS account id.")
@@ -731,7 +753,15 @@ def download_account(account, progress=lambda text: None):
     if details.pop("details_denied", False):
         known.append(ACCOUNT_DETAILS)
     remember(account_id, connected=True, checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), arn=identity.get("Arn", ""), error="", **details)
-    progress(f"{account_id}: checking access")
+    denied_before = set(known)
+    regions = [r for r in account.get("regions") or [] if REGION.match(r)] or [profile_region or "us-east-1"]
+    position = {"step": 0, "steps": 5 + REGION_FILES * len(regions)}  # known up front, so the bar never goes backwards
+
+    def advance(text):
+        position["step"] += 1
+        progress(text, position["step"], position["steps"])
+
+    advance(f"{account_id}: checking access")
     access = check_access(profile, profile_region, known)
     note_denied(account_id, access["denied"] + known)
     if not access["allowed"]:
@@ -741,36 +771,45 @@ def download_account(account, progress=lambda text: None):
     run = Recorder(denied=access["denied"] + known + list(access["errors"]))
     run.errors.extend(f"{key}: {text}" for key, text in access["errors"].items())
     cli = AwsCli(profile, profile_region)
-    regions = [r for r in account.get("regions") or [] if REGION.match(r)] or [profile_region or "us-east-1"]
     folder = account_folder(account_id, profile)
+    written = {"changed": 0, "unchanged": 0}
+
+    def save(path, data):
+        written["changed" if _write(path, data) else "unchanged"] += 1
+
     for region in regions:
-        progress(f"{account_id} {region}: VPC, routing and transit gateway")
-        _write(folder / region / "ec2.json", _ec2(cli, region, run))
-        progress(f"{account_id} {region}: load balancers")
-        _write(folder / region / "elbv2.json", _elbv2(cli, region, run))
-        progress(f"{account_id} {region}: EKS clusters")
-        _write(folder / region / "eks.json", _eks(cli, region, run))
+        advance(f"{account_id} {region}: VPC, routing and transit gateway")
+        save(folder / region / "ec2.json", _ec2(cli, region, run))
+        advance(f"{account_id} {region}: load balancers")
+        save(folder / region / "elbv2.json", _elbv2(cli, region, run))
+        advance(f"{account_id} {region}: EKS clusters")
+        save(folder / region / "eks.json", _eks(cli, region, run))
         for file, label in (("network", "peering, VPN, Direct Connect and interfaces"), ("ingress", "API gateways and classic load balancers"), ("compute", "instances and Auto Scaling")):
-            progress(f"{account_id} {region}: {label}")
-            _write(folder / region / f"{file}.json", _extras(cli, region, run, file))
-        progress(f"{account_id} {region}: network firewall")
-        _write(folder / region / "network-firewall.json", _network_firewall(cli, region, run))
-        progress(f"{account_id} {region}: Route 53 Resolver")
-        _write(folder / region / "route53resolver.json", _resolver(cli, region, run))
+            advance(f"{account_id} {region}: {label}")
+            save(folder / region / f"{file}.json", _extras(cli, region, run, file))
+        advance(f"{account_id} {region}: network firewall")
+        save(folder / region / "network-firewall.json", _network_firewall(cli, region, run))
+        advance(f"{account_id} {region}: Route 53 Resolver")
+        save(folder / region / "route53resolver.json", _resolver(cli, region, run))
         for stale in ("config.json", "cloudtrail.json"):  # written by earlier versions
             (folder / region / stale).unlink(missing_ok=True)
-    progress(f"{account_id}: Route 53 hosted zones")
-    _write(folder / "global" / "route53.json", _route53(cli, None, run))
-    progress(f"{account_id}: writing state.json")
-    _write(folder / "state.json", build_state(folder, account_id, profile, regions))
-    progress(f"{account_id}: nslookup for hosted zone, endpoint and load balancer names")
+    # A region no longer downloaded mustn't linger in the analysis.
+    for child in folder.iterdir():
+        if child.is_dir() and REGION.match(child.name) and child.name not in regions:
+            shutil.rmtree(child)
+    advance(f"{account_id}: Route 53 hosted zones")
+    save(folder / "global" / "route53.json", _route53(cli, None, run))
+    advance(f"{account_id}: writing state.json")
+    save(folder / "state.json", build_state(folder, account_id, profile, regions))
+    advance(f"{account_id}: nslookup for hosted zone, endpoint and load balancer names")
     lookups = run_lookups(lookup_names(folder, regions, account_id))
-    _write(folder / "global" / "dns-lookups.json", {"DnsLookups": lookups})
+    save(folder / "global" / "dns-lookups.json", {"DnsLookups": lookups})
     timed_out = sum(item["status"] == "timeout" for item in lookups)
     not_tried = sum(item["status"] == "not_tried" for item in lookups)
     if timed_out or not_tried:
         run.errors.append(f"nslookup timed out for {timed_out} name(s)" + (f"; {not_tried} more not tried because the DNS server wasn't answering" if not_tried else "")
                           + ". Are you on the company network or VPN?")
+    advance(f"{account_id}: finishing")
     previous = {}
     if (folder / "account.json").exists():
         previous = json.loads((folder / "account.json").read_text()).get("Account", {})
@@ -786,8 +825,13 @@ def download_account(account, progress=lambda text: None):
             "errors": run.errors, "denied": sorted(run.denied - set(access["errors"])), "downloaded_at": datetime.now(timezone.utc).isoformat(),
         },
     }
-    _write(folder / "account.json", manifest)
+    save(folder / "account.json", manifest)
+    manifest["Download"].update(written, new_denied=sorted(set(manifest["Download"]["denied"]) - denied_before))
     note_denied(account_id, manifest["Download"]["denied"])
+    with _lock:  # the last download time changes every run, so it lives apart from the data
+        info = account_info()
+        info.setdefault(account_id, {})["last_download"] = manifest["Download"]["downloaded_at"]
+        _write(info_file(), info)
     return manifest
 
 
@@ -827,11 +871,15 @@ def snapshot_files(account_ids):
 def downloaded(account_ids):
     """What the media folder already holds for these accounts."""
     out = {}
+    info = account_info()
     for account_id in account_ids:
         folder = find_folder(account_id)
         if folder:
             data = json.loads((folder / "account.json").read_text())
             out[account_id] = {**data.get("Download", {}), "name": data.get("Account", {}).get("Name", "")}
+            last = info.get(account_id, {}).get("last_download")
+            if last:
+                out[account_id]["downloaded_at"] = last
     return out
 
 
@@ -883,9 +931,14 @@ def _run(key, name, accounts):
     def one(account):
         _account_state(key, account["account_id"], state="running")
         try:
-            manifest = download_account(account, progress=lambda text: _update(key, message=text))
-            _account_state(key, account["account_id"], state="done", warnings=len(manifest["Download"]["errors"]) + len(manifest["Download"]["denied"]),
-                           denied=manifest["Download"]["denied"], error="; ".join(manifest["Download"]["errors"][:3]))
+            def progress(text, step, steps):
+                _update(key, message=text)
+                _account_state(key, account["account_id"], message=text, step=step, steps=steps)
+
+            manifest = download_account(account, progress=progress)
+            found = manifest["Download"]
+            _account_state(key, account["account_id"], state="done", warnings=len(found["errors"]), denied=found["denied"], new_denied=found.get("new_denied", []),
+                           changed=found.get("changed", 0), unchanged=found.get("unchanged", 0), error="; ".join(found["errors"][:3]))
             return True
         except Exception as error:  # noqa: BLE001 - report per account and continue
             _account_state(key, account["account_id"], state="failed", error=str(error)[:500])
@@ -900,8 +953,8 @@ def _run(key, name, accounts):
         return
     try:
         _update(key, message="Building the snapshot")
-        meta = store.import_snapshot(f"{name} · AWS download", files)
-        _update(key, state="done" if ok == len(accounts) else "partial", finished=time.time(), message="", snapshot=meta["id"])
+        meta = store.import_snapshot(f"{name} · AWS download", files, reuse=True)
+        _update(key, state="done" if ok == len(accounts) else "partial", finished=time.time(), message="", snapshot=meta["id"], snapshot_unchanged=bool(meta.get("unchanged")))
         event("architecture.refresh.completed", key=key, accounts=ok)
     except ValueError as error:
         _update(key, state="failed", finished=time.time(), message="", error=str(error)[:500])
@@ -1016,6 +1069,39 @@ def connected_accounts():
             accounts.append({"account_id": account["account_id"], "name": entry.get("name", ""), "type": entry.get("type", ""),
                              "regions": entry.get("regions") or config["regions"], "profile": entry.get("profile", ""), "environments": []})
     return accounts
+
+
+def start_tests(account_ids):
+    """Test accounts in the backend, TESTS_AT_ONCE at a time, so closing the page doesn't stop them."""
+    with _lock:
+        if _jobs.get("tests", {}).get("state") == "running":
+            raise ValueError("A test run is already running.")
+        _jobs["tests"] = {"state": "running", "started": time.time(), "finished": None,
+                          "accounts": [{"account_id": i, "state": "queued"} for i in dict.fromkeys(account_ids)]}
+    threading.Thread(target=_run_tests, args=(list(dict.fromkeys(account_ids)),), name="architecture-tests", daemon=True).start()
+    return status("tests")
+
+
+def _run_tests(account_ids):
+    def one(account_id):
+        _account_state("tests", account_id, state="running")
+        try:
+            result = test_account(account_id)
+            _account_state("tests", account_id, state="done", ok=result["ok"], error=result["error"])
+        except Exception as error:  # noqa: BLE001 - report per account and continue
+            _account_state("tests", account_id, state="done", ok=False, error=str(error)[:300])
+
+    with ThreadPoolExecutor(TESTS_AT_ONCE) as pool:
+        list(pool.map(one, account_ids))
+    _update("tests", state="done", finished=time.time())
+
+
+def tests_status():
+    job = status("tests")
+    if job.get("accounts"):
+        with _lock:
+            job["accounts"] = [dict(a) for a in job["accounts"]]
+    return job
 
 
 def start_all():

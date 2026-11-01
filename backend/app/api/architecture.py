@@ -183,7 +183,7 @@ def resources(snapshot_id: str, kind: str, account: str = ""):
 def download_settings():
     """Accounts in the AWS config grouped by name, which are selected, and the running download."""
     return {**download.account_groups(), "aws_config": download.config_path(), "media": str(download.media_folder()),
-            "job": download.status("all")}
+            "job": download.status("all"), "tests": download.tests_status()}
 
 
 class Selection(BaseModel):
@@ -223,6 +223,18 @@ def retry_denied(account_id: str):
     """Forget the account's denied types, so the next test or download tries them again."""
     download.forget_denied(account_id)
     return {"account_id": account_id, "denied_types": []}
+
+
+@router.post("/download/tests", status_code=202)
+def start_tests(value: Selection):
+    """Test several accounts in the backend: closing the page doesn't stop them."""
+    _require_aws_cli()
+    return download.start_tests(value.account_ids)
+
+
+@router.get("/download/tests")
+def tests_status():
+    return download.tests_status()
 
 
 @router.post("/download/test/{account_id}")

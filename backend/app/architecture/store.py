@@ -12,6 +12,7 @@ The first use copies the sample Payment Platform in, with a snapshot imported fr
 the sample AWS export, so the app has something to show.
 """
 
+import hashlib
 import json
 import re
 import shutil
@@ -112,8 +113,21 @@ def _slug(text):
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "snapshot"
 
 
-def _store_snapshot(root, name, files, created):
+def _newest_same_accounts(root, accounts):
+    """Reads the folder directly: the caller already holds the lock ensure() takes."""
+    items = [_read(p / "meta.json") for p in (root / "snapshots").iterdir() if (p / "meta.json").exists()]
+    return next((m for m in sorted(items, key=lambda m: (-m["created"], m["id"])) if m.get("accounts") == accounts), None)
+
+
+def _store_snapshot(root, name, files, created, reuse=False):
     inventory, errors, warnings = normalize(files)
+    content = inventory.model_dump_json(by_alias=True)
+    digest = hashlib.sha256(content.encode()).hexdigest()
+    if reuse:
+        # Nothing changed since the newest snapshot of these accounts: no new copy.
+        latest = _newest_same_accounts(root, sorted(inventory.accounts))
+        if latest and latest.get("hash") == digest:
+            return {**latest, "unchanged": True}
     stamp = time.strftime("%Y-%m-%dT%H-%M-%S", time.localtime(created))
     snapshot_id = f"{stamp}-{_slug(name)}"
     target = root / "snapshots" / snapshot_id
@@ -122,10 +136,10 @@ def _store_snapshot(root, name, files, created):
         suffix += 1
         target = root / "snapshots" / f"{snapshot_id}-{suffix}"
     target.mkdir(parents=True)
-    (target / "inventory.json").write_text(inventory.model_dump_json(by_alias=True))
+    (target / "inventory.json").write_text(content)
     meta = {
         "id": target.name, "name": name, "created": created, "files": len(files),
-        "accounts": sorted(inventory.accounts),
+        "accounts": sorted(inventory.accounts), "hash": digest,
         "counts": counts(inventory), "errors": errors, "warnings": warnings,
     }
     (target / "meta.json").write_text(json.dumps(meta, indent=2))
@@ -137,7 +151,7 @@ def validate(files):
     return {"counts": counts(inventory), "errors": errors, "warnings": warnings, "files": len(files)}
 
 
-def import_snapshot(name, files):
+def import_snapshot(name, files, reuse=False):
     root = ensure()
     preview = validate(files)
     if preview["errors"]:
@@ -145,7 +159,7 @@ def import_snapshot(name, files):
     if not any(item["count"] for item in preview["counts"].values()):
         raise ValueError("No AWS resources were found in the files.")
     with _lock:
-        return _store_snapshot(root, name or "Import", files, created=time.time())
+        return _store_snapshot(root, name or "Import", files, created=time.time(), reuse=reuse)
 
 
 def snapshots():

@@ -400,6 +400,29 @@ class DownloadConnected(Base):
             self.assertEqual(download.connected_accounts(), [])
 
 
+class BackgroundTests(Base):
+    def test_batch_runs_in_the_backend(self):
+        import time
+        from app.architecture import download
+
+        config = Path(self.temp.name) / "aws-config"
+        config.write_text("[profile mc-a-prod]\nsso_account_id = 111111111111\n[profile mc-b-prod]\nsso_account_id = 222222222222\n")
+        client = TestClient(app)
+        with patch("app.architecture.download.config_path", return_value=str(config)), patch("app.aws.connection._aws", return_value="aws"), \
+                patch("app.aws.connection.run_sts", return_value=({"Account": "111111111111", "Arn": "a"}, None)), \
+                patch("app.architecture.download.account_details", return_value={"created_error": ""}):
+            self.assertEqual(client.post("/api/architecture/download/tests", json={"account_ids": ["111111111111", "222222222222"]}).status_code, 202)
+            for _ in range(100):
+                job = client.get("/api/architecture/download/tests").json()
+                if job["state"] != "running":
+                    break
+                time.sleep(0.05)
+        self.assertEqual(job["state"], "done")
+        self.assertEqual({a["account_id"]: a["ok"] for a in job["accounts"]}, {"111111111111": True, "222222222222": False})
+        self.assertTrue(download.account_info()["111111111111"]["connected"])
+        self.assertFalse(download.account_info()["222222222222"]["connected"])
+
+
 class Hybrid(Base):
     """Peering, VPN to another cloud and Direct Connect in the analysis."""
 
@@ -825,6 +848,59 @@ class Times(Base):
         self.assertEqual(groups["top"], ["111111111111", "222222222222"])  # by count
         self.assertEqual(groups["recent"], ["222222222222", "111111111111"])  # by time
 
+    def test_second_download_fetches_all_but_writes_only_changes(self):
+        from types import SimpleNamespace
+        from app.architecture import download
+
+        config = Path(self.temp.name) / "aws-config"
+        config.write_text("[profile mc-a-prod]\nsso_account_id = 111111111111\nregion = eu-west-2\n")
+        commands, vpcs, steps = [], ["vpc-1"], []
+
+        def fake(command, **kwargs):
+            if command[0] != "aws":
+                return SimpleNamespace(returncode=0, stderr="", stdout="")
+            commands.append(command)
+            if command[2] == "describe-vpcs":
+                return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({"Vpcs": [{"VpcId": v, "CidrBlock": "10.0.0.0/16"} for v in vpcs]}))
+            return SimpleNamespace(returncode=0, stderr="", stdout="{}")
+
+        with patch("app.architecture.download.config_path", return_value=str(config)), patch("app.aws.connection._aws", return_value="aws"), \
+                patch("app.aws.connection.run_sts", return_value=({"Account": "111111111111", "Arn": "arn:x"}, None)), \
+                patch("app.architecture.download.subprocess.run", side_effect=fake):
+            first = download.download_account({"account_id": "111111111111"}, progress=lambda *a: steps.append(a[1:]))["Download"]
+            self.assertEqual(steps[-1][0], steps[-1][1])  # progress reaches 100%
+            self.assertEqual(len({s[1] for s in steps}), 1)  # the total never changes, so the bar never goes backwards
+            self.assertEqual([s[0] for s in steps], list(range(1, steps[-1][1] + 1)))  # one real step at a time
+            folder = download.find_folder("111111111111")
+            ec2, state, account = folder / "eu-west-2" / "ec2.json", folder / "state.json", folder / "account.json"
+            for path in (ec2, state, account):
+                os.utime(path, (1000, 1000))
+            fetched = len(commands)
+            second = download.download_account({"account_id": "111111111111"})["Download"]
+            self.assertGreaterEqual(len(commands), 2 * fetched - 2)  # everything fetched again
+            self.assertEqual((second["changed"], first["unchanged"]), (0, 0))
+            self.assertEqual({p.stat().st_mtime for p in (ec2, state, account)}, {1000})  # identical data: files untouched
+            self.assertNotEqual(download.downloaded(["111111111111"])["111111111111"]["downloaded_at"], "")
+            self.assertEqual(download.account_info()["111111111111"]["last_download"], second["downloaded_at"])  # the time still moves
+            vpcs.append("vpc-2")
+            third = download.download_account({"account_id": "111111111111"})["Download"]
+            self.assertGreater(ec2.stat().st_mtime, 1000)  # changed data: written
+            self.assertEqual(third["changed"], 2)  # ec2.json and state.json
+            self.assertIn("vpc-2", json.dumps(download.state_of("111111111111")))
+            # A region no longer downloaded is cleared out.
+            (folder / "us-east-1").mkdir()
+            download.download_account({"account_id": "111111111111"})
+            self.assertFalse((folder / "us-east-1").exists())
+
+    def test_identical_download_makes_no_new_snapshot(self):
+        files = [("111111111111/ec2.json", {"Vpcs": [{"VpcId": "vpc-1", "CidrBlock": "10.0.0.0/16"}]})]
+        first = store.import_snapshot("One", files, reuse=True)
+        second = store.import_snapshot("One", files, reuse=True)
+        self.assertEqual((second["id"], second["unchanged"]), (first["id"], True))
+        changed = store.import_snapshot("One", [("111111111111/ec2.json", {"Vpcs": [{"VpcId": "vpc-2", "CidrBlock": "10.0.0.0/16"}]})], reuse=True)
+        self.assertNotEqual(changed["id"], first["id"])
+        self.assertNotEqual(store.import_snapshot("One", files, reuse=True)["id"], first["id"])  # back to old data is newest again
+
     def test_no_access_downloads_nothing(self):
         from types import SimpleNamespace
         from app.architecture import download
@@ -925,7 +1001,7 @@ class Download(Base):
 
         sample = {p.parent.name.split("-")[0] + "/" + p.name: json.loads(p.read_text()) for p in (SAMPLE / "aws").rglob("*.json")}
 
-        def fake(account, progress=lambda t: None, history=None):
+        def fake(account, progress=lambda *a: None, history=None):
             folder = download.media_folder() / f"{account['account_id']}-x" / "prod"
             for name, data in sample.items():
                 if name.startswith(account["account_id"]) and not name.endswith("account.json"):

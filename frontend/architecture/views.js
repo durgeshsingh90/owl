@@ -320,7 +320,7 @@ AA.views = (() => {
       section("VPC endpoints", d.vpc_endpoints.length, table(d.vpc_endpoints, [["Endpoint", (e) => mono(e.id)], ["Type", (e) => esc(e.type)], ["Service", (e) => esc(e.service)]])) +
       section("DNS lookups (nslookup)", d.dns.lookups.length, tableBase(d.dns.lookups, [["Name", (l) => mono(l.name)], ["IP addresses", (l) => esc(l.ips.join(", ")) || "—"],
         ["Result", (l) => ({resolved: status("PASS", "Resolved"), timeout: status("UNKNOWN", "Timed out"), not_tried: status("UNKNOWN", "Not tried"), not_found: status("WARNING", "Not found")}[l.status] || status("UNKNOWN", l.status)) + (l.detail ? `<div class="small muted">${esc(l.detail)}</div>` : "")],
-        ["From", (l) => esc(l.source)], ["Looked up", (l) => esc(new Date(l.looked_up_at).toLocaleString())]])) +
+        ["From", (l) => esc(l.source)], ["Answer since", (l) => esc(new Date(l.looked_up_at).toLocaleString())]])) +
       section("DNS associations", d.dns.hosted_zones.length + d.dns.resolver_rules.length,
         table(d.dns.hosted_zones, [["Hosted zone", (z) => `${esc(z.name)} ${z.private ? '<span class="muted small">private</span>' : ""}`], ["VPCs", (z) => esc(z.vpcs.join(", "))], ["Records", (z) => z.records.length]]) +
         table(d.dns.resolver_rules, [["Resolver rule", (r) => `${mono(r.id)} ${esc(r.domain)}`], ["Targets", (r) => esc(r.target_ips.join(", "))], ["VPCs", (r) => esc(r.vpcs.join(", "))]]));

@@ -9,7 +9,7 @@ AA.views.download = (() => {
   const ICONS = {connected: `${SHARED}connected.png?v=2`, checking: `${SHARED}no-connection.gif?v=2`, failed: `${SHARED}disconnected.png?v=2`, unknown: "assets/not-tested.png"};
   let data = null, search = "", onlySelected = false, polling = null;
   const running = new Set();
-  let searchTyping, editingTag = "", editingHost = "", tagDraft = "", tagChoice = -1, tagFilter = "";
+  let testPolling, searchTyping, editingTag = "", editingHost = "", tagDraft = "", tagChoice = -1, tagFilter = "";
   const TAG_SUGGESTIONS = 8;
   const everTested = (a) => a.info?.connected === true || a.info?.connected === false;
 
@@ -28,22 +28,39 @@ AA.views.download = (() => {
     return ["unknown", "Not tested", "Not tested yet."];
   }
 
-  function jobLabel(job) {
-    if (job.state === "running") {
-      const finished = job.accounts.filter((a) => a.state === "done" || a.state === "failed");
-      const failed = finished.filter((a) => a.state === "failed").length;
-      return `${finished.length}/${job.accounts.length} accounts${failed ? ` · ${failed} failed` : ""} · ${job.message || ""}`;
-    }
-    if (!job.finished) return "";
-    const failed = job.accounts.filter((a) => a.state === "failed").length;
-    return `Last download ${new Date(job.finished * 1000).toLocaleString()} · ${job.accounts.length - failed}/${job.accounts.length} downloaded${failed ? ` · ${failed} failed` : ""}${job.error ? ` · ${job.error}` : ""}`;
-  }
-
   const isConnected = (a) => a.info?.connected === true && (!a.session || new Date(a.session.expires_at).getTime() > Date.now());
-
   const deniedOf = (a, s) => [...new Set([...(a.info?.denied_types || []), ...(a.info?.denied || []), ...(s?.denied || [])])].sort();
 
-  const downloadingNow = (job) => job.state === "running";
+  // Each account counts as its completed steps; failed and finished accounts count in full.
+  const shareOf = (a) => (a.state === "done" || a.state === "failed" ? 1 : a.steps ? (a.step || 0) / a.steps : 0);
+  const percent = (share) => `${Math.floor(share * 100)}%`;
+
+  function lastDownload(job) {
+    if (!job.finished) return "";
+    const failed = job.accounts.filter((a) => a.state === "failed").length;
+    const changed = job.accounts.reduce((sum, a) => sum + (a.changed || 0), 0);
+    const total = changed + job.accounts.reduce((sum, a) => sum + (a.unchanged || 0), 0);
+    return `Last download ${new Date(job.finished * 1000).toLocaleString()} · ${job.accounts.length - failed}/${job.accounts.length} downloaded${failed ? ` · ${failed} failed` : ""}`
+      + (total ? ` · ${changed} of ${total} files changed` : "") + (job.snapshot_unchanged ? " · nothing new to analyse" : "") + (job.error ? ` · ${job.error}` : "");
+  }
+
+  function drawProgress(main, job) {
+    const box = main.querySelector("#dl-progress-box");
+    main.querySelector("#dl-job").textContent = job.state === "running" ? "" : lastDownload(job);
+    box.hidden = job.state !== "running";
+    if (box.hidden) return;
+    const items = job.accounts || [];
+    const share = items.reduce((sum, a) => sum + shareOf(a), 0) / (items.length || 1);
+    const finished = items.filter((a) => a.state === "done" || a.state === "failed");
+    const failed = finished.filter((a) => a.state === "failed").length;
+    const names = new Map(data.groups.flatMap((g) => g.accounts.map((a) => [a.account_id, `${g.name} ${a.stage}`])));
+    const current = items.filter((a) => a.state === "running");
+    box.innerHTML = `<div class="dl-bar-row"><b>Overall</b><progress max="1000" value="${Math.floor(share * 1000)}"></progress><b class="dl-pct">${percent(share)}</b>
+        <span class="small muted">${finished.length}/${items.length} accounts${failed ? ` · ${failed} failed` : ""}</span></div>
+      ${current.map((a) => `<div class="dl-bar-row current"><span class="dl-bar-name" title="${esc(a.account_id)}">${esc(names.get(a.account_id) || a.account_id)}</span><progress max="1000" value="${Math.floor(shareOf(a) * 1000)}"></progress><span class="dl-pct">${percent(shareOf(a))}</span>
+        <span class="small muted dl-bar-step">${a.steps ? `Step ${a.step}/${a.steps}` : "Starting"}${a.message ? ` · ${esc(a.message.replace(`${a.account_id}${" "}`, "").replace(`${a.account_id}: `, ""))}` : ""}</span></div>`).join("")}`;
+  }
+
 
   function notes(a, states) {
     const s = states[a.account_id], i = a.info || {};
@@ -51,7 +68,6 @@ AA.views.download = (() => {
     return [
       ...(s?.state === "failed" || s?.error ? [`<div class="dl-problem">${esc(s.error)}</div>`] : i.connected === false && i.error ? [`<div class="dl-problem">${esc(i.error)}</div>`] : []),
       ...Object.entries(i.errors || {}).slice(0, 5).map(([k, v]) => `<div class="dl-denied">${esc(k)}: ${esc(v)}</div>`),
-      ...(denied.length ? [`<div class="dl-denied">No access, not called again: ${esc(denied.join(", "))} <button type="button" class="link" data-retry="${esc(a.account_id)}">Try again</button></div>`] : []),
     ].join("");
   }
 
@@ -69,7 +85,7 @@ AA.views.download = (() => {
       <td class="small nowrap">${job ? esc(job) : '<span class="muted">Never</span>'}</td>
       <td><div class="dl-tags">${(a.tags || []).map((t) => `<span class="dl-tag">${esc(t)}<button type="button" data-untag="${esc(t)}" data-account="${esc(a.account_id)}" aria-label="Remove tag ${esc(t)}">×</button></span>`).join("")}${editingTag === a.account_id ? `<input class="dl-tag-input" data-tag-input="${esc(a.account_id)}" placeholder="Type a tag" aria-label="Add a tag" maxlength="40" autocomplete="off" spellcheck="false">` : `<button type="button" class="dl-tag-add" data-tag-add="${esc(a.account_id)}" title="Add a tag" aria-label="Add a tag">+</button>`}</div></td>
       <td class="dl-count" title="New connections made: testing again during a live session doesn't count">${a.connects || 0}</td>
-      <td><span class="dl-status ${state}" title="${esc(tip)}"><img src="${ICONS[state]}" alt="">${esc(label)}</span>${state === "connected" && denied.length ? `<div class="dl-partial">${denied.length} type${denied.length === 1 ? "" : "s"} denied</div>` : ""}</td>
+      <td><span class="dl-status ${state}" title="${esc(tip)}"><img src="${ICONS[state]}" alt="">${esc(label)}</span>${denied.length ? `<div><button type="button" class="link dl-retry" data-retry="${esc(a.account_id)}" title="${esc(`No access: ${denied.join(", ")}. Not called again. Click to try them on the next download.`)}">${denied.length} skipped</button></div>` : ""}</td>
       <td><button type="button" class="dl-test" data-test="${esc(a.account_id)}" ${running.has(a.account_id) ? "disabled" : ""}>Test</button></td></tr>${problems ? `<tr class="dl-note"><td colspan="8">${problems}</td></tr>` : ""}`;
   }
 
@@ -108,12 +124,7 @@ AA.views.download = (() => {
     };
     section(data.top, "#dl-top-box", "#dl-top", "#dl-top-count", (a) => `Used ${a.uses} time${a.uses === 1 ? "" : "s"}`);
     section(data.recent, "#dl-recent-box", "#dl-recent", "#dl-recent-count", (a) => `Last used ${stamp(a.last_used)}`);
-    const progress = main.querySelector("#dl-progress");
-    progress.hidden = !downloadingNow(job);
-    if (job.accounts) {
-      progress.max = job.accounts.length || 1;
-      progress.value = job.accounts.filter((a) => a.state === "done" || a.state === "failed").length;
-    }
+    drawProgress(main, job);
     const count = chosen().length;
     const downloading = job.state === "running";
     const start = main.querySelector("#dl-start"), all = main.querySelector("#dl-test-all");
@@ -131,7 +142,6 @@ AA.views.download = (() => {
     main.querySelector("#dl-total").textContent = data.total.toLocaleString();
     main.querySelector("#dl-unique").textContent = data.unique.toLocaleString();
     main.querySelector("#dl-selected").textContent = count.toLocaleString();
-    main.querySelector("#dl-job").textContent = jobLabel(job);
     showTagEditor(main);
   }
 
@@ -195,31 +205,34 @@ AA.views.download = (() => {
     list(main);
   }
 
+  // Runs in the backend, so closing or leaving the page doesn't stop it; this only follows along.
   async function runTests(main, ids) {
     ids.forEach((id) => running.add(id));
     list(main);
-    const queue = [...ids];
-    await Promise.all(Array.from({length: Math.min(TESTS_AT_ONCE, queue.length)}, async () => {
-      while (queue.length) {
-        const id = queue.shift();
-        const account = accounts().find((a) => a.account_id === id);
-        try {
-          const r = await api(`/download/test/${id}`, {method: "POST"});
-          if (r.ok && !isConnected(account)) account.connects = (account.connects || 0) + 1;
-          account.info = {...account.info, connected: r.ok, arn: r.arn, error: r.error, denied: r.denied, errors: r.errors, checked_at: new Date().toISOString(),
-            ...(r.created !== undefined ? {created: r.created, created_error: r.created_error, account_name: r.account_name} : {})};
-        } catch (error) {
-          account.info = {...account.info, connected: false, error: error.message, checked_at: new Date().toISOString()};
-        }
-        running.delete(id);
-        if (main.querySelector("#dl-list")) list(main);
-      }
-    }));
-    if (!running.size && main.querySelector("#dl-list")) {  // Recent and Most used changed
-      const job = data.job;
-      data = {...(await api("/download")), job};
+    try {
+      await api("/download/tests", {method: "POST", body: {account_ids: ids}});
+    } catch (error) {
+      ids.forEach((id) => running.delete(id));
       list(main);
+      return toast(error.message);
     }
+    followTests(main);
+  }
+
+  async function followTests(main) {
+    clearTimeout(testPolling);
+    const job = await api("/download/tests");
+    if (!main.querySelector("#dl-list")) return;
+    running.clear();
+    (job.accounts || []).filter((a) => a.state !== "done").forEach((a) => running.add(a.account_id));
+    if (job.state === "running") {
+      list(main);
+      testPolling = setTimeout(() => followTests(main), 1000);
+      return;
+    }
+    const downloadJob = data.job;
+    data = {...(await api("/download")), job: downloadJob};  // saved results, Recent and Most used
+    list(main);
   }
 
   function render(main, app) {
@@ -231,7 +244,7 @@ AA.views.download = (() => {
         <select id="dl-tag-filter" aria-label="Filter by tag" hidden></select>
         <label class="small"><input type="checkbox" id="dl-only" ${onlySelected ? "checked" : ""}> Selected only</label>
         <span id="dl-job" class="small muted" aria-live="polite"></span></div>
-      <progress id="dl-progress" class="dl-progress" hidden></progress>
+      <div id="dl-progress-box" class="dl-progress-box" role="status" hidden></div>
       <div id="dl-recent-box" hidden><h2 class="dl-section">Recent <span class="muted small">latest <span id="dl-recent-count"></span> tested, downloaded or copied in AWS Accounts</span></h2>
         <div class="table-wrap"><table class="data dl-table"><thead><tr><th>Name</th><th>Stage</th><th>Account number</th><th>Account created</th><th>Last download</th><th>Tags</th><th>Times connected</th><th>Status</th><th>Test</th></tr></thead><tbody id="dl-recent"></tbody></table></div></div>
       <div id="dl-top-box" hidden><h2 class="dl-section">Most used <span class="muted small">top <span id="dl-top-count"></span> by tests, downloads and AWS Accounts copies</span></h2>
@@ -389,9 +402,11 @@ AA.views.download = (() => {
     data.job = job;
     list(main);
     if (job.state === "running") {
-      polling = setTimeout(() => poll(main, app), 1500);
+      polling = setTimeout(() => poll(main, app), 1000);
     } else if (before === "running" && job.snapshot) {
-      toast(job.state === "done" ? "Download finished." : "Download finished; some accounts failed.");
+      const newly = job.accounts.filter((a) => a.new_denied?.length);
+      toast((job.state === "done" ? "Download finished." : "Download finished; some accounts failed.")
+        + (newly.length ? ` No access to some types in ${newly.length} account${newly.length === 1 ? "" : "s"}; they'll be skipped from now on.` : ""));
       await app.reload();  // each project picks its newest covering snapshot
       location.hash = "#download";
       data = await api("/download");
@@ -404,5 +419,6 @@ AA.views.download = (() => {
     data = await api("/download");
     render(main, app);
     if (data.job?.state === "running") poll(main, app);
+    if (data.tests?.state === "running") followTests(main);
   };
 })();

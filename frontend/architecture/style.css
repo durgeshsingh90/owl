@@ -250,7 +250,14 @@ table.dl-table td{vertical-align:middle;padding:7px 14px}
 table.dl-table td.dl-name{font-weight:600;min-width:190px;overflow-wrap:break-word;vertical-align:top;background:var(--side);border-right:1px solid var(--line)}
 .dl-aws-name{font-weight:400}
 .dl-section{margin:18px 0 8px}
-.dl-progress{display:block;width:100%;height:8px;margin:0 0 10px;accent-color:var(--accent)}
+.dl-progress-box{margin:0 0 12px;padding:10px 14px;background:var(--surface);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;gap:6px}
+.dl-bar-row{display:grid;grid-template-columns:170px minmax(120px,1fr) 44px minmax(120px,2fr);gap:10px;align-items:center;font-size:13px}
+.dl-bar-row progress{width:100%;height:10px;accent-color:var(--accent)}
+.dl-bar-row.current{font-size:12px}
+.dl-bar-row.current progress{height:6px}
+.dl-pct{text-align:right;font-variant-numeric:tabular-nums}
+.dl-bar-name,.dl-bar-step{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dl-retry{font-size:11px;padding-left:8px!important;color:var(--muted)!important}
 table.dl-table tr.dl-first td{border-top:1px solid var(--border)}
 .dl-pick{height:28px;min-width:64px;padding:0 12px;font-size:12px}
 .dl-pick[aria-pressed="true"],.dl-pick[aria-pressed="true"]:hover:not(:disabled){background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
@@ -274,7 +281,6 @@ table.dl-table tr.dl-first td{border-top:1px solid var(--border)}
 .dl-tag-hint{padding:5px 8px;font-size:11px;color:var(--muted)}
 .dl-count{text-align:center;font-variant-numeric:tabular-nums}
 .dl-test{height:28px;padding:0 12px;font-size:12px}
-.dl-partial{color:var(--warn);font-size:11px}
 .dl-note td{padding:0 14px 8px;font-size:12px;overflow-wrap:anywhere;border-top:0}
 .dl-problem{color:var(--fail)}
 .dl-denied{color:var(--warn)}
