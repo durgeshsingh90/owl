@@ -159,7 +159,7 @@ class ValidateTests(unittest.TestCase):
         self.bad("aws", ["EC2;", "describe-instances"])
         self.assertEqual(
             runner.arguments("aws", ["ec2", "describe-vpcs"], {"profile": "p1", "region": "eu-west-1"}),
-            ["ec2", "describe-vpcs", "--output", "json", "--profile", "p1", "--region", "eu-west-1"],
+            ["ec2", "describe-vpcs", "--no-verify-ssl", "--output", "json", "--profile", "p1", "--region", "eu-west-1"],
         )
 
     def test_az(self):

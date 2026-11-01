@@ -172,7 +172,7 @@ class AwsCli:
         self.timeout = timeout
 
     def call(self, service, operation, *arguments, region=None):
-        command = [connection._aws(), service, operation, *arguments, "--profile", self.profile, "--output", "json"]
+        command = [connection._aws(), service, operation, *arguments, *connection.ssl_args(), "--profile", self.profile, "--output", "json"]
         if region or self.region:
             command += ["--region", region or self.region]
         try:

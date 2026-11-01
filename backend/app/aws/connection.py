@@ -36,6 +36,12 @@ def _in_progress():
         )
 
 
+def ssl_args():
+    """Every aws command skips certificate checks: the company network intercepts HTTPS, so
+    the CLI rejects its certificate otherwise. OWL_AWS_VERIFY_SSL=1 turns checking back on."""
+    return [] if os.environ.get("OWL_AWS_VERIFY_SSL") == "1" else ["--no-verify-ssl"]
+
+
 def _aws():
     path = shutil.which("aws")
     if not path:
@@ -61,7 +67,7 @@ def run_sts(profile):
     """Return (identity, None) when the profile works, else (None, error)."""
     try:
         result = subprocess.run(
-            [_aws(), "sts", "get-caller-identity", "--profile", profile, "--output", "json"],
+            [_aws(), "sts", "get-caller-identity", *ssl_args(), "--profile", profile, "--output", "json"],
             capture_output=True,
             text=True,
             timeout=CHECK_TIMEOUT,
@@ -204,7 +210,7 @@ def login():
         return state()
     with _lock:
         process = subprocess.Popen(
-            [_aws(), "sso", "login", "--profile", profile],
+            [_aws(), "sso", "login", *ssl_args(), "--profile", profile],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             # Not the Windows code page: one unexpected character must not stop the watcher.

@@ -5,7 +5,7 @@ AA.views.download = (() => {
   const {esc, api, toast} = AA;
   const TESTS_AT_ONCE = 6;
   const SHARED = "../bitbucket/assets/";
-  const ICONS = {connected: `${SHARED}connected.png`, checking: `${SHARED}no-connection.gif`, failed: `${SHARED}disconnected.png`, unknown: "assets/not-tested.png"};
+  const ICONS = {connected: `${SHARED}connected.png?v=2`, checking: `${SHARED}no-connection.gif?v=2`, failed: `${SHARED}disconnected.png?v=2`, unknown: "assets/not-tested.png"};
   let data = null, search = "", onlySelected = false, polling = null, login = null;
   const running = new Set();
   let searchTyping;

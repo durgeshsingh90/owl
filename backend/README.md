@@ -293,6 +293,7 @@ Created and updated times come from fields AWS returns on the resource itself. *
 Today / Yesterday / This week / ... / month headings, like the Bitbucket timeline.
 
 The refresh button downloads a project's accounts with the `aws` command (run through
-subprocess; AWS CLI v2 must be on PATH) using the AWS config file
+subprocess; AWS CLI v2 must be on PATH, and every aws command adds `--no-verify-ssl` unless
+`OWL_AWS_VERIFY_SSL=1` is set) using the AWS config file
 the AWS Accounts app reads; only describe/list/get calls are made. AWS JSON can also be imported from
 the Import page. The first run adds a sample Payment Platform project and snapshot.

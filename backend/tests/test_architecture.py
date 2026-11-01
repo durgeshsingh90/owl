@@ -473,6 +473,7 @@ class Times(Base):
         self.assertTrue(all(c[0] == "aws" and c[c.index("--profile") + 1] == "mc-a-prod" and c[-2:] != [] for c in commands))
         self.assertTrue(all(c[1] != "route53" or "--region" in c for c in commands))
         self.assertEqual(next(c for c in commands if c[2] == "describe-vpcs")[-2:], ["--region", "eu-west-2"])
+        self.assertTrue(all("--no-verify-ssl" in c for c in commands))  # the company network intercepts HTTPS
         self.assertEqual(manifest["Download"]["denied"], ["Firewalls"])  # denied at the check: recorded, the rest still downloads
         self.assertEqual(sum(c[2] == "list-firewalls" for c in commands), 1)  # the check's one try, never again
         self.assertIn("--max-items", next(c for c in commands if c[2] == "list-firewalls"))

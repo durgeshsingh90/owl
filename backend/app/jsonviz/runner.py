@@ -17,6 +17,7 @@ import uuid
 from collections import OrderedDict
 from pathlib import Path
 
+from app.aws import connection as aws_connection
 from app.aws import profiles
 from app.aws.connection import PROFILE
 from app.core.database import connection
@@ -207,7 +208,7 @@ def arguments(tool, args, fields):
     the chosen profile, region, subscription, context or project."""
     args = validate(tool, args)
     if tool == "aws":
-        args += ["--output", "json"]
+        args += [*aws_connection.ssl_args(), "--output", "json"]
         args += ["--profile", fields["profile"]] if fields.get("profile") else []
         args += ["--region", fields["region"]] if fields.get("region") else []
     elif tool == "az":

@@ -254,6 +254,7 @@ table.dl-table tr.dl-first td{border-top:1px solid var(--border)}
 .dl-pick{height:28px;min-width:64px;padding:0 12px;font-size:12px}
 .dl-pick[aria-pressed="true"],.dl-pick[aria-pressed="true"]:hover:not(:disabled){background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
 .dl-status{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 8px;border:0;background:transparent;font-size:12px}
+.dl-status:hover:not(:disabled){background:transparent}
 .dl-status img{width:22px;height:22px;object-fit:contain}
 :root[data-theme="dark"] .dl-status.unknown img,:root[data-theme="dark"] .dl-status.failed img{filter:invert(1)}
 .dl-status.unknown{color:var(--muted)}

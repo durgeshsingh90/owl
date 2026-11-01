@@ -68,8 +68,8 @@
     $('login-code').textContent = current.login_code ? `· code ${current.login_code}` : '';
     $('dialog-error').textContent = current.error || '';
     $('dialog-error').hidden = !current.error || connected;
-    $('check-command').textContent = `aws sts get-caller-identity --profile ${current.profile}`;
-    $('login-command').textContent = `aws sso login --profile ${current.profile}`;
+    $('check-command').textContent = `aws sts get-caller-identity --no-verify-ssl --profile ${current.profile}`;
+    $('login-command').textContent = `aws sso login --no-verify-ssl --profile ${current.profile}`;
     if (document.activeElement !== $('profile-input')) $('profile-input').value = current.profile;
     $('dialog-login').disabled = pending;
     $('check-now').disabled = checking || pending;
