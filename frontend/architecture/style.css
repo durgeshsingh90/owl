@@ -261,12 +261,42 @@ table.dl-table tr.dl-first td{border-top:1px solid var(--border)}
 .dl-status.unknown{color:var(--muted)}
 .dl-status.connected{color:var(--pass)}
 .dl-status.failed{color:var(--fail)}
+.dl-timer{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;padding-left:8px;white-space:nowrap}
+.dl-timer.soon{color:var(--warn)}
+.dl-tags{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-top:3px}
+.dl-tag{display:inline-flex;align-items:center;gap:3px;padding:1px 7px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-size:11px;white-space:nowrap}
+.dl-tag button{height:auto;padding:0 0 0 2px;border:0;background:none;color:inherit;font-size:11px;line-height:1}
+.dl-tag button:hover:not(:disabled){background:none;color:var(--fail)}
+.dl-tag-add{height:22px;min-width:24px;padding:0 6px;font-size:11px;border-radius:999px}
+.dl-tag-input{height:22px;width:110px;padding:0 6px;font-size:11px}
+.dl-count{text-align:center;font-variant-numeric:tabular-nums}
 .dl-test{height:28px;padding:0 12px;font-size:12px}
 .dl-partial{color:var(--warn);font-size:11px}
 .dl-note td{padding:0 14px 8px;font-size:12px;overflow-wrap:anywhere;border-top:0}
 .dl-problem{color:var(--fail)}
 .dl-denied{color:var(--warn)}
 .dl-login{padding:10px 14px;border-radius:10px;background:var(--accent-soft);font-size:13px;margin-bottom:12px}
+
+/* Search AWS */
+.ex-bar #ex-q{flex:1;min-width:260px;height:38px;font-size:14px}
+.ex-summary{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:4px 0 12px;font-size:13px}
+.ex-results{display:flex;flex-direction:column;gap:8px}
+.ex-result{display:block;width:100%;height:auto;padding:10px 14px;text-align:left;white-space:normal;border-radius:10px;border:1px solid var(--line);background:var(--surface);font-size:13px}
+.ex-result:hover:not(:disabled){border-color:var(--accent);background:var(--surface)}
+.ex-title{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:3px}
+.ex-type{font-size:12px;color:var(--accent)}
+.ex-snippet{font-size:12px;margin-top:3px;overflow-wrap:anywhere}
+.ex-split{display:block}
+.ex-split.open{display:grid;grid-template-columns:minmax(300px,2fr) minmax(420px,3fr);gap:14px;align-items:start}
+.ex-split.open #ex-body{max-height:calc(100vh - 210px);overflow:auto;padding-right:4px}
+#ex-viewer{display:none;width:100%;height:calc(100vh - 210px);border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+.ex-split.open #ex-viewer{display:block}
+.ex-result.active{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent)}
+.link-like{color:var(--accent);cursor:pointer}
+.link-like:hover{text-decoration:underline}
+@media (max-width:1000px){.ex-split.open{grid-template-columns:1fr}.ex-split.open #ex-body{max-height:40vh}}
+.ex-pages{justify-content:center;margin-top:12px}
+mark{background:var(--warn-bg);color:inherit;border-radius:3px;padding:0 1px}
 
 /* Timeline (same pattern as the Bitbucket PDF timeline) */
 table.timeline .timeline-date-row th{position:relative;padding:12px 14px 8px 40px;background:var(--side);font-size:12px;font-weight:500;color:var(--text);border-bottom:1px solid var(--line)}

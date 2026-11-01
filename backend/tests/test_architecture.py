@@ -236,20 +236,136 @@ class Scenarios(Base):
         self.assertEqual(critical[0].title, "PROD Payment API cannot reach Payment Provider over TCP/443.")
 
 
-class DownloadAll(Base):
-    def test_everything_covers_every_account_with_a_profile(self):
+class GlobalSearch(Base):
+    def setUp(self):
+        super().setUp()
+        from app.architecture import download
+
+        def account(account_id, name, env, resources, lookups=()):
+            folder = download.media_folder() / f"{account_id}-{name}" / env
+            download._write(folder / "account.json", {"Account": {"Id": account_id, "Name": f"mc-{name}-{env}", "Created": "2021-01-02T00:00:00+00:00"}})
+            download._write(folder / "state.json", {"resources": resources})
+            download._write(folder / "global" / "dns-lookups.json", {"DnsLookups": list(lookups)})
+
+        def item(kind, resource_id, name="", **attributes):
+            return {"type": kind, "id": resource_id, "name": name, "region": "eu-west-2", "created_at": "", "attributes": attributes}
+
+        account("111111111111", "payments", "prod", [
+            item("aws_lb", "arn:lb/payments-nlb", "payments-nlb", Type="network", DNSName="internal-payments.elb.amazonaws.com"),
+            item("aws_eks_cluster", "arn:eks/orders", "orders", version="1.31", Tags=[{"Key": "team", "Value": "payments squad"}]),
+            item("aws_subnet", "subnet-1", "app-a", CidrBlock="10.20.10.0/24"),
+            item("aws_vpc", "vpc-1", "main", CidrBlock="10.20.0.0/16"),
+        ], [{"name": "ledger.corp.sep", "status": "resolved", "ips": ["10.100.5.7"], "source": "Route 53", "looked_up_at": "2026-11-01T00:00:00+00:00"}])
+        account("222222222222", "billing", "nonp", [item("aws_lb", "arn:lb/billing", "billing-alb", Type="application")])
+
+    def find(self, query, **kw):
+        from app.architecture import search
+
+        return search.search(query, **kw)
+
+    def test_best_matches_come_first(self):
+        answer = self.find("payments-nlb")
+        self.assertEqual((answer["results"][0]["name"], answer["results"][0]["tier"]), ("payments-nlb", "Exact"))
+        ranked = self.find("payments")["results"]
+        self.assertEqual(ranked[0]["type"], "aws_account")  # the name itself
+        self.assertLess([r["name"] for r in ranked].index("payments-nlb"), [r["name"] for r in ranked].index("orders"))  # name above a tag value
+
+    def test_all_words_outrank_most_words(self):
+        results = self.find("payments network billing")["results"]
+        self.assertEqual(results[0]["name"], "payments-nlb")
+        self.assertEqual((results[0]["matched"], results[0]["of"], results[0]["tier"]), (2, 3, "Most words"))
+        self.assertEqual(self.find("network payments")["results"][0]["tier"], "All words")
+
+    def test_near_match_for_typos(self):
+        answer = self.find("paymants")
+        self.assertTrue(answer["total"])
+        self.assertEqual(answer["results"][0]["tier"], "Near match")
+        self.assertIn("payments", answer["near_words"]["paymants"])
+        self.assertEqual(self.find("zzqqxx")["total"], 0)
+
+    def test_anything_is_searchable(self):
+        self.assertEqual(self.find("subnet-1")["results"][0]["id"], "subnet-1")
+        self.assertEqual(self.find("10.20.10.0/24")["results"][0]["id"], "subnet-1")
+        self.assertEqual(self.find("10.100.5.7")["results"][0]["type"], "dns_lookup")
+        self.assertEqual(self.find("squad")["results"][0]["name"], "orders")
+        self.assertEqual(self.find("222222222222")["results"][0]["account"], "222222222222")
+        self.assertEqual(self.find("PAYMENTS-NLB")["results"][0]["name"], "payments-nlb")
+
+    def test_an_ip_finds_the_ranges_holding_it(self):
+        results = self.find("10.20.10.5")["results"]
+        self.assertEqual({r["id"] for r in results}, {"subnet-1", "vpc-1"})
+        self.assertEqual(next(r for r in results if r["id"] == "subnet-1")["contains"], "10.20.10.0/24")
+
+    def test_filters_and_index_refresh(self):
+        from app.architecture import download
+
+        self.assertEqual({r["type"] for r in self.find("payments", kind="aws_lb")["results"]}, {"aws_lb"})
+        self.assertEqual(self.find("newthing")["total"], 0)
+        folder = download.media_folder() / "222222222222-billing" / "nonp"
+        download._write(folder / "state.json", {"resources": [{"type": "aws_vpc", "id": "vpc-newthing", "name": "", "attributes": {}}]})
+        import os
+        os.utime(folder / "state.json", (2000000000, 2000000000))
+        self.assertEqual(self.find("newthing")["total"], 1)
+
+    def test_account_tags(self):
+        client = TestClient(app)
+        url = "/api/architecture/download/tags/111111111111"
+        self.assertEqual(client.put(url, json={"tags": ["Team Pay", "team pay", "  critical  ", ""]}).json()["tags"], ["critical", "Team Pay"])
+        self.assertEqual(client.put("/api/architecture/download/tags/12", json={"tags": ["x"]}).status_code, 400)
+        results = self.find("critical")["results"]
+        self.assertEqual({r["account"] for r in results}, {"111111111111"})
+        self.assertEqual(results[0]["tags"], ["critical", "Team Pay"])
+        config = Path(self.temp.name) / "aws-config"
+        config.write_text("[profile mc-a-prod]\nsso_account_id = 111111111111\n")
+        with patch("app.architecture.download.config_path", return_value=str(config)):
+            body = client.get("/api/architecture/download").json()
+        self.assertEqual(body["all_tags"], ["critical", "Team Pay"])
+        self.assertEqual(body["groups"][0]["accounts"][0]["tags"], ["critical", "Team Pay"])
+        self.assertEqual(client.put(url, json={"tags": []}).json()["tags"], [])
+        self.assertEqual(self.find("critical")["total"], 0)
+
+    def test_api_opens_only_indexed_results(self):
+        client = TestClient(app)
+        result = client.get("/api/architecture/explore/search", params={"q": "payments-nlb"}).json()["results"][0]
+        full = client.get("/api/architecture/explore/resource", params={"file": result["file"], "index": result["index"]}).json()
+        self.assertEqual(full["attributes"]["Type"], "network")
+        self.assertEqual(client.get("/api/architecture/explore/resource", params={"file": os.path.abspath(__file__), "index": 0}).status_code, 404)
+
+
+class DownloadConnected(Base):
+    def test_only_connected_accounts_are_downloaded(self):
         from app.architecture import download
 
         config = Path(self.temp.name) / "aws-config"
-        config.write_text("[profile mc-a-prod]\nsso_account_id = 111111111111\n[profile mc-b-prod]\nsso_account_id = 222222222222\n")
+        config.write_text("".join(f"[profile mc-{n}-prod]\nsso_account_id = {a}\n" for n, a in (("a", "111111111111"), ("b", "222222222222"), ("c", "333333333333"), ("d", "444444444444"))))
         with patch("app.architecture.download.config_path", return_value=str(config)), \
                 patch("app.architecture.download.start_job", return_value={}) as job, patch("app.aws.connection._aws", return_value="aws"):
             client = TestClient(app)
+            # Selected but never tested: nothing to download.
             client.put("/api/architecture/download/selection", json={"account_ids": ["111111111111"]})
-            client.post("/api/architecture/download/start")
-            self.assertEqual([a["account_id"] for a in job.call_args[0][2]], ["111111111111"])
-            client.post("/api/architecture/download/start", json={"everything": True})
-            self.assertEqual([a["account_id"] for a in job.call_args[0][2]], ["111111111111", "222222222222"])
+            response = client.post("/api/architecture/download/start")
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("Test the accounts", response.json()["detail"])
+            job.assert_not_called()
+            download.remember("222222222222", connected=True)  # passed
+            download.remember("333333333333", connected=False)  # failed
+            download.remember("444444444444", connected=True)
+            info = download.account_info()
+            info["444444444444"]["session_until"] = "2020-01-01T00:00:00+00:00"  # session ended
+            download._write(download.info_file(), info)
+            self.assertEqual(client.post("/api/architecture/download/start").status_code, 202)
+            self.assertEqual([a["account_id"] for a in job.call_args[0][2]], ["222222222222"])
+
+    def test_failed_sign_in_marks_the_account_not_connected(self):
+        from app.architecture import download
+
+        config = Path(self.temp.name) / "aws-config"
+        config.write_text("[profile mc-a-prod]\nsso_account_id = 111111111111\n")
+        with patch("app.architecture.download.config_path", return_value=str(config)), patch("app.aws.connection.run_sts", return_value=(None, "ExpiredToken")):
+            download.remember("111111111111", connected=True)
+            with self.assertRaises(PermissionError):
+                download.download_account({"account_id": "111111111111"})
+            self.assertEqual(download.connected_accounts(), [])
 
 
 class Hybrid(Base):
@@ -615,6 +731,46 @@ class Times(Base):
                 self.assertEqual(download.denied_types("111111111111"), [])
                 download.test_account("111111111111")
                 self.assertEqual(calls("list-firewalls"), 3)
+
+    def test_session_timer_uses_the_sso_cache_then_twelve_hours(self):
+        from app.architecture import download
+
+        cache = Path(self.temp.name) / "sso"
+        cache.mkdir()
+        (cache / "a.json").write_text(json.dumps({"startUrl": "https://corp.awsapps.com/start/", "expiresAt": "2030-05-01T10:00:00Z", "accessToken": "secret-token"}))
+        (cache / "b.json").write_text(json.dumps({"clientId": "x", "expiresAt": "2031-01-01T00:00:00Z"}))
+        config = Path(self.temp.name) / "aws-config"
+        config.write_text("[sso-session corp]\nsso_start_url = https://corp.awsapps.com/start\nsso_region = eu-west-1\n"
+                          "[profile mc-a-prod]\nsso_session = corp\nsso_account_id = 111111111111\n"
+                          "[profile mc-b-prod]\nsso_account_id = 222222222222\n[profile mc-c-prod]\nsso_session = corp\nsso_account_id = 333333333333\n")
+        with patch("app.architecture.download.config_path", return_value=str(config)), patch("app.architecture.download.sso_cache_folder", return_value=cache):
+            download.remember("111111111111", connected=True)
+            download.remember("222222222222", connected=True)
+            first = download.account_info()["222222222222"]["session_until"]
+            download.remember("222222222222", connected=True)
+            self.assertEqual(download.account_info()["222222222222"]["session_until"], first)  # testing again doesn't extend it
+            by_id = {a["account_id"]: a for g in download.account_groups()["groups"] for a in g["accounts"]}
+            self.assertNotIn("secret-token", json.dumps(by_id))
+            self.assertEqual(by_id["111111111111"]["session"], {"expires_at": "2030-05-01T10:00:00+00:00", "source": "sso"})
+            self.assertEqual(by_id["222222222222"]["session"], {"expires_at": first, "source": "estimated"})
+            self.assertIsNone(by_id["333333333333"]["session"])  # not tested, so not shown as connected
+            download.remember("111111111111", connected=False)
+            self.assertIsNone(next(a for g in download.account_groups()["groups"] for a in g["accounts"] if a["account_id"] == "111111111111")["session"])
+
+    def test_times_connected_counts_new_connections(self):
+        from app.architecture import download
+
+        download.remember("111111111111", connected=True)
+        download.remember("111111111111", connected=True)  # same session: not a new connection
+        self.assertEqual(download.account_info()["111111111111"]["connects"], 1)
+        download.remember("111111111111", connected=False)
+        download.remember("111111111111", connected=True)  # came back
+        self.assertEqual(download.account_info()["111111111111"]["connects"], 2)
+        info = download.account_info()
+        info["111111111111"]["session_until"] = "2020-01-01T00:00:00+00:00"  # session ended
+        download._write(download.info_file(), info)
+        download.remember("111111111111", connected=True)
+        self.assertEqual(download.account_info()["111111111111"]["connects"], 3)
 
     def test_most_used_and_recent_are_calculated(self):
         from app.architecture import download

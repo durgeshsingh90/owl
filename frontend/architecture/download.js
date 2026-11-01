@@ -1,6 +1,6 @@
 "use strict";
 // AWS download: one line per account, the name shown once. Click a stage to select it, test
-// one line or all selected, click a status icon to sign in, then download what's selected.
+// one line or all selected, click a status icon to sign in, then download what's connected.
 AA.views.download = (() => {
   const {esc, api, toast} = AA;
   const TESTS_AT_ONCE = 6;
@@ -8,17 +8,19 @@ AA.views.download = (() => {
   const ICONS = {connected: `${SHARED}connected.png?v=2`, checking: `${SHARED}no-connection.gif?v=2`, failed: `${SHARED}disconnected.png?v=2`, unknown: "assets/not-tested.png"};
   let data = null, search = "", onlySelected = false, polling = null, login = null;
   const running = new Set();
-  let searchTyping;
+  let searchTyping, ticker, editingTag = "", tagFilter = "";
 
   const accounts = () => data.groups.flatMap((g) => g.accounts);
   const chosen = () => accounts().filter((a) => a.selected);
   const dateOnly = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"}) : "");
   const stamp = (iso) => (iso ? new Date(iso).toLocaleString(undefined, {dateStyle: "medium", timeStyle: "short"}) : "");
 
+  // Never tried: Not tested. Tried but never worked: Not connected. Worked before: Disconnected.
   function statusOf(a) {
     if (running.has(a.account_id)) return ["checking", "Testing…", ""];
     const i = a.info || {};
-    if (i.connected === true) return ["connected", "Connected", `${i.arn || ""}. Last tested ${stamp(i.checked_at)}. Click to test again.`];
+    if (isConnected(a)) return ["connected", "Connected", `${i.arn || ""}. Last tested ${stamp(i.checked_at)}. Click to test again.`];
+    if (a.connects > 0 || i.connected === true) return ["failed", "Disconnected", `${i.error || "The session has ended."} Click to sign in again.`];
     if (i.connected === false) return ["failed", "Not connected", `${i.error || ""} Click to sign in.`];
     return ["unknown", "Not tested", "Click to sign in."];
   }
@@ -32,6 +34,32 @@ AA.views.download = (() => {
     if (!job.finished) return "";
     const failed = job.accounts.filter((a) => a.state === "failed").length;
     return `Last download ${new Date(job.finished * 1000).toLocaleString()} · ${job.accounts.length - failed}/${job.accounts.length} downloaded${failed ? ` · ${failed} failed` : ""}${job.error ? ` · ${job.error}` : ""}`;
+  }
+
+  const isConnected = (a) => a.info?.connected === true && (!a.session || new Date(a.session.expires_at).getTime() > Date.now());
+
+  function timeLeft(session) {
+    const left = Math.floor((new Date(session.expires_at).getTime() - Date.now()) / 1000);
+    if (left <= 0) return "Expired";
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${session.source === "sso" ? "" : "~"}${Math.floor(left / 3600)}h ${pad(Math.floor(left / 60) % 60)}m ${pad(left % 60)}s left`;
+  }
+
+  // Counts down once a second without redrawing the table; at zero the row shows Not connected.
+  function tick(main) {
+    let expired = false;
+    main.querySelectorAll(".dl-timer").forEach((node) => {
+      const account = accounts().find((a) => a.account_id === node.dataset.account);
+      if (!account?.session) return;
+      node.textContent = timeLeft(account.session);
+      const left = new Date(account.session.expires_at).getTime() - Date.now();
+      node.classList.toggle("soon", left < 3600000);
+      if (left <= 0 && account.info?.connected) {
+        account.info = {...account.info, connected: false, error: "The session has ended."};
+        expired = true;
+      }
+    });
+    if (expired) list(main);
   }
 
   const deniedOf = (a, s) => [...new Set([...(a.info?.denied_types || []), ...(a.info?.denied || []), ...(s?.denied || [])])].sort();
@@ -56,12 +84,14 @@ AA.views.download = (() => {
     const problems = notes(a, states);
     const job = s?.state === "running" ? "Downloading…" : s?.state === "queued" ? "Queued" : stamp(a.downloaded_at);
     return `<tr class="${first ? "dl-first" : ""}">${nameCell}
-      <td><button type="button" class="dl-pick" data-pick="${esc(a.account_id)}" aria-pressed="${a.selected}" title="${a.selected ? "Selected for download. Click to remove" : "Click to select for download"}">${esc(a.stage)}</button></td>
+      <td><button type="button" class="dl-pick" data-pick="${esc(a.account_id)}" aria-pressed="${a.selected}" title="${a.selected ? "Selected for Test selected. Click to remove" : "Click to select for Test selected"}">${esc(a.stage)}</button></td>
       <td class="mono">${esc(a.account_id)}</td>
       <td class="nowrap" ${i.created_error ? `title="${esc(i.created_error)}"` : ""}>${i.created ? esc(dateOnly(i.created)) : `<span class="muted">${i.created_error ? "No access" : "—"}</span>`}</td>
       <td class="small nowrap">${job ? esc(job) : '<span class="muted">Never</span>'}</td>
-      <td><button type="button" class="dl-status ${state}" data-status="${esc(a.account_id)}" title="${esc(tip)}"><img src="${ICONS[state]}" alt="">${esc(label)}</button>${state === "connected" && denied.length ? `<div class="dl-partial">${denied.length} type${denied.length === 1 ? "" : "s"} denied</div>` : ""}</td>
-      <td><button type="button" class="dl-test" data-test="${esc(a.account_id)}" ${running.has(a.account_id) ? "disabled" : ""}>Test</button></td></tr>${problems ? `<tr class="dl-note"><td colspan="6">${problems}</td></tr>` : ""}`;
+      <td><div class="dl-tags">${(a.tags || []).map((t) => `<span class="dl-tag">${esc(t)}<button type="button" data-untag="${esc(t)}" data-account="${esc(a.account_id)}" aria-label="Remove tag ${esc(t)}">×</button></span>`).join("")}${editingTag === a.account_id ? `<input class="dl-tag-input" data-tag-input="${esc(a.account_id)}" list="dl-tag-list" placeholder="New or existing" aria-label="Add a tag" maxlength="40">` : `<button type="button" class="dl-tag-add" data-tag-add="${esc(a.account_id)}" title="Add a tag" aria-label="Add a tag">+</button>`}</div></td>
+      <td class="dl-count" title="New connections made: testing again during a live session doesn't count">${a.connects || 0}</td>
+      <td><button type="button" class="dl-status ${state}" data-status="${esc(a.account_id)}" title="${esc(tip)}"><img src="${ICONS[state]}" alt="">${esc(label)}</button>${state === "connected" && a.session ? `<div class="dl-timer" data-expires="${esc(a.session.expires_at)}" data-account="${esc(a.account_id)}" title="${esc(a.session.source === "sso" ? `Session ends ${stamp(a.session.expires_at)}, from the AWS sign-in` : `About 12 hours from the first successful test, ending ${stamp(a.session.expires_at)}`)}">${esc(timeLeft(a.session))}</div>` : ""}${state === "connected" && denied.length ? `<div class="dl-partial">${denied.length} type${denied.length === 1 ? "" : "s"} denied</div>` : ""}</td>
+      <td><button type="button" class="dl-test" data-test="${esc(a.account_id)}" ${running.has(a.account_id) ? "disabled" : ""}>Test</button></td></tr>${problems ? `<tr class="dl-note"><td colspan="8">${problems}</td></tr>` : ""}`;
   }
 
   const nameOf = (group, a) => `${esc(group.name)}${a.info?.account_name && a.info.account_name !== group.name ? `<div class="small muted dl-aws-name">${esc(a.info.account_name)}</div>` : ""}`;
@@ -73,7 +103,7 @@ AA.views.download = (() => {
 
   // Anything can be searched: words can be in any order and match name, stage, number or profile.
   function matches(group, a, words) {
-    const text = [group.name, a.account_id, a.stage, a.profile, ...(a.profiles || []), a.info?.account_name || ""].join(" ").toLowerCase();
+    const text = [group.name, a.account_id, a.stage, a.profile, ...(a.profiles || []), ...(a.tags || []), a.info?.account_name || ""].join(" ").toLowerCase();
     return words.every((word) => text.includes(word));
   }
 
@@ -82,12 +112,16 @@ AA.views.download = (() => {
     const states = Object.fromEntries((job.accounts || []).map((a) => [a.account_id, a]));
     const words = search.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const rows = data.groups.map((g) => {
-      const items = g.accounts.filter((a) => (!onlySelected || a.selected) && matches(g, a, words));
+      const items = g.accounts.filter((a) => (!onlySelected || a.selected) && (!tagFilter || (a.tags || []).includes(tagFilter)) && matches(g, a, words));
       return items.length ? lines(g, items, states) : "";
     }).join("");
-    main.querySelector("#dl-list").innerHTML = rows || `<tr><td colspan="7" class="empty">No accounts match.</td></tr>`;
+    main.querySelector("#dl-list").innerHTML = rows || `<tr><td colspan="9" class="empty">No accounts match.</td></tr>`;
     const groupOf = new Map(data.groups.flatMap((g) => g.accounts.map((a) => [a.account_id, [g, a]])));
-    const browsing = !words.length && !onlySelected;
+    const browsing = !words.length && !onlySelected && !tagFilter;
+    main.querySelector("#dl-tag-list").innerHTML = (data.all_tags || []).map((t) => `<option value="${esc(t)}">`).join("");
+    const tagSelect = main.querySelector("#dl-tag-filter");
+    tagSelect.innerHTML = `<option value="">Any tag</option>` + (data.all_tags || []).map((t) => `<option ${t === tagFilter ? "selected" : ""}>${esc(t)}</option>`).join("");
+    tagSelect.hidden = !(data.all_tags || []).length;
     const section = (ids, box, body, count, extra) => {
       const items = browsing ? (ids || []).map((id) => groupOf.get(id)).filter(Boolean) : [];
       main.querySelector(box).hidden = !items.length;
@@ -105,12 +139,10 @@ AA.views.download = (() => {
     const count = chosen().length;
     const downloading = job.state === "running";
     const start = main.querySelector("#dl-start"), all = main.querySelector("#dl-test-all");
-    start.textContent = downloading ? "Downloading…" : `Download selected (${count})`;
-    start.disabled = downloading || !count;
-    const everything = main.querySelector("#dl-all");
-    const withProfile = accounts().filter((a) => a.profile).length;
-    everything.textContent = `Download all (${withProfile.toLocaleString()})`;
-    everything.disabled = downloading || !withProfile;
+    const connected = accounts().filter((a) => isConnected(a) && a.session).length;
+    start.textContent = downloading ? "Downloading…" : `Download connected (${connected.toLocaleString()})`;
+    start.disabled = downloading || !connected;
+    start.title = connected ? "Downloads every connected account" : "Test the accounts you want first. Only connected accounts download.";
     all.textContent = running.size ? "Testing…" : `Test selected (${count})`;
     all.disabled = Boolean(running.size) || !count;
     main.querySelector("#dl-total").textContent = data.total.toLocaleString();
@@ -136,6 +168,7 @@ AA.views.download = (() => {
         const account = accounts().find((a) => a.account_id === id);
         try {
           const r = await api(`/download/test/${id}`, {method: "POST"});
+          if (r.ok && !isConnected(account)) account.connects = (account.connects || 0) + 1;
           account.info = {...account.info, connected: r.ok, arn: r.arn, error: r.error, denied: r.denied, errors: r.errors, checked_at: new Date().toISOString(),
             ...(r.created !== undefined ? {created: r.created, created_error: r.created_error, account_name: r.account_name} : {})};
         } catch (error) {
@@ -189,19 +222,20 @@ AA.views.download = (() => {
   function render(main, app) {
     main.innerHTML = `<div class="dl-head"><h1>AWS download</h1>
         <div class="dl-counts"><span><b id="dl-total"></b> total</span><span><b id="dl-unique"></b> unique</span><span><b id="dl-selected"></b> selected</span></div>
-        <div class="dl-actions"><button type="button" id="dl-test-all"></button><button type="button" id="dl-all"></button><button type="button" class="primary" id="dl-start"></button></div></div>
+        <div class="dl-actions"><button type="button" id="dl-test-all"></button><button type="button" class="primary" id="dl-start"></button></div></div>
       ${data.error ? `<div class="error-box">${esc(data.error)}</div>` : ""}
       <div id="dl-login" class="dl-login" hidden></div>
       <div class="filters dl-filters"><input type="search" id="dl-search" placeholder="Search anything: name, account number, stage, profile" value="${esc(search)}">
+        <select id="dl-tag-filter" aria-label="Filter by tag" hidden></select><datalist id="dl-tag-list"></datalist>
         <label class="small"><input type="checkbox" id="dl-only" ${onlySelected ? "checked" : ""}> Selected only</label>
         <span id="dl-job" class="small muted" aria-live="polite"></span></div>
       <progress id="dl-progress" class="dl-progress" hidden></progress>
       <div id="dl-recent-box" hidden><h2 class="dl-section">Recent <span class="muted small">latest <span id="dl-recent-count"></span> tested, downloaded or copied in AWS Accounts</span></h2>
-        <div class="table-wrap"><table class="data dl-table"><thead><tr><th>Name</th><th>Stage</th><th>Account number</th><th>Account created</th><th>Last download</th><th>Status</th><th>Test</th></tr></thead><tbody id="dl-recent"></tbody></table></div></div>
+        <div class="table-wrap"><table class="data dl-table"><thead><tr><th>Name</th><th>Stage</th><th>Account number</th><th>Account created</th><th>Last download</th><th>Tags</th><th>Times connected</th><th>Status</th><th>Test</th></tr></thead><tbody id="dl-recent"></tbody></table></div></div>
       <div id="dl-top-box" hidden><h2 class="dl-section">Most used <span class="muted small">top <span id="dl-top-count"></span> by tests, downloads and AWS Accounts copies</span></h2>
-        <div class="table-wrap"><table class="data dl-table"><thead><tr><th>Name</th><th>Stage</th><th>Account number</th><th>Account created</th><th>Last download</th><th>Status</th><th>Test</th></tr></thead><tbody id="dl-top"></tbody></table></div></div>
+        <div class="table-wrap"><table class="data dl-table"><thead><tr><th>Name</th><th>Stage</th><th>Account number</th><th>Account created</th><th>Last download</th><th>Tags</th><th>Times connected</th><th>Status</th><th>Test</th></tr></thead><tbody id="dl-top"></tbody></table></div></div>
       <h2 class="dl-section">All accounts</h2>
-      <div class="table-wrap"><table class="data dl-table"><thead><tr><th>Name</th><th>Stage</th><th>Account number</th><th>Account created</th><th>Last download</th><th>Status</th><th>Test</th></tr></thead><tbody id="dl-list"></tbody></table></div>
+      <div class="table-wrap"><table class="data dl-table"><thead><tr><th>Name</th><th>Stage</th><th>Account number</th><th>Account created</th><th>Last download</th><th>Tags</th><th>Times connected</th><th>Status</th><th>Test</th></tr></thead><tbody id="dl-list"></tbody></table></div>
       <p class="small muted">Accounts from <span class="mono">${esc(data.aws_config)}</span>, saved to <span class="mono">${esc(data.media)}</span>. Read-only.</p>`;
     main.querySelector("#dl-search").addEventListener("input", (e) => {
       search = e.target.value;
@@ -212,7 +246,57 @@ AA.views.download = (() => {
       onlySelected = e.target.checked;
       list(main);
     });
+    main.querySelector("#dl-tag-filter").addEventListener("change", (e) => {
+      tagFilter = e.target.value;
+      list(main);
+    });
+    const saveTags = async (account, tags) => {
+      const previous = account.tags;
+      account.tags = tags;
+      try {
+        const saved = await api(`/download/tags/${account.account_id}`, {method: "PUT", body: {tags}});
+        account.tags = saved.tags;
+        data.all_tags = [...new Set(accounts().flatMap((a) => a.tags || []))].sort((x, y) => x.localeCompare(y));
+        if (tagFilter && !data.all_tags.includes(tagFilter)) tagFilter = "";
+      } catch (error) {
+        account.tags = previous;
+        toast(error.message);
+      }
+      list(main);
+    };
+    const onTagKey = (e) => {
+      const input = e.target.closest("[data-tag-input]");
+      if (!input) return;
+      if (e.type === "keydown" && e.key === "Escape") {
+        editingTag = "";
+        return list(main);
+      }
+      if (e.type === "keydown" && e.key !== "Enter") return;
+      const account = accounts().find((a) => a.account_id === input.dataset.tagInput);
+      const value = input.value.trim();
+      if (!editingTag) return;
+      editingTag = "";
+      if (value) saveTags(account, [...(account.tags || []), value]);
+      else list(main);
+    };
+    for (const id of ["#dl-list", "#dl-top", "#dl-recent"]) {
+      main.querySelector(id).addEventListener("keydown", onTagKey);
+      main.querySelector(id).addEventListener("focusout", onTagKey);
+    }
     const onTableClick = async (e) => {
+      const add = e.target.closest("[data-tag-add]");
+      if (add) {
+        editingTag = add.dataset.tagAdd;
+        list(main);
+        main.querySelector(`[data-tag-input="${editingTag}"]`)?.focus();
+        return;
+      }
+      const untag = e.target.closest("[data-untag]");
+      if (untag) {
+        const account = accounts().find((a) => a.account_id === untag.dataset.account);
+        saveTags(account, (account.tags || []).filter((t) => t !== untag.dataset.untag));
+        return;
+      }
       const find = (id) => accounts().find((a) => a.account_id === id);
       const pick = e.target.closest("[data-pick]");
       if (pick) {
@@ -239,7 +323,7 @@ AA.views.download = (() => {
       const status = e.target.closest("[data-status]");
       if (status && !running.has(status.dataset.status) && !login) {
         const account = find(status.dataset.status);
-        if (account.info?.connected === true) runTests(main, [account.account_id]);
+        if (isConnected(account)) runTests(main, [account.account_id]);
         else signIn(main, account);
       }
     };
@@ -247,19 +331,14 @@ AA.views.download = (() => {
     main.querySelector("#dl-top").addEventListener("click", onTableClick);
     main.querySelector("#dl-recent").addEventListener("click", onTableClick);
     main.querySelector("#dl-test-all").addEventListener("click", () => runTests(main, chosen().map((a) => a.account_id)));
-    const begin = async (everything) => {
+    main.querySelector("#dl-start").addEventListener("click", async () => {
       try {
-        data.job = await api("/download/start", {method: "POST", body: {everything}});
+        data.job = await api("/download/start", {method: "POST"});
         list(main);
         poll(main, app);
       } catch (error) {
         toast(error.message);
       }
-    };
-    main.querySelector("#dl-start").addEventListener("click", () => begin(false));
-    main.querySelector("#dl-all").addEventListener("click", () => {
-      const count = accounts().filter((a) => a.profile).length;
-      if (confirm(`Download all ${count} accounts? This can take a long time and makes many read-only AWS calls.`)) begin(true);
     });
     list(main);
   }
@@ -286,6 +365,12 @@ AA.views.download = (() => {
     main.innerHTML = `<div class="loading">Loading…</div>`;
     data = await api("/download");
     render(main, app);
+    clearInterval(ticker);
+    ticker = setInterval(() => {
+      if (!main.querySelector("#dl-list")) clearInterval(ticker);
+      else tick(main);
+    }, 1000);
+    tick(main);
     if (data.job?.state === "running") poll(main, app);
   };
 })();

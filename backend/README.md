@@ -281,7 +281,8 @@ sets the port from that hop on (NLB 443 → pods 8443).
 **AWS download** lists every account in the AWS config (on Windows
 `C:\Users\<you>\.aws\config`, or the path set in the AWS Accounts app), one row per
 `mc-<name>-<stage>` name with a button per stage. Click stages to select them, test any
-one or all selected with `aws sts get-caller-identity`, then download the selected ones.
+one or all selected with `aws sts get-caller-identity`, then download: only accounts whose
+latest test passed and whose session hasn't ended are downloaded.
 The selection is saved in `architecture/download.json`. Each account's access is checked
 first (one item of each resource type); denied types are never called and show as UNKNOWN
 in the analysis. Private zone records, VPC endpoint and load balancer names and project
@@ -291,6 +292,9 @@ with all its properties (network, peering, VPN, Direct Connect, ingress, EKS and
 AWS Config) or firewall policies and rule groups are read, so firewall checks stay UNKNOWN.
 Created and updated times come from fields AWS returns on the resource itself. **Timeline** shows these newest first under
 Today / Yesterday / This week / ... / month headings, like the Bitbucket timeline.
+
+**Search AWS** searches everything downloaded, best matches first: exact name or id, all
+words, most words, then near matches for typos. An IP also finds the CIDRs that contain it.
 
 The refresh button downloads a project's accounts with the `aws` command (run through
 subprocess; AWS CLI v2 must be on PATH, and every aws command adds `--no-verify-ssl` unless

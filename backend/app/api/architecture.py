@@ -6,6 +6,7 @@ Read-only over AWS: inventories are imported JSON, never fetched from AWS.
 import json
 
 from app.architecture import download, engine, store
+from app.architecture import search as global_search
 from app.aws import connection as aws_connection
 from app.architecture.models import COLLECTIONS, Project
 from fastapi import APIRouter, HTTPException, Query
@@ -208,6 +209,15 @@ def resource_state(account_id: str):
     return state
 
 
+class AccountTags(BaseModel):
+    tags: list[str] = Field(max_length=50)
+
+
+@router.put("/download/tags/{account_id}")
+def save_tags(account_id: str, value: AccountTags):
+    return {"account_id": account_id, "tags": download.set_tags(account_id, value.tags)}
+
+
 @router.post("/download/denied/{account_id}/reset")
 def retry_denied(account_id: str):
     """Forget the account's denied types, so the next test or download tries them again."""
@@ -221,20 +231,32 @@ def test_connectivity(account_id: str):
     return download.test_account(account_id)
 
 
-class StartDownload(BaseModel):
-    everything: bool = False
-
-
 @router.post("/download/start", status_code=202)
-def start_download(value: StartDownload | None = None):
-    """Download the selected accounts, or all of them (read-only), then snapshot them."""
+def start_download():
+    """Download the connected accounts (read-only), then snapshot them."""
     _require_aws_cli()
-    return download.start_all(bool(value and value.everything))
+    return download.start_all()
 
 
 @router.get("/download/status")
 def download_status():
     return download.status("all")
+
+
+@router.get("/explore/search")
+def explore_search(q: str = Query("", max_length=500), type: str = "", account: str = "",
+                   limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
+    """Search everything downloaded, best matches first."""
+    return global_search.search(q, kind=type, account=account, limit=limit, offset=offset)
+
+
+@router.get("/explore/resource")
+def explore_resource(file: str = Query(max_length=2000), index: int = Query(ge=-1)):
+    """One result's full properties. Only files in the search index can be read."""
+    try:
+        return global_search.resource(file, index)
+    except KeyError as error:
+        _missing(error)
 
 
 @router.get("/catalog")

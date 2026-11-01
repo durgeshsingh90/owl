@@ -675,3 +675,27 @@
   // Start once every module has loaded.
   window.addEventListener("DOMContentLoaded", () => JV.render());
 })();
+
+// Other OWL apps can open a document here: ?open=<OWL API path>&name=<tab name>, or a message
+// to an embedded copy. Only same-origin /api/ paths are read.
+(() => {
+  const openRemote = async (path, name) => {
+    if (!/^\/api\//.test(path)) return;
+    try {
+      const response = await fetch(path, {cache: "no-store"});
+      if (!response.ok) throw new Error();
+      JV.openText(await response.text(), name || "document.json", {format: "json"});
+    } catch {
+      JV.toast?.(`Couldn't open ${name || path}.`);
+    }
+  };
+  window.addEventListener("message", (event) => {
+    if (event.origin === location.origin && event.data?.type === "owl-open") openRemote(event.data.path, event.data.name);
+  });
+  const params = new URLSearchParams(location.search);
+  if (params.get("embed")) document.body.classList.add("embedded");
+  window.addEventListener("load", () => {
+    if (params.get("open")) openRemote(params.get("open"), params.get("name"));
+    if (window.parent !== window) window.parent.postMessage({type: "owl-viewer-ready"}, location.origin);
+  });
+})();

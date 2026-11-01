@@ -2,7 +2,7 @@
 // Architecture Analyser: state, loading, routing, the analysis drawer and the evidence viewer.
 (() => {
   const {esc, api, toast, store} = AA;
-  const VIEWS = ["setup", "download", "timeline", "overview", "architecture", "connectivity", "requirements", "findings", "environments", "accounts", "tad", "import", "standards"];
+  const VIEWS = ["setup", "download", "explore", "timeline", "overview", "architecture", "connectivity", "requirements", "findings", "environments", "accounts", "tad", "import", "standards"];
   const main = document.querySelector("#main");
   const drawer = document.querySelector("#drawer");
   const modal = document.querySelector("#modal");
@@ -163,8 +163,8 @@
     const view = currentView();
     document.querySelectorAll("#sidebar a").forEach((a) => a.classList.toggle("active", a.dataset.view === view));
     // Project, environment and snapshot only show where they change the page.
-    document.querySelector("#context-bar").hidden = ["download", "timeline", "import"].includes(view);
-    if (view === "setup" || view === "download" || view === "timeline") {
+    document.querySelector("#context-bar").hidden = ["download", "explore", "timeline", "import"].includes(view);
+    if (view === "setup" || view === "download" || view === "explore" || view === "timeline") {
       try {
         await AA.views[view](main, app);
       } catch (error) {

@@ -572,9 +572,81 @@ def remember(account_id, **fields):
     with _lock:
         info = account_info()
         before = info.get(account_id, {})
+        if fields.get("connected") is True:
+            # A connection lasts 12 hours: the clock starts when it was first seen working.
+            now = datetime.now(timezone.utc)
+            # Older records had a session but no count: that session was one connection.
+            connects = before.get("connects", 1 if before.get("session_until") else 0)
+            if before.get("session_until", "") > now.isoformat(timespec="seconds"):
+                fields["session_until"] = before["session_until"]  # still the same connection
+            else:
+                fields["session_until"] = iso(now.timestamp() + connection.SESSION)
+                connects += 1
+            fields["connects"] = connects
+        elif fields.get("connected") is False:
+            fields["session_until"] = ""
         info[account_id] = {**before, **fields, "uses": before.get("uses", 0) + 1,
                             "last_used": datetime.now(timezone.utc).isoformat(timespec="seconds")}
         _write(info_file(), info)
+
+
+def tags_file():
+    return store.ensure() / "account-tags.json"
+
+
+def account_tags():
+    path = tags_file()
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def set_tags(account_id, tags):
+    """Your own labels for an account, kept in OWL: AWS itself isn't changed."""
+    if not ACCOUNT.match(account_id):
+        raise ValueError(f"{account_id!r} is not a 12-digit AWS account id.")
+    clean = {}
+    for tag in tags:
+        tag = " ".join(str(tag).split())[:40]
+        if tag:
+            clean.setdefault(tag.lower(), tag)
+    with _lock:
+        saved = account_tags()
+        if clean:
+            saved[account_id] = sorted(clean.values(), key=str.lower)
+        else:
+            saved.pop(account_id, None)
+        _write(tags_file(), saved)
+    return saved.get(account_id, [])
+
+
+def sso_cache_folder():
+    return Path("~/.aws/sso/cache").expanduser()
+
+
+def sso_expiries():
+    """When each SSO sign-in really ends, by start URL. Only those two fields are read from
+    the CLI's cache: the tokens beside them are never used or passed on."""
+    found = {}
+    for path in sso_cache_folder().glob("*.json"):
+        try:
+            entry = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(entry, dict) and entry.get("startUrl") and entry.get("expiresAt"):
+            url, ends = entry["startUrl"].rstrip("/"), iso(entry["expiresAt"])
+            if ends > found.get(url, ""):
+                found[url] = ends
+    return found
+
+
+def session_of(entry, profile_items, expiries):
+    """How long a connected account's session lasts: the SSO cache, else 12 hours from its test."""
+    if entry.get("connected") is not True:
+        return None
+    for item in profile_items:
+        ends = expiries.get(str(item.get("sso_start_url") or "").rstrip("/"))
+        if ends:
+            return {"expires_at": ends, "source": "sso"}
+    return {"expires_at": entry["session_until"], "source": "estimated"} if entry.get("session_until") else None
 
 
 def denied_types(account_id):
@@ -644,6 +716,7 @@ def download_account(account, progress=lambda text: None):
     profile, profile_region = profile_for(account_id, account.get("profile", ""))
     identity, problem = connection.run_sts(profile)
     if not identity:
+        remember(account_id, connected=False, error=str(problem or ""), checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
         raise PermissionError(f"Profile {profile} can't sign in: {problem} Log in, then download again.")
     if identity.get("Account") != account_id:
         raise PermissionError(f"Profile {profile} signs in to {identity.get('Account')}, not {account_id}.")
@@ -894,6 +967,8 @@ def account_groups():
     have = downloaded(sorted(set(found) | selected))
     info = account_info()
     copies = copy_counts()
+    expiries = sso_expiries()
+    tags = account_tags()
     groups = {}
     for account_id in sorted(set(found) | selected):
         profile_names = [p["profile"] for p in found.get(account_id, [])]
@@ -903,6 +978,9 @@ def account_groups():
             "account_id": account_id, "stage": stage or first or "account", "profile": first, "profiles": profile_names,
             "selected": account_id in selected, "downloaded_at": (have.get(account_id) or {}).get("downloaded_at", ""),
             "info": info.get(account_id, {}),
+            "tags": tags.get(account_id, []),
+            "connects": info.get(account_id, {}).get("connects", 1 if info.get(account_id, {}).get("session_until") else 0),
+            "session": session_of(info.get(account_id, {}), found.get(account_id, []), expiries),
             "uses": info.get(account_id, {}).get("uses", 0) + sum(copies.get(k, (0, ""))[0] for k in [account_id, *profile_names]),
             "last_used": max((iso(v) for v in [info.get(account_id, {}).get("last_used") or info.get(account_id, {}).get("checked_at"),
                                                *(copies.get(k, (0, ""))[1] for k in [account_id, *profile_names])] if v), default=""),
@@ -912,16 +990,30 @@ def account_groups():
                for name, items in sorted(groups.items())]
     used = sorted(((a["uses"], g["name"], a["stage"], a["account_id"]) for g in listing for a in g["accounts"] if a["uses"]), key=lambda i: (-i[0], i[1], i[2]))
     recent = sorted(((a["last_used"], a["account_id"]) for g in listing for a in g["accounts"] if a["last_used"]), reverse=True)
-    return {"groups": listing, "top": [i[3] for i in used[:TOP_ACCOUNTS]], "recent": [i[1] for i in recent[:TOP_ACCOUNTS]], "total": sum(len(g["accounts"]) for g in listing), "unique": len(listing),
+    return {"groups": listing, "top": [i[3] for i in used[:TOP_ACCOUNTS]], "recent": [i[1] for i in recent[:TOP_ACCOUNTS]],
+            "all_tags": sorted({t for items in tags.values() for t in items}, key=str.lower), "total": sum(len(g["accounts"]) for g in listing), "unique": len(listing),
             "selected": len(selected), "error": error}
 
 
-def start_all(everything=False):
-    """Download the selected accounts, or every account in the AWS config that has a profile."""
+def connected_accounts():
+    """Accounts whose latest test passed and whose session hasn't ended: all a download touches."""
     config = download_config()
-    if everything:
-        accounts = [{"account_id": i, "name": "", "type": "", "regions": config["regions"], "profile": "", "environments": []}
-                    for i in sorted(profiles_by_account())]
-    else:
-        accounts = [{**a, "regions": a["regions"] or config["regions"], "environments": []} for a in config["accounts"]]
-    return start_job("all", "All accounts" if everything else "Selected accounts", accounts)
+    saved = {a["account_id"]: a for a in config["accounts"]}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    accounts = []
+    for group in account_groups()["groups"]:
+        for account in group["accounts"]:
+            session = account["session"]
+            if not session or session["expires_at"] <= now:
+                continue
+            entry = saved.get(account["account_id"], {})
+            accounts.append({"account_id": account["account_id"], "name": entry.get("name", ""), "type": entry.get("type", ""),
+                             "regions": entry.get("regions") or config["regions"], "profile": entry.get("profile", ""), "environments": []})
+    return accounts
+
+
+def start_all():
+    accounts = connected_accounts()
+    if not accounts:
+        raise ValueError("No connected accounts. Test the accounts you want first, then download.")
+    return start_job("all", "Connected accounts", accounts)
