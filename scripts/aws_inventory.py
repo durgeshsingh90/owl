@@ -53,6 +53,8 @@ total (the commands in aws_commands.json times regions times accounts, known up 
 accounts done, aws calls running, the rate, elapsed time (hh:mm:ss) and an ETA from the
 rate of the last eta_window commands. No logs unless asked: `sync --logs` (or
 `config logs=true`) shows log lines above the bar and writes _runs/<run>/run.log.
+The last step writes what changed into one SQLite database, inventory/inventory.db
+(aws_db.py; write_db=false turns it off), for SQL and for `aws_db.py search <text>`.
 Each account's sync time is saved in aws_accounts.json with its average (last 10 runs).
 Ctrl+C stops cleanly: finished accounts and regions are saved, nothing half done is
 written; a second Ctrl+C quits at once.
@@ -121,6 +123,9 @@ DEFAULT_SETTINGS = {
     # Daily runs skip the types that were empty or had no permission before (see "daily" in
     # aws_commands.json); every full_sweep_days an account lists everything again.
     "smart_skip": True,
+    # Last step of a sync: write what changed into one SQLite database (aws_db.py), in output_dir.
+    "write_db": True,
+    "db_file": "inventory.db",
     "full_sweep_days": 7,
 }
 
@@ -2015,8 +2020,32 @@ def cmd_sync(args):
         print(line, file=sys.stderr)
     print(f"Files in {os.path.relpath(run.out)}{os.sep}. See: aws_inventory.py changes, permissions", file=sys.stderr)
     if not stopped and not getattr(args, "follow_up", False):
-        return add_missing_types(run, args, results) or 0
-    return 130 if stopped else 0
+        follow_up = add_missing_types(run, args, results)
+        if follow_up is not None:
+            return follow_up  # that sync writes the database at its end
+    if stopped:
+        if run.settings["write_db"]:
+            print("Database not updated (stopped): the next run catches up, or run aws_db.py.", file=sys.stderr)
+        return 130
+    return write_database(run, results, summary)
+
+
+def write_database(run, results, summary):
+    """The last step: the accounts of this run (and any the database is behind on) into SQLite."""
+    if not run.settings["write_db"]:
+        return 0
+    sys.path.insert(0, str(HERE))
+    import aws_db
+    accounts = [run.out / r["account_id"] for r in results.values()
+                if r.get("account_id") and (run.out / r["account_id"] / "_account.json").exists()]
+    try:
+        aws_db.update(run.out / run.settings["db_file"], run.out, accounts, run=summary)
+    except KeyboardInterrupt:
+        print("\nStopped writing the database: accounts written so far are in it; the next run continues.",
+              file=sys.stderr)
+        return 130
+    print(f"Search it: aws_db.py search <text>", file=sys.stderr)
+    return 0
 
 
 def coverage_summary(run, results):

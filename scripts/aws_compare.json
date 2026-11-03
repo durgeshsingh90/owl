@@ -1,0 +1,41 @@
+{
+  "_help": [
+    "Settings for aws_compare.py, which compares two accounts' inventories (e.g. nonp and prod).",
+    "env_words: words that can name an environment inside resource names; the script shows which ones it finds and asks which mean the environment on each side.",
+    "name_keys: fields that name a resource, tried after the Name tag. key_fields: what tells unnamed resources apart (a listener by its port).",
+    "ignore_keys: fields that always differ between accounts (dates, states, generated ids and DNS names); they are not compared.",
+    "expected_keys: fields that usually differ on purpose between environments (CIDRs, sizes, certificates); differences there are listed apart from the others."
+  ],
+  "env_words": [
+    "dev", "develop", "development", "tst", "test", "qa", "sit", "uat", "nonp", "nonprod", "stg", "stage", "staging",
+    "preprod", "perf", "mtf", "prd", "prod", "production", "dr", "sbx", "sandbox", "work"
+  ],
+  "name_keys": [
+    "Name", "name", "GroupName", "FunctionName", "RoleName", "UserName", "PolicyName", "InstanceProfileName",
+    "DBInstanceIdentifier", "DBClusterIdentifier", "DBProxyName", "DBSubnetGroupName", "LoadBalancerName",
+    "TargetGroupName", "TableName", "ClusterName", "clusterName", "CacheClusterId", "ReplicationGroupId",
+    "ServerlessCacheName", "CacheSubnetGroupName", "repositoryName", "AlarmName", "logGroupName", "StackName",
+    "AutoScalingGroupName", "LaunchTemplateName", "KeyName", "AliasName", "DomainName", "BucketName",
+    "FileSystemId", "Identifier", "nodegroupName", "fargateProfileName", "addonName", "serviceName"
+  ],
+  "key_fields": ["Port", "Protocol", "Priority", "RuleNumber"],
+  "ignore_keys": [
+    "CreateTime", "CreatedTime", "CreationTime", "CreationDate", "CreatedDate", "CreatedAt", "createdAt", "CreateDate",
+    "LaunchTime", "LastModified", "LastModifiedTime", "LastModifiedDate", "LastUpdatedTime", "LastUpdateTime",
+    "UpdateDate", "AttachTime", "StartTime", "ModifiedAt", "modifiedAt", "Timestamp", "UsageOperationUpdateTime",
+    "State", "state", "Status", "status", "StatusMessage", "StateReason", "StateTransitionReason", "HealthStatus",
+    "DNSName", "dnsName", "PublicDnsName", "PrivateDnsName", "PublicIpAddress", "PublicIp", "MacAddress",
+    "Ipv6Address", "AvailableIpAddressCount", "ETag", "Etag", "VersionId", "Version", "DefaultVersionId",
+    "LatestVersionNumber", "DefaultVersionNumber", "UniqueId", "RoleId", "UserId", "PolicyId", "OwnerId",
+    "RequesterId", "ClientToken", "RevisionId", "ReservationId", "AmiLaunchIndex", "ClientRequestToken",
+    "Endpoint", "ReaderEndpoint", "ConfigurationEndpoint", "endpoint", "CanonicalHostedZoneId",
+    "_parent_id", "_lookup", "ResponseMetadata"
+  ],
+  "expected_keys": [
+    "CidrBlock", "CidrBlockAssociationSet", "Ipv6CidrBlock", "Ipv6CidrBlockAssociationSet", "PrivateIpAddress",
+    "PrivateIpAddresses", "cidr", "AvailabilityZone", "AvailabilityZoneId", "AvailabilityZones",
+    "InstanceType", "DBInstanceClass", "CacheNodeType", "NodeType", "instanceTypes", "DesiredCapacity", "MinSize",
+    "MaxSize", "desiredSize", "minSize", "maxSize", "scalingConfig", "AllocatedStorage", "MaxAllocatedStorage",
+    "CertificateArn", "Certificates", "certificateArn"
+  ]
+}
