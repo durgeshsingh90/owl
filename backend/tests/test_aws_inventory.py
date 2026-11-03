@@ -331,5 +331,31 @@ class AwsInventoryTests(unittest.TestCase):
             self.assertIn("AWS Inventory", page.text)
 
 
+class SuffixAliasTests(unittest.TestCase):
+    """aws_compare.py reads an EKS cluster's differing random suffix as the same name."""
+
+    @staticmethod
+    def side(*idents):
+        return {"entries": [{"label": "us-east-1", "key": key, "ident": ident} for key, ident in idents]}
+
+    def test_cluster_suffix_is_learnt_from_its_names(self):
+        import aws_compare
+        source = self.side(("eks/clusters", "<env>_ghdjegd"), ("ec2/instances", "vpc/<env>_ghdjegd-node"),
+                           ("ec2/security_groups", "vpc/web-<env>"), ("ec2/security_groups", "vpc/app-<env>"))
+        target = self.side(("eks/clusters", "<env>_gdjhsw"), ("ec2/instances", "vpc/<env>_gdjhsw-node"),
+                           ("ec2/security_groups", "vpc/web-<env>"))
+        self.assertEqual(aws_compare.suffix_aliases([source, target]), [("ghdjegd", "gdjhsw", 2)])
+
+    def test_different_names_are_not_paired(self):
+        import aws_compare
+        # app also exists in the target, so app -> apiy is a different resource, not a suffix.
+        source = self.side(("ec2/security_groups", "vpc/app-<env>"), ("ec2/instances", "vpc/apix-<env>"))
+        target = self.side(("ec2/security_groups", "vpc/apiy-<env>"), ("ec2/instances", "vpc/app-<env>"))
+        self.assertEqual(aws_compare.suffix_aliases([source, target]), [])
+        # a single name differing is more likely a rename than a suffix
+        self.assertEqual(aws_compare.suffix_aliases([self.side(("eks/clusters", "<env>_aaaa")),
+                                                     self.side(("eks/clusters", "<env>_bbbb"))]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

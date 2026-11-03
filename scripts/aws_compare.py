@@ -16,6 +16,10 @@ listener's port), inside their VPC or parent, with the environment words of each
 read as the same word: web-dev in one account pairs with web-mtf in the other. Once
 paired, ids, ARNs and account numbers are read through the pairs, so a security group
 rule that points to sg-<dev web> matches one that points to sg-<mtf web>.
+Random suffixes that differ between the two (an EKS cluster dev_ghdjegd in one, mtf_gdjhsw
+in the other) are learnt from the names left unpaired and read as the same too: a suffix
+counts when it is the only difference in two or more names (the cluster, its node groups,
+nodes and security groups) and never appears on the other side (pair_suffixes).
 
 The report (console, and inventory/_compare/<source>-vs-<target>-<time>.json) lists:
     missing     in the source, not in the target (the step not done yet)
@@ -203,15 +207,19 @@ def main_words(counts):
     return [w for w, n in counts.most_common() if n >= max(2, top * 0.2)]
 
 
-def identities(entries, words, catalog):
+def identities(entries, words, catalog, aliases=None):
     """Give each resource its pairing key: its name with the environment words, account
-    numbers and generated ids taken out, inside its VPC or parent. Returns how this side's
-    values are cleaned for comparing (accounts and environment words, case kept)."""
+    numbers and generated ids taken out, inside its VPC or parent. aliases: this side's
+    random suffixes to read as a shared placeholder ({"ghdjegd": "<suffix1>"}). Returns how
+    this side's values are cleaned for comparing (accounts and environment words, case kept)."""
     pattern = env_pattern(words)
+    alias = (re.compile(r"(?<![a-z0-9])(?:" + "|".join(map(re.escape, aliases)) + r")(?![a-z0-9])", re.I)
+             if aliases else None)
 
     def clean_value(text):
         text = ACCOUNT.sub("<account>", str(text))
-        return pattern.sub("<env>", text) if pattern else text
+        text = pattern.sub("<env>", text) if pattern else text
+        return alias.sub(lambda m: aliases[m.group(0).lower()], text) if alias else text
 
     def clean(name):
         return clean_value(name).lower()
@@ -259,8 +267,44 @@ def identities(entries, words, catalog):
         return base
 
     for e in entries:
+        e.pop("ident", None)
+    for e in entries:
         ident(e)
     return clean_value
+
+
+TOKEN = re.compile(r"[a-z0-9]+")
+
+
+def suffix_aliases(sides, min_names=2):
+    """Random suffixes that differ between the sides, learnt from the names left unpaired:
+    [(source token, target token, names)]. A pair counts when it is the only difference
+    between an unpaired source name and an unpaired target name of the same type, in at
+    least min_names names, and neither token appears anywhere on the other side."""
+    left = collections.defaultdict(lambda: (set(), set()))
+    vocab = (set(), set())
+    for side, s in enumerate(sides):
+        for e in s["entries"]:
+            if e["ident"]:
+                left[e["label"], e["key"]][side].add(e["ident"])
+                vocab[side].update(TOKEN.findall(e["ident"]))
+    buckets = collections.defaultdict(lambda: (set(), set()))
+    for group, (a, b) in left.items():
+        for side, idents in ((0, a - b), (1, b - a)):
+            for ident in idents:
+                for token in set(TOKEN.findall(ident)):
+                    if len(token) >= 4 and not token.isdigit():
+                        masked = re.sub(rf"(?<![a-z0-9]){token}(?![a-z0-9])", "\x00", ident)
+                        buckets[group, masked][side].add(token)
+    votes = collections.Counter()
+    for a, b in buckets.values():
+        if len(a) == 1 and len(b) == 1 and a != b:
+            votes[next(iter(a)), next(iter(b))] += 1
+    found = [(a, b, n) for (a, b), n in votes.most_common()
+             if n >= min_names and a not in vocab[1] and b not in vocab[0]]
+    # One token on each side reads as one other only; a clash means neither is sure.
+    seen = collections.Counter([a for a, _, _ in found] + [b for _, b, _ in found])
+    return [(a, b, n) for a, b, n in found if seen[a] == 1 and seen[b] == 1]
 
 
 # ---------------------------------------------------------------------------- compare
@@ -571,6 +615,11 @@ def run(args):
     inv.write_json(pairs_file, remembered)
     for side, w in zip(sides, words):
         side["clean"] = identities(side["entries"], w, catalog)
+    aliases = suffix_aliases(sides) if cfg.get("pair_suffixes", True) else []
+    if aliases:
+        for i, side in enumerate(sides):
+            own = {pair[i]: f"<suffix{n}>" for n, pair in enumerate(aliases, 1)}
+            side["clean"] = identities(side["entries"], words[i], catalog, own)
 
     since_keys = None
     if args.since:
@@ -580,7 +629,7 @@ def run(args):
     report = {"source": {k: sides[0][k] for k in ("profile", "account", "synced", "found_words")} | {"env_words": words[0]},
               "target": {k: sides[1][k] for k in ("profile", "account", "synced", "found_words")} | {"env_words": words[1]},
               "since": args.since, "compared_at": inv.iso(inv.utc_now()), "read_from": "database" if db else "files",
-              **report}
+              "suffixes": [{"source": a, "target": b, "names": n} for a, b, n in aliases], **report}
     stamp = inv.utc_now().strftime("%Y%m%dT%H%M%SZ")
     path = out / "_compare" / f"{inv.safe_name(src_profile)}-vs-{inv.safe_name(dst_profile)}-{stamp}.json"
     inv.write_json(path, report)
@@ -643,6 +692,9 @@ def print_report(r, show, path):
     print(f"\nCompare {s['profile']} ({s['account']}, synced {s['synced']}) -> {t['profile']} ({t['account']}, synced {t['synced']})")
     print(f"Environment words: {', '.join(s['env_words']) or 'none'} -> {', '.join(t['env_words']) or 'none'}"
           + (f"; only what changed in the source since {r['since']}" if r["since"] else ""))
+    if r.get("suffixes"):
+        print("Suffixes read as the same: " + ", ".join(f"{x['source']} -> {x['target']} ({x['names']} names)"
+                                                       for x in r["suffixes"]))
     print(f"{r['pairs']:,} paired: {r['same']:,} the same, {len(r['different']):,} different, "
           f"{len(r['expected']):,} with expected differences | {len(r['missing']):,} missing in target, "
           f"{len(r['extra']):,} extra in target | {len(r['not_compared']):,} not compared")

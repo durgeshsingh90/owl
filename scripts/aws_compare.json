@@ -1,6 +1,7 @@
 {
   "_help": [
     "Settings for aws_compare.py, which compares two accounts' inventories (e.g. nonp and prod).",
+    "pair_suffixes: read random suffixes that differ between the two accounts as the same (an EKS cluster dev_ghdjegd vs mtf_gdjhsw), learnt from names that are otherwise the same; false turns it off.",
     "env_words: words that can name an environment inside resource names; the script shows which ones it finds and asks which mean the environment on each side.",
     "name_keys: fields that name a resource, tried after the Name tag. key_fields: what tells unnamed resources apart (a listener by its port).",
     "pair_by: for types that are often unnamed (subnets, route tables, ENIs...), what they are attached to pairs them instead.",
@@ -12,6 +13,7 @@
     "dev", "develop", "development", "tst", "test", "qa", "sit", "uat", "nonp", "nonprod", "stg", "stage", "staging",
     "preprod", "perf", "mtf", "prd", "prod", "production", "dr", "sbx", "sandbox", "work"
   ],
+  "pair_suffixes": true,
   "name_keys": [
     "Name", "name", "GroupName", "FunctionName", "RoleName", "UserName", "PolicyName", "InstanceProfileName",
     "DBInstanceIdentifier", "DBClusterIdentifier", "DBProxyName", "DBSubnetGroupName", "LoadBalancerName",

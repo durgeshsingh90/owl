@@ -916,6 +916,7 @@
           <div class="actions"><button class="button" type="submit" id="compare-again">Compare again with these words</button></div>
         </form>
         <p class="muted" style="margin:0;font-size:13px">A word marked “left out” is in some names but not used: those names show as missing or extra. Add it if that is on purpose.</p>
+        ${(r.suffixes || []).length ? `<p style="margin:10px 0 0;font-size:13px"><strong>Suffixes read as the same:</strong> ${r.suffixes.map(x => `<span class="chip plain" title="the only difference in ${number(x.names)} names">${esc(x.source)} → ${esc(x.target)} · ${number(x.names)}</span>`).join(" ")} <span class="muted">random suffixes (an EKS cluster's) learnt from names that are otherwise the same; set pair_suffixes to false in aws_compare.json to turn this off.</span></p>` : ""}
         <p id="compare-error" class="error" hidden></p>
       </section>
       ${tabBar(`#/compare/${encodeURIComponent(name)}`, tabs, current)}
