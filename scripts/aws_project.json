@@ -1,0 +1,17 @@
+{
+  "_help": [
+    "Settings for aws_project.py, which finds everything a project uses across its own accounts and the shared-services accounts, and works out its ingress, egress and DNS.",
+    "shared_accounts: account numbers or profiles of the shared-services accounts. shared_words: a profile or alias containing one of these words is a shared-services account too.",
+    "eks_env_pattern: how the environment is read from an EKS cluster name (dev_ghdjegd -> dev).",
+    "keyword_limit: at most this many shared-services resources are taken per keyword (they are found by full-text search).",
+    "test_ports: ports checked for traffic into the project when a load balancer's listeners do not say; egress_ports: ports checked out to the internet.",
+    "cluster_tags: tags that tie an instance or load balancer to an EKS cluster ({cluster} is the cluster name; a tag key ending in /{cluster} works too)."
+  ],
+  "shared_accounts": [],
+  "shared_words": ["shared", "centralized", "central", "transit", "hub"],
+  "eks_env_pattern": "^(?P<env>[A-Za-z]+)[_-]",
+  "keyword_limit": 500,
+  "test_ports": [443],
+  "egress_ports": [443],
+  "cluster_tags": ["eks:cluster-name", "aws:eks:cluster-name", "elbv2.k8s.aws/cluster", "kubernetes.io/cluster/{cluster}", "alpha.eksctl.io/cluster-name"]
+}

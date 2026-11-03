@@ -125,7 +125,10 @@
     {"service": "autoscaling", "type": "groups", "command": ["autoscaling", "describe-auto-scaling-groups"], "query": "AutoScalingGroups", "id": "AutoScalingGroupName", "network": "attach"},
 
     {"service": "elbv2", "type": "load_balancers", "command": ["elbv2", "describe-load-balancers"], "query": "LoadBalancers", "id": "LoadBalancerArn", "network": "attach",
-     "details": [{"key": "Attributes", "command": ["elbv2", "describe-load-balancer-attributes", "--load-balancer-arn", "{LoadBalancerArn}"], "query": "Attributes"}]},
+     "details": [
+       {"key": "Attributes", "command": ["elbv2", "describe-load-balancer-attributes", "--load-balancer-arn", "{LoadBalancerArn}"], "query": "Attributes"},
+       {"key": "Tags", "command": ["elbv2", "describe-tags", "--resource-arns", "{LoadBalancerArn}"], "query": "TagDescriptions[0].Tags"}
+     ]},
     {"service": "elbv2", "type": "listeners", "parent": "elbv2/load_balancers", "command": ["elbv2", "describe-listeners", "--load-balancer-arn", "{LoadBalancerArn}"], "query": "Listeners", "id": "ListenerArn",
      "details": [{"key": "Rules", "command": ["elbv2", "describe-rules", "--listener-arn", "{ListenerArn}"], "query": "Rules"}]},
     {"service": "elbv2", "type": "target_groups", "command": ["elbv2", "describe-target-groups"], "query": "TargetGroups", "id": "TargetGroupArn",
@@ -143,7 +146,10 @@
      "details": [{"key": "Listeners", "command": ["vpc-lattice", "list-listeners", "--service-identifier", "{id}"], "query": "items"}]},
     {"service": "vpc-lattice", "type": "target_groups", "command": ["vpc-lattice", "list-target-groups"], "query": "items", "id": "id"},
     {"service": "network-firewall", "type": "firewalls", "command": ["network-firewall", "list-firewalls"], "query": "Firewalls", "id": "FirewallArn", "network": "attach",
-     "details": [{"key": "Firewall", "command": ["network-firewall", "describe-firewall", "--firewall-arn", "{FirewallArn}"], "query": "Firewall"}]},
+     "details": [
+       {"key": "Firewall", "command": ["network-firewall", "describe-firewall", "--firewall-arn", "{FirewallArn}"], "query": "Firewall"},
+       {"key": "Status", "command": ["network-firewall", "describe-firewall", "--firewall-arn", "{FirewallArn}"], "query": "FirewallStatus"}
+     ]},
     {"service": "network-firewall", "type": "firewall_policies", "command": ["network-firewall", "list-firewall-policies"], "query": "FirewallPolicies", "id": "Arn",
      "details": [{"key": "Policy", "command": ["network-firewall", "describe-firewall-policy", "--firewall-policy-arn", "{Arn}"], "query": "FirewallPolicy"}]},
     {"service": "network-firewall", "type": "rule_groups", "command": ["network-firewall", "list-rule-groups"], "query": "RuleGroups", "id": "Arn",
