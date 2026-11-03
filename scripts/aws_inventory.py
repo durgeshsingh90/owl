@@ -1117,11 +1117,35 @@ def profile_for(account, data, from_config):
     return ask(f"  No profile in ~/.aws/config for {account}. Profile name (Enter to skip): ") or None
 
 
+REGION = re.compile(r"[a-z]{2}(-gov|-iso[a-z]?)?-[a-z]+-\d")
+
+
+def ask_regions(label, default):
+    """Regions for one account: a list, or "all". Enter keeps the default."""
+    shown = default if default == "all" else ", ".join(default)
+    while True:
+        answer = ask(f"  Regions for {label} [{shown}]: ")
+        if not answer:
+            return default
+        if answer.lower() == "all":
+            return "all"
+        regions = list(dict.fromkeys(r.lower() for r in re.split(r"[\s,]+", answer) if r))
+        wrong = [r for r in regions if not REGION.fullmatch(r)]
+        if not wrong:
+            return regions
+        print(f"  Not a region: {', '.join(wrong)} (e.g. us-east-1, eu-west-1, or all)")
+
+
 def cmd_interactive(args):
-    """Ask which accounts to sync; Enter syncs every account used before."""
+    """Ask which accounts and regions to sync; Enter syncs every account used before."""
     data = load_accounts()
     saved = [p for p, a in data["accounts"].items() if a.get("enabled", True)]
     print(f"{len(saved)} saved account(s) in {ACCOUNTS_FILE.name}.")
+    for p in sorted(saved, key=lambda p: data["accounts"][p].get("account_id", p))[:20]:
+        regions = data["accounts"][p].get("regions") or data["settings"]["regions"]
+        print(f"  {data['accounts'][p].get('account_id', '?'):14} {p:40} {regions if regions == 'all' else ', '.join(regions)}")
+    if len(saved) > 20:
+        print(f"  ... and {len(saved) - 20} more (see: aws_inventory.py list)")
     answer = ask("AWS account numbers (or profiles), separated by spaces or commas. Enter = all saved: ")
     if not answer:
         if not saved:
@@ -1144,6 +1168,9 @@ def cmd_interactive(args):
                 entry = data["accounts"].setdefault(profile, {"added": iso(utc_now())})
             else:
                 continue
+            label = f"{entry.get('account_id', profile)} ({profile})" if entry.get("account_id") else profile
+            # A known account offers its saved regions; a new one offers settings.regions (us-east-1).
+            entry["regions"] = ask_regions(label, entry.get("regions") or data["settings"]["regions"])
             entry["enabled"] = True
             entry["last_used"] = iso(utc_now())
             profiles.append(profile)
