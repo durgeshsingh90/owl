@@ -12,12 +12,16 @@ The accounts to scan are remembered in aws_accounts.json.
     python3 aws_inventory.py sync --profiles prod-profile --services ec2 elbv2 route53
     python3 aws_inventory.py changes --diff                     # what changed in the last sync
 
-Each account starts with `sts get-caller-identity`; an account that cannot connect is
-reported and skipped. Inside an account every region runs in parallel, and inside a
-region every resource type runs in its own worker (list, then the per-resource detail
-calls). Each resource is written to its own file, then everything is merged:
+First every account is checked with `sts get-caller-identity`, all at once; the result is
+printed and you confirm before anything else runs (sync --yes skips the question). An
+account that cannot sign in is skipped. Inside an account every region runs in parallel,
+and inside a region every resource type runs in its own worker (list, then the
+per-resource detail calls), which appends each finished resource to a temporary
+JSON-lines file; the files are then read back one resource at a time and saved, so a
+region is never held in memory. Each resource gets its own file, then the account is
+merged, again written piece by piece:
 
-    inventory/<account_id>/inventory.json                      the account merged: global + regions -> vpcs -> resources
+    inventory/<profile>-<account_id>.json                      the account merged: global + regions -> vpcs -> resources
     inventory/<account_id>/us-east-1/ec2/instances/<InstanceId>.json
     inventory/<account_id>/global/route53/hosted_zones/<zone>.json   records with nslookup answers
     inventory/<account_id>/_changelog.jsonl                    every change ever seen
@@ -28,6 +32,11 @@ A call that times out is tried once more; if it times out again it is saved as a
 timeout (the type keeps its previous files, a detail becomes {"_error": "Timeout"}).
 A sync lists every type each time, but repeats the per-resource detail calls only for
 resources whose list entry changed, or once detail_refresh_hours have passed.
+
+Each account's sync time is saved in aws_accounts.json with its average (last 10 runs);
+a status line shows done / running / pending accounts, the ETA and the average. Ctrl+C
+stops cleanly: finished accounts and regions are saved, nothing half done is written;
+a second Ctrl+C quits at once.
 """
 
 import argparse
@@ -40,9 +49,11 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 
@@ -74,6 +85,8 @@ DEFAULT_SETTINGS = {
     "dns_match": "",
     "dns_workers": 8,
     "dns_timeout": 20,
+    # How often the progress line (done / running / pending, ETA) is printed.
+    "status_seconds": 30,
 }
 
 # The profile may not read everything: these are skipped and saved as "no_permission".
@@ -172,6 +185,10 @@ def load_commands():
 
 # ---------------------------------------------------------------------------- aws cli
 
+class Stopped(Exception):
+    """Ctrl+C was pressed: stop starting new work and save nothing half done."""
+
+
 class AwsError(Exception):
     def __init__(self, code, message):
         super().__init__(f"{code}: {message}")
@@ -199,10 +216,11 @@ class AwsError(Exception):
 class Aws:
     """Runs `aws <args>` for one profile and returns the parsed JSON output."""
 
-    def __init__(self, profile, settings, gate):
+    def __init__(self, profile, settings, gate, stop=None):
         self.profile = profile
         self.settings = settings
         self.gate = gate
+        self.stop = stop
         self.env = {**os.environ, "AWS_PAGER": "", "PYTHONWARNINGS": "ignore"}
         self.env.setdefault("AWS_RETRY_MODE", "adaptive")
         self.env.setdefault("AWS_MAX_ATTEMPTS", "10")
@@ -230,11 +248,18 @@ class Aws:
     def run(self, cmd):
         log.debug("run %s", " ".join(cmd))
         with self.gate:
+            if self.stop and self.stop.is_set():
+                raise Stopped()
             try:
                 p = subprocess.run(cmd, capture_output=True, text=True, env=self.env, timeout=self.settings["call_timeout"])
             except subprocess.TimeoutExpired:
                 raise AwsError("Timeout", f"no answer in {self.settings['call_timeout']}s")
         if p.returncode != 0:
+            # Ctrl+C reaches the aws processes too, often before the script sees it: their
+            # failure is the stop, not an AWS error.
+            interrupted = p.returncode in (130, -signal.SIGINT) or "KeyboardInterrupt" in p.stderr
+            if interrupted or (self.stop and self.stop.is_set()):
+                raise Stopped()
             raise AwsError.from_stderr(p.stderr)
         out = p.stdout.strip()
         return json.loads(out) if out else None
@@ -343,56 +368,56 @@ def find_ids(obj, pattern, found):
     return found
 
 
-def add_network(resources, by_key, reference):
-    """Attach security group, network ACL and route rules to the resources that use them.
+def sg_rule_set(sg):
+    return {"inbound": sg_rules(sg.get("IpPermissions")), "outbound": sg_rules(sg.get("IpPermissionsEgress"))}
 
-    reference(key) returns that type's resources, from this sync or else from disk.
+
+def nacl_rule_set(acl):
+    return {"inbound": nacl_rules(acl.get("Entries"), False), "outbound": nacl_rules(acl.get("Entries"), True)}
+
+
+class NetworkIndex:
+    """One region's security group, network ACL and route rules, to attach to the resources that use them.
+
+    load(key) yields (id, resource) for that type, from this sync or else from disk. Only
+    the rules are kept, not the resources.
     """
-    sgs = reference("ec2/security_groups")
-    for sg in sgs.values():
-        sg["_rules"] = {"inbound": sg_rules(sg.get("IpPermissions")), "outbound": sg_rules(sg.get("IpPermissionsEgress"))}
-    nacls = reference("ec2/network_acls")
-    subnet_nacl = {}
-    for acl in nacls.values():
-        acl["_rules"] = {"inbound": nacl_rules(acl.get("Entries"), False), "outbound": nacl_rules(acl.get("Entries"), True)}
-        for a in acl.get("Associations", []):
-            subnet_nacl[a.get("SubnetId")] = acl
-    subnets = reference("ec2/subnets")
-    subnet_rtb, main_rtb = {}, {}
-    for rtb in reference("ec2/route_tables").values():
-        for a in rtb.get("Associations", []):
-            if a.get("Main"):
-                main_rtb[rtb.get("VpcId")] = rtb
-            elif a.get("SubnetId"):
-                subnet_rtb[a["SubnetId"]] = rtb
 
-    for key, items in resources.items():
-        if by_key[key].get("network") != "attach":
-            continue
-        for item in items.values():
-            item.pop("_network", None)
-            network = {}
-            sg_ids = sorted(find_ids(item, SG_ID, set()) & set(sgs))
-            if sg_ids:
-                network["security_groups"] = [
-                    {"id": i, "name": sgs[i].get("GroupName"), **sgs[i]["_rules"]} for i in sg_ids
-                ]
-                network["inbound"] = [{"security_group": i, **r} for i in sg_ids for r in sgs[i]["_rules"]["inbound"]]
-                network["outbound"] = [{"security_group": i, **r} for i in sg_ids for r in sgs[i]["_rules"]["outbound"]]
-            subnet_ids = sorted(find_ids(item, SUBNET_ID, set()) & set(subnets))
-            if subnet_ids:
-                network["subnets"] = []
-                for s in subnet_ids:
-                    acl = subnet_nacl.get(s)
-                    rtb = subnet_rtb.get(s) or main_rtb.get(subnets[s].get("VpcId"))
-                    network["subnets"].append({
-                        "id": s,
-                        "cidr": subnets[s].get("CidrBlock"),
-                        "network_acl": acl and {"id": acl.get("NetworkAclId"), **acl["_rules"]},
-                        "route_table": rtb and {"id": rtb.get("RouteTableId"), "routes": rtb.get("Routes", [])},
-                    })
-            if network:
-                item["_network"] = network
+    def __init__(self, load):
+        self.sgs = {rid: {"name": sg.get("GroupName"), **sg_rule_set(sg)} for rid, sg in load("ec2/security_groups")}
+        self.subnets = {rid: {"vpc": s.get("VpcId"), "cidr": s.get("CidrBlock")} for rid, s in load("ec2/subnets")}
+        self.subnet_nacl = {}
+        for rid, acl in load("ec2/network_acls"):
+            rules = {"id": acl.get("NetworkAclId", rid), **nacl_rule_set(acl)}
+            for a in acl.get("Associations", []):
+                self.subnet_nacl[a.get("SubnetId")] = rules
+        self.subnet_rtb, self.main_rtb = {}, {}
+        for rid, rtb in load("ec2/route_tables"):
+            table = {"id": rtb.get("RouteTableId", rid), "routes": rtb.get("Routes", [])}
+            for a in rtb.get("Associations", []):
+                if a.get("Main"):
+                    self.main_rtb[rtb.get("VpcId")] = table
+                elif a.get("SubnetId"):
+                    self.subnet_rtb[a["SubnetId"]] = table
+
+    def attach(self, item):
+        item.pop("_network", None)
+        network = {}
+        sg_ids = sorted(find_ids(item, SG_ID, set()) & set(self.sgs))
+        if sg_ids:
+            network["security_groups"] = [{"id": i, **self.sgs[i]} for i in sg_ids]
+            network["inbound"] = [{"security_group": i, **r} for i in sg_ids for r in self.sgs[i]["inbound"]]
+            network["outbound"] = [{"security_group": i, **r} for i in sg_ids for r in self.sgs[i]["outbound"]]
+        subnet_ids = sorted(find_ids(item, SUBNET_ID, set()) & set(self.subnets))
+        if subnet_ids:
+            network["subnets"] = [{
+                "id": s,
+                "cidr": self.subnets[s]["cidr"],
+                "network_acl": self.subnet_nacl.get(s),
+                "route_table": self.subnet_rtb.get(s) or self.main_rtb.get(self.subnets[s]["vpc"]),
+            } for s in subnet_ids]
+        if network:
+            item["_network"] = network
 
 
 # ---------------------------------------------------------------------------- dns
@@ -429,6 +454,8 @@ def lookup(run, name):
     cmd = fill(run.commands["dns_lookup"]["command"], {"name": name})
     result = {"status": "timeout"}
     for _ in range(run.settings["timeout_retries"] + 1):
+        if run.stop.is_set():
+            raise Stopped()
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=run.settings["dns_timeout"])
         except subprocess.TimeoutExpired:
@@ -461,7 +488,7 @@ def add_dns_lookups(run, zones):
         rec["_lookup"] = answers[name]
     if names:
         timeouts = sum(1 for a in answers.values() if a["status"] == "timeout")
-        log.info("dns: looked up %d name(s), %d timed out", len(names), timeouts)
+        log.debug("dns: looked up %d name(s), %d timed out", len(names), timeouts)
 
 
 # ---------------------------------------------------------------------------- sync
@@ -475,11 +502,15 @@ class Run:
         self.id = self.started.strftime("%Y%m%dT%H%M%SZ")
         self.out = (HERE / self.settings["output_dir"]).resolve()
         self.run_dir = self.out / "_runs" / self.id
+        # Workers write what they fetch here, one resource per line, before it is saved.
+        self.tmp = self.out / "_tmp" / self.id
         self.gate = threading.BoundedSemaphore(self.settings["max_parallel_calls"])
+        self.stop = threading.Event()
         self.volatile = set(commands.get("volatile_keys", []))
         self.lock = threading.Lock()
         self.changes = []
         self.seen_accounts = {}
+        self.running = {}  # profile -> time.monotonic() when its sync started
         self.by_key = {r["key"]: r for r in commands["resources"]}
 
         keys = [r["key"] for r in commands["resources"]
@@ -542,163 +573,214 @@ def fetch_details(aws, rt, item, region, context):
     return details
 
 
-def fetch_type(run, aws, account, region, rt, prev, parents):
-    """One worker: list one resource type (per parent for child types), then its details.
+def write_line(f, value):
+    f.write(json.dumps(value, default=str) + "\n")
 
-    Returns {id: resource} and {id: when its details were fetched}. Raises AwsError when
-    the list fails, so the previous files are kept.
+
+def read_lines(path):
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                yield json.loads(line)
+
+
+def fetch_type(run, aws, account, region, rt, prev, parent_path, out_path):
+    """One worker: list one resource type (per parent for child types), fetch each resource's
+    details, and append every finished resource to out_path (one JSON per line) at once.
+
+    Only the resources still waiting for details are in memory. Raises AwsError when the
+    list fails, so the previous files are kept.
     """
     acct_dir = run.out / account["account_id"]
     context = {"account_id": account["account_id"], "region": region}
-    raw = []
-    if rt.get("parent"):
-        for pid, parent in parents.items():
+    refresh = dt.timedelta(hours=run.settings["detail_refresh_hours"])
+    now = iso(utc_now())
+
+    def listed():
+        if not rt.get("parent"):
+            found = aws(fill(rt["command"], context), region, rt.get("query")) or []
+            for r in found if isinstance(found, list) else [found]:
+                yield None, r
+            return
+        for parent in read_lines(parent_path):
             try:
-                found = aws(fill(rt["command"], {**context, **parent}), region, rt.get("query")) or []
+                found = aws(fill(rt["command"], {**context, **parent["item"]}), region, rt.get("query")) or []
             except AwsError as e:
                 if e.code in NOT_FOUND_ERRORS:
                     continue
                 raise
-            raw += [(pid, r) for r in (found if isinstance(found, list) else [found])]
-    else:
-        found = aws(fill(rt["command"], context), region, rt.get("query")) or []
-        raw = [(None, r) for r in (found if isinstance(found, list) else [found])]
+            for r in found if isinstance(found, list) else [found]:
+                yield parent["id"], r
 
-    items = {}
-    for pid, r in raw:
-        item = parse_embedded_json(r) if isinstance(r, dict) else {"Id": r}
-        if pid is not None:
-            item["_parent_id"] = pid
-        rid = resource_id(item, rt)
-        if pid is not None:
-            rid = f"{pid}/{rid}"
-        while rid in items:
-            rid += "#"
-        items[rid] = item
-
-    now = iso(utc_now())
-    refresh = dt.timedelta(hours=run.settings["detail_refresh_hours"])
-    times = {}
-    if not rt["details"]:
-        return items, times
-
-    def details_for(pair):
-        rid, item = pair
+    def with_details(rid, item):
         old = prev.get(rid)
         if old and not run.full and old.get("list_hash") == digest(item, run.volatile) and old.get("detail_ts"):
             fetched = dt.datetime.strptime(old["detail_ts"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
             doc = read_json(acct_dir / old["file"]) if utc_now() - fetched < refresh else None
             if doc and "_details" in doc.get("resource", {}):
-                return rid, doc["resource"]["_details"], old["detail_ts"]
-        return rid, fetch_details(aws, rt, item, region, context), now
+                item["_details"] = doc["resource"]["_details"]
+                return {"id": rid, "detail_ts": old["detail_ts"], "item": item}
+        item["_details"] = fetch_details(aws, rt, item, region, context)
+        return {"id": rid, "detail_ts": now, "item": item}
 
-    with cf.ThreadPoolExecutor(run.settings["detail_workers"]) as pool:
-        for rid, details, ts in pool.map(details_for, list(items.items())):
-            items[rid]["_details"] = details
-            times[rid] = ts
-    return items, times
+    seen = set()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as out, cf.ThreadPoolExecutor(run.settings["detail_workers"]) as pool:
+        waiting = set()
+
+        def drain(until):
+            nonlocal waiting
+            while len(waiting) > until:
+                done, waiting = cf.wait(waiting, return_when=cf.FIRST_COMPLETED)
+                for f in done:
+                    write_line(out, f.result())
+
+        for pid, r in listed():
+            item = parse_embedded_json(r) if isinstance(r, dict) else {"Id": r}
+            if pid is not None:
+                item["_parent_id"] = pid
+            rid = resource_id(item, rt)
+            if pid is not None:
+                rid = f"{pid}/{rid}"
+            while rid in seen:
+                rid += "#"
+            seen.add(rid)
+            if rt["details"]:
+                waiting.add(pool.submit(with_details, rid, item))
+                drain(run.settings["detail_workers"] * 2)
+            else:
+                write_line(out, {"id": rid, "detail_ts": None, "item": item})
+        drain(0)
+    return len(seen)
+
+
+def save_resource(run, account, label, rt, rid, item, detail_ts, old, now, changes):
+    """Write one resource's file if it changed; returns its manifest entry."""
+    acct_dir = run.out / account["account_id"]
+    key = rt["key"]
+    base = {k: v for k, v in item.items() if k not in ("_details", "_network", "_rules")}
+    h = digest(item, run.volatile)
+    raw_hash = digest(item)
+    rel = f"{label}/{rt['service']}/{rt['type']}/{safe_name(rid)}.json"
+    path = acct_dir / rel
+    entry = {"file": rel, "hash": h, "raw_hash": raw_hash, "list_hash": digest(base, run.volatile),
+             "detail_ts": detail_ts, "last_seen": now,
+             "last_changed": old.get("last_changed") if old else now}
+    if old and old["hash"] == h and old.get("raw_hash") == raw_hash and path.exists():
+        return entry
+    change = None
+    if not old:
+        change = {"action": "added"}
+    elif old["hash"] != h:
+        old_doc = read_json(acct_dir / old["file"])
+        change = {"action": "modified"}
+        if old_doc:
+            change["diff"] = json_diff(canonical(old_doc["resource"], run.volatile), canonical(item, run.volatile))
+            archive(run, account, old["file"])
+    # Same hash: only volatile fields (or a file deleted by hand) changed; save without reporting.
+    if old and old["file"] != rel:
+        (acct_dir / old["file"]).unlink(missing_ok=True)
+    if change:
+        entry["last_changed"] = now
+        changes.append({"account_id": account["account_id"], "profile": account["profile"], "region": label,
+                        "type": key, "id": rid, "file": rel, **change})
+    write_json(path, {
+        "_meta": {"account_id": account["account_id"], "account_alias": account.get("alias"),
+                  "profile": account["profile"], "region": label, "service": rt["service"],
+                  "type": rt["type"], "id": rid, "arn": resource_arn(item), "hash": h,
+                  "last_changed": entry["last_changed"]},
+        "resource": item,
+    })
+    return entry
 
 
 def scan_scope(run, aws, account, label, region, rtypes):
-    """Scan one region (or 'global') of one account; write changed files and the manifest."""
+    """Scan one region (or 'global') of one account; write changed files and the manifest.
+
+    Every type runs in its own worker and streams into a temporary file; then the files are
+    read back one resource at a time and saved. Ctrl+C (Stopped) leaves this region as it was.
+    """
     acct_dir = run.out / account["account_id"]
     manifest_path = acct_dir / label / "_manifest.json"
     manifest = read_json(manifest_path, {})
+    tmp = run.tmp / account["account_id"] / label
+    try:
+        done, errors = {}, []
+        waiting, running = list(rtypes), {}
+        # A child type starts once its parent's file is complete.
+        with cf.ThreadPoolExecutor(run.settings["type_workers"]) as pool:
+            while waiting or running:
+                for rt in list(waiting):
+                    parent = rt.get("parent")
+                    if parent and parent not in done and parent not in {e["type"] for e in errors}:
+                        continue
+                    waiting.remove(rt)
+                    if parent and parent not in done:
+                        status = next(e["status"] for e in errors if e["type"] == parent)
+                        errors.append({"scope": label, "type": rt["key"], "status": status, "code": "ParentFailed",
+                                       "message": f"{parent} could not be listed"})
+                        continue
+                    if run.stop.is_set():
+                        raise Stopped()
+                    path = tmp / f"{rt['service']}__{rt['type']}.jsonl"
+                    prev = manifest.get(rt["key"], {}).get("items", {})
+                    running[pool.submit(fetch_type, run, aws, account, rt.get("region", region), rt, prev,
+                                        done.get(parent), path)] = (rt, path)
+                if not running:
+                    continue
+                finished, _ = cf.wait(running, return_when=cf.FIRST_COMPLETED)
+                for f in finished:
+                    rt, path = running.pop(f)
+                    try:
+                        f.result()
+                        done[rt["key"]] = path
+                    except AwsError as e:
+                        status = error_status(e.code)
+                        errors.append({"scope": label, "type": rt["key"], "status": status, "code": e.code, "message": e.message[:500]})
+                        # No permission is normal here: counted per account on screen, listed in run.log.
+                        if status in ("no_permission", "not_available"):
+                            log.debug("%s %s %s: %s, skipped (%s)", account["profile"], label, rt["key"], status, e.code)
+                        else:
+                            log.warning("%s %s %s: %s", account["profile"], label, rt["key"], e)
+        if run.stop.is_set():
+            raise Stopped()
+        return save_scope(run, account, label, manifest, manifest_path, done, errors)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def save_scope(run, account, label, manifest, manifest_path, done, errors):
+    acct_dir = run.out / account["account_id"]
     now = iso(utc_now())
-    resources, detail_time, errors = {}, {}, []
 
-    # Every type runs in its own worker; a child type starts once its parent is done.
-    waiting = list(rtypes)
-    running = {}
-    with cf.ThreadPoolExecutor(run.settings["type_workers"]) as pool:
-        while waiting or running:
-            for rt in list(waiting):
-                parent = rt.get("parent")
-                if parent and parent not in resources and parent not in {e["type"] for e in errors}:
-                    continue
-                waiting.remove(rt)
-                if parent and parent not in resources:
-                    status = next(e["status"] for e in errors if e["type"] == parent)
-                    errors.append({"scope": label, "type": rt["key"], "status": status, "code": "ParentFailed",
-                                   "message": f"{parent} could not be listed"})
-                    continue
-                prev = manifest.get(rt["key"], {}).get("items", {})
-                running[pool.submit(fetch_type, run, aws, account, rt.get("region", region), rt, prev,
-                                    resources.get(parent, {}))] = rt
-            if not running:
-                continue
-            done, _ = cf.wait(running, return_when=cf.FIRST_COMPLETED)
-            for f in done:
-                rt = running.pop(f)
-                try:
-                    resources[rt["key"]], detail_time[rt["key"]] = f.result()
-                except AwsError as e:
-                    status = error_status(e.code)
-                    errors.append({"scope": label, "type": rt["key"], "status": status, "code": e.code, "message": e.message[:500]})
-                    # No permission is normal here: counted per account on screen, listed in run.log.
-                    if status in ("no_permission", "not_available"):
-                        log.debug("%s %s %s: %s, skipped (%s)", account["profile"], label, rt["key"], status, e.code)
-                    else:
-                        log.warning("%s %s %s: %s", account["profile"], label, rt["key"], e)
-
-    def reference(key):
-        if key in resources:
-            return resources[key]
-        loaded = {}
+    def load(key):
+        if key in done:
+            for line in read_lines(done[key]):
+                yield line["id"], line["item"]
+            return
         for rid, entry in manifest.get(key, {}).get("items", {}).items():
             doc = read_json(acct_dir / entry["file"])
             if doc:
-                loaded[rid] = doc["resource"]
-        return loaded
+                yield rid, doc["resource"]
 
-    if label != "global":
-        add_network(resources, run.by_key, reference)
-    dns_key = run.commands.get("dns_lookup", {}).get("resource")
-    if run.settings["dns_lookup"] and dns_key in resources:
-        add_dns_lookups(run, resources[dns_key])
-
+    index = NetworkIndex(load) if label != "global" else None
+    dns_key = run.commands.get("dns_lookup", {}).get("resource") if run.settings["dns_lookup"] else None
     changes = []
-    for key, items in resources.items():
+    for key, path in done.items():
         rt = run.by_key[key]
         prev = manifest.get(key, {}).get("items", {})
         entries = {}
-        for rid, item in items.items():
-            base = {k: v for k, v in item.items() if k not in ("_details", "_network", "_rules")}
-            h = digest(item, run.volatile)
-            raw_hash = digest(item)
-            rel = f"{label}/{rt['service']}/{rt['type']}/{safe_name(rid)}.json"
-            path = acct_dir / rel
-            old = prev.get(rid)
-            entry = {"file": rel, "hash": h, "raw_hash": raw_hash, "list_hash": digest(base, run.volatile),
-                     "detail_ts": detail_time.get(key, {}).get(rid), "last_seen": now,
-                     "last_changed": old.get("last_changed") if old else now}
-            if old and old["hash"] == h and old.get("raw_hash") == raw_hash and path.exists():
-                entries[rid] = entry
-                continue
-            change = None
-            if not old:
-                change = {"action": "added"}
-            elif old["hash"] != h:
-                old_doc = read_json(acct_dir / old["file"])
-                change = {"action": "modified"}
-                if old_doc:
-                    change["diff"] = json_diff(canonical(old_doc["resource"], run.volatile), canonical(item, run.volatile))
-                    archive(run, account, old["file"])
-            # Same hash: only volatile fields (or a file deleted by hand) changed; save without reporting.
-            if old and old["file"] != rel:
-                (acct_dir / old["file"]).unlink(missing_ok=True)
-            if change:
-                entry["last_changed"] = now
-                changes.append({"account_id": account["account_id"], "profile": account["profile"], "region": label,
-                                "type": key, "id": rid, "file": rel, **change})
-            write_json(path, {
-                "_meta": {"account_id": account["account_id"], "account_alias": account.get("alias"),
-                          "profile": account["profile"], "region": label, "service": rt["service"],
-                          "type": rt["type"], "id": rid, "arn": resource_arn(item), "hash": h,
-                          "last_changed": entry["last_changed"]},
-                "resource": item,
-            })
-            entries[rid] = entry
+        for line in read_lines(path):
+            rid, item = line["id"], line["item"]
+            if rt.get("network") == "sg":
+                item["_rules"] = sg_rule_set(item)
+            elif rt.get("network") == "nacl":
+                item["_rules"] = nacl_rule_set(item)
+            elif rt.get("network") == "attach" and index:
+                index.attach(item)
+            if key == dns_key:
+                add_dns_lookups(run, {rid: item})
+            entries[rid] = save_resource(run, account, label, rt, rid, item, line["detail_ts"], prev.get(rid), now, changes)
         for rid in set(prev) - set(entries):
             archive(run, account, prev[rid]["file"])
             (acct_dir / prev[rid]["file"]).unlink(missing_ok=True)
@@ -730,29 +812,27 @@ def connectivity(aws, commands, region):
     """sts get-caller-identity: proves the profile can reach AWS before anything else runs."""
     try:
         ident = run_named(aws, commands, "identity", region)
-        return {"status": "ok", "arn": ident.get("Arn"), "user_id": ident.get("UserId"), "account_id": ident["Account"]}
+        return {"status": "ok", "arn": ident.get("Arn"), "user_id": ident.get("UserId"), "account_id": ident["Account"],
+                "checked_at": iso(utc_now())}
     except AwsError as e:
-        return {"status": "timeout" if e.code == "Timeout" else "error", "error": e.code, "message": e.message[:500]}
+        return {"status": "timeout" if e.code == "Timeout" else "error", "error": e.code, "message": e.message[:500],
+                "checked_at": iso(utc_now())}
 
 
-def scan_account(run, profile, account_cfg):
-    aws = Aws(profile, run.settings, run.gate)
-    result = {"profile": profile, "added": 0, "modified": 0, "removed": 0, "errors": [],
+def mark_unreachable(run, account_cfg, conn):
+    """Keep the old data of a known account, marked as not reachable this time."""
+    account_id = account_cfg.get("account_id")
+    acct_dir = run.out / str(account_id)
+    if account_id and (acct_dir / "_account.json").exists():
+        write_json(acct_dir / "_account.json", {**read_json(acct_dir / "_account.json", {}), "connectivity": conn})
+        build_account_inventory(acct_dir, run.by_key)
+
+
+def scan_account(run, profile, account_cfg, conn):
+    """Sync one account whose sign-in (conn) was already checked."""
+    aws = Aws(profile, run.settings, run.gate, run.stop)
+    result = {"profile": profile, "connectivity": conn, "added": 0, "modified": 0, "removed": 0, "errors": [],
               "no_permission": [], "timeout": [], "not_available": 0}
-    g = run.settings["global_region"]
-    conn = connectivity(aws, run.commands, g)
-    conn["checked_at"] = iso(utc_now())
-    result["connectivity"] = conn
-    if conn["status"] != "ok":
-        result["error"] = f"cannot connect: {conn['error']}"
-        log.error("%s: cannot connect: %s", profile, conn["message"])
-        # Keep the old data of a known account, marked as not reachable this time.
-        account_id = account_cfg.get("account_id")
-        if account_id and (run.out / account_id / "_account.json").exists():
-            acct_dir = run.out / account_id
-            write_json(acct_dir / "_account.json", {**read_json(acct_dir / "_account.json", {}), "connectivity": conn})
-            build_account_inventory(acct_dir, run.by_key)
-        return result
     account_id = conn["account_id"]
     result["account_id"] = account_id
     with run.lock:
@@ -760,43 +840,59 @@ def scan_account(run, profile, account_cfg):
             result["duplicate_of"] = run.seen_accounts[account_id]
             return result
         run.seen_accounts[account_id] = profile
+        started = run.running[profile] = time.monotonic()
+    g = run.settings["global_region"]
+    counts, changes, stopped = {}, [], False
+    log.info("Start %s (%s), usually takes %s", profile, account_id, fmt_seconds(account_cfg.get("avg_seconds")))
     try:
-        alias = run_named(aws, run.commands, "alias", g)
-    except AwsError:
-        alias = None
+        try:
+            alias = run_named(aws, run.commands, "alias", g)
+        except AwsError:
+            alias = None
+        regions = account_cfg.get("regions") or run.settings["regions"]
+        if regions == "all" or regions == ["all"]:
+            regions = sorted(run_named(aws, run.commands, "regions", g) or [])
+        account = {"profile": profile, "account_id": account_id, "alias": alias}
 
-    regions = account_cfg.get("regions") or run.settings["regions"]
-    if regions == "all" or regions == ["all"]:
-        regions = sorted(run_named(aws, run.commands, "regions", g) or [])
-    account = {"profile": profile, "account_id": account_id, "alias": alias}
+        scopes = []
+        global_types = [r for r in run.resources if r["scope"] == "global"]
+        regional_types = [r for r in run.resources if r["scope"] == "regional"]
+        if global_types:
+            scopes.append(("global", g, global_types))
+        if regional_types:
+            scopes += [(r, r, regional_types) for r in regions]
 
-    scopes = []
-    global_types = [r for r in run.resources if r["scope"] == "global"]
-    regional_types = [r for r in run.resources if r["scope"] == "regional"]
-    if global_types:
-        scopes.append(("global", g, global_types))
-    if regional_types:
-        scopes += [(r, r, regional_types) for r in regions]
-
-    counts, changes = {}, []
-    with cf.ThreadPoolExecutor(run.settings["region_workers"]) as pool:
-        futures = {pool.submit(scan_scope, run, aws, account, *s): s[0] for s in scopes}
-        for f in cf.as_completed(futures):
-            label = futures[f]
-            try:
-                c, errs, counts[label] = f.result()
-            except Exception as e:
-                log.exception("%s %s failed", profile, label)
-                result["errors"].append({"scope": label, "code": type(e).__name__, "message": str(e)})
-                continue
-            changes += c
-            for e in errs:
-                if e["status"] == "not_available":
-                    result["not_available"] += 1
-                elif e["status"] in ("no_permission", "timeout"):
-                    result[e["status"]].append(f"{label} {e['type']}")
-                else:
-                    result["errors"].append(e)
+        with cf.ThreadPoolExecutor(run.settings["region_workers"]) as pool:
+            futures = {pool.submit(scan_scope, run, aws, account, *s): s[0] for s in scopes}
+            for f in cf.as_completed(futures):
+                label = futures[f]
+                try:
+                    c, errs, counts[label] = f.result()
+                except Stopped:
+                    stopped = True
+                    continue
+                except Exception as e:
+                    log.exception("%s %s failed", profile, label)
+                    result["errors"].append({"scope": label, "code": type(e).__name__, "message": str(e)})
+                    continue
+                changes += c
+                for e in errs:
+                    if e["status"] == "not_available":
+                        result["not_available"] += 1
+                    elif e["status"] in ("no_permission", "timeout"):
+                        result[e["status"]].append(f"{label} {e['type']}")
+                    else:
+                        result["errors"].append(e)
+        if stopped:
+            raise Stopped()
+    except Stopped:
+        # Regions that finished are saved; the account's summary files are left as they were.
+        result["stopped"] = True
+        log_changes(run, run.out / account_id, changes)
+        return result
+    finally:
+        with run.lock:
+            run.running.pop(profile, None)
 
     acct_dir = run.out / account_id
     old = read_json(acct_dir / "_account.json", {})
@@ -804,90 +900,134 @@ def scan_account(run, profile, account_cfg):
         **old, "account_id": account_id, "alias": alias, "profile": profile, "connectivity": conn,
         "regions": regions, "last_sync": iso(run.started), "resource_counts": counts,
     })
-    if changes:
-        with open(acct_dir / "_changelog.jsonl", "a", encoding="utf-8") as f:
-            for c in changes:
-                f.write(json.dumps({"run": run.id, **{k: v for k, v in c.items() if k != "diff"}}, default=str) + "\n")
+    log_changes(run, acct_dir, changes)
     for c in changes:
         result[c["action"]] += 1
     result["resources"] = sum(sum(c.values()) for c in counts.values())
     build_account_inventory(acct_dir, run.by_key)
+    result["seconds"] = round(time.monotonic() - started, 1)
+    return result
+
+
+def log_changes(run, acct_dir, changes):
+    if not changes:
+        return
+    acct_dir.mkdir(parents=True, exist_ok=True)
+    with open(acct_dir / "_changelog.jsonl", "a", encoding="utf-8") as f:
+        for c in changes:
+            f.write(json.dumps({"run": run.id, **{k: v for k, v in c.items() if k != "diff"}}, default=str) + "\n")
     with run.lock:
         run.changes += changes
-    return result
 
 
 # ---------------------------------------------------------------------------- merged json
 
+def inventory_path(acct_dir, profile):
+    """The account's merged file: inventory/<profile>-<account number>.json."""
+    return acct_dir.parent / f"{safe_name(profile)}-{acct_dir.name}.json"
+
+
 def build_account_inventory(acct_dir, by_key):
-    """Merge every resource file of one account into <account_id>/inventory.json.
+    """Merge every resource file of one account into inventory/<profile>-<account number>.json.
 
     {"account": {...}, "global": {service: {type: {id: resource}}},
      "regions": {region: {"vpcs": {vpc_id: {"vpc": {...}, service: {type: {id: resource}}}},
                           "outside_vpc": {service: {type: {id: resource}}},
                           "skipped": [{"type", "status": no_permission|timeout|error, "error", "at"}]}}}
+
+    The layout is worked out from file paths first, then the file is written one resource
+    at a time, so the account is never in memory as a whole.
     """
-    doc = {"account": read_json(acct_dir / "_account.json", {}), "global": {}, "regions": {}}
+    tree = {"account": read_json(acct_dir / "_account.json", {}), "global": {}, "regions": {}}
     for manifest_path in sorted(acct_dir.glob("*/_manifest.json")):
         label = manifest_path.parent.name
         manifest = read_json(manifest_path, {})
+        entries = {key: entry.get("items", {}) for key, entry in manifest.items()}
         if label == "global":
-            section = doc["global"]
-        else:
-            section = doc["regions"].setdefault(label, {"vpcs": {}, "outside_vpc": {}})
-        skipped = []
-        loaded = {}
-        for key, entry in sorted(manifest.items()):
-            if entry.get("status") in ("no_permission", "timeout", "error"):
-                skipped.append({"type": key, "status": entry["status"], "error": entry.get("error"), "at": entry.get("last_error")})
-            for rid, item in sorted(entry.get("items", {}).items()):
-                resource = (read_json(acct_dir / item["file"]) or {}).get("resource")
-                if resource is not None:
-                    loaded.setdefault(key, {})[rid] = resource
-        if label == "global":
-            for key, items in loaded.items():
+            section = tree["global"]
+            for key, items in entries.items():
                 service, type_ = key.split("/", 1)
-                section.setdefault(service, {})[type_] = items
+                for rid, item in items.items():
+                    section.setdefault(service, {}).setdefault(type_, {})[rid] = acct_dir / item["file"]
         else:
-            place_in_vpcs(section, loaded, by_key)
+            section = tree["regions"].setdefault(label, {"vpcs": {}, "outside_vpc": {}})
+            place_in_vpcs(section, acct_dir, entries, by_key)
+        skipped = [{"type": key, "status": e["status"], "error": e.get("error"), "at": e.get("last_error")}
+                   for key, e in sorted(manifest.items()) if e.get("status") in ("no_permission", "timeout", "error")]
         if skipped:
             section["skipped"] = skipped
-    write_json(acct_dir / "inventory.json", doc)
+    path = inventory_path(acct_dir, tree["account"].get("profile") or "account")
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        write_value(f, tree, 0)
+        f.write("\n")
+    os.replace(tmp, path)
+    # A file under the account's old profile name (or the old inventory.json) is out of date.
+    for stale in [*acct_dir.parent.glob(f"*-{acct_dir.name}.json"), acct_dir / "inventory.json"]:
+        if stale != path and stale.exists():
+            stale.unlink()
 
 
-def place_in_vpcs(section, loaded, by_key):
-    """Put each regional resource under the VPC it belongs to.
+def write_value(f, value, depth):
+    """Write JSON piece by piece; a Path stands for that resource file's resource."""
+    pad = "  " * depth
+    if isinstance(value, Path):
+        value = (read_json(value) or {}).get("resource")
+    elif isinstance(value, dict) and value and not all(isinstance(v, (str, int, float, bool, type(None))) for v in value.values()):
+        f.write("{\n")
+        items = sorted(value.items(), key=lambda kv: str(kv[0]))
+        for i, (k, v) in enumerate(items):
+            f.write(f"{pad}  {json.dumps(str(k))}: ")
+            write_value(f, v, depth + 1)
+            f.write(",\n" if i < len(items) - 1 else "\n")
+        f.write(pad + "}")
+        return
+    f.write(json.dumps(value, indent=2, sort_keys=True, default=str).replace("\n", "\n" + pad))
+
+
+def place_in_vpcs(section, acct_dir, entries, by_key):
+    """Put each regional resource file under the VPC it belongs to.
 
     The VPC is the resource's own VpcId, else the VPC of a subnet or security group it
     uses, else its parent's VPC (an EKS node group follows its cluster).
     """
-    subnet_vpc = {rid: s.get("VpcId") for rid, s in loaded.get("ec2/subnets", {}).items()}
-    sg_vpc = {rid: s.get("VpcId") for rid, s in loaded.get("ec2/security_groups", {}).items()}
+    def load(key):
+        for rid, item in entries.get(key, {}).items():
+            resource = (read_json(acct_dir / item["file"]) or {}).get("resource")
+            if resource is not None:
+                yield rid, resource
+
+    subnet_vpc = {rid: r.get("VpcId") for rid, r in load("ec2/subnets")}
+    sg_vpc = {rid: r.get("VpcId") for rid, r in load("ec2/security_groups")}
+
+    def depth(key):
+        n = 0
+        while by_key.get(key, {}).get("parent"):
+            key, n = by_key[key]["parent"], n + 1
+        return n
+
     vpc_of = {}
-
-    def find(key, rid, resource):
-        if (key, rid) in vpc_of:
-            return vpc_of[key, rid]
-        vpc = find_vpc_id({k: v for k, v in resource.items() if k != "_network"})
-        if not vpc:
-            vpcs = {subnet_vpc[s] for s in find_ids(resource, SUBNET_ID, set()) if subnet_vpc.get(s)}
-            vpcs |= {sg_vpc[s] for s in find_ids(resource, SG_ID, set()) if sg_vpc.get(s)}
-            vpc = vpcs.pop() if len(vpcs) == 1 else None
-        parent = by_key.get(key, {}).get("parent")
-        if not vpc and parent and resource.get("_parent_id") in loaded.get(parent, {}):
-            vpc = find(parent, resource["_parent_id"], loaded[parent][resource["_parent_id"]])
-        vpc_of[key, rid] = vpc
-        return vpc
-
-    for key, items in loaded.items():
+    for key in sorted(entries, key=lambda k: (depth(k), k)):
         service, type_ = key.split("/", 1)
-        for rid, resource in items.items():
+        parent = by_key.get(key, {}).get("parent")
+        for rid, item in entries[key].items():
+            path = acct_dir / item["file"]
             if key == "ec2/vpcs":
-                section["vpcs"].setdefault(rid, {})["vpc"] = resource
+                section["vpcs"].setdefault(rid, {})["vpc"] = path
                 continue
-            vpc = find(key, rid, resource)
+            resource = (read_json(path) or {}).get("resource")
+            if resource is None:
+                continue
+            vpc = find_vpc_id({k: v for k, v in resource.items() if k != "_network"})
+            if not vpc:
+                vpcs = {subnet_vpc[s] for s in find_ids(resource, SUBNET_ID, set()) if subnet_vpc.get(s)}
+                vpcs |= {sg_vpc[s] for s in find_ids(resource, SG_ID, set()) if sg_vpc.get(s)}
+                vpc = vpcs.pop() if len(vpcs) == 1 else None
+            if not vpc and parent:
+                vpc = vpc_of.get((parent, resource.get("_parent_id")))
+            vpc_of[key, rid] = vpc
             target = section["vpcs"].setdefault(vpc, {}) if vpc else section["outside_vpc"]
-            target.setdefault(service, {}).setdefault(type_, {})[rid] = resource
+            target.setdefault(service, {}).setdefault(type_, {})[rid] = path
 
 
 # ---------------------------------------------------------------------------- commands
@@ -956,8 +1096,10 @@ def cmd_list(args):
     data = load_accounts()
     for p, a in sorted(data["accounts"].items()):
         regions = a.get("regions") or "(default)"
-        print(f"{p:40} {a.get('account_id', '?'):14} {'enabled ' if a.get('enabled', True) else 'disabled'} {regions}")
-    print(f"{len(data['accounts'])} account(s). Default regions: {data['settings']['regions']}")
+        took = f"avg {fmt_seconds(a['avg_seconds'])}" if a.get("avg_seconds") else ""
+        print(f"{p:40} {a.get('account_id', '?'):14} {'enabled ' if a.get('enabled', True) else 'disabled'} {took:12} {regions}")
+    average = f", average sync {fmt_seconds(data['average_seconds'])} per account" if data.get("average_seconds") else ""
+    print(f"{len(data['accounts'])} account(s){average}. Default regions: {data['settings']['regions']}")
 
 
 def cmd_enable(args, enabled):
@@ -995,63 +1137,187 @@ def cmd_catalog(args):
         print(f"{r['key']:48} {where:22} {' '.join(r['command'])}{parent}")
 
 
+def fmt_seconds(seconds):
+    if seconds is None:
+        return "unknown"
+    seconds = int(round(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60:02d}s"
+    return f"{seconds // 3600}h {seconds % 3600 // 60:02d}m"
+
+
+def check_accounts(settings, commands, accounts, profiles, unresolved):
+    """sts get-caller-identity for every account at once. Prints one line per account and
+    returns (results, the profiles that can sign in, one per account)."""
+    gate = threading.BoundedSemaphore(settings["max_parallel_calls"])
+    print(f"Checking sign-in (sts get-caller-identity) for {len(profiles)} account(s)...")
+    pool = cf.ThreadPoolExecutor(settings["max_parallel_calls"])
+    conns = {}
+    try:
+        futures = {pool.submit(connectivity, Aws(p, settings, gate), commands, settings["global_region"]): p for p in profiles}
+        for i, f in enumerate(cf.as_completed(futures), 1):
+            conns[futures[f]] = f.result()
+            if i % 50 == 0 and i < len(profiles):
+                print(f"  checked {i}/{len(profiles)}")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    ready, owner, rows = [], {}, []
+    for p in profiles:
+        c, saved = conns[p], accounts[p].get("account_id")
+        if c["status"] != "ok":
+            label = "TIMEOUT" if c["status"] == "timeout" else "NO ACCESS" if c.get("error") in PERMISSION_ERRORS else "FAILED"
+            rows.append((label, saved or "?", p, c.get("message", "")))
+        elif c["account_id"] in owner:
+            rows.append(("DUPLICATE", c["account_id"], p, f"same account as {owner[c['account_id']]}; skipped"))
+        else:
+            owner[c["account_id"]] = p
+            ready.append(p)
+            note = f"WARNING: saved as {saved}, signs in to {c['account_id']}" if saved and saved != c["account_id"] else c.get("arn") or ""
+            rows.append(("OK", c["account_id"], p, note))
+    rows += [("NO PROFILE", number, "-", "no profile found for this account number") for number in unresolved]
+    # Problems first, so they are not lost above a long list of OKs.
+    for status, account, profile, note in sorted(rows, key=lambda r: (r[0] == "OK", r[1])):
+        print(f"  {status:10} {account:14} {profile:45} {note[:110]}")
+    print(f"Ready: {len(ready)} of {len(profiles) + len(unresolved)} account(s); not ready: {len(rows) - len(ready)}.")
+    return conns, ready
+
+
 def cmd_sync(args):
     data = load_accounts()
     commands = load_commands()
+    accounts = data["accounts"]
     if args.regions:
         data["settings"]["regions"] = "all" if args.regions == ["all"] else args.regions
-    run = Run(data, commands, args)
-    setup_logging(args.verbose, run.run_dir / "run.log")
-    profiles = args.profiles or [p for p, a in data["accounts"].items() if a.get("enabled", True)]
-    missing = [p for p in profiles if p not in data["accounts"]]
+    profiles = args.profiles or [p for p, a in accounts.items() if a.get("enabled", True)]
+    missing = [p for p in profiles if p not in accounts]
     if missing:
         sys.exit(f"Not added yet (use `add`): {', '.join(missing)}")
     if not profiles:
         sys.exit("No accounts. Add some with: aws_inventory.py add <profile> ...")
+
+    conns, ready = check_accounts(data["settings"], commands, accounts, profiles, getattr(args, "unresolved", []))
+    if not ready:
+        print("No account can sign in; nothing to sync.")
+        return 1
+    if not args.yes and ask(f"Continue with {len(ready)} account(s)? [Y/n] ").lower() in ("n", "no"):
+        print("Nothing synced.")
+        return 0
+
+    run = Run(data, commands, args)
     if not run.resources:
         sys.exit("No resource types match --services/--types.")
+    setup_logging(args.verbose, run.run_dir / "run.log")
+    for p in profiles:
+        if conns[p]["status"] != "ok":
+            mark_unreachable(run, accounts[p], conns[p])
 
-    log.info("Sync %s: %d account(s), %d resource type(s), output %s", run.id, len(profiles), len(run.resources), run.out)
+    def overall():
+        """Average sync time over every account that has one."""
+        known = [a["avg_seconds"] for a in accounts.values() if a.get("avg_seconds")]
+        return sum(known) / len(known) if known else None
+
+    def expected(p):
+        return accounts[p].get("avg_seconds") or overall()
+
     results = {}
-    with cf.ThreadPoolExecutor(run.settings["account_workers"]) as pool:
-        futures = {pool.submit(scan_account, run, p, data["accounts"][p]): p for p in profiles}
-        for i, f in enumerate(cf.as_completed(futures), 1):
-            p = futures[f]
-            try:
-                r = f.result()
-            except Exception as e:
-                log.exception("%s failed", p)
-                r = {"profile": p, "error": str(e)}
-            results[p] = r
-            if r.get("error"):
-                log.info("[%d/%d] %s: %s", i, len(profiles), p, r["error"])
-            elif r.get("duplicate_of"):
-                log.info("[%d/%d] %s: same account as profile %s, skipped", i, len(profiles), p, r["duplicate_of"])
-            else:
-                log.info("[%d/%d] %s (%s): %d resources, +%d ~%d -%d, %d no permission, %d timeout, %d error(s)",
-                         i, len(profiles), p, r["account_id"], r["resources"], r["added"], r["modified"], r["removed"],
-                         len(r["no_permission"]), len(r["timeout"]), len(r["errors"]))
+    t0 = time.monotonic()
 
-    data = load_accounts()
-    for p, r in results.items():
-        if r.get("account_id") and p in data["accounts"]:
-            expected = data["accounts"][p].get("account_id")
-            if expected and expected != r["account_id"]:
-                log.warning("%s: saved as account %s but signs in to %s; saved %s now", p, expected, r["account_id"], r["account_id"])
-            data["accounts"][p]["account_id"] = r["account_id"]
-            data["accounts"][p]["last_sync"] = iso(run.started)
+    def status():
+        with run.lock:
+            running = dict(run.running)
+        pending = [p for p in ready if p not in results and p not in running]
+        now = time.monotonic()
+        guesses = [expected(p) for p in pending] + [
+            None if expected(p) is None else max(expected(p) - (now - start), 0) for p, start in running.items()]
+        eta = None if guesses else 0
+        if guesses and None not in guesses:
+            eta = sum(guesses) / max(1, min(run.settings["account_workers"], len(guesses)))
+        finish = f" (about {(dt.datetime.now() + dt.timedelta(seconds=eta)).strftime('%H:%M')})" if eta is not None else ""
+        log.info("Status: %d/%d done, %d running, %d pending | ETA %s%s | average %s per account | elapsed %s",
+                 len(results), len(ready), len(running), len(pending), fmt_seconds(eta), finish,
+                 fmt_seconds(overall()), fmt_seconds(now - t0))
+
+    def finished(f, p):
+        if f.cancelled():
+            return
+        try:
+            r = f.result()
+        except Exception as e:
+            log.exception("%s failed", p)
+            r = {"profile": p, "error": str(e)}
+        results[p] = r
+        n = f"[{len(results)}/{len(ready)}]"
+        if r.get("stopped"):
+            log.info("%s %s: stopped before it finished", n, p)
+        elif r.get("error"):
+            log.info("%s %s: %s", n, p, r["error"])
+        elif r.get("duplicate_of"):
+            log.info("%s %s: same account as profile %s, skipped", n, p, r["duplicate_of"])
+        else:
+            entry = accounts[p]
+            entry["durations"] = (entry.get("durations", []) + [r["seconds"]])[-10:]
+            entry["avg_seconds"] = round(sum(entry["durations"]) / len(entry["durations"]), 1)
+            entry["last_seconds"] = r["seconds"]
+            entry["account_id"] = r["account_id"]
+            entry["last_sync"] = iso(run.started)
+            data["average_seconds"] = round(overall(), 1)
+            write_json(ACCOUNTS_FILE, data)  # durations survive a stop later in the run
+            log.info("%s %s (%s): %d resources, +%d ~%d -%d, %d no permission, %d timeout, %d error(s) | took %s (its average %s)",
+                     n, p, r["account_id"], r["resources"], r["added"], r["modified"], r["removed"],
+                     len(r["no_permission"]), len(r["timeout"]), len(r["errors"]),
+                     fmt_seconds(r["seconds"]), fmt_seconds(entry["avg_seconds"]))
+
+    log.info("Sync %s: %d account(s), %d resource type(s), output %s. Ctrl+C stops cleanly.",
+             run.id, len(ready), len(run.resources), run.out)
+    status()
+    pool = cf.ThreadPoolExecutor(run.settings["account_workers"])
+    futures = {pool.submit(scan_account, run, p, accounts[p], conns[p]): p for p in ready}
+    not_done, stopped, last_status = set(futures), False, time.monotonic()
+    try:
+        while not_done:
+            done, not_done = cf.wait(not_done, timeout=2, return_when=cf.FIRST_COMPLETED)
+            for f in done:
+                finished(f, futures[f])
+            if done or time.monotonic() - last_status >= run.settings["status_seconds"]:
+                status()
+                last_status = time.monotonic()
+    except KeyboardInterrupt:
+        stopped = True
+        run.stop.set()
+        log.warning("Ctrl+C: stopping. Finished accounts are saved; accounts in progress stop now and keep "
+                    "their finished regions. Press Ctrl+C again to quit at once.")
+        pool.shutdown(wait=False, cancel_futures=True)
+        try:
+            for f in cf.as_completed(not_done):
+                finished(f, futures[f])
+        except KeyboardInterrupt:
+            log.error("Quit without cleaning up.")
+            os._exit(130)
+    finally:
+        pool.shutdown(wait=False)
+        shutil.rmtree(run.tmp, ignore_errors=True)
+        try:
+            run.tmp.parent.rmdir()
+        except OSError:
+            pass
+
     write_json(ACCOUNTS_FILE, data)
-
     totals = {k: sum(r.get(k, 0) for r in results.values()) for k in ("resources", "added", "modified", "removed")}
-    summary = {"run": run.id, "started": iso(run.started), "finished": iso(utc_now()), "full": run.full,
-               "types": [r["key"] for r in run.resources], "totals": totals, "accounts": results}
+    not_ready = {p: conns[p] for p in profiles if p not in ready}
+    summary = {"run": run.id, "started": iso(run.started), "finished": iso(utc_now()), "full": run.full, "stopped": stopped,
+               "seconds": round(time.monotonic() - t0, 1), "average_seconds": overall(),
+               "types": [r["key"] for r in run.resources], "totals": totals, "accounts": results, "not_ready": not_ready}
     write_json(run.run_dir / "summary.json", summary)
     write_json(run.run_dir / "changes.json", sorted(run.changes, key=lambda c: (c["account_id"], c["region"], c["type"], c["id"])))
     write_json(run.out / "_runs" / "latest.json", {"run": run.id, "path": str(run.run_dir)})
-    failed = [p for p, r in results.items() if r.get("error")]
-    log.info("Done: %d resources, %d added, %d modified, %d removed, %d account(s) could not connect. Details: %s",
-             totals["resources"], totals["added"], totals["modified"], totals["removed"], len(failed), run.run_dir)
-    return 1 if failed else 0
+    done_count = sum(1 for r in results.values() if not r.get("stopped") and not r.get("error"))
+    log.info("%s: %d of %d account(s) done in %s, %d resources, %d added, %d modified, %d removed, %d not ready. Details: %s",
+             "Stopped" if stopped else "Done", done_count, len(ready), fmt_seconds(time.monotonic() - t0),
+             totals["resources"], totals["added"], totals["modified"], totals["removed"], len(not_ready), run.run_dir)
+    return 130 if stopped else 0
 
 
 def cmd_changes(args):
@@ -1153,13 +1419,13 @@ def cmd_interactive(args):
         profiles = saved
     else:
         from_config = config_profiles()
-        profiles = []
+        profiles, unresolved = [], []
         for token in re.split(r"[\s,]+", answer):
             number = token.replace("-", "")
             if re.fullmatch(r"\d{12}", number):
                 profile = profile_for(number, data, from_config)
                 if not profile:
-                    print(f"  {number}: skipped")
+                    unresolved.append(number)
                     continue
                 entry = data["accounts"].setdefault(profile, {"added": iso(utc_now())})
                 entry.setdefault("account_id", number)
@@ -1175,12 +1441,13 @@ def cmd_interactive(args):
             entry["last_used"] = iso(utc_now())
             profiles.append(profile)
         if not profiles:
-            sys.exit("Nothing to sync.")
+            sys.exit(f"Nothing to sync: no profile for {', '.join(unresolved)}." if unresolved else "Nothing to sync.")
         write_json(ACCOUNTS_FILE, data)
         print(f"Saved. Next time press Enter to sync all {len({*saved, *profiles})} account(s).")
     profiles = list(dict.fromkeys(profiles))
     return cmd_sync(argparse.Namespace(profiles=profiles, services=None, types=None, regions=None,
-                                       full=False, verbose=False))
+                                       full=False, verbose=False, yes=False,
+                                       unresolved=unresolved if answer else []))
 
 
 def main():
@@ -1225,6 +1492,7 @@ def main():
     p.add_argument("--types", nargs="+", help="only these types, e.g. ec2/instances")
     p.add_argument("--regions", nargs="+", help="regions for this run only")
     p.add_argument("--full", action="store_true", help="repeat every detail call, even for unchanged resources")
+    p.add_argument("-y", "--yes", action="store_true", help="do not ask before syncing the accounts that can sign in")
     p.add_argument("-v", "--verbose", action="store_true")
     p.set_defaults(func=cmd_sync)
 
@@ -1235,7 +1503,13 @@ def main():
     p.set_defaults(func=cmd_changes)
 
     args = parser.parse_args()
-    sys.exit(args.func(args) or 0)
+    try:
+        code = args.func(args) or 0
+    except KeyboardInterrupt:
+        # Ctrl+C at a prompt or during the sign-in check: nothing was synced yet.
+        print("\nCancelled.", file=sys.stderr)
+        code = 130
+    sys.exit(code)
 
 
 if __name__ == "__main__":
