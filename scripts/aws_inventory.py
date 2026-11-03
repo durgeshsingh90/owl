@@ -4,6 +4,7 @@
 The commands it runs live in aws_commands.json; this file only runs them.
 The accounts to scan are remembered in aws_accounts.json.
 
+    python3 aws_inventory.py                                    # asks for account numbers; Enter = all saved
     python3 aws_inventory.py add prod-profile dev-profile      # remember accounts
     python3 aws_inventory.py add --all-profiles --match '^acme-' # every profile in ~/.aws/config that matches
     python3 aws_inventory.py config regions=us-east-1,eu-west-1  # or regions=all
@@ -31,6 +32,7 @@ resources whose list entry changed, or once detail_refresh_hours have passed.
 
 import argparse
 import concurrent.futures as cf
+import configparser
 import datetime as dt
 import hashlib
 import json
@@ -1033,6 +1035,9 @@ def cmd_sync(args):
     data = load_accounts()
     for p, r in results.items():
         if r.get("account_id") and p in data["accounts"]:
+            expected = data["accounts"][p].get("account_id")
+            if expected and expected != r["account_id"]:
+                log.warning("%s: saved as account %s but signs in to %s; saved %s now", p, expected, r["account_id"], r["account_id"])
             data["accounts"][p]["account_id"] = r["account_id"]
             data["accounts"][p]["last_sync"] = iso(run.started)
     write_json(ACCOUNTS_FILE, data)
@@ -1068,9 +1073,93 @@ def cmd_changes(args):
                 print(f"             {d['op']:7} {d['path']}: {old} -> {new}")
 
 
+def config_profiles():
+    """{account number: [profile, ...]} from ~/.aws/config (sso_account_id, role_arn or a number in the name)."""
+    parser = configparser.RawConfigParser()
+    parser.read(Path(os.environ.get("AWS_CONFIG_FILE", "~/.aws/config")).expanduser())
+    found = {}
+    for section in parser.sections():
+        if section != "default" and not section.startswith("profile "):
+            continue  # sso-session and services sections
+        name = section[len("profile "):] if section.startswith("profile ") else section
+        values = parser[section]
+        role = re.search(r":iam::(\d{12}):", values.get("role_arn", ""))
+        number = re.search(r"(?<!\d)\d{12}(?!\d)", name)
+        account = values.get("sso_account_id") or (role and role.group(1)) or (number and number.group(0))
+        if account:
+            found.setdefault(account.strip(), []).append(name)
+    return found
+
+
+def ask(prompt):
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return ""
+
+
+def profile_for(account, data, from_config):
+    """The profile to use for an account number: a saved one, else from ~/.aws/config, else ask."""
+    saved = sorted(p for p, a in data["accounts"].items() if a.get("account_id") == account)
+    if saved:
+        return saved[0]
+    candidates = from_config.get(account, [])
+    if len(candidates) == 1:
+        print(f"  {account}: profile {candidates[0]}")
+        return candidates[0]
+    if candidates:
+        for i, p in enumerate(candidates, 1):
+            print(f"    {i}. {p}")
+        choice = ask(f"  {account} has {len(candidates)} profiles, which one? [1] ")
+        if choice.isdigit() and 1 <= int(choice) <= len(candidates):
+            return candidates[int(choice) - 1]
+        return choice if choice in candidates else candidates[0]
+    return ask(f"  No profile in ~/.aws/config for {account}. Profile name (Enter to skip): ") or None
+
+
+def cmd_interactive(args):
+    """Ask which accounts to sync; Enter syncs every account used before."""
+    data = load_accounts()
+    saved = [p for p, a in data["accounts"].items() if a.get("enabled", True)]
+    print(f"{len(saved)} saved account(s) in {ACCOUNTS_FILE.name}.")
+    answer = ask("AWS account numbers (or profiles), separated by spaces or commas. Enter = all saved: ")
+    if not answer:
+        if not saved:
+            sys.exit("No saved accounts yet: type at least one account number.")
+        profiles = saved
+    else:
+        from_config = config_profiles()
+        profiles = []
+        for token in re.split(r"[\s,]+", answer):
+            number = token.replace("-", "")
+            if re.fullmatch(r"\d{12}", number):
+                profile = profile_for(number, data, from_config)
+                if not profile:
+                    print(f"  {number}: skipped")
+                    continue
+                entry = data["accounts"].setdefault(profile, {"added": iso(utc_now())})
+                entry.setdefault("account_id", number)
+            elif token:
+                profile = token
+                entry = data["accounts"].setdefault(profile, {"added": iso(utc_now())})
+            else:
+                continue
+            entry["enabled"] = True
+            entry["last_used"] = iso(utc_now())
+            profiles.append(profile)
+        if not profiles:
+            sys.exit("Nothing to sync.")
+        write_json(ACCOUNTS_FILE, data)
+        print(f"Saved. Next time press Enter to sync all {len({*saved, *profiles})} account(s).")
+    profiles = list(dict.fromkeys(profiles))
+    return cmd_sync(argparse.Namespace(profiles=profiles, services=None, types=None, regions=None,
+                                       full=False, verbose=False))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.set_defaults(func=cmd_interactive)
+    sub = parser.add_subparsers(dest="command")
 
     p = sub.add_parser("add", help="remember profiles (accounts) to scan")
     p.add_argument("profiles", nargs="*")
