@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>OWL · AWS Inventory</title>
+  <link rel="icon" href="../bitbucket/assets/owl.png">
+  <link rel="stylesheet" href="style.css?v=3">
+  <script src="../bitbucket/theme.js?v=20260914-current-mode"></script>
+</head>
+<body>
+<div class="shell">
+  <nav class="rail" aria-label="AWS Inventory">
+    <a class="brand" href="../home/" aria-label="OWL home"><img src="../bitbucket/assets/owl.png" alt=""><span>OWL<small>AWS Inventory</small></span></a>
+    <p class="rail-group">Run</p>
+    <a href="#/" data-nav="overview">Overview</a>
+    <a href="#/sync" data-nav="sync">Sync</a>
+    <a href="#/accounts" data-nav="accounts">Accounts &amp; permissions</a>
+    <p class="rail-group">Explore</p>
+    <a href="#/search" data-nav="search">Search</a>
+    <a href="#/changes" data-nav="changes">Changes</a>
+    <p class="rail-group">Analyse</p>
+    <a href="#/compare" data-nav="compare">Compare accounts</a>
+    <a href="#/projects" data-nav="projects">Projects</a>
+    <a href="#/settings" data-nav="settings">Settings</a>
+    <div class="rail-foot">
+      <span id="rail-database"></span>
+      <button id="theme-toggle" type="button" aria-label="Switch color theme"><span>◐</span> Theme</button>
+    </div>
+  </nav>
+  <main id="view" class="view" tabindex="-1" aria-live="polite"></main>
+</div>
+<script src="app.js?v=2"></script>
+<script src="/home/app-open.js?v=1" data-app="inventory"></script>
+</body>
+</html>

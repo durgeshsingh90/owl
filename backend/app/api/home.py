@@ -20,6 +20,7 @@ APPS = {
     "tracker": "Confluence Tracker",
     "compare": "Compare",
     "json": "JSON Visualizer",
+    "inventory": "AWS Inventory",
 }
 # Tables in the main database, by app (full-text indexes keep their shadow tables
 # under the same prefix).
@@ -122,6 +123,13 @@ def measure():
     if json_bytes:
         sizes["json"] += json_bytes
         files.append({"name": json_folder.name, "bytes": json_bytes})
+    # AWS Inventory: what the scripts downloaded (resource files, history, database).
+    from app.api import aws_inventory
+
+    inventory_bytes = aws_inventory.folder_bytes()
+    if inventory_bytes:
+        sizes["inventory"] += inventory_bytes
+        files.append({"name": aws_inventory.folder().name, "bytes": inventory_bytes})
     return {
         "apps": [{"app": app, "name": APPS[app], "bytes": sizes[app]} for app in APPS],
         "total_bytes": sum(item["bytes"] for item in files),

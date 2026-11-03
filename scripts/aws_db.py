@@ -503,7 +503,7 @@ def matched_paths(resource, terms, path="", out=None):
 
 def search(db, text, account=None, type_=None, region=None, limit=50):
     """Resources whose text holds every word of the search, best matches first:
-    [(profile, account, region, type, name, id, [where it matched])]."""
+    [(profile, account, region, type, name, id, [where it matched], database row id)]."""
     terms = [t for t in re.split(r"\s+", text.strip()) if t]
     if not terms:
         return []
@@ -523,13 +523,13 @@ def search(db, text, account=None, type_=None, region=None, limit=50):
     indexed = [t for t in terms if t not in short] if mode != "scan" else []
     if indexed:
         match = " AND ".join('"' + t.replace('"', '""') + '"' for t in indexed)
-        sql = ("SELECT a.profile, r.account_id, r.region, r.type, r.name, r.resource_id, r.data "
+        sql = ("SELECT a.profile, r.account_id, r.region, r.type, r.name, r.resource_id, r.data, r.id "
                "FROM resource_search s JOIN resources r ON r.id = s.rowid "
                "LEFT JOIN accounts a ON a.account_id = r.account_id WHERE resource_search MATCH ?")
         params = [match] + params
         order = " ORDER BY s.rank"
     else:
-        sql = ("SELECT a.profile, r.account_id, r.region, r.type, r.name, r.resource_id, r.data "
+        sql = ("SELECT a.profile, r.account_id, r.region, r.type, r.name, r.resource_id, r.data, r.id "
                "FROM resources r LEFT JOIN accounts a ON a.account_id = r.account_id WHERE 1=1")
         order = ""
     for t in (short if indexed else terms):
@@ -539,15 +539,15 @@ def search(db, text, account=None, type_=None, region=None, limit=50):
         sql += " AND " + " AND ".join(filters)
     rows = db.execute(sql + order + " LIMIT ?", params + [limit]).fetchall()
     lowered = [t.lower() for t in terms]
-    return [(p, a, reg, typ, name, rid, matched_paths(json.loads(data), lowered))
-            for p, a, reg, typ, name, rid, data in rows]
+    return [(p, a, reg, typ, name, rid, matched_paths(json.loads(data), lowered), pk)
+            for p, a, reg, typ, name, rid, data, pk in rows]
 
 
 def print_hits(hits, limit):
     if not hits:
         print("  nothing found")
         return
-    for profile, account, region, type_, name, rid, where in hits:
+    for profile, account, region, type_, name, rid, where, _ in hits:
         label = name if name and name != rid else ""
         print(f"  {profile or account} ({account})  {region:12} {type_:34} {label}")
         print(f"      id: {rid}")
