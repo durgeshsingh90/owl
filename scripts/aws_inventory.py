@@ -58,9 +58,10 @@ The last step writes what changed into one SQLite database, inventory/inventory.
 (aws_db.py; write_db=false turns it off), for SQL and for `aws_db.py search <text>`.
 Each account's sync time is saved in aws_accounts.json with its average (last 10 runs).
 Ctrl+C stops cleanly: finished accounts and regions are saved, nothing half done is
-written; a second Ctrl+C quits at once.
+written; a second Ctrl+C quits at once. The OWL app's Stop writes inventory/_runs/stop, read as a Ctrl+C.
 """
 
+import _thread
 import argparse
 import collections
 import concurrent.futures as cf
@@ -187,6 +188,33 @@ def write_json(path, data):
     os.replace(tmp, path)
 
 
+# The OWL app's Stop: it writes inventory/_runs/stop, read here as a Ctrl+C (Ctrl+Break cannot
+# reach a sync started from a backend without its own console on Windows).
+STOP_REQUESTED = threading.Event()
+CALLS = set()  # the aws processes running now, ended at once on a stop request
+CALLS_LOCK = threading.Lock()
+
+
+def watch_stop_file(path):
+    """Every second: when the stop file appears, end the aws calls in flight and raise Ctrl+C in
+    the main thread; a second request is a second Ctrl+C (quit at once)."""
+    while True:
+        time.sleep(1)
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        STOP_REQUESTED.set()
+        with CALLS_LOCK:
+            calls = list(CALLS)
+        for call in calls:
+            try:
+                call.kill()
+            except OSError:
+                pass
+        _thread.interrupt_main()
+
+
 def live_status(out, reset=False, **fields):
     """inventory/_runs/live.json: what the running sync is doing, for the OWL app to follow.
     reset: start a new one; else these fields are merged into it."""
@@ -303,18 +331,26 @@ class Aws:
         with self.gate:
             if self.stop and self.stop.is_set():
                 raise Stopped()
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=self.env)
+            with CALLS_LOCK:
+                CALLS.add(p)
             try:
-                p = subprocess.run(cmd, capture_output=True, text=True, env=self.env, timeout=self.settings["call_timeout"])
+                stdout, stderr = p.communicate(timeout=self.settings["call_timeout"])
             except subprocess.TimeoutExpired:
+                p.kill()
+                p.communicate()
                 raise AwsError("Timeout", f"no answer in {self.settings['call_timeout']}s")
+            finally:
+                with CALLS_LOCK:
+                    CALLS.discard(p)
         if p.returncode != 0:
             # Ctrl+C reaches the aws processes too, often before the script sees it: their
             # failure is the stop, not an AWS error.
-            interrupted = p.returncode in (130, -signal.SIGINT) or "KeyboardInterrupt" in p.stderr
-            if interrupted or (self.stop and self.stop.is_set()):
+            interrupted = p.returncode in (130, -signal.SIGINT) or "KeyboardInterrupt" in stderr
+            if interrupted or STOP_REQUESTED.is_set() or (self.stop and self.stop.is_set()):
                 raise Stopped()
-            raise AwsError.from_stderr(p.stderr)
-        out = p.stdout.strip()
+            raise AwsError.from_stderr(stderr)
+        out = stdout.strip()
         return json.loads(out) if out else None
 
 
@@ -1906,6 +1942,9 @@ def cmd_sync(args):
     if getattr(args, "follow_up", False):  # the types the coverage check added: keep the main sync's result
         before = read_json(out / "_runs" / "live.json", {}) or {}
         earlier = before.get("earlier", []) + [{k: before.get(k) for k in ("run", "message")}]
+    stop_file = out / "_runs" / "stop"
+    stop_file.unlink(missing_ok=True)  # a request left from an earlier sync
+    threading.Thread(target=watch_stop_file, args=(stop_file,), name="stop-file", daemon=True).start()
     live_status(out, reset=True, phase="sign-in", pid=os.getpid(), started=iso(utc_now()),
                 command=["sync"] + [a for a in sys.argv[2:]], earlier=earlier,
                 follow_up=bool(getattr(args, "follow_up", False)))

@@ -597,7 +597,7 @@
   }
 
   function running(data) {
-    const s = data.status, stopping = s.stopping || s.phase === "stopping";
+    const s = data.status, stopping = s.stopping || s.phase === "stopping" || !!s.stop_requested;
     const elapsed = s.elapsed != null && s.phase === "sync" ? s.elapsed : (Date.now() - Date.parse(s.started || s.updated || Date.now())) / 1000;
     const L = s.list || {}, S = s.save || {}, D = s.database || null, A = s.accounts || {}, W = s.workers || {};
     const eta = v => v == null ? "estimating" : clock(v);
@@ -607,7 +607,7 @@
         <p><span class="chip ${stopping ? "warn" : ""}">${stopping ? "Stopping" : esc(PHASES[s.phase] || s.phase)}</span>
           ${s.phase === "sign-in" ? ` Checking that ${plural(A.total || 0, "account")} can sign in, all at once.` : ""}
           ${s.follow_up ? " Downloading the types AWS lists that aws_commands.json lacked (just added)." : ""}
-          ${stopping ? " Finished accounts are kept; accounts in progress stop now and keep their finished regions." : ""}</p></div>
+          ${stopping ? " Finished accounts are kept; accounts in progress stop now and keep their finished regions. If it does not stop within a minute, Quit at once ends it." : ""}</p></div>
         <div class="actions"><button class="button ${stopping ? "danger" : ""}" type="button" id="stop-sync">${stopping ? "Quit at once" : "Stop"}</button></div></header>
       <section class="card bars">
         ${bar("List", L.done || 0, L.total || 0, `${number(L.done)}/${number(L.total)} ${pct(L.done, L.total)} · ETA ${L.total ? eta(L.eta) : "—"}`)}
@@ -701,11 +701,13 @@
     view.innerHTML = running(data);
     $("#stop-sync").addEventListener("click", async event => {
       const now = event.target.textContent === "Quit at once";
-      if (!confirm(now ? "Quit at once? Accounts in progress are not finished and the database is not written; the next sync catches up."
+      if (!confirm(now ? "Quit at once? This ends the sync and its aws commands. Finished accounts are kept; accounts in progress are not finished and the database is not written for this run; the next sync catches up."
                        : "Stop the sync? Finished accounts are kept; accounts in progress keep the regions they finished.")) return;
       event.target.disabled = true;
       try {
-        await send("/sync/stop");
+        await send("/sync/stop", "POST", {force: now});
+        stopPolling();
+        syncPage(params).catch(failed);
       } catch (error) {
         alert(error.message);
       }

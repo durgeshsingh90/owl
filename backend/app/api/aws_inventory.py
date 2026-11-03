@@ -15,6 +15,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
@@ -439,6 +440,7 @@ def change_diff(run: str, account: str, region: str, type: str, id: str):
 # ---------------------------------------------------------------------------- sync
 
 PROCESS = None  # the sync this backend started (subprocess.Popen)
+STOP_ASKED = {}  # pid -> when Stop was pressed
 RUNNING = {"sign-in", "sync", "database"}
 
 
@@ -464,7 +466,7 @@ def alive(pid):
     if not pid:
         return False
     if os.name == "nt":
-        return True  # os.kill(pid, 0) would end it on Windows; trust the status file
+        return windows_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -474,12 +476,28 @@ def alive(pid):
     return True
 
 
+def windows_alive(pid):
+    """Whether a process runs on Windows (os.kill(pid, 0) would end it there)."""
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ctypes.GetLastError() == 5  # access denied: it exists
+    try:
+        code = ctypes.c_ulong()
+        return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def sync_status():
     status = read_json(status_path(), {}) or {}
     running = status.get("phase") in RUNNING and alive(status.get("pid"))
     if status.get("phase") in RUNNING and not running:
         status = {**status, "phase": "ended",
                   "message": "The sync ended without saying how: it was closed or crashed. See its output below."}
+    if running and STOP_ASKED.get(status.get("pid")):
+        status = {**status, "stop_requested": STOP_ASKED[status["pid"]]}
     return {"running": running, "status": status}
 
 
@@ -537,6 +555,8 @@ def start_sync(body: Start):
     command += (["--profiles", *body.profiles] if body.profiles else []) + ["--full"] * body.full + ["--sweep"] * body.sweep
     log_path().parent.mkdir(parents=True, exist_ok=True)
     options = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True})
+    if PROCESS is not None:
+        PROCESS.poll()  # reaps the last one (it has ended: a sync running was refused above)
     with open(log_path(), "w", encoding="utf-8") as log:
         try:
             PROCESS = subprocess.Popen(command, cwd=scripts_folder(), stdin=subprocess.DEVNULL, stdout=log,
@@ -551,6 +571,10 @@ def start_sync(body: Start):
     return {"ok": True, "pid": PROCESS.pid}
 
 
+def now_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 def write_status(status):
     path = status_path()
     tmp = path.with_name(path.name + ".tmp")
@@ -558,24 +582,60 @@ def write_status(status):
     os.replace(tmp, path)
 
 
+class Stop(BaseModel):
+    force: bool = False  # quit at once: end the script and its aws commands
+
+
 @router.post("/sync/stop")
-def stop_sync():
+def stop_sync(body: Stop = Stop()):
     """A Ctrl+C for the running sync: finished accounts are kept and accounts in progress keep their
-    finished regions. Pressed again while it is stopping, it quits at once (as a second Ctrl+C)."""
+    finished regions. Pressed again while it is stopping, it quits at once (as a second Ctrl+C).
+    On Mac and Linux it gets a SIGINT; on Windows (where Ctrl+Break cannot reach a sync started
+    from a backend without its own console) the script reads inventory/_runs/stop instead, within
+    a second. force ends the process tree at once."""
     state = sync_status()
     if not state["running"]:
         raise HTTPException(409, "No sync is running.")
-    pid = state["status"]["pid"]
+    status = state["status"]
+    pid = status["pid"]
     ours = PROCESS is not None and PROCESS.pid == pid
-    try:
-        if os.name == "nt":
-            os.kill(pid, signal.CTRL_BREAK_EVENT)
-        elif ours:
-            os.killpg(pid, signal.SIGINT)  # the script and its aws commands, as Ctrl+C in a terminal
-        else:
-            os.kill(pid, signal.SIGINT)
-    except (ProcessLookupError, PermissionError, OSError) as e:
-        raise HTTPException(500, f"Could not stop the sync (process {pid}): {e}")
+    if body.force:
+        try:
+            if os.name == "nt":
+                done = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=30)
+                if done.returncode != 0 and windows_alive(pid):
+                    raise OSError((done.stderr or done.stdout).strip())
+            elif ours or pid == app_pid():
+                os.killpg(pid, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except (PermissionError, OSError, subprocess.TimeoutExpired) as e:
+            raise HTTPException(500, f"Could not end the sync (process {pid}): {e}")
+        if ours:
+            PROCESS.wait(timeout=10)
+        write_status({**status, "phase": "stopped", "stopping": False, "finished": now_iso(), "code": 137,
+                      "message": "Quit at once: finished accounts are saved; the accounts in progress and the "
+                                 "database update of this run were not."})
+        return {"ok": True}
+    # One Ctrl+C only (two quit at once): a SIGINT on Mac and Linux, else the stop file.
+    signalled = False
+    if os.name != "nt":
+        try:
+            if ours or pid == app_pid():
+                os.killpg(pid, signal.SIGINT)  # the script and its aws commands, as Ctrl+C in a terminal
+            else:
+                os.kill(pid, signal.SIGINT)
+            signalled = True
+        except OSError:
+            pass
+    if not signalled:
+        try:
+            (folder() / "_runs" / "stop").write_text(now_iso())
+        except OSError as e:
+            raise HTTPException(500, f"Could not ask the sync to stop: {e}")
+    STOP_ASKED[pid] = now_iso()  # shown as stopping until the script says so itself (live.json is its own)
     return {"ok": True}
 
 

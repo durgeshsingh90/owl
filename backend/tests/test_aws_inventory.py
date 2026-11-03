@@ -30,6 +30,8 @@ runs.mkdir(parents=True, exist_ok=True)
 def write(**fields):
     (runs / "live.json").write_text(json.dumps({"pid": os.getpid(), **fields}))
 print("args", *sys.argv[1:], flush=True)
+if "--full" not in sys.argv:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)  # a sync that does not answer Ctrl+C
 try:
     write(phase="sync", run="20261103T050000Z", list={"done": 1, "total": 4}, accounts={"done": 0, "total": 2})
     time.sleep(30)
@@ -256,6 +258,22 @@ class AwsInventoryTests(unittest.TestCase):
             self.assertEqual(state["status"]["phase"], "stopped")
             self.assertIn("Stopped", state["log"])
             self.assertEqual(client.post("/api/aws-inventory/sync/stop").status_code, 409)
+
+            # Where no signal reaches it (Windows), Stop leaves the stop file the script reads.
+            r = client.post("/api/aws-inventory/sync", json={"profiles": ["stablecoin-nonp"]})
+            wait(client, lambda s: s["status"].get("phase") == "sync" and s["log"])
+            with patch("app.api.aws_inventory.os.killpg", side_effect=OSError("no")), \
+                    patch("app.api.aws_inventory.os.kill", side_effect=OSError("no")):
+                self.assertEqual(client.post("/api/aws-inventory/sync/stop").status_code, 200)
+            self.assertTrue((self.out / "_runs" / "stop").exists())
+            self.assertTrue(client.get("/api/aws-inventory/sync").json()["status"]["stop_requested"])
+
+            # Quit at once ends a sync that does not answer Ctrl+C (an older script, or a hung one).
+            self.assertEqual(client.post("/api/aws-inventory/sync/stop", json={"force": True}).status_code, 200)
+            state = client.get("/api/aws-inventory/sync").json()
+            self.assertFalse(state["running"])
+            self.assertEqual(state["status"]["phase"], "stopped")
+            self.assertIn("Quit at once", state["status"]["message"])
 
     def test_compare_two_accounts(self):
         self.build()
