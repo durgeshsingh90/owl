@@ -28,17 +28,13 @@
         <div class="section-heading apps-heading">
           <div>
             <p class="eyebrow">OWL WORKSPACE</p>
-            <h1>Your apps <span class="app-total">09</span></h1>
+            <h1>Your apps <span class="app-total">07</span></h1>
             <p class="apps-description">
               Everything you work with, in one place.
             </p>
           </div>
         </div>
         <section class="app-area" aria-label="Your apps">
-          <a class="app-card" href="../aws-accounts/"><span class="app-opens" data-app-opens="aws" hidden></span>
-            <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h10a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.2 9.5 4.3 4.3 0 0 0 7 18Z" /></svg></div>
-            <div><div class="app-title"><h3>AWS Accounts</h3><span>Account inventory</span></div><p>Reads your ~/.aws/config profiles.<br />Grouped by category and environment; copy names, IDs and roles.</p></div>
-          </a>
           <a class="app-card" href="../naas/"><span class="app-opens" data-app-opens="naas" hidden></span>
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 3h12l4 4v14H4V3Zm5 6h6M9 13h6M9 17h4" /></svg></div>
             <div><div class="app-title"><h3>NAAS and Networking</h3><span>YAML &amp; README</span></div><p>Track configuration and documentation.<br />Search repositories, changes and file history.</p><p class="owl-auto-refresh" data-auto-refresh="naas" data-show-last></p></div>
@@ -95,10 +91,6 @@
             <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4c-2 0-3 1-3 3v2c0 1.5-1 3-2 3 1 0 2 1.5 2 3v2c0 2 1 3 3 3M16 4c2 0 3 1 3 3v2c0 1.5 1 3 2 3-1 0-2 1.5-2 3v2c0 2-1 3-3 3" /></svg></div>
             <div><div class="app-title"><h3>JSON Visualizer</h3><span>Cloud CLI output</span></div><p>AWS, Azure, kubectl and Terraform JSON as tables, cards and trees.<br />Search it and copy any value or path in one click.</p></div>
           </a>
-          <a class="app-card" href="../architecture/"><span class="app-opens" data-app-opens="architecture" hidden></span>
-            <div class="app-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 2.5h6v5H9zM2.5 16.5h6v5h-6zM15.5 16.5h6v5h-6zM12 7.5V12M5.5 16.5V12h13v4.5" /></svg></div>
-            <div><div class="app-title"><h3>Architecture Analyser</h3><span>Interactive TAD</span></div><p>Checks a project's AWS connectivity, DNS and security against its requirements.<br />Every PASS, FAIL and UNKNOWN comes with evidence.</p></div>
-          </a>
         </section>
         <script>
           // Inline on purpose: it runs before the first paint, so the cards never visibly move.
@@ -140,7 +132,6 @@
           <a href="#stats-bookmarks" data-stats-link="bookmarks">Bookmarks<small data-stats-figure="bookmarks"></small></a>
           <a href="#stats-naas" data-stats-link="naas">NAAS and Networking<small data-stats-figure="naas"></small></a>
           <a href="#stats-network" data-stats-link="network">Network Automation<small data-stats-figure="network"></small></a>
-          <a href="#stats-aws" data-stats-link="aws">AWS Accounts<small data-stats-figure="aws"></small></a>
           <a href="#stats-tracker" data-stats-link="tracker">Confluence Tracker<small data-stats-figure="tracker"></small></a>
         </nav>
         <section
@@ -313,13 +304,6 @@
             <span class="sample-badge">JSON &amp; README files</span><a class="bookmark-app-link" href="../network-automation/">Open app ↗</a>
           </div>
           <div id="stats-network-body" class="app-stats-body"><p class="app-stats-loading">Loading statistics…</p></div>
-        </section>
-        <section class="app-stats stats-section" id="stats-aws" aria-labelledby="stats-aws-title">
-          <div class="statistics-app-heading">
-            <h2 id="stats-aws-title">AWS Accounts statistics</h2>
-            <span class="sample-badge">Imported inventory</span><a class="bookmark-app-link" href="../aws-accounts/">Open app ↗</a>
-          </div>
-          <div id="stats-aws-body" class="app-stats-body"><p class="app-stats-loading">Loading statistics…</p></div>
         </section>
         <section class="app-stats stats-section" id="stats-tracker" aria-labelledby="stats-tracker-title">
           <div class="statistics-app-heading">

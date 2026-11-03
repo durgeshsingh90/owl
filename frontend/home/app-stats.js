@@ -1,11 +1,11 @@
 "use strict";
-// Statistics for NAAS and Networking, Network Automation, AWS Accounts and Confluence Tracker,
+// Statistics for NAAS and Networking, Network Automation and Confluence Tracker,
 // plus the sticky "Jump to" bar that links every app's statistics section.
 (() => {
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[char]));
   const number = value => Number(value || 0).toLocaleString();
-  const PLURALS = {category: "categories", copy: "copies", entry: "entries"};
+  const PLURALS = {entry: "entries"};
   const plural = (count, word) => `${number(count)} ${count === 1 ? word : PLURALS[word] || `${word}s`}`;
   const when = value => {
     const time = typeof value === "number" ? value * (value < 1e12 ? 1000 : 1) : Date.parse(value);
@@ -80,47 +80,6 @@
     }
   }
 
-  const ENV = /-(prod|production|prd|nonp|nonprod|nonprd|work|mtf|dev|develop|development|test|testing|qa|uat|sit|stage|staging|stg|preprod|pre|perf|sandbox|sbx|demo|poc|lab|dr)(?:-\d+)?$/i;
-  async function renderAws() {
-    const body = $("stats-aws-body");
-    try {
-      const [data, connection] = await Promise.all([json("/api/aws-accounts"), json("/api/aws-accounts/connection").catch(() => null)]);
-      if (!data.imported) {
-        figure("aws", "not set up");
-        body.innerHTML = emptyState(data.config?.error || "No AWS accounts yet. Set your AWS config file in AWS Accounts settings.", "../aws-accounts/", "Open app");
-        return;
-      }
-      const accounts = [...new Map(Object.values(data.categories).flat().map(account => [account.profile, account])).values()];
-      figure("aws", plural(accounts.length, "account"));
-      const copies = profile => (data.copies?.profile?.[profile] || 0);
-      const environments = new Map();
-      for (const account of accounts) {
-        const env = ENV.exec(account.profile)?.[1].toLowerCase() || "no env";
-        environments.set(env, (environments.get(env) || 0) + 1);
-      }
-      const totalCopies = Object.values(data.copies || {}).flatMap(Object.values).reduce((sum, value) => sum + value, 0);
-      const connected = connection?.status === "connected" && connection.expires_at;
-      const left = connected ? Math.max(0, connection.expires_at - Date.now() / 1000) : 0;
-      body.innerHTML = metrics([
-        ["Accounts", accounts.length, plural(Object.keys(data.categories).length, "category")],
-        ["Projects", (data.projects || []).length, `${number((data.projects || []).reduce((sum, project) => sum + project.accounts.length, 0))} accounts grouped`],
-        ["Starred accounts", (data.stars || []).length, "Quick access"],
-        ["Copies", totalCopies, "Names, IDs and roles copied"],
-        ["AWS connection", connected ? "Connected" : connection ? "Disconnected" : "Unknown", connected ? `${Math.floor(left / 3600)}h ${Math.floor(left % 3600 / 60)}m left · ${connection.profile}` : connection?.profile || ""],
-        ["Read from config", when(data.imported_at), data.config?.path || ""],
-      ]) + `<section class="analytics">${[
-        panel("Accounts by category", "Current inventory", bars(Object.entries(data.categories).map(([name, list]) => [name.replace(/_/g, " "), list.length]).sort((a, b) => b[1] - a[1]), "No categories.")),
-        panel("Accounts by environment", "From account names", bars([...environments].sort((a, b) => b[1] - a[1]), "No accounts.")),
-        panel("Most copied accounts", "Name and ID copies", rows(accounts.filter(account => copies(account.profile)).sort((a, b) => copies(b.profile) - copies(a.profile)).slice(0, 8)
-          .map(account => [account.profile, String(account.account_id), plural(copies(account.profile), "copy")]), "Nothing copied yet.")),
-        panel("Projects", "Your groupings", rows((data.projects || []).map(project => [project.name, "Project", plural(project.accounts.length, "account")]), "No projects yet. Create one in AWS Accounts.")),
-      ].join("")}</section>`;
-    } catch {
-      figure("aws", "unavailable");
-      body.innerHTML = `<p class="app-stats-empty">Unable to load statistics. Check that OWL is running.</p>`;
-    }
-  }
-
   async function renderTracker() {
     const body = $("stats-tracker-body");
     try {
@@ -161,7 +120,6 @@
   json("/api/bookmarks/workspace").then(data => figure("bookmarks", plural((data.bookmarks || []).length, "bookmark"))).catch(() => figure("bookmarks", ""));
   renderLibrary("naas", "/naas", "file");
   renderLibrary("network", "/network-automation", "file");
-  renderAws();
   renderTracker();
 
   // Highlight the app whose statistics are on screen.

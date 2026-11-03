@@ -19,9 +19,7 @@ APPS = {
     "bookmarks": "Bookmarks",
     "tracker": "Confluence Tracker",
     "compare": "Compare",
-    "aws": "AWS Accounts",
     "json": "JSON Visualizer",
-    "architecture": "Architecture Analyser",
 }
 # Tables in the main database, by app (full-text indexes keep their shadow tables
 # under the same prefix).
@@ -30,7 +28,7 @@ PREFIXES = (
     ("confluence_tracker_", "tracker"),
     ("tracker_", "tracker"),
     ("compare_", "compare"),
-    ("aws_", "aws"),
+    ("aws_", "json"),
     ("json_viz_", "json"),
 )
 BITBUCKET_TABLES = {
@@ -124,14 +122,6 @@ def measure():
     if json_bytes:
         sizes["json"] += json_bytes
         files.append({"name": json_folder.name, "bytes": json_bytes})
-    # Architecture Analyser: snapshots and definitions, and the shared AWS download folder.
-    from app.architecture import download as architecture_download
-
-    for folder in (main.parent / "architecture", architecture_download.media_folder()):
-        if folder.is_dir():
-            size = sum(p.stat().st_size for p in folder.rglob("*") if p.is_file())
-            sizes["architecture"] += size
-            files.append({"name": str(folder.relative_to(main.parent)) if folder.is_relative_to(main.parent) else folder.name, "bytes": size})
     return {
         "apps": [{"app": app, "name": APPS[app], "bytes": sizes[app]} for app in APPS],
         "total_bytes": sum(item["bytes"] for item in files),

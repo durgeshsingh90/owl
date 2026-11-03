@@ -1,8 +1,0 @@
-{
-  "id": "sanctions-service",
-  "name": "Sanctions Screening Service",
-  "type": "third-party",
-  "description": "SaaS sanctions screening. The vendor has not published fixed IP addresses yet.",
-  "domains": ["api.sanctions-check.example"],
-  "endpoints": [{"hostname": "api.sanctions-check.example", "protocol": "TCP", "port": 443}]
-}

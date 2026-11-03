@@ -15,7 +15,7 @@ class Forwarding(unittest.TestCase):
             self.assertTrue(forwarded(path), path)
 
     def test_static_files_stay_static(self):
-        for path in ("/naas/", "/naas/script.js", "/network-automation/index.html", "/home/", "/architecture/app.js"):
+        for path in ("/naas/", "/naas/script.js", "/network-automation/index.html", "/home/", "/json-visualizer/app.js"):
             self.assertFalse(forwarded(path), path)
 
 

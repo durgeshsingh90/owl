@@ -430,7 +430,7 @@ def cancel(job_id):
 
 
 def aws_profiles():
-    """Profiles in the AWS config file AWS Accounts uses; none when it is missing."""
+    """Profiles in the saved AWS config file (else ~/.aws/config); none when it is missing."""
     try:
         with connection() as db:
             row = db.execute("SELECT path FROM aws_config_source WHERE id=1").fetchone()
