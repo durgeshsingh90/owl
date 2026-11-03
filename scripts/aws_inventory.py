@@ -626,13 +626,16 @@ def hms(seconds):
 
 
 class Progress:
-    """One console line, rewritten in place: a bar of list commands done out of the total,
-    elapsed time, rate and ETA.
+    """Two console lines, rewritten in place.
 
-    The unit is one resource type's list command in one region of one account, so the
-    total is known before the run: the commands in aws_commands.json times regions times
-    accounts. The rate comes from the last eta_window commands to finish. When the output
-    is not a terminal (piped, cron), the line is printed every status_seconds instead.
+    List: list commands done out of the total (the commands in aws_commands.json times
+    regions times accounts, known up front), accounts, aws workers and an ETA from the rate
+    of the last eta_window commands.
+    Save: the work after listing, one unit per resource saved (with its network rules and
+    DNS answers) and per file read for the coverage check and the merged account file. Its
+    total grows while listing goes on, so it is estimated (~) from the work per command so
+    far; total ETA covers both. When the output is not a terminal (piped, cron), both lines
+    are printed every status_seconds instead.
     """
 
     def __init__(self, settings, accounts_total, gate, tuner=None):
@@ -640,6 +643,9 @@ class Progress:
         self.total = 0
         self.done = 0
         self.window = collections.deque(maxlen=settings["eta_window"] + 1)
+        self.work_total = 0
+        self.work_done = 0
+        self.samples = collections.deque(maxlen=15)  # (time, work_done), one per redraw
         self.started = time.monotonic()
         self.accounts_total = accounts_total
         self.accounts_done = 0
@@ -648,8 +654,10 @@ class Progress:
         self.tuner = tuner
         self.stopping = False
         self.tty = sys.stderr.isatty()
+        if self.tty and os.name == "nt":
+            os.system("")  # lets the Windows console move the cursor up (ANSI codes)
         self.every = 1 if self.tty else settings["status_seconds"]
-        self.width = 0
+        self.drawn = False
         self.halt = threading.Event()
         self.thread = threading.Thread(target=self.loop, name="progress", daemon=True)
 
@@ -662,47 +670,73 @@ class Progress:
             self.done += 1
             self.window.append(time.monotonic())
 
+    def add_work(self, n):
+        with self.lock:
+            self.work_total += n
+
+    def tick_work(self, n=1):
+        with self.lock:
+            self.work_done += n
+
     def account_done(self):
         with self.lock:
             self.accounts_done += 1
 
-    def line(self):
+    def lines(self):
+        now = time.monotonic()
         total = max(self.total, self.done)
-        share = self.done / total if total else 0
+        listed = total and self.done >= total
         rate = None
         if len(self.window) >= 2 and self.window[-1] > self.window[0]:
             rate = (len(self.window) - 1) / (self.window[-1] - self.window[0])
-        if total and self.done >= total:
-            eta = "00:00:00"
-        else:
-            eta = hms((total - self.done) / rate) if rate else "estimating"
-        cpu = f" cpu {self.tuner.cpu:.0%}" if self.tuner and self.tuner.cpu is not None else ""
-        text = (f" {self.done:,}/{total:,} {share:4.0%} | accounts {self.accounts_done}/{self.accounts_total} ({self.accounts_running} running)"
-                f" | workers {self.gate.active}/{self.gate.limit}{cpu} | {rate or 0:.1f}/s"
-                f" | elapsed {hms(time.monotonic() - self.started)} | ETA {eta}")
-        if self.stopping:
-            text += " | stopping"
+        list_eta = 0 if listed else ((total - self.done) / rate if rate else None)
+
+        self.samples.append((now, self.work_done))
+        (t0, w0), (t1, w1) = self.samples[0], self.samples[-1]
+        work_rate = (w1 - w0) / (t1 - t0) if t1 > t0 and w1 > w0 else None
+        # Work still to come from the commands not listed yet, at the work per command so far.
+        future = 0 if listed or not self.done else round(self.work_total / self.done * (total - self.done))
+        work_total = max(self.work_total + future, self.work_done)
+        left = work_total - self.work_done
+        save_eta = 0 if not left else (left / work_rate if work_rate else None)
+        etas = [e for e in (list_eta, save_eta) if e is not None]
+        total_eta = hms(max(etas)) if len(etas) == 2 or (etas and listed) else "estimating"
+
+        list_text = (f"{self.done:,}/{total:,} {self.done / total if total else 0:5.0%}"
+                     f"  accounts {self.accounts_done}/{self.accounts_total}"
+                     f"  workers {self.gate.active}/{self.gate.limit}"
+                     f"  ETA {hms(list_eta) if list_eta is not None else 'estimating'}")
+        save_text = (f"{self.work_done:,}/{'' if listed else '~'}{work_total:,}"
+                     f" {self.work_done / work_total if work_total else 0:5.0%}"
+                     f"  elapsed {hms(now - self.started)}  total ETA {total_eta}"
+                     + ("  stopping" if self.stopping else ""))
         columns = shutil.get_terminal_size((120, 20)).columns - 1
-        size = max(10, min(40, columns - len(text) - 2))
-        filled = int(size * share)
-        return ("[" + "#" * filled + "-" * (size - filled) + "]" + text)[:columns]
+        size = max(10, min(32, columns - max(len(list_text), len(save_text)) - 9))
+
+        def bar(share):
+            filled = int(size * min(share, 1))
+            return "[" + "#" * filled + "-" * (size - filled) + "]"
+
+        return [(f"List  {bar(self.done / total if total else 0)}  {list_text}")[:columns],
+                (f"Save  {bar(self.work_done / work_total if work_total else 0)}  {save_text}")[:columns]]
 
     def show(self):
         with self.lock:
-            line = self.line()
+            first, second = self.lines()
             if self.tty:
-                sys.stderr.write("\r" + line + " " * max(0, self.width - len(line)))
-                self.width = len(line)
+                up = "\x1b[1A" if self.drawn else ""  # back to the first of the two lines
+                sys.stderr.write(f"{up}\r\x1b[2K{first}\n\r\x1b[2K{second}")
+                self.drawn = True
             else:
-                sys.stderr.write(line + "\n")
+                sys.stderr.write(f"{first}\n{second}\n")
             sys.stderr.flush()
 
     def print(self, text):
-        """A message above the bar (logs, Ctrl+C)."""
+        """A message above the two lines (Ctrl+C, errors, logs when on)."""
         with self.lock:
-            if self.tty and self.width:
-                sys.stderr.write("\r" + " " * self.width + "\r")
-                self.width = 0
+            if self.tty and self.drawn:
+                sys.stderr.write("\r\x1b[2K\x1b[1A\r\x1b[2K")
+                self.drawn = False
             sys.stderr.write(text + "\n")
             if self.tty and self.thread.is_alive():
                 self.show()
@@ -724,7 +758,7 @@ class Progress:
             self.show()
             if self.tty:
                 sys.stderr.write("\n")
-                self.width = 0
+                self.drawn = False
 
 
 class ProgressHandler(logging.Handler):
@@ -1111,8 +1145,10 @@ def scan_scope(run, aws, account, label, region, rtypes):
                     if run.progress and not isinstance(f.exception(), Stopped):
                         run.progress.tick()
                     try:
-                        _, denials[rt["key"]] = f.result()
+                        count, denials[rt["key"]] = f.result()
                         done[rt["key"]] = path
+                        if run.progress:
+                            run.progress.add_work(count)
                     except AwsError as e:
                         status = error_status(e.code)
                         errors.append({"scope": label, "type": rt["key"], "status": status, "code": e.code, "message": e.message[:500]})
@@ -1160,6 +1196,8 @@ def save_scope(run, account, label, manifest, manifest_path, done, errors, denia
             if key == dns_key:
                 add_dns_lookups(run, {rid: item})
             entries[rid] = save_resource(run, account, label, rt, rid, item, line["detail_ts"], prev.get(rid), now, changes)
+            if run.progress:
+                run.progress.tick_work()
         for rid in set(prev) - set(entries):
             archive(run, account, prev[rid]["file"])
             (acct_dir / prev[rid]["file"]).unlink(missing_ok=True)
@@ -1286,7 +1324,7 @@ def scan_account(run, profile, account_cfg, conn):
     for c in changes:
         result[c["action"]] += 1
     result["resources"] = sum(sum(c.values()) for c in counts.values())
-    build_account_inventory(acct_dir, run.by_key)
+    build_account_inventory(acct_dir, run.by_key, run.progress)
     result["seconds"] = round(time.monotonic() - started, 1)
     return result
 
@@ -1313,9 +1351,12 @@ def id_forms(value):
     return {value, value.rstrip("/").split("/")[-1], value.split(":")[-1]}
 
 
-def inventory_tokens(acct_dir):
+def inventory_tokens(acct_dir, progress=None):
     """Every ARN and id the account's saved resources hold, read one file at a time."""
     tokens = set()
+    manifests = [read_json(path, {}) or {} for path in acct_dir.glob("*/_manifest.json")]
+    if progress:
+        progress.add_work(sum(len(e.get("items", {})) for m in manifests for e in m.values()))
 
     def walk(obj):
         if isinstance(obj, str):
@@ -1328,13 +1369,15 @@ def inventory_tokens(acct_dir):
             for v in obj:
                 walk(v)
 
-    for manifest_path in acct_dir.glob("*/_manifest.json"):
-        for entry in (read_json(manifest_path, {}) or {}).values():
+    for manifest in manifests:
+        for entry in manifest.values():
             for rid, item in entry.get("items", {}).items():
                 tokens.update(id_forms(rid))
                 resource = (read_json(acct_dir / item["file"]) or {}).get("resource")
                 if resource is not None:
                     walk(resource)
+                if progress:
+                    progress.tick_work()
     return tokens
 
 
@@ -1402,7 +1445,7 @@ def check_coverage(run, aws, account, regions):
     def covered(names, kind_type):
         return any(r["service"] in names and type_matches(r["type"], kind_type) for r in catalog)
 
-    tokens = inventory_tokens(acct_dir)
+    tokens = inventory_tokens(acct_dir, run.progress)
     # Types this account could not list (no permission, timeout, error) often explain a gap.
     skipped = sorted({key for path in acct_dir.glob("*/_manifest.json")
                       for key, entry in (read_json(path, {}) or {}).items()
@@ -1528,7 +1571,7 @@ def inventory_path(acct_dir, profile):
     return acct_dir.parent / f"{safe_name(profile)}-{acct_dir.name}.json"
 
 
-def build_account_inventory(acct_dir, by_key):
+def build_account_inventory(acct_dir, by_key, progress=None):
     """Merge every resource file of one account into inventory/<profile>-<account number>.json.
 
     {"account": {...}, "coverage": {what AWS lists that the inventory lacks}, "global": {service: {type: {id: resource}}},
@@ -1541,6 +1584,15 @@ def build_account_inventory(acct_dir, by_key):
     """
     tree = {"account": read_json(acct_dir / "_account.json", {}), "coverage": read_json(acct_dir / "_coverage.json"),
             "global": {}, "regions": {}}
+    tick = progress.tick_work if progress else None
+    if progress:
+        # Each file is read once to write it; regional ones (but VPCs) once more to find their VPC.
+        units = 0
+        for path in acct_dir.glob("*/_manifest.json"):
+            for key, entry in (read_json(path, {}) or {}).items():
+                n = len(entry.get("items", {}))
+                units += n if path.parent.name == "global" or key == "ec2/vpcs" else 2 * n
+        progress.add_work(units)
     for manifest_path in sorted(acct_dir.glob("*/_manifest.json")):
         label = manifest_path.parent.name
         manifest = read_json(manifest_path, {})
@@ -1553,7 +1605,7 @@ def build_account_inventory(acct_dir, by_key):
                     section.setdefault(service, {}).setdefault(type_, {})[rid] = acct_dir / item["file"]
         else:
             section = tree["regions"].setdefault(label, {"vpcs": {}, "outside_vpc": {}})
-            place_in_vpcs(section, acct_dir, entries, by_key)
+            place_in_vpcs(section, acct_dir, entries, by_key, tick)
         skipped = [{"type": key, "status": e["status"], "error": e.get("error"), "at": e.get("last_error")}
                    for key, e in sorted(manifest.items()) if e.get("status") in ("no_permission", "timeout", "error")]
         if skipped:
@@ -1561,7 +1613,7 @@ def build_account_inventory(acct_dir, by_key):
     path = inventory_path(acct_dir, tree["account"].get("profile") or "account")
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
-        write_value(f, tree, 0)
+        write_value(f, tree, 0, tick)
         f.write("\n")
     os.replace(tmp, path)
     # A file under the account's old profile name (or the old inventory.json) is out of date.
@@ -1570,24 +1622,26 @@ def build_account_inventory(acct_dir, by_key):
             stale.unlink()
 
 
-def write_value(f, value, depth):
+def write_value(f, value, depth, tick=None):
     """Write JSON piece by piece; a Path stands for that resource file's resource."""
     pad = "  " * depth
     if isinstance(value, Path):
         value = (read_json(value) or {}).get("resource")
+        if tick:
+            tick()
     elif isinstance(value, dict) and value and not all(isinstance(v, (str, int, float, bool, type(None))) for v in value.values()):
         f.write("{\n")
         items = sorted(value.items(), key=lambda kv: str(kv[0]))
         for i, (k, v) in enumerate(items):
             f.write(f"{pad}  {json.dumps(str(k))}: ")
-            write_value(f, v, depth + 1)
+            write_value(f, v, depth + 1, tick)
             f.write(",\n" if i < len(items) - 1 else "\n")
         f.write(pad + "}")
         return
     f.write(json.dumps(value, indent=2, sort_keys=True, default=str).replace("\n", "\n" + pad))
 
 
-def place_in_vpcs(section, acct_dir, entries, by_key):
+def place_in_vpcs(section, acct_dir, entries, by_key, tick=None):
     """Put each regional resource file under the VPC it belongs to.
 
     The VPC is the resource's own VpcId, else the VPC of a subnet or security group it
@@ -1618,6 +1672,8 @@ def place_in_vpcs(section, acct_dir, entries, by_key):
                 section["vpcs"].setdefault(rid, {})["vpc"] = path
                 continue
             resource = (read_json(path) or {}).get("resource")
+            if tick:
+                tick()
             if resource is None:
                 continue
             vpc = find_vpc_id({k: v for k, v in resource.items() if k != "_network"})
@@ -1752,19 +1808,17 @@ def fmt_seconds(seconds):
 
 
 def check_accounts(settings, commands, accounts, profiles, unresolved):
-    """sts get-caller-identity for every account at once. Prints one line per account and
-    returns (results, the profiles that can sign in, one per account)."""
+    """sts get-caller-identity for every account at once. Prints a count and a line per
+    account with a problem; returns (results, the profiles that can sign in, one per account)."""
     start = worker_limits(settings)[0]
     gate = Gate(start)
-    print(f"Checking sign-in (sts get-caller-identity) for {len(profiles)} account(s), {start} at a time...")
+    print(f"Checking sign-in for {len(profiles)} account(s)...", end=" ", flush=True)
     pool = cf.ThreadPoolExecutor(start)
     conns = {}
     try:
         futures = {pool.submit(connectivity, Aws(p, settings, gate), commands, settings["global_region"]): p for p in profiles}
         for i, f in enumerate(cf.as_completed(futures), 1):
             conns[futures[f]] = f.result()
-            if i % 50 == 0 and i < len(profiles):
-                print(f"  checked {i}/{len(profiles)}")
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 
@@ -1782,10 +1836,11 @@ def check_accounts(settings, commands, accounts, profiles, unresolved):
             note = f"WARNING: saved as {saved}, signs in to {c['account_id']}" if saved and saved != c["account_id"] else c.get("arn") or ""
             rows.append(("OK", c["account_id"], p, note))
     rows += [("NO PROFILE", number, "-", "no profile found for this account number") for number in unresolved]
-    # Problems first, so they are not lost above a long list of OKs.
-    for status, account, profile, note in sorted(rows, key=lambda r: (r[0] == "OK", r[1])):
-        print(f"  {status:10} {account:14} {profile:45} {note[:110]}")
-    print(f"Ready: {len(ready)} of {len(profiles) + len(unresolved)} account(s); not ready: {len(rows) - len(ready)}.")
+    problems = [r for r in rows if r[0] != "OK" or r[3].startswith("WARNING")]
+    print(f"{len(ready)} OK" + (f", {len(rows) - len(ready)} not ready:" if len(rows) > len(ready) else
+                                (":" if problems else ".")))
+    for status, account, profile, note in sorted(problems, key=lambda r: (r[0], r[1])):
+        print(f"  {status:10} {account:14} {profile:40} {note[:90]}")
     return conns, ready
 
 
@@ -1877,18 +1932,12 @@ def cmd_sync(args):
                      fmt_seconds(r["seconds"]), fmt_seconds(entry["avg_seconds"]))
 
     log.info("Sync %s: %d account(s), %d resource type(s), output %s", run.id, len(ready), len(run.resources), run.out)
-    sys.stdout.flush()  # the sign-in table first, then the progress line (stderr)
-    notes = []
-    if skipped_types:
-        notes.append(f"{skipped_types:,} skipped as empty before, listed again every "
-                     f"{run.settings['full_sweep_days']} days or with --sweep")
-    if denied_types:
-        notes.append(f"{denied_types:,} skipped for no permission: `aws_inventory.py permissions` to see or retry")
-    skip_note = f" ({'; '.join(notes)})" if notes else ""
-    sweep_note = (f" Full sweep (every type) for {sweeps} account(s)."
-                  if sweeps and run.settings["smart_skip"] and not run.filtered else "")
-    print(f"Syncing {len(ready)} account(s): {progress.total:,} list commands{skip_note}.{sweep_note} "
-          "Ctrl+C stops cleanly.", file=sys.stderr)
+    sys.stdout.flush()  # the sign-in lines first, then the progress lines (stderr)
+    parts = [f"empty {skipped_types:,}"] * bool(skipped_types) + [f"no permission {denied_types:,}"] * bool(denied_types)
+    skip_note = f", {skipped_types + denied_types:,} skipped ({', '.join(parts)})" if parts else ""
+    sweep_note = (f", full sweep for {sweeps}" if sweeps and run.settings["smart_skip"] and not run.filtered else "")
+    print(f"Syncing {len(ready)} account(s): {progress.total:,} list commands{skip_note}{sweep_note}. Ctrl+C to stop.",
+          file=sys.stderr)
     if run.tuner:
         run.tuner.start()
     progress.start()
@@ -1956,46 +2005,35 @@ def cmd_sync(args):
     write_json(run.out / "_runs" / "latest.json", {"run": run.id, "path": str(run.run_dir)})
     done_count = sum(1 for r in results.values() if not r.get("stopped") and not r.get("error"))
     problems = sum(len(r.get("errors", [])) + len(r.get("timeout", [])) for r in results.values())
-    message = (f"{'Stopped' if stopped else 'Done'}: {done_count} of {len(ready)} account(s) in {hms(time.monotonic() - t0)}"
-               f" | {totals['resources']:,} resources: {totals['added']} added, {totals['modified']} modified,"
-               f" {totals['removed']} removed | {problems} timeout/error(s) | {len(not_ready)} not ready"
-               + (f" | {sum(r.get('skipped_types', 0) for r in results.values()):,} type(s) skipped as empty before"
-                  if any(r.get("skipped_types") for r in results.values()) else "")
-               + (f" | {sum(r.get('denied_skipped', 0) for r in results.values()):,} skipped for no permission"
-                  if any(r.get("denied_skipped") for r in results.values()) else ""))
+    message = (f"{'Stopped' if stopped else 'Done'} in {hms(time.monotonic() - t0)}: {done_count}/{len(ready)} accounts, "
+               f"{totals['resources']:,} resources (+{totals['added']} ~{totals['modified']} -{totals['removed']}), "
+               f"{problems} error(s)" + (f", {len(not_ready)} not ready" if not_ready else "") + ".")
     log.info(message)
     print(message, file=sys.stderr)
     for line in coverage_summary(run, results):
         log.info(line)
         print(line, file=sys.stderr)
+    print(f"Files in {os.path.relpath(run.out)}{os.sep}. See: aws_inventory.py changes, permissions", file=sys.stderr)
     if not stopped and not getattr(args, "follow_up", False):
         return add_missing_types(run, args, results) or 0
-    print(f"Files: {run.out}   What changed: aws_inventory.py changes --diff", file=sys.stderr)
     return 130 if stopped else 0
 
 
 def coverage_summary(run, results):
-    """A few lines on what AWS lists that the inventory lacks, over all accounts of this run."""
+    """One line on what AWS lists that the inventory lacks, over all accounts of this run."""
     reports = {p: r["coverage"] for p, r in results.items() if r.get("coverage")}
     if not reports:
         return []
     unchecked = [p for p, c in reports.items() if not c["checked"]]
     gaps = {p: c for p, c in reports.items() if c["missed"] or c["config_types"]}
-    lines = [f"Coverage: {len(reports) - len(unchecked)} account(s) checked against AWS's own lists, "
-             f"{len(reports) - len(unchecked) - len(gaps)} complete, {len(gaps)} with gaps"
-             + (f", {len(unchecked)} could not be checked (no access to the Tagging API or AWS Config)" if unchecked else "")]
     types = collections.Counter()
     for c in gaps.values():
         types.update(c["types"])
-    if types:
-        lines.append("  Not in the inventory: " + ", ".join(f"{kind} {count}" for kind, count in types.most_common(8)))
-    for p, c in list(gaps.items())[:5]:
-        account = results[p]["account_id"]
-        lines.append(f"  {p} ({account}): {c['missed']} missed, {c['config_types']} Config type(s) not covered "
-                     f"-> {run.out / account / '_coverage.json'}")
-    if len(gaps) > 5:
-        lines.append(f"  ... and {len(gaps) - 5} more account(s): see each account's _coverage.json")
-    return lines
+    top = f" ({', '.join(f'{kind} {count}' for kind, count in types.most_common(4))})" if types else ""
+    line = (f"Coverage: {len(reports) - len(unchecked) - len(gaps)} complete, {len(gaps)} with gaps{top}"
+            + (f", {len(unchecked)} not checked (no access)" if unchecked else "")
+            + (". Details: <account>/_coverage.json" if gaps else "."))
+    return [line]
 
 
 def add_missing_types(run, args, results):
