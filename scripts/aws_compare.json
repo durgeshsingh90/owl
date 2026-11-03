@@ -3,6 +3,8 @@
     "Settings for aws_compare.py, which compares two accounts' inventories (e.g. nonp and prod).",
     "env_words: words that can name an environment inside resource names; the script shows which ones it finds and asks which mean the environment on each side.",
     "name_keys: fields that name a resource, tried after the Name tag. key_fields: what tells unnamed resources apart (a listener by its port).",
+    "pair_by: for types that are often unnamed (subnets, route tables, ENIs...), what they are attached to pairs them instead.",
+    "text_keys: free-text fields where generated ids and hex inside the text are ignored (an ELB network interface's description).",
     "ignore_keys: fields that always differ between accounts (dates, states, generated ids and DNS names); they are not compared.",
     "expected_keys: fields that usually differ on purpose between environments (CIDRs, sizes, certificates); differences there are listed apart from the others."
   ],
@@ -19,6 +21,27 @@
     "FileSystemId", "Identifier", "nodegroupName", "fargateProfileName", "addonName", "serviceName"
   ],
   "key_fields": ["Port", "Protocol", "Priority", "RuleNumber"],
+  "pair_by": {
+    "_help": "How to pair resources that have no name, per type, inside their VPC. A part is a field (dots go into lists), ref:<field> (the resource that id points to, by its own pairing), main / default (the VPC's main or default one), cidr_in_vpc (where the CIDR sits inside the VPC's), or =text.",
+    "ec2/subnets": ["cidr_in_vpc"],
+    "ec2/route_tables": ["main", "ref:Associations.SubnetId", "ref:Associations.GatewayId"],
+    "ec2/network_acls": ["default", "ref:Associations.SubnetId"],
+    "ec2/vpc_endpoints": ["ServiceName", "VpcEndpointType"],
+    "ec2/nat_gateways": ["ConnectivityType", "ref:SubnetId"],
+    "ec2/internet_gateways": ["=internet-gateway"],
+    "ec2/egress_only_internet_gateways": ["=egress-only-internet-gateway"],
+    "ec2/network_interfaces": ["InterfaceType", "Description", "ref:Attachment.InstanceId", "ref:SubnetId"],
+    "ec2/elastic_ips": ["ref:NetworkInterfaceId", "ref:InstanceId"],
+    "ec2/volumes": ["ref:Attachments.InstanceId", "Attachments.Device"],
+    "ec2/transit_gateway_attachments": ["ResourceType", "ref:ResourceId"],
+    "ec2/transit_gateway_vpc_attachments": ["ref:VpcId"],
+    "ec2/transit_gateway_route_tables": ["DefaultAssociationRouteTable", "DefaultPropagationRouteTable"],
+    "ec2/flow_logs": ["ref:ResourceId", "TrafficType"],
+    "ec2/vpc_peering_connections": ["ref:RequesterVpcInfo.VpcId", "ref:AccepterVpcInfo.VpcId"],
+    "ec2/dhcp_options": ["DhcpConfigurations.Values.Value"],
+    "ec2/vpcs": ["default"]
+  },
+  "text_keys": ["Description", "description", "GroupDescription"],
   "ignore_keys": [
     "CreateTime", "CreatedTime", "CreationTime", "CreationDate", "CreatedDate", "CreatedAt", "createdAt", "CreateDate",
     "LaunchTime", "LastModified", "LastModifiedTime", "LastModifiedDate", "LastUpdatedTime", "LastUpdateTime",

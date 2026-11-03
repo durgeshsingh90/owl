@@ -31,6 +31,7 @@ words chosen for each pair of accounts are remembered in inventory/_compare/pair
 import argparse
 import collections
 import datetime as dt
+import ipaddress
 import json
 import re
 import sys
@@ -47,6 +48,7 @@ EMBEDDED_ID = re.compile(
     r"\b(?:sg|subnet|vpc|rtb|acl|igw|eigw|nat|eni|vpce|vpce-svc|tgw|tgw-attach|tgw-rtb|pcx|i|vol|snap|ami|"
     r"eipalloc|eipassoc|lt|cvpn-endpoint|vgw|cgw|vpn|dopt|fl|pl|sgr|rtbassoc|aclassoc|lb|tg)-[0-9a-f]{8,17}\b")
 ACCOUNT = re.compile(r"(?<!\d)\d{12}(?!\d)")
+HEX = re.compile(r"(?<![0-9a-z])[0-9a-f]{8,}(?![0-9a-z])")
 NOT_LISTED = "not listed"
 
 
@@ -75,6 +77,43 @@ def tag(resource, key="Name"):
     return None
 
 
+def values_at(obj, path):
+    """The plain values at a dotted path; lists on the way are gone through (Associations.SubnetId)."""
+    found = [obj]
+    for step in path.split("."):
+        found = [n[step] for node in found for n in (node if isinstance(node, list) else [node])
+                 if isinstance(n, dict) and step in n]
+    flat = [x for v in found for x in (v if isinstance(v, list) else [v])]
+    return [v for v in flat if v not in (None, "") and not isinstance(v, (dict, list))]
+
+
+def part_values(resource, part):
+    """One pair_by part of a resource, as strings (see pair_by in aws_compare.json)."""
+    if part == "main":
+        return ["main"] if any(isinstance(a, dict) and a.get("Main") for a in resource.get("Associations") or []) else []
+    if part == "default":
+        return ["default"] if resource.get("IsDefault") is True else []
+    if part.startswith("="):
+        return [part[1:]]
+    if part == "cidr_in_vpc":
+        return [resource["CidrBlock"]] if resource.get("CidrBlock") else []
+    return [str(v) for v in values_at(resource, part[4:] if part.startswith("ref:") else part)]
+
+
+def cidr_in_vpc(cidr, vpc_cidrs):
+    """Where a subnet sits inside its VPC: 10.1.4.0/24 in 10.1.0.0/16 -> block1+1024/24, the same as
+    10.2.4.0/24 in 10.2.0.0/16."""
+    try:
+        net = ipaddress.ip_network(cidr, strict=False)
+        for i, block in enumerate(vpc_cidrs, 1):
+            vpc = ipaddress.ip_network(block, strict=False)
+            if net.version == vpc.version and net.subnet_of(vpc):
+                return f"block{i}+{int(net.network_address) - int(vpc.network_address)}/{net.prefixlen}"
+    except ValueError:
+        pass
+    return "outside-vpc"
+
+
 def describe(cfg, rt, label, key, rid, ref, resource):
     """What is needed to pair one resource, without keeping the resource."""
     name = tag(resource)
@@ -92,10 +131,15 @@ def describe(cfg, rt, label, key, rid, ref, resource):
     own = {rid} | {str(resource[f]) for f in rt.get("id", []) if resource.get(f)}
     own |= {v for v in resource.values() if isinstance(v, str) and v.startswith("arn:")
             and last_segment(v) in {last_segment(rid), name}}
+    spec = cfg.get("pair_by", {}).get(key)
+    cidrs = [c["CidrBlock"] for c in resource.get("CidrBlockAssociationSet") or [] if c.get("CidrBlock")] or (
+        [resource["CidrBlock"]] if resource.get("CidrBlock") else [])
     return {"label": label, "key": key, "rid": rid, "ref": ref, "name": name, "fields": fields,
             "default": default, "vpc": None if key == "ec2/vpcs" else inv.find_vpc_id(
                 {k: v for k, v in resource.items() if k not in ("_network", "_details")}),
-            "parent": resource.get("_parent_id"), "own": own}
+            "parent": resource.get("_parent_id"), "own": own, "cidrs": cidrs,
+            # Unnamed: what it is attached to pairs it instead (pair_by in aws_compare.json).
+            "parts": [(part, part_values(resource, part)) for part in spec] if spec and not name else None}
 
 
 def load_side_db(db, account_id, cfg, catalog, keep):
@@ -174,12 +218,36 @@ def identities(entries, words, catalog):
 
     by_rid = {(e["label"], e["key"], e["rid"]): e for e in entries}
     vpcs = {(e["label"], e["rid"]): e for e in entries if e["key"] == "ec2/vpcs"}
+    by_id = {(e["label"], own): e for e in entries for own in e["own"]}
+
+    def parts_ident(e):
+        """An unnamed resource's pairing name from its pair_by parts."""
+        pieces = []
+        for part, values in e["parts"]:
+            if part == "cidr_in_vpc":
+                vpc = vpcs.get((e["label"], e["vpc"]))
+                pieces += [cidr_in_vpc(v, vpc["cidrs"] if vpc else []) for v in values]
+            elif part.startswith("ref:"):
+                names = []
+                for v in values:
+                    target = by_id.get((e["label"], v))
+                    names.append((ident(target) if target is not None and target is not e else None) or "?")
+                pieces.append("+".join(sorted(names)))
+            else:
+                pieces.append("+".join(sorted(HEX.sub("*", EMBEDDED_ID.sub("*", clean(v))) for v in values)))
+        pieces = [x for x in pieces if x]
+        return "|".join(pieces) or None
 
     def ident(e):
         if "ident" in e:
             return e["ident"]
         e["ident"] = None  # guards against loops
-        base = clean(e["name"]) if e["name"] else (e["fields"] or ("default" if e["default"] else None))
+        if e["name"]:
+            base = clean(e["name"])
+        elif e.get("parts"):
+            base = parts_ident(e)
+        else:
+            base = e["fields"] or ("default" if e["default"] else None)
         parent_key = catalog.get(e["key"], {}).get("parent")
         if base and parent_key and e["parent"]:
             parent = by_rid.get((e["label"], parent_key, e["parent"]))
@@ -197,11 +265,14 @@ def identities(entries, words, catalog):
 
 # ---------------------------------------------------------------------------- compare
 
-def normalizer(refs, clean_name, ignore):
-    """A copy of a resource with ids, ARNs, accounts and environment words read the same way on both sides."""
-    def value(v):
+def normalizer(refs, clean_name, ignore, text_keys=()):
+    """A copy of a resource with ids, ARNs, accounts and environment words read the same way on both
+    sides; in free-text fields (text_keys, e.g. Description) generated hex is ignored too."""
+    def value(v, key=None):
         if isinstance(v, dict):
-            return {k: value(x) for k, x in v.items() if k not in ignore}
+            return {k: value(x, k) for k, x in v.items() if k not in ignore}
+        if isinstance(v, str) and key in text_keys and v not in refs:
+            return HEX.sub("*", clean_name(EMBEDDED_ID.sub(lambda m: f"<{refs.get(m.group(0), 'unpaired id')}>", v)))
         if isinstance(v, list):
             return [value(x) for x in v]
         if isinstance(v, str):
@@ -312,7 +383,9 @@ def compare(source, target, cfg, catalog, volatile, since_keys=None):
         if any(unnamed):
             report["unnamed"].append({"region": label, "type": key, "source": unnamed[0], "target": unnamed[1]})
 
-    value = (normalizer(refs[0], source["clean"], ignore), normalizer(refs[1], target["clean"], ignore))
+    text_keys = set(cfg.get("text_keys", []))
+    value = (normalizer(refs[0], source["clean"], ignore, text_keys),
+             normalizer(refs[1], target["clean"], ignore, text_keys))
     for label, key, ident, a, b in paired:
         if since_keys is not None and (label, key, a["rid"]) not in since_keys:
             continue
@@ -502,6 +575,7 @@ def run(args):
     if args.since:
         since_keys = changed_since_db(db, src_id, args.since) if db else changed_since(sides[0]["dir"], args.since)
     report = compare(sides[0], sides[1], cfg, catalog, commands.get("volatile_keys", []), since_keys)
+    report["blind_spots"] = blind_spots(report, sides, db)
     report = {"source": {k: sides[0][k] for k in ("profile", "account", "synced")} | {"env_words": words[0]},
               "target": {k: sides[1][k] for k in ("profile", "account", "synced")} | {"env_words": words[1]},
               "since": args.since, "compared_at": inv.iso(inv.utc_now()), "read_from": "database" if db else "files",
@@ -513,6 +587,56 @@ def run(args):
     return 1 if report["missing"] or report["different"] else 0
 
 
+def blind_spots(report, sides, db):
+    """What this compare cannot see, said before its findings."""
+    lines = []
+    for side, label in zip(sides, ("source", "target")):
+        why = collections.Counter()
+        for n in report["not_compared"]:
+            for part in n["why"].split(", "):
+                if part.startswith(f"{label}: "):
+                    why[part.split(": ", 1)[1]] += 1
+        detail = sum(1 for n in report["not_compared"] if "detail calls" in n["why"])
+        if why or detail:
+            lines.append(f"{side['profile']}: {sum(why.values())} type(s) not compared ("
+                         + ", ".join(f"{w} {n}" for w, n in why.most_common()) + ")"
+                         + (f"; {detail} resource(s) with detail calls one side could not make" if detail and label == "source" else ""))
+    unnamed = [u for u in report["unnamed"] if u["source"] or u["target"]]
+    if unnamed:
+        lines.append(f"no name or pair_by rule to pair by: {sum(u['source'] for u in unnamed)} in source, "
+                     f"{sum(u['target'] for u in unnamed)} in target ("
+                     + ", ".join(sorted({u['type'] for u in unnamed})[:6]) + "); add a pair_by rule in aws_compare.json")
+    for side in sides:
+        if db:
+            row = db.execute("SELECT report FROM coverage WHERE account_id=?", (side["account"],)).fetchone()
+            coverage = json.loads(row[0]) if row else None
+        else:
+            coverage = inv.read_json(side["dir"] / "_coverage.json")
+        if not coverage:
+            lines.append(f"{side['profile']}: no coverage check yet (what AWS lists but the inventory lacks is unknown)")
+        elif not coverage.get("checked"):
+            lines.append(f"{side['profile']}: coverage could not be checked (no access to the Tagging API or AWS Config)")
+        elif coverage.get("missed") or coverage.get("config_types_not_in_commands"):
+            top = ", ".join(f"{k} {v['count']}" for k, v in list(coverage.get("missed_types", {}).items())[:4])
+            lines.append(f"{side['profile']}: AWS lists {coverage.get('missed', 0)} resource(s) its inventory lacks"
+                         + (f" ({top})" if top else "")
+                         + (f", and {len(coverage['config_types_not_in_commands'])} type(s) aws_commands.json does not cover"
+                            if coverage.get("config_types_not_in_commands") else ""))
+    times = []
+    for side in sides:
+        try:
+            times.append(dt.datetime.strptime(side["synced"], "%Y-%m-%dT%H:%M:%SZ"))
+        except (TypeError, ValueError):
+            times.append(None)
+    if None not in times and abs(times[0] - times[1]) > dt.timedelta(hours=24):
+        days = abs(times[0] - times[1]).total_seconds() / 86400
+        lines.append(f"synced {days:.1f} days apart ({sides[0]['synced']} vs {sides[1]['synced']}): sync both for a fair compare")
+    for side, regions in (("source", report["regions_only_in_source"]), ("target", report["regions_only_in_target"])):
+        if regions:
+            lines.append(f"regions synced only in the {side}: {', '.join(regions)}")
+    return lines
+
+
 def print_report(r, show, path):
     s, t = r["source"], r["target"]
     print(f"\nCompare {s['profile']} ({s['account']}, synced {s['synced']}) -> {t['profile']} ({t['account']}, synced {t['synced']})")
@@ -521,6 +645,10 @@ def print_report(r, show, path):
     print(f"{r['pairs']:,} paired: {r['same']:,} the same, {len(r['different']):,} different, "
           f"{len(r['expected']):,} with expected differences | {len(r['missing']):,} missing in target, "
           f"{len(r['extra']):,} extra in target | {len(r['not_compared']):,} not compared")
+    if r["blind_spots"]:
+        print("\nBlind spots (this compare cannot see these):")
+        for line in r["blind_spots"]:
+            print(f"  - {line}")
 
     def section(title, rows, line):
         if not rows:
@@ -542,13 +670,6 @@ def print_report(r, show, path):
         fields = collections.Counter(c["path"].split(".")[-1].split("[")[0] for e in r["expected"] for c in e["changes"])
         print(f"\nExpected differences in {len(r['expected']):,} resource(s): "
               + ", ".join(f"{f} {n}" for f, n in fields.most_common(6)) + " (in the report)")
-    if r["unnamed"]:
-        print(f"Not paired, no name to pair by: {sum(u['source'] for u in r['unnamed'])} in source, "
-              f"{sum(u['target'] for u in r['unnamed'])} in target (types: "
-              + ", ".join(sorted({u['type'] for u in r['unnamed']})[:5]) + ")")
-    for side, regions in (("source", r["regions_only_in_source"]), ("target", r["regions_only_in_target"])):
-        if regions:
-            print(f"Regions only in the {side}, not compared: {', '.join(regions)}")
     print(f"\nReport: {path}")
 
 
