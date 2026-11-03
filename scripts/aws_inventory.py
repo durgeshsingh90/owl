@@ -11,6 +11,8 @@ The accounts to scan are remembered in aws_accounts.json.
     python3 aws_inventory.py sync                               # download / refresh everything
     python3 aws_inventory.py sync --profiles prod-profile --services ec2 elbv2 route53
     python3 aws_inventory.py changes --diff                     # what changed in the last sync
+    python3 aws_inventory.py permissions                        # what each account had no permission for
+    python3 aws_inventory.py permissions --retry prod-profile   # got the permission: try it on the next run
 
 First every account is checked with `sts get-caller-identity`, all at once; the result is
 printed and you confirm before anything else runs (sync --yes skips the question). An
@@ -41,7 +43,9 @@ timeout (the type keeps its previous files, a detail becomes {"_error": "Timeout
 A daily sync lists only the types that had resources before, were never listed, failed
 last time, or that AWS Config / the coverage check point to, plus a core of network, DNS
 and IAM types ("daily" in aws_commands.json); types that were empty or had no permission
-wait for the full sweep every full_sweep_days (or sync --sweep). Detail calls are repeated
+wait for the full sweep every full_sweep_days (or sync --sweep). Types and detail calls
+that had no permission are remembered per account and skipped on every run, sweeps
+included, until flagged with `permissions --retry` (or asked for with --services/--types). Detail calls are repeated
 only for resources whose list entry changed, or once detail_refresh_hours have passed.
 
 While it runs, one line is rewritten in place: a bar of list commands done out of the
@@ -770,13 +774,15 @@ def coverage_hints(run, acct_dir):
     return hints
 
 
-def account_plan(run, account_id, regions):
-    """What one account lists today: [(label, region, types)], how many types are skipped, and
-    whether it is a full sweep.
+def account_plan(run, account_id, regions, retry=()):
+    """What one account lists today: [(label, region, types)], the types skipped as empty, the
+    types skipped for no permission, and whether it is a full sweep.
 
-    Outside a sweep a type is listed when it is in daily.always_run, had resources before,
-    was never listed, failed last time (timeout, error), or the last coverage check points
-    to it; a child type brings its parent. The rest (empty, no permission) waits.
+    A type that had no permission before is skipped, in sweeps too, until it is flagged with
+    `permissions --retry` (retry: its keys, or "*") or asked for with --services/--types.
+    Outside a sweep a type is listed when it is in daily.always_run, had resources before, was
+    never listed, failed last time (timeout, error), or the last coverage check points to it;
+    a child type brings its parent. The other (empty) types wait for the sweep.
     """
     g = run.settings["global_region"]
     scopes = []
@@ -787,31 +793,41 @@ def account_plan(run, account_id, regions):
     if regional_types:
         scopes += [(r, r, regional_types) for r in regions]
     sweep = sweep_due(run, account_id)
-    if sweep:
-        return scopes, 0, True
     acct_dir = run.out / account_id
-    hints = coverage_hints(run, acct_dir)
+    hints = {} if sweep else coverage_hints(run, acct_dir)
     always = set(run.commands.get("daily", {}).get("always_run", []))
-    plan, skipped = [], 0
+    plan, empty, denied = [], 0, 0
     for label, region, rtypes in scopes:
         manifest = read_json(acct_dir / label / "_manifest.json", {}) or {}
 
+        def blocked(key):
+            """It, or a parent it needs, had no permission and is not flagged for retry."""
+            while key:
+                if ((manifest.get(key) or {}).get("status") == "no_permission" and not run.filtered
+                        and "*" not in retry and key not in retry):
+                    return True
+                key = run.by_key[key].get("parent")
+            return False
+
         def needed(key):
             entry = manifest.get(key)
-            if key in always or key in hints.get(label, ()) or entry is None:
+            if sweep or key in always or key in hints.get(label, ()) or entry is None:
                 return True
-            return entry.get("count", 0) > 0 or entry.get("status") in ("timeout", "error")
+            # no_permission here means it is flagged for retry (blocked() let it through).
+            return entry.get("count", 0) > 0 or entry.get("status") in ("timeout", "error", "no_permission")
 
-        wanted = {rt["key"] for rt in rtypes if needed(rt["key"])}
+        wanted = {rt["key"] for rt in rtypes if not blocked(rt["key"]) and needed(rt["key"])}
         for key in list(wanted):
             while run.by_key[key].get("parent"):
                 key = run.by_key[key]["parent"]
                 wanted.add(key)
         chosen = [rt for rt in rtypes if rt["key"] in wanted]
-        skipped += len(rtypes) - len(chosen)
+        no_permission = sum(1 for rt in rtypes if blocked(rt["key"]))
+        denied += no_permission
+        empty += len(rtypes) - len(chosen) - no_permission
         if chosen:
             plan.append((label, region, chosen))
-    return plan, skipped, False
+    return plan, empty, denied, sweep
 
 
 class Run:
@@ -882,22 +898,33 @@ def find_vpc_id(obj):
     return None
 
 
-def fetch_details(aws, rt, item, region, context):
+def fetch_details(aws, rt, item, region, context, denied=None, note=None):
+    """The resource's detail calls. denied: {detail: error code} this account had no permission
+    for before, skipped and saved as before. note(detail, code or None): what each call did."""
     details = {}
     for d in rt["details"]:
+        key = d["key"]
+        if denied and key in denied:
+            details[key] = {"_status": "no_permission", "_error": denied[key]}
+            continue
         try:
             args = fill(d["command"], {**context, **item})
         except KeyError as e:
-            details[d["key"]] = {"_error": f"missing field {e}"}
+            details[key] = {"_error": f"missing field {e}"}
             continue
         try:
-            details[d["key"]] = parse_embedded_json(aws(args, region, d.get("query")))
+            details[key] = parse_embedded_json(aws(args, region, d.get("query")))
+            outcome = None
         except AwsError as e:
             if e.code in d.get("ignore_errors", []) or e.code in NOT_FOUND_ERRORS:
-                details[d["key"]] = None
+                details[key] = None
+                outcome = None
             else:
-                (log.info if e.code == "Timeout" else log.debug)("%s %s %s detail %s: %s", aws.profile, region, rt["key"], d["key"], e)
-                details[d["key"]] = {"_status": error_status(e.code), "_error": e.code}
+                (log.info if e.code == "Timeout" else log.debug)("%s %s %s detail %s: %s", aws.profile, region, rt["key"], key, e)
+                details[key] = {"_status": error_status(e.code), "_error": e.code}
+                outcome = e.code if error_status(e.code) == "no_permission" else "other"
+        if note and outcome != "other":
+            note(key, outcome)
     return details
 
 
@@ -912,12 +939,14 @@ def read_lines(path):
                 yield json.loads(line)
 
 
-def fetch_type(run, aws, account, region, rt, prev, parent_path, out_path):
+def fetch_type(run, aws, account, region, rt, prev, parent_path, out_path, denied=None):
     """One worker: list one resource type (per parent for child types), fetch each resource's
     details, and append every finished resource to out_path (one JSON per line) at once.
 
-    Only the resources still waiting for details are in memory. Raises AwsError when the
-    list fails, so the previous files are kept.
+    Only the resources still waiting for details are in memory. Returns the count and the
+    detail calls this account has no permission for ({detail: error code}: denied before and
+    not tried, or denied for every resource now). Raises AwsError when the list fails, so the
+    previous files are kept.
     """
     acct_dir = run.out / account["account_id"]
     context = {"account_id": account["account_id"], "region": region}
@@ -948,8 +977,18 @@ def fetch_type(run, aws, account, region, rt, prev, parent_path, out_path):
             if doc and "_details" in doc.get("resource", {}):
                 item["_details"] = doc["resource"]["_details"]
                 return {"id": rid, "detail_ts": old["detail_ts"], "item": item}
-        item["_details"] = fetch_details(aws, rt, item, region, context)
+        item["_details"] = fetch_details(aws, rt, item, region, context, denied, note)
         return {"id": rid, "detail_ts": now, "item": item}
+
+    calls, calls_lock = {}, threading.Lock()  # detail -> [allowed, denied, code]
+
+    def note(key, code):
+        with calls_lock:
+            c = calls.setdefault(key, [0, 0, None])
+            if code:
+                c[1], c[2] = c[1] + 1, code
+            else:
+                c[0] += 1
 
     seen = set()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -979,7 +1018,13 @@ def fetch_type(run, aws, account, region, rt, prev, parent_path, out_path):
             else:
                 write_line(out, {"id": rid, "detail_ts": None, "item": item})
         drain(0)
-    return len(seen)
+    still_denied = dict(denied or {})
+    for key, (allowed, refused, code) in calls.items():
+        if allowed:
+            still_denied.pop(key, None)
+        elif refused:
+            still_denied[key] = code
+    return len(seen), still_denied
 
 
 def save_resource(run, account, label, rt, rid, item, detail_ts, old, now, changes):
@@ -1033,7 +1078,7 @@ def scan_scope(run, aws, account, label, region, rtypes):
     manifest = read_json(manifest_path, {})
     tmp = run.tmp / account["account_id"] / label
     try:
-        done, errors = {}, []
+        done, errors, denials = {}, [], {}
         waiting, running = list(rtypes), {}
         # A child type starts once its parent's file is complete.
         with cf.ThreadPoolExecutor(run.settings["type_workers"]) as pool:
@@ -1054,8 +1099,10 @@ def scan_scope(run, aws, account, label, region, rtypes):
                         raise Stopped()
                     path = tmp / f"{rt['service']}__{rt['type']}.jsonl"
                     prev = manifest.get(rt["key"], {}).get("items", {})
+                    retry = account.get("retry", set())
+                    denied = {} if "*" in retry or rt["key"] in retry else manifest.get(rt["key"], {}).get("denied_details", {})
                     running[pool.submit(fetch_type, run, aws, account, rt.get("region", region), rt, prev,
-                                        done.get(parent), path)] = (rt, path)
+                                        done.get(parent), path, denied)] = (rt, path)
                 if not running:
                     continue
                 finished, _ = cf.wait(running, return_when=cf.FIRST_COMPLETED)
@@ -1064,7 +1111,7 @@ def scan_scope(run, aws, account, label, region, rtypes):
                     if run.progress and not isinstance(f.exception(), Stopped):
                         run.progress.tick()
                     try:
-                        f.result()
+                        _, denials[rt["key"]] = f.result()
                         done[rt["key"]] = path
                     except AwsError as e:
                         status = error_status(e.code)
@@ -1076,12 +1123,12 @@ def scan_scope(run, aws, account, label, region, rtypes):
                             log.warning("%s %s %s: %s", account["profile"], label, rt["key"], e)
         if run.stop.is_set():
             raise Stopped()
-        return save_scope(run, account, label, manifest, manifest_path, done, errors)
+        return save_scope(run, account, label, manifest, manifest_path, done, errors, denials)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def save_scope(run, account, label, manifest, manifest_path, done, errors):
+def save_scope(run, account, label, manifest, manifest_path, done, errors, denials):
     acct_dir = run.out / account["account_id"]
     now = iso(utc_now())
 
@@ -1119,6 +1166,8 @@ def save_scope(run, account, label, manifest, manifest_path, done, errors):
             changes.append({"account_id": account["account_id"], "profile": account["profile"], "region": label,
                             "type": key, "id": rid, "file": prev[rid]["file"], "action": "removed"})
         manifest[key] = {"status": "ok", "last_run": now, "count": len(entries), "items": entries}
+        if denials.get(key):
+            manifest[key]["denied_details"] = denials[key]
 
     for e in errors:
         # A failed list keeps the previous files: nothing is reported as removed.
@@ -1186,8 +1235,9 @@ def scan_account(run, profile, account_cfg, conn):
         regions = account_cfg.get("regions") or run.settings["regions"]
         if regions == "all" or regions == ["all"]:
             regions = sorted(run_named(aws, run.commands, "regions", g) or [])
-        account = {"profile": profile, "account_id": account_id, "alias": alias}
-        scopes, result["skipped_types"], sweep = account_plan(run, account_id, regions)
+        retry = account_cfg.get("retry_permissions") or []
+        account = {"profile": profile, "account_id": account_id, "alias": alias, "retry": set(retry)}
+        scopes, result["skipped_types"], result["denied_skipped"], sweep = account_plan(run, account_id, regions, retry)
         result["sweep"] = sweep
         if run.progress:
             run.progress.add_total(sum(len(s[2]) for s in scopes) - run.planned.get(profile, 0))
@@ -1771,15 +1821,17 @@ def cmd_sync(args):
             mark_unreachable(run, accounts[p], conns[p])
 
     # The total is known up front; "all" regions are counted when the account starts.
-    skipped_types, sweeps = 0, 0
+    skipped_types, denied_types, sweeps = 0, 0, 0
     for p in ready:
         regions = accounts[p].get("regions") or run.settings["regions"]
         if regions in ("all", ["all"]):
             regions = read_json(run.out / conns[p]["account_id"] / "_account.json", {}).get("regions") or [
                 f"unknown-{i}" for i in range(17)]
-        plan, skipped, sweep = account_plan(run, conns[p]["account_id"], regions)
+        plan, skipped, denied, sweep = account_plan(run, conns[p]["account_id"], regions,
+                                                    accounts[p].get("retry_permissions") or [])
         run.planned[p] = sum(len(s[2]) for s in plan)
         skipped_types += skipped
+        denied_types += denied
         sweeps += sweep
         progress.add_total(run.planned[p])
 
@@ -1816,6 +1868,7 @@ def cmd_sync(args):
             entry["last_seconds"] = r["seconds"]
             entry["account_id"] = r["account_id"]
             entry["last_sync"] = iso(run.started)
+            entry.pop("retry_permissions", None)  # tried; what is still denied is remembered again
             data["average_seconds"] = round(overall(), 1)
             write_json(ACCOUNTS_FILE, data)  # durations survive a stop later in the run
             log.info("%s %s (%s): %d resources, +%d ~%d -%d, %d no permission, %d timeout, %d error(s) | took %s (its average %s)",
@@ -1825,8 +1878,13 @@ def cmd_sync(args):
 
     log.info("Sync %s: %d account(s), %d resource type(s), output %s", run.id, len(ready), len(run.resources), run.out)
     sys.stdout.flush()  # the sign-in table first, then the progress line (stderr)
-    skip_note = (f" ({skipped_types:,} skipped: empty or no permission before; full sweep every "
-                 f"{run.settings['full_sweep_days']} days or with --sweep)") if skipped_types else ""
+    notes = []
+    if skipped_types:
+        notes.append(f"{skipped_types:,} skipped as empty before, listed again every "
+                     f"{run.settings['full_sweep_days']} days or with --sweep")
+    if denied_types:
+        notes.append(f"{denied_types:,} skipped for no permission: `aws_inventory.py permissions` to see or retry")
+    skip_note = f" ({'; '.join(notes)})" if notes else ""
     sweep_note = (f" Full sweep (every type) for {sweeps} account(s)."
                   if sweeps and run.settings["smart_skip"] and not run.filtered else "")
     print(f"Syncing {len(ready)} account(s): {progress.total:,} list commands{skip_note}.{sweep_note} "
@@ -1902,7 +1960,9 @@ def cmd_sync(args):
                f" | {totals['resources']:,} resources: {totals['added']} added, {totals['modified']} modified,"
                f" {totals['removed']} removed | {problems} timeout/error(s) | {len(not_ready)} not ready"
                + (f" | {sum(r.get('skipped_types', 0) for r in results.values()):,} type(s) skipped as empty before"
-                  if any(r.get("skipped_types") for r in results.values()) else ""))
+                  if any(r.get("skipped_types") for r in results.values()) else "")
+               + (f" | {sum(r.get('denied_skipped', 0) for r in results.values()):,} skipped for no permission"
+                  if any(r.get("denied_skipped") for r in results.values()) else ""))
     log.info(message)
     print(message, file=sys.stderr)
     for line in coverage_summary(run, results):
@@ -1961,6 +2021,82 @@ def add_missing_types(run, args, results):
         log.removeHandler(handler)
     return cmd_sync(argparse.Namespace(profiles=profiles, services=None, types=keys, regions=None, full=False,
                                        sweep=False, logs=args.logs, yes=True, unresolved=[], follow_up=True))
+
+
+def denied_by_account(data, profiles=None):
+    """{profile: {"account_id", "types": {type: [regions]}, "details": {"type detail": [regions]},
+    "retry"}} for the remembered accounts (or just these profiles), read from their manifests."""
+    out = (HERE / data["settings"]["output_dir"]).resolve()
+    report = {}
+    for profile, a in sorted(data["accounts"].items()):
+        if profiles is not None and profile not in profiles:
+            continue
+        if not a.get("account_id"):
+            continue
+        types, details = {}, {}
+        for path in sorted((out / a["account_id"]).glob("*/_manifest.json")):
+            for key, entry in (read_json(path, {}) or {}).items():
+                if entry.get("status") == "no_permission":
+                    types.setdefault(key, []).append(path.parent.name)
+                for detail in entry.get("denied_details") or {}:
+                    details.setdefault(f"{key} {detail}", []).append(path.parent.name)
+        report[profile] = {"account_id": a["account_id"], "types": types, "details": details,
+                           "retry": a.get("retry_permissions")}
+    return report
+
+
+def cmd_permissions(args):
+    """List what each account had no permission for, or flag it to be tried on the next run."""
+    data = load_accounts()
+    accounts = data["accounts"]
+    if args.retry or args.retry_all or args.clear:
+        names = args.retry or args.clear or []
+        targets = list(accounts) if args.retry_all else [
+            p for p, a in accounts.items() if p in names or a.get("account_id") in names]
+        missing = [n for n in names if not any(n in (p, accounts[p].get("account_id")) for p in targets)]
+        if missing:
+            sys.exit(f"Not a saved profile or account number: {', '.join(missing)}")
+        keys = ["*"]
+        if args.types:
+            catalog = [r["key"] for r in load_commands()["resources"]]
+            # "s3" means every s3 type; "s3/buckets" one type.
+            keys = sorted({k for t in args.types for k in catalog if k == t or k.split("/")[0] == t})
+            if not keys:
+                sys.exit(f"No such types in aws_commands.json: {', '.join(args.types)}")
+        for p in targets:
+            if args.clear:
+                accounts[p].pop("retry_permissions", None)
+            else:
+                accounts[p]["retry_permissions"] = keys
+        write_json(ACCOUNTS_FILE, data)
+        what = "all its no-permission types and detail calls" if keys == ["*"] else ", ".join(keys)
+        if args.clear:
+            print(f"Cleared the retry flag for {len(targets)} account(s).")
+        else:
+            print(f"Flagged {len(targets)} account(s): the next run tries {what} again. "
+                  "What is still denied is remembered again.")
+        return 0
+
+    report = {p: r for p, r in denied_by_account(data).items()
+              if (r["types"] or r["details"]) and (not args.account or args.account in (p, r["account_id"]))}
+    if not report:
+        print("Nothing remembered as no permission." if not args.account else "Nothing remembered for that account.")
+        return 0
+    full = bool(args.account) or len(report) <= 5
+    for p, r in report.items():
+        flag = f"   [flagged for retry: {', '.join(r['retry'])}]" if r["retry"] else ""
+        print(f"{p} ({r['account_id']}): {len(r['types'])} type(s), {len(r['details'])} detail call(s) "
+              f"without permission{flag}")
+        if full:
+            for name, regions in sorted({**r["types"], **r["details"]}.items()):
+                print(f"    {name:55} {', '.join(regions)}")
+    print(f"\n{len(report)} account(s) with remembered no-permission items; the runs skip them.")
+    if not full:
+        print("See one account: aws_inventory.py permissions --account <profile or account number>")
+    print("Got a permission? Flag it for the next run:\n"
+          "  aws_inventory.py permissions --retry <profile or account number> [--types s3/buckets ec2 ...]\n"
+          "  aws_inventory.py permissions --retry-all")
+    return 0
 
 
 def cmd_changes(args):
@@ -2050,9 +2186,14 @@ def cmd_interactive(args):
     data = load_accounts()
     saved = [p for p, a in data["accounts"].items() if a.get("enabled", True)]
     print(f"{len(saved)} saved account(s) in {ACCOUNTS_FILE.name}.")
-    for p in sorted(saved, key=lambda p: data["accounts"][p].get("account_id", p))[:20]:
+    shown = sorted(saved, key=lambda p: data["accounts"][p].get("account_id", p))[:20]
+    denied = denied_by_account(data, shown)
+    for p in shown:
         regions = data["accounts"][p].get("regions") or data["settings"]["regions"]
-        print(f"  {data['accounts'][p].get('account_id', '?'):14} {p:40} {regions if regions == 'all' else ', '.join(regions)}")
+        d = denied.get(p, {})
+        note = f"{len(d.get('types', {})) + len(d.get('details', {}))} no permission" if d.get("types") or d.get("details") else ""
+        print(f"  {data['accounts'][p].get('account_id', '?'):14} {p:40} {note:18} "
+              f"{regions if regions == 'all' else ', '.join(regions)}")
     if len(saved) > 20:
         print(f"  ... and {len(saved) - 20} more (see: aws_inventory.py list)")
     answer = ask("AWS account numbers (or profiles), separated by spaces or commas. Enter = all saved: ")
@@ -2088,9 +2229,31 @@ def cmd_interactive(args):
         write_json(ACCOUNTS_FILE, data)
         print(f"Saved. Next time press Enter to sync all {len({*saved, *profiles})} account(s).")
     profiles = list(dict.fromkeys(profiles))
+    ask_retry(data, profiles)
     return cmd_sync(argparse.Namespace(profiles=profiles, services=None, types=None, regions=None,
                                        full=False, sweep=False, logs=False, yes=False,
                                        unresolved=unresolved if answer else []))
+
+
+def ask_retry(data, profiles):
+    """If the chosen accounts skip things for no permission, offer to try them again this run."""
+    denied = {p: r for p, r in denied_by_account(data, set(profiles)).items() if r["types"] or r["details"]}
+    if not denied:
+        return
+    items = sum(len(r["types"]) + len(r["details"]) for r in denied.values())
+    print(f"{len(denied)} of these account(s) skip {items:,} type(s) or detail call(s) remembered as no permission"
+          " (aws_inventory.py permissions lists them).")
+    answer = ask("Got new permissions? Account numbers to try again (all = every one, Enter = none): ")
+    if not answer:
+        return
+    tokens = [t for t in re.split(r"[\s,]+", answer) if t]
+    names = set(tokens) | {t.replace("-", "") for t in tokens}  # profiles keep dashes; 1234-5678-9012 too
+    chosen = list(denied) if "all" in {n.lower() for n in names} else [
+        p for p, r in denied.items() if p in names or r["account_id"] in names]
+    for p in chosen:
+        data["accounts"][p]["retry_permissions"] = ["*"]
+    write_json(ACCOUNTS_FILE, data)
+    print(f"This run tries them again for {len(chosen)} account(s); what is still denied is remembered again.")
 
 
 def main():
@@ -2139,6 +2302,14 @@ def main():
     p.add_argument("-y", "--yes", action="store_true", help="do not ask before syncing the accounts that can sign in")
     p.add_argument("-v", "--logs", action="store_true", help="show log lines and write _runs/<run>/run.log")
     p.set_defaults(func=cmd_sync)
+
+    p = sub.add_parser("permissions", help="what each account had no permission for; flag it for a retry")
+    p.add_argument("--account", help="only this profile or account number, with every item")
+    p.add_argument("--retry", nargs="+", metavar="ACCOUNT", help="try these accounts' no-permission items on the next run")
+    p.add_argument("--retry-all", action="store_true", help="try every account's no-permission items on the next run")
+    p.add_argument("--types", nargs="+", help="with --retry: only these types or services, e.g. s3/buckets ec2")
+    p.add_argument("--clear", nargs="+", metavar="ACCOUNT", help="remove the retry flag")
+    p.set_defaults(func=cmd_permissions)
 
     p = sub.add_parser("changes", help="show what the last (or a given) sync changed")
     p.add_argument("--run", help="run id from inventory/_runs")
