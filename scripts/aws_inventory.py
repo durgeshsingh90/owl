@@ -28,18 +28,34 @@ merged, again written piece by piece:
     inventory/_runs/<run>/summary.json, changes.json, run.log
     inventory/_history/<run>/<account_id>/...                  previous versions of changed files
 
+After each account, AWS's own lists (the Tagging API's tagged resources, and AWS
+Config's resource counts where Config is on) are compared with what was downloaded;
+anything the inventory lacks is in <account_id>/_coverage.json, in the merged file, and
+summed up at the end of the run. Types that nothing in aws_commands.json covers are then
+offered for adding (config add_commands=ask|yes|no) as Cloud Control commands
+(cloudcontrol list-resources), after a backup to aws_commands.json.bak, and downloaded
+right away for the accounts that have them.
+
 A call that times out is tried once more; if it times out again it is saved as a
 timeout (the type keeps its previous files, a detail becomes {"_error": "Timeout"}).
-A sync lists every type each time, but repeats the per-resource detail calls only for
-resources whose list entry changed, or once detail_refresh_hours have passed.
+A daily sync lists only the types that had resources before, were never listed, failed
+last time, or that AWS Config / the coverage check point to, plus a core of network, DNS
+and IAM types ("daily" in aws_commands.json); types that were empty or had no permission
+wait for the full sweep every full_sweep_days (or sync --sweep). Detail calls are repeated
+only for resources whose list entry changed, or once detail_refresh_hours have passed.
 
-Each account's sync time is saved in aws_accounts.json with its average (last 10 runs);
-a status line shows done / running / pending accounts, the ETA and the average. Ctrl+C
-stops cleanly: finished accounts and regions are saved, nothing half done is written;
-a second Ctrl+C quits at once.
+While it runs, one line is rewritten in place: a bar of list commands done out of the
+total (the commands in aws_commands.json times regions times accounts, known up front),
+accounts done, aws calls running, the rate, elapsed time (hh:mm:ss) and an ETA from the
+rate of the last eta_window commands. No logs unless asked: `sync --logs` (or
+`config logs=true`) shows log lines above the bar and writes _runs/<run>/run.log.
+Each account's sync time is saved in aws_accounts.json with its average (last 10 runs).
+Ctrl+C stops cleanly: finished accounts and regions are saved, nothing half done is
+written; a second Ctrl+C quits at once.
 """
 
 import argparse
+import collections
 import concurrent.futures as cf
 import configparser
 import datetime as dt
@@ -67,12 +83,16 @@ DEFAULT_SETTINGS = {
     "global_region": "us-east-1",
     "verify_ssl": False,
     "aws_cli": "aws",
-    "account_workers": 8,
+    # Accounts synced at once. "auto": at least 4, and one more whenever the aws workers
+    # have room; a number keeps it fixed.
+    "account_workers": "auto",
     "region_workers": 4,
     "type_workers": 6,
     "detail_workers": 4,
-    # Upper bound on aws processes running at once, across all accounts and regions.
-    "max_parallel_calls": 32,
+    # aws processes running at once, across all accounts and regions. "auto" starts at 2 per
+    # CPU core and adds or removes workers every few seconds by how busy this computer is;
+    # a number keeps it fixed.
+    "max_parallel_calls": "auto",
     "connect_timeout": 15,
     "read_timeout": 60,
     "call_timeout": 300,
@@ -85,8 +105,19 @@ DEFAULT_SETTINGS = {
     "dns_match": "",
     "dns_workers": 8,
     "dns_timeout": 20,
-    # How often the progress line (done / running / pending, ETA) is printed.
+    # How often the progress line is printed when the output is not a terminal.
     "status_seconds": 30,
+    # The ETA uses the rate of the last this many list commands to finish.
+    "eta_window": 10,
+    # Show log lines and write _runs/<run>/run.log; off: only the progress line and a summary.
+    "logs": False,
+    # Resource types AWS lists that aws_commands.json does not cover: "ask" at the end of a
+    # sync whether to add them (as Cloud Control commands) and download them, "yes", or "no".
+    "add_commands": "ask",
+    # Daily runs skip the types that were empty or had no permission before (see "daily" in
+    # aws_commands.json); every full_sweep_days an account lists everything again.
+    "smart_skip": True,
+    "full_sweep_days": 7,
 }
 
 # The profile may not read everything: these are skipped and saved as "no_permission".
@@ -263,6 +294,98 @@ class Aws:
             raise AwsError.from_stderr(p.stderr)
         out = p.stdout.strip()
         return json.loads(out) if out else None
+
+
+class Gate:
+    """How many aws processes may run at once; the limit can change during the run."""
+
+    def __init__(self, limit):
+        self.cond = threading.Condition()
+        self.limit = limit
+        self.active = 0
+
+    def __enter__(self):
+        with self.cond:
+            while self.active >= self.limit:
+                self.cond.wait()
+            self.active += 1
+
+    def __exit__(self, *exc):
+        with self.cond:
+            self.active -= 1
+            self.cond.notify()
+
+    def set_limit(self, limit):
+        with self.cond:
+            self.limit = limit
+            self.cond.notify_all()
+
+
+def worker_limits(settings):
+    """(start, lowest, highest) number of aws processes at once, and whether it adapts."""
+    value = settings["max_parallel_calls"]
+    if str(value).isdigit():
+        return int(value), int(value), int(value), False
+    cores = os.cpu_count() or 4
+    try:
+        memory = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, ValueError, OSError):
+        memory = None
+    highest = cores * 8
+    if memory:
+        highest = min(highest, memory // (150 * 2 ** 20))  # about 150 MB per aws process
+    highest = max(4, min(highest, 160))
+    return min(cores * 2, highest), 4, highest, True
+
+
+class Tuner:
+    """Every few seconds: more workers while the computer has room and all are busy, fewer
+    when it is busy (with this script or anything else)."""
+
+    def __init__(self, gate, lowest, highest):
+        self.gate, self.lowest, self.highest = gate, lowest, highest
+        self.cores = os.cpu_count() or 4
+        self.cpu = None  # 0..1 of all cores, for the progress line
+        self.halt = threading.Event()
+        try:
+            import psutil  # optional: an instant reading instead of the 1-minute load average
+            psutil.cpu_percent()
+            self.psutil = psutil
+        except ImportError:
+            self.psutil = None
+        self.thread = threading.Thread(target=self.loop, name="tuner", daemon=True)
+
+    def reading(self):
+        """(cpu busy 0..1, memory used 0..1 or None); None when this computer cannot tell."""
+        if self.psutil:
+            return self.psutil.cpu_percent() / 100, self.psutil.virtual_memory().percent / 100
+        try:
+            return os.getloadavg()[0] / self.cores, None
+        except (AttributeError, OSError):
+            return None, None
+
+    def loop(self):
+        while not self.halt.wait(5):
+            cpu, memory = self.reading()
+            self.cpu = cpu
+            if cpu is None:
+                continue
+            limit = self.gate.limit
+            if cpu > 0.9 or (memory or 0) > 0.9:
+                limit = max(self.lowest, int(limit * 0.8))
+            elif cpu < 0.7 and (memory or 0) < 0.8 and self.gate.active >= limit - 1:
+                limit = min(self.highest, limit + max(2, self.cores // 2))
+            if limit != self.gate.limit:
+                log.debug("workers: %d -> %d (cpu %.0f%%)", self.gate.limit, limit, cpu * 100)
+                self.gate.set_limit(limit)
+
+    def start(self):
+        if not self.psutil:  # psutil's first reading has nothing to compare with yet
+            self.cpu = self.reading()[0]
+        self.thread.start()
+
+    def stop(self):
+        self.halt.set()
 
 
 def run_named(aws, commands, name, region=None):
@@ -493,6 +616,204 @@ def add_dns_lookups(run, zones):
 
 # ---------------------------------------------------------------------------- sync
 
+def hms(seconds):
+    seconds = max(0, int(round(seconds)))
+    return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+
+
+class Progress:
+    """One console line, rewritten in place: a bar of list commands done out of the total,
+    elapsed time, rate and ETA.
+
+    The unit is one resource type's list command in one region of one account, so the
+    total is known before the run: the commands in aws_commands.json times regions times
+    accounts. The rate comes from the last eta_window commands to finish. When the output
+    is not a terminal (piped, cron), the line is printed every status_seconds instead.
+    """
+
+    def __init__(self, settings, accounts_total, gate, tuner=None):
+        self.lock = threading.RLock()
+        self.total = 0
+        self.done = 0
+        self.window = collections.deque(maxlen=settings["eta_window"] + 1)
+        self.started = time.monotonic()
+        self.accounts_total = accounts_total
+        self.accounts_done = 0
+        self.accounts_running = 0
+        self.gate = gate
+        self.tuner = tuner
+        self.stopping = False
+        self.tty = sys.stderr.isatty()
+        self.every = 1 if self.tty else settings["status_seconds"]
+        self.width = 0
+        self.halt = threading.Event()
+        self.thread = threading.Thread(target=self.loop, name="progress", daemon=True)
+
+    def add_total(self, n):
+        with self.lock:
+            self.total += n
+
+    def tick(self):
+        with self.lock:
+            self.done += 1
+            self.window.append(time.monotonic())
+
+    def account_done(self):
+        with self.lock:
+            self.accounts_done += 1
+
+    def line(self):
+        total = max(self.total, self.done)
+        share = self.done / total if total else 0
+        rate = None
+        if len(self.window) >= 2 and self.window[-1] > self.window[0]:
+            rate = (len(self.window) - 1) / (self.window[-1] - self.window[0])
+        if total and self.done >= total:
+            eta = "00:00:00"
+        else:
+            eta = hms((total - self.done) / rate) if rate else "estimating"
+        cpu = f" cpu {self.tuner.cpu:.0%}" if self.tuner and self.tuner.cpu is not None else ""
+        text = (f" {self.done:,}/{total:,} {share:4.0%} | accounts {self.accounts_done}/{self.accounts_total} ({self.accounts_running} running)"
+                f" | workers {self.gate.active}/{self.gate.limit}{cpu} | {rate or 0:.1f}/s"
+                f" | elapsed {hms(time.monotonic() - self.started)} | ETA {eta}")
+        if self.stopping:
+            text += " | stopping"
+        columns = shutil.get_terminal_size((120, 20)).columns - 1
+        size = max(10, min(40, columns - len(text) - 2))
+        filled = int(size * share)
+        return ("[" + "#" * filled + "-" * (size - filled) + "]" + text)[:columns]
+
+    def show(self):
+        with self.lock:
+            line = self.line()
+            if self.tty:
+                sys.stderr.write("\r" + line + " " * max(0, self.width - len(line)))
+                self.width = len(line)
+            else:
+                sys.stderr.write(line + "\n")
+            sys.stderr.flush()
+
+    def print(self, text):
+        """A message above the bar (logs, Ctrl+C)."""
+        with self.lock:
+            if self.tty and self.width:
+                sys.stderr.write("\r" + " " * self.width + "\r")
+                self.width = 0
+            sys.stderr.write(text + "\n")
+            if self.tty and self.thread.is_alive():
+                self.show()
+            sys.stderr.flush()
+
+    def loop(self):
+        while not self.halt.wait(self.every):
+            self.show()
+
+    def start(self):
+        self.show()
+        self.thread.start()
+
+    def finish(self):
+        self.halt.set()
+        if self.thread.is_alive():
+            self.thread.join()
+        with self.lock:
+            self.show()
+            if self.tty:
+                sys.stderr.write("\n")
+                self.width = 0
+
+
+class ProgressHandler(logging.Handler):
+    """Log lines go above the progress bar instead of through it."""
+
+    def __init__(self, progress):
+        super().__init__()
+        self.progress = progress
+
+    def emit(self, record):
+        self.progress.print(self.format(record))
+
+
+def sweep_due(run, account_id):
+    """True when this account lists every type today: forced, filtered by --services/--types,
+    skipping is off, or its last full sweep is full_sweep_days old."""
+    if run.sweep or run.filtered or not run.settings["smart_skip"]:
+        return True
+    last = (read_json(run.out / account_id / "_account.json", {}) or {}).get("last_full_sweep")
+    if not last:
+        return True
+    when = dt.datetime.strptime(last, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    return utc_now() - when >= dt.timedelta(days=run.settings["full_sweep_days"])
+
+
+def coverage_hints(run, acct_dir):
+    """{region: types} the last coverage check points to: AWS Config counted some, or a tagged
+    resource of that type was missing from the inventory."""
+    report = read_json(acct_dir / "_coverage.json") or {}
+    cfg = run.commands.get("coverage", {})
+    hints = {}
+
+    def add(names, type_, region):
+        for r in run.resources:
+            if r["service"] in names and type_matches(r["type"], type_):
+                hints.setdefault("global" if r["scope"] == "global" else region, set()).add(r["key"])
+
+    for region, counts in (report.get("config_counts") or {}).items():
+        for name, count in counts.items():
+            if count and name.count("::") == 2:
+                service, type_ = name.split("::")[1:]
+                add(cfg.get("config_services", {}).get(service.lower(), [service.lower()]), type_, region)
+    for kind, missed in (report.get("missed_types") or {}).items():
+        service, type_ = kind.split(":", 1)
+        for arn in missed.get("examples", []):
+            add(cfg.get("arn_services", {}).get(service, [service]), type_, arn.split(":")[3] or "global")
+    return hints
+
+
+def account_plan(run, account_id, regions):
+    """What one account lists today: [(label, region, types)], how many types are skipped, and
+    whether it is a full sweep.
+
+    Outside a sweep a type is listed when it is in daily.always_run, had resources before,
+    was never listed, failed last time (timeout, error), or the last coverage check points
+    to it; a child type brings its parent. The rest (empty, no permission) waits.
+    """
+    g = run.settings["global_region"]
+    scopes = []
+    global_types = [r for r in run.resources if r["scope"] == "global"]
+    regional_types = [r for r in run.resources if r["scope"] == "regional"]
+    if global_types:
+        scopes.append(("global", g, global_types))
+    if regional_types:
+        scopes += [(r, r, regional_types) for r in regions]
+    sweep = sweep_due(run, account_id)
+    if sweep:
+        return scopes, 0, True
+    acct_dir = run.out / account_id
+    hints = coverage_hints(run, acct_dir)
+    always = set(run.commands.get("daily", {}).get("always_run", []))
+    plan, skipped = [], 0
+    for label, region, rtypes in scopes:
+        manifest = read_json(acct_dir / label / "_manifest.json", {}) or {}
+
+        def needed(key):
+            entry = manifest.get(key)
+            if key in always or key in hints.get(label, ()) or entry is None:
+                return True
+            return entry.get("count", 0) > 0 or entry.get("status") in ("timeout", "error")
+
+        wanted = {rt["key"] for rt in rtypes if needed(rt["key"])}
+        for key in list(wanted):
+            while run.by_key[key].get("parent"):
+                key = run.by_key[key]["parent"]
+                wanted.add(key)
+        chosen = [rt for rt in rtypes if rt["key"] in wanted]
+        skipped += len(rtypes) - len(chosen)
+        if chosen:
+            plan.append((label, region, chosen))
+    return plan, skipped, False
+
+
 class Run:
     def __init__(self, data, commands, args):
         self.settings = data["settings"]
@@ -504,13 +825,20 @@ class Run:
         self.run_dir = self.out / "_runs" / self.id
         # Workers write what they fetch here, one resource per line, before it is saved.
         self.tmp = self.out / "_tmp" / self.id
-        self.gate = threading.BoundedSemaphore(self.settings["max_parallel_calls"])
+        start, lowest, highest, auto = worker_limits(self.settings)
+        self.gate = Gate(start)
+        self.tuner = Tuner(self.gate, lowest, highest) if auto else None
         self.stop = threading.Event()
         self.volatile = set(commands.get("volatile_keys", []))
         self.lock = threading.Lock()
         self.changes = []
         self.seen_accounts = {}
         self.running = {}  # profile -> time.monotonic() when its sync started
+        self.planned = {}  # profile -> list commands counted in the progress total
+        self.cfn_types = None  # CloudFormation types Cloud Control can list, read once per run
+        self.sweep = getattr(args, "sweep", False)
+        self.filtered = bool(args.services or args.types)
+        self.progress = None
         self.by_key = {r["key"]: r for r in commands["resources"]}
 
         keys = [r["key"] for r in commands["resources"]
@@ -719,6 +1047,8 @@ def scan_scope(run, aws, account, label, region, rtypes):
                         status = next(e["status"] for e in errors if e["type"] == parent)
                         errors.append({"scope": label, "type": rt["key"], "status": status, "code": "ParentFailed",
                                        "message": f"{parent} could not be listed"})
+                        if run.progress:
+                            run.progress.tick()
                         continue
                     if run.stop.is_set():
                         raise Stopped()
@@ -731,6 +1061,8 @@ def scan_scope(run, aws, account, label, region, rtypes):
                 finished, _ = cf.wait(running, return_when=cf.FIRST_COMPLETED)
                 for f in finished:
                     rt, path = running.pop(f)
+                    if run.progress and not isinstance(f.exception(), Stopped):
+                        run.progress.tick()
                     try:
                         f.result()
                         done[rt["key"]] = path
@@ -838,6 +1170,8 @@ def scan_account(run, profile, account_cfg, conn):
     with run.lock:
         if account_id in run.seen_accounts:
             result["duplicate_of"] = run.seen_accounts[account_id]
+            if run.progress:
+                run.progress.add_total(-run.planned.get(profile, 0))
             return result
         run.seen_accounts[account_id] = profile
         started = run.running[profile] = time.monotonic()
@@ -853,14 +1187,10 @@ def scan_account(run, profile, account_cfg, conn):
         if regions == "all" or regions == ["all"]:
             regions = sorted(run_named(aws, run.commands, "regions", g) or [])
         account = {"profile": profile, "account_id": account_id, "alias": alias}
-
-        scopes = []
-        global_types = [r for r in run.resources if r["scope"] == "global"]
-        regional_types = [r for r in run.resources if r["scope"] == "regional"]
-        if global_types:
-            scopes.append(("global", g, global_types))
-        if regional_types:
-            scopes += [(r, r, regional_types) for r in regions]
+        scopes, result["skipped_types"], sweep = account_plan(run, account_id, regions)
+        result["sweep"] = sweep
+        if run.progress:
+            run.progress.add_total(sum(len(s[2]) for s in scopes) - run.planned.get(profile, 0))
 
         with cf.ThreadPoolExecutor(run.settings["region_workers"]) as pool:
             futures = {pool.submit(scan_scope, run, aws, account, *s): s[0] for s in scopes}
@@ -885,6 +1215,7 @@ def scan_account(run, profile, account_cfg, conn):
                         result["errors"].append(e)
         if stopped:
             raise Stopped()
+        result["coverage"] = check_coverage(run, aws, account, regions)
     except Stopped:
         # Regions that finished are saved; the account's summary files are left as they were.
         result["stopped"] = True
@@ -899,6 +1230,7 @@ def scan_account(run, profile, account_cfg, conn):
     write_json(acct_dir / "_account.json", {
         **old, "account_id": account_id, "alias": alias, "profile": profile, "connectivity": conn,
         "regions": regions, "last_sync": iso(run.started), "resource_counts": counts,
+        "last_full_sweep": iso(run.started) if sweep and not run.filtered else old.get("last_full_sweep"),
     })
     log_changes(run, acct_dir, changes)
     for c in changes:
@@ -920,6 +1252,225 @@ def log_changes(run, acct_dir, changes):
         run.changes += changes
 
 
+# ---------------------------------------------------------------------------- coverage
+
+ID_LIKE = re.compile(r"^[a-z][a-z0-9]*-[0-9A-Za-z]{6,}$")
+
+
+def id_forms(value):
+    """An ARN or id, and the short ids it ends with (".../i-123" -> "i-123", "...:function:f" -> "f")."""
+    value = str(value)
+    return {value, value.rstrip("/").split("/")[-1], value.split(":")[-1]}
+
+
+def inventory_tokens(acct_dir):
+    """Every ARN and id the account's saved resources hold, read one file at a time."""
+    tokens = set()
+
+    def walk(obj):
+        if isinstance(obj, str):
+            if obj.startswith("arn:") or ID_LIKE.match(obj):
+                tokens.update(id_forms(obj))
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    for manifest_path in acct_dir.glob("*/_manifest.json"):
+        for entry in (read_json(manifest_path, {}) or {}).values():
+            for rid, item in entry.get("items", {}).items():
+                tokens.update(id_forms(rid))
+                resource = (read_json(acct_dir / item["file"]) or {}).get("resource")
+                if resource is not None:
+                    walk(resource)
+    return tokens
+
+
+def arn_type(arn):
+    """service:type of an ARN, e.g. ec2:instance, elasticloadbalancing:loadbalancer, s3:bucket."""
+    parts = arn.split(":", 5)
+    if len(parts) < 6:
+        return "unknown"
+    service, resource = parts[2], parts[5]
+    for sep in ("/", ":"):
+        if sep in resource:
+            return f"{service}:{resource.split(sep)[0]}"
+    return f"{service}:" + {"s3": "bucket", "sns": "topic", "sqs": "queue"}.get(service, "resource")
+
+
+def norm(name):
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
+def type_matches(ours, theirs):
+    """Our type name (plural, snake_case) and AWS's (ARN or CloudFormation): instances ~ instance,
+    db_instances ~ DBInstance, policies ~ ManagedPolicy, hosted_zones ~ hostedzone."""
+    ours, theirs = norm(ours), norm(theirs)
+    forms = {ours, ours[:-1] if ours.endswith("s") else ours, ours[:-2] if ours.endswith("es") else ours,
+             ours[:-3] + "y" if ours.endswith("ies") else ours}
+    return bool(theirs) and any(f == theirs or f.endswith(theirs) or theirs.endswith(f) for f in forms if f)
+
+
+def cfn_type_list(run, aws):
+    """CloudFormation resource types Cloud Control can list, cached for a week in inventory/_cfn_types.json."""
+    with run.lock:
+        if run.cfn_types is not None:
+            return run.cfn_types
+    path = run.out / "_cfn_types.json"
+    cached = read_json(path)
+    if cached and time.time() - cached.get("fetched", 0) < 7 * 24 * 3600:
+        types = set(cached["types"])
+    else:
+        types = set()
+        for c in run.commands["coverage"].get("cfn_types", []):
+            try:
+                types.update(aws(c["command"], run.settings["global_region"], c.get("query")) or [])
+            except AwsError as e:
+                log.info("cloudformation list-types: %s", e.code)
+        if types:
+            write_json(path, {"fetched": time.time(), "types": sorted(types)})
+    with run.lock:
+        run.cfn_types = types
+    return types
+
+
+def check_coverage(run, aws, account, regions):
+    """Ask AWS for its own lists of the account's resources and note what the inventory lacks.
+
+    Writes <account>/_coverage.json and returns a short summary for the run, including the
+    CloudFormation types aws_commands.json does not cover that Cloud Control could list.
+    """
+    cfg = run.commands.get("coverage")
+    if not cfg:
+        return None
+    acct_dir = run.out / account["account_id"]
+    catalog = run.commands["resources"]
+    arn_services, config_services = cfg.get("arn_services", {}), cfg.get("config_services", {})
+
+    def covered(names, kind_type):
+        return any(r["service"] in names and type_matches(r["type"], kind_type) for r in catalog)
+
+    tokens = inventory_tokens(acct_dir)
+    # Types this account could not list (no permission, timeout, error) often explain a gap.
+    skipped = sorted({key for path in acct_dir.glob("*/_manifest.json")
+                      for key, entry in (read_json(path, {}) or {}).items()
+                      if entry.get("status") in ("no_permission", "timeout", "error")})
+    ignore = set(cfg.get("ignore_arn_types", []))
+    ignore_config = [re.compile(p) for p in cfg.get("ignore_config_type_patterns", [])]
+    missed, sources, config_types, config_counts = {}, {}, {}, {}
+    for region in [run.settings["global_region"], *regions]:
+        if region in sources:
+            continue
+        try:
+            arns = aws(cfg["tagged"]["command"], region, cfg["tagged"].get("query")) or []
+            sources[region] = {"tagged": len(arns)}
+        except AwsError as e:
+            sources[region] = {"tagged": error_status(e.code)}
+            arns = []
+        for arn in arns:
+            kind = arn_type(arn)
+            if kind not in ignore and not (id_forms(arn) & tokens):
+                missed.setdefault(kind, set()).add(arn)
+        try:
+            counts = aws(cfg["config_counts"]["command"], region, cfg["config_counts"].get("query")) or []
+            sources[region]["config"] = "on" if counts else "off"
+        except AwsError as e:
+            sources[region]["config"] = error_status(e.code)
+            counts = []
+        if counts:
+            config_counts[region] = {c.get("resourceType", ""): c.get("count", 0) for c in counts}
+        for c in counts:
+            name = c.get("resourceType", "")
+            if name.count("::") != 2 or any(p.search(name) for p in ignore_config):
+                continue
+            service, type_ = name.split("::")[1:]
+            if not covered(config_services.get(service.lower(), [service.lower()]), type_):
+                config_types[name] = config_types.get(name, 0) + c.get("count", 0)
+
+    types = {}
+    for kind, arns in sorted(missed.items(), key=lambda kv: -len(kv[1])):
+        service, type_ = kind.split(":", 1)
+        names = arn_services.get(service, [service])
+        types[kind] = {
+            "count": len(arns),
+            "type_in_commands": covered(names, type_),
+            # The likely reason first: a skipped type of the same kind.
+            "skipped_types_of_service": sorted((k for k in skipped if k.split("/")[0] in names),
+                                               key=lambda k: not type_matches(k.split("/")[1], type_)),
+            "examples": sorted(arns)[:10],
+        }
+
+    # Types nothing covers: the CloudFormation name Cloud Control can list them by.
+    wanted = set(config_types)
+    for kind, t in types.items():
+        if not t["type_in_commands"]:
+            service, type_ = kind.split(":", 1)
+            wanted.add((service, type_))
+    suggested = []
+    if wanted:
+        cfn = cfn_type_list(run, aws)
+        by_parts = {(norm(n.split("::")[1]), norm(n.split("::")[2])): n for n in cfn if n.count("::") == 2}
+        for w in wanted:
+            name = w if isinstance(w, str) else by_parts.get((norm(w[0]), norm(w[1])))
+            if name in cfn:
+                suggested.append(name)
+
+    checked = any(isinstance(s.get("tagged"), int) or s.get("config") == "on" for s in sources.values())
+    report = {
+        "checked_at": iso(utc_now()),
+        "checked": checked,
+        "sources": sources,
+        "missed": sum(t["count"] for t in types.values()),
+        "missed_types": types,
+        "config_types_not_in_commands": dict(sorted(config_types.items(), key=lambda kv: -kv[1])),
+        "suggested_commands": sorted(set(suggested)),
+        "config_counts": config_counts,
+        "_help": "missed_types: resources AWS lists (tagged ones) that no saved resource matches. "
+                 "type_in_commands true: aws_commands.json has that type, so the gap is usually a skipped list "
+                 "(skipped_types_of_service: no permission, timeout, error). config_types_not_in_commands: types "
+                 "AWS Config records that aws_commands.json does not cover. suggested_commands: the CloudFormation "
+                 "types of the uncovered ones that Cloud Control can list; a sync offers to add them.",
+    }
+    write_json(acct_dir / "_coverage.json", report)
+    return {"checked": checked, "missed": report["missed"],
+            "types": {k: v["count"] for k, v in types.items()},
+            "config_types": len(config_types), "suggested": report["suggested_commands"]}
+
+
+def add_commands(cfn_types, cfg):
+    """Append a Cloud Control entry per CloudFormation type to aws_commands.json (backup first).
+
+    Returns the new resource keys. The file keeps its layout: one line per new entry.
+    """
+    text = COMMANDS_FILE.read_text()
+    data = json.loads(text)
+    existing = {r["service"] + "/" + r["type"] for r in data["resources"]}
+    template = cfg["new_resource"]
+    lines, keys = [], []
+    for name in sorted(cfn_types):
+        service, type_ = name.split("::")[1:]
+        service = service.lower()
+        type_ = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", type_).lower() + "s"
+        key = f"{service}/{type_}"
+        if key in existing:
+            key, type_ = key + "_cc", type_ + "_cc"
+        entry = {"service": service, "type": type_}
+        if service in cfg.get("global_services", []):
+            entry["scope"] = "global"
+        entry.update({"command": fill(template["command"], {"cfn_type": name}), "query": template.get("query"),
+                      "id": template["id"], "added": f"coverage {utc_now():%Y-%m-%d}"})
+        lines.append("    " + json.dumps(entry))
+        keys.append(key)
+    end = text.rstrip().rfind("]")
+    new_text = text[:end].rstrip() + ",\n" + ",\n".join(lines) + "\n  " + text[end:]
+    json.loads(new_text)  # never write a broken file
+    shutil.copy2(COMMANDS_FILE, COMMANDS_FILE.with_name(COMMANDS_FILE.name + ".bak"))
+    COMMANDS_FILE.write_text(new_text)
+    return keys
+
+
 # ---------------------------------------------------------------------------- merged json
 
 def inventory_path(acct_dir, profile):
@@ -930,7 +1481,7 @@ def inventory_path(acct_dir, profile):
 def build_account_inventory(acct_dir, by_key):
     """Merge every resource file of one account into inventory/<profile>-<account number>.json.
 
-    {"account": {...}, "global": {service: {type: {id: resource}}},
+    {"account": {...}, "coverage": {what AWS lists that the inventory lacks}, "global": {service: {type: {id: resource}}},
      "regions": {region: {"vpcs": {vpc_id: {"vpc": {...}, service: {type: {id: resource}}}},
                           "outside_vpc": {service: {type: {id: resource}}},
                           "skipped": [{"type", "status": no_permission|timeout|error, "error", "at"}]}}}
@@ -938,7 +1489,8 @@ def build_account_inventory(acct_dir, by_key):
     The layout is worked out from file paths first, then the file is written one resource
     at a time, so the account is never in memory as a whole.
     """
-    tree = {"account": read_json(acct_dir / "_account.json", {}), "global": {}, "regions": {}}
+    tree = {"account": read_json(acct_dir / "_account.json", {}), "coverage": read_json(acct_dir / "_coverage.json"),
+            "global": {}, "regions": {}}
     for manifest_path in sorted(acct_dir.glob("*/_manifest.json")):
         label = manifest_path.parent.name
         manifest = read_json(manifest_path, {})
@@ -1032,10 +1584,11 @@ def place_in_vpcs(section, acct_dir, entries, by_key):
 
 # ---------------------------------------------------------------------------- commands
 
-def setup_logging(verbose, log_file=None):
+def setup_logging(logs, log_file=None, progress=None):
+    """Off: only errors reach the screen. On: info above the progress line, everything in log_file."""
     log.setLevel(logging.DEBUG)
-    console = logging.StreamHandler()
-    console.setLevel(logging.DEBUG if verbose else logging.INFO)
+    console = ProgressHandler(progress) if progress else logging.StreamHandler()
+    console.setLevel(logging.INFO if logs else logging.ERROR)
     console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
     log.addHandler(console)
     if log_file:
@@ -1049,7 +1602,7 @@ def setup_logging(verbose, log_file=None):
 def cmd_add(args):
     data = load_accounts()
     settings, commands = data["settings"], load_commands()
-    gate = threading.BoundedSemaphore(settings["max_parallel_calls"])
+    gate = Gate(worker_limits(settings)[0])
     profiles = list(args.profiles)
     if args.file:
         profiles += [l.strip() for l in Path(args.file).read_text().splitlines() if l.strip() and not l.startswith("#")]
@@ -1070,7 +1623,7 @@ def cmd_add(args):
             return profile, {"status": "not checked"}
         return profile, connectivity(Aws(profile, settings, gate), commands, settings["global_region"])
 
-    with cf.ThreadPoolExecutor(settings["account_workers"]) as pool:
+    with cf.ThreadPoolExecutor(worker_limits(settings)[0]) as pool:
         for profile, conn in pool.map(check, profiles):
             entry = data["accounts"].setdefault(profile, {"added": iso(utc_now())})
             entry["enabled"] = True
@@ -1151,9 +1704,10 @@ def fmt_seconds(seconds):
 def check_accounts(settings, commands, accounts, profiles, unresolved):
     """sts get-caller-identity for every account at once. Prints one line per account and
     returns (results, the profiles that can sign in, one per account)."""
-    gate = threading.BoundedSemaphore(settings["max_parallel_calls"])
-    print(f"Checking sign-in (sts get-caller-identity) for {len(profiles)} account(s)...")
-    pool = cf.ThreadPoolExecutor(settings["max_parallel_calls"])
+    start = worker_limits(settings)[0]
+    gate = Gate(start)
+    print(f"Checking sign-in (sts get-caller-identity) for {len(profiles)} account(s), {start} at a time...")
+    pool = cf.ThreadPoolExecutor(start)
     conns = {}
     try:
         futures = {pool.submit(connectivity, Aws(p, settings, gate), commands, settings["global_region"]): p for p in profiles}
@@ -1209,36 +1763,33 @@ def cmd_sync(args):
     run = Run(data, commands, args)
     if not run.resources:
         sys.exit("No resource types match --services/--types.")
-    setup_logging(args.verbose, run.run_dir / "run.log")
+    logs = args.logs or run.settings["logs"]
+    progress = run.progress = Progress(run.settings, len(ready), run.gate, run.tuner)
+    setup_logging(logs, run.run_dir / "run.log" if logs else None, progress)
     for p in profiles:
         if conns[p]["status"] != "ok":
             mark_unreachable(run, accounts[p], conns[p])
+
+    # The total is known up front; "all" regions are counted when the account starts.
+    skipped_types, sweeps = 0, 0
+    for p in ready:
+        regions = accounts[p].get("regions") or run.settings["regions"]
+        if regions in ("all", ["all"]):
+            regions = read_json(run.out / conns[p]["account_id"] / "_account.json", {}).get("regions") or [
+                f"unknown-{i}" for i in range(17)]
+        plan, skipped, sweep = account_plan(run, conns[p]["account_id"], regions)
+        run.planned[p] = sum(len(s[2]) for s in plan)
+        skipped_types += skipped
+        sweeps += sweep
+        progress.add_total(run.planned[p])
 
     def overall():
         """Average sync time over every account that has one."""
         known = [a["avg_seconds"] for a in accounts.values() if a.get("avg_seconds")]
         return sum(known) / len(known) if known else None
 
-    def expected(p):
-        return accounts[p].get("avg_seconds") or overall()
-
     results = {}
     t0 = time.monotonic()
-
-    def status():
-        with run.lock:
-            running = dict(run.running)
-        pending = [p for p in ready if p not in results and p not in running]
-        now = time.monotonic()
-        guesses = [expected(p) for p in pending] + [
-            None if expected(p) is None else max(expected(p) - (now - start), 0) for p, start in running.items()]
-        eta = None if guesses else 0
-        if guesses and None not in guesses:
-            eta = sum(guesses) / max(1, min(run.settings["account_workers"], len(guesses)))
-        finish = f" (about {(dt.datetime.now() + dt.timedelta(seconds=eta)).strftime('%H:%M')})" if eta is not None else ""
-        log.info("Status: %d/%d done, %d running, %d pending | ETA %s%s | average %s per account | elapsed %s",
-                 len(results), len(ready), len(running), len(pending), fmt_seconds(eta), finish,
-                 fmt_seconds(overall()), fmt_seconds(now - t0))
 
     def finished(f, p):
         if f.cancelled():
@@ -1249,6 +1800,8 @@ def cmd_sync(args):
             log.exception("%s failed", p)
             r = {"profile": p, "error": str(e)}
         results[p] = r
+        progress.account_done()
+        progress.accounts_running = sum(1 for other in futures if not other.done())
         n = f"[{len(results)}/{len(ready)}]"
         if r.get("stopped"):
             log.info("%s %s: stopped before it finished", n, p)
@@ -1270,34 +1823,64 @@ def cmd_sync(args):
                      len(r["no_permission"]), len(r["timeout"]), len(r["errors"]),
                      fmt_seconds(r["seconds"]), fmt_seconds(entry["avg_seconds"]))
 
-    log.info("Sync %s: %d account(s), %d resource type(s), output %s. Ctrl+C stops cleanly.",
-             run.id, len(ready), len(run.resources), run.out)
-    status()
-    pool = cf.ThreadPoolExecutor(run.settings["account_workers"])
-    futures = {pool.submit(scan_account, run, p, accounts[p], conns[p]): p for p in ready}
-    not_done, stopped, last_status = set(futures), False, time.monotonic()
+    log.info("Sync %s: %d account(s), %d resource type(s), output %s", run.id, len(ready), len(run.resources), run.out)
+    sys.stdout.flush()  # the sign-in table first, then the progress line (stderr)
+    skip_note = (f" ({skipped_types:,} skipped: empty or no permission before; full sweep every "
+                 f"{run.settings['full_sweep_days']} days or with --sweep)") if skipped_types else ""
+    sweep_note = (f" Full sweep (every type) for {sweeps} account(s)."
+                  if sweeps and run.settings["smart_skip"] and not run.filtered else "")
+    print(f"Syncing {len(ready)} account(s): {progress.total:,} list commands{skip_note}.{sweep_note} "
+          "Ctrl+C stops cleanly.", file=sys.stderr)
+    if run.tuner:
+        run.tuner.start()
+    progress.start()
+    fixed = str(run.settings["account_workers"]).isdigit()
+    most = int(run.settings["account_workers"]) if fixed else max(4, min(len(ready), worker_limits(run.settings)[2]))
+    pool = cf.ThreadPoolExecutor(most)
+    waiting, futures, not_done, stopped = list(ready), {}, set(), False
+
+    def launch():
+        """Start accounts: up to the fixed number, or (auto) at least 4 and then one more per
+        check while fewer than 3/4 of the aws workers are busy."""
+        extra = 1
+        while waiting and len(not_done) < most:
+            if not fixed and len(not_done) >= 4:
+                if not extra or run.gate.active >= run.gate.limit * 0.75:
+                    break
+                extra -= 1
+            p = waiting.pop(0)
+            f = pool.submit(scan_account, run, p, accounts[p], conns[p])
+            futures[f] = p
+            not_done.add(f)
+        progress.accounts_running = len(not_done)
+
     try:
+        launch()
         while not_done:
-            done, not_done = cf.wait(not_done, timeout=2, return_when=cf.FIRST_COMPLETED)
+            done, rest = cf.wait(not_done, timeout=1, return_when=cf.FIRST_COMPLETED)
+            not_done.clear()
+            not_done.update(rest)
             for f in done:
                 finished(f, futures[f])
-            if done or time.monotonic() - last_status >= run.settings["status_seconds"]:
-                status()
-                last_status = time.monotonic()
+            launch()
     except KeyboardInterrupt:
         stopped = True
         run.stop.set()
-        log.warning("Ctrl+C: stopping. Finished accounts are saved; accounts in progress stop now and keep "
-                    "their finished regions. Press Ctrl+C again to quit at once.")
+        progress.stopping = True
+        progress.print("Ctrl+C: stopping. Finished accounts are saved; accounts in progress stop now and keep "
+                       "their finished regions. Press Ctrl+C again to quit at once.")
         pool.shutdown(wait=False, cancel_futures=True)
         try:
             for f in cf.as_completed(not_done):
                 finished(f, futures[f])
         except KeyboardInterrupt:
-            log.error("Quit without cleaning up.")
+            progress.print("Quit without cleaning up.")
             os._exit(130)
     finally:
         pool.shutdown(wait=False)
+        if run.tuner:
+            run.tuner.stop()
+        progress.finish()
         shutil.rmtree(run.tmp, ignore_errors=True)
         try:
             run.tmp.parent.rmdir()
@@ -1314,10 +1897,70 @@ def cmd_sync(args):
     write_json(run.run_dir / "changes.json", sorted(run.changes, key=lambda c: (c["account_id"], c["region"], c["type"], c["id"])))
     write_json(run.out / "_runs" / "latest.json", {"run": run.id, "path": str(run.run_dir)})
     done_count = sum(1 for r in results.values() if not r.get("stopped") and not r.get("error"))
-    log.info("%s: %d of %d account(s) done in %s, %d resources, %d added, %d modified, %d removed, %d not ready. Details: %s",
-             "Stopped" if stopped else "Done", done_count, len(ready), fmt_seconds(time.monotonic() - t0),
-             totals["resources"], totals["added"], totals["modified"], totals["removed"], len(not_ready), run.run_dir)
+    problems = sum(len(r.get("errors", [])) + len(r.get("timeout", [])) for r in results.values())
+    message = (f"{'Stopped' if stopped else 'Done'}: {done_count} of {len(ready)} account(s) in {hms(time.monotonic() - t0)}"
+               f" | {totals['resources']:,} resources: {totals['added']} added, {totals['modified']} modified,"
+               f" {totals['removed']} removed | {problems} timeout/error(s) | {len(not_ready)} not ready"
+               + (f" | {sum(r.get('skipped_types', 0) for r in results.values()):,} type(s) skipped as empty before"
+                  if any(r.get("skipped_types") for r in results.values()) else ""))
+    log.info(message)
+    print(message, file=sys.stderr)
+    for line in coverage_summary(run, results):
+        log.info(line)
+        print(line, file=sys.stderr)
+    if not stopped and not getattr(args, "follow_up", False):
+        return add_missing_types(run, args, results) or 0
+    print(f"Files: {run.out}   What changed: aws_inventory.py changes --diff", file=sys.stderr)
     return 130 if stopped else 0
+
+
+def coverage_summary(run, results):
+    """A few lines on what AWS lists that the inventory lacks, over all accounts of this run."""
+    reports = {p: r["coverage"] for p, r in results.items() if r.get("coverage")}
+    if not reports:
+        return []
+    unchecked = [p for p, c in reports.items() if not c["checked"]]
+    gaps = {p: c for p, c in reports.items() if c["missed"] or c["config_types"]}
+    lines = [f"Coverage: {len(reports) - len(unchecked)} account(s) checked against AWS's own lists, "
+             f"{len(reports) - len(unchecked) - len(gaps)} complete, {len(gaps)} with gaps"
+             + (f", {len(unchecked)} could not be checked (no access to the Tagging API or AWS Config)" if unchecked else "")]
+    types = collections.Counter()
+    for c in gaps.values():
+        types.update(c["types"])
+    if types:
+        lines.append("  Not in the inventory: " + ", ".join(f"{kind} {count}" for kind, count in types.most_common(8)))
+    for p, c in list(gaps.items())[:5]:
+        account = results[p]["account_id"]
+        lines.append(f"  {p} ({account}): {c['missed']} missed, {c['config_types']} Config type(s) not covered "
+                     f"-> {run.out / account / '_coverage.json'}")
+    if len(gaps) > 5:
+        lines.append(f"  ... and {len(gaps) - 5} more account(s): see each account's _coverage.json")
+    return lines
+
+
+def add_missing_types(run, args, results):
+    """Offer to add the types AWS lists that aws_commands.json lacks, then download only those."""
+    wanted = {}
+    for p, r in results.items():
+        for name in (r.get("coverage") or {}).get("suggested", []):
+            wanted.setdefault(name, []).append(p)
+    mode = str(run.settings["add_commands"]).lower()
+    if not wanted or mode == "no":
+        return None
+    print(f"aws_commands.json does not cover {len(wanted)} type(s) found in these accounts:", file=sys.stderr)
+    for name, profiles in sorted(wanted.items()):
+        print(f"  {name:50} {len(profiles)} account(s)", file=sys.stderr)
+    if mode != "yes" and not args.yes:
+        if ask("Add them to aws_commands.json (as Cloud Control commands) and download them now? [Y/n] ").lower() in ("n", "no"):
+            return None
+    keys = add_commands(wanted, run.commands["coverage"])
+    profiles = sorted({p for ps in wanted.values() for p in ps})
+    print(f"Added {len(keys)} type(s) to aws_commands.json (previous file: aws_commands.json.bak). "
+          f"Downloading them for {len(profiles)} account(s)...", file=sys.stderr)
+    for handler in list(log.handlers):
+        log.removeHandler(handler)
+    return cmd_sync(argparse.Namespace(profiles=profiles, services=None, types=keys, regions=None, full=False,
+                                       sweep=False, logs=args.logs, yes=True, unresolved=[], follow_up=True))
 
 
 def cmd_changes(args):
@@ -1446,7 +2089,7 @@ def cmd_interactive(args):
         print(f"Saved. Next time press Enter to sync all {len({*saved, *profiles})} account(s).")
     profiles = list(dict.fromkeys(profiles))
     return cmd_sync(argparse.Namespace(profiles=profiles, services=None, types=None, regions=None,
-                                       full=False, verbose=False, yes=False,
+                                       full=False, sweep=False, logs=False, yes=False,
                                        unresolved=unresolved if answer else []))
 
 
@@ -1492,8 +2135,9 @@ def main():
     p.add_argument("--types", nargs="+", help="only these types, e.g. ec2/instances")
     p.add_argument("--regions", nargs="+", help="regions for this run only")
     p.add_argument("--full", action="store_true", help="repeat every detail call, even for unchanged resources")
+    p.add_argument("--sweep", action="store_true", help="list every type, also those empty or without permission before")
     p.add_argument("-y", "--yes", action="store_true", help="do not ask before syncing the accounts that can sign in")
-    p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("-v", "--logs", action="store_true", help="show log lines and write _runs/<run>/run.log")
     p.set_defaults(func=cmd_sync)
 
     p = sub.add_parser("changes", help="show what the last (or a given) sync changed")

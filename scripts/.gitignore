@@ -1,2 +1,4 @@
 aws_accounts.json
+aws_commands.json.bak
 inventory/
+*.tmp

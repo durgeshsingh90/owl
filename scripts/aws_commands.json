@@ -22,6 +22,41 @@
     "record_types": ["A", "AAAA", "CNAME"],
     "command": ["nslookup", "-timeout=5", "-retry=1", "{name}"]
   },
+  "daily": {
+    "_help": "Daily runs list only the types that had resources before, were never run, failed last time, or that AWS Config / the coverage check point to, plus always_run. Types that were empty or had no permission wait for the full sweep (settings full_sweep_days, or sync --sweep).",
+    "always_run": [
+      "ec2/vpcs", "ec2/subnets", "ec2/route_tables", "ec2/network_acls", "ec2/security_groups", "ec2/network_interfaces",
+      "ec2/vpc_endpoints", "ec2/vpc_endpoint_services", "ec2/vpc_peering_connections", "ec2/nat_gateways", "ec2/internet_gateways",
+      "ec2/transit_gateways", "ec2/transit_gateway_attachments", "ec2/transit_gateway_route_tables", "ec2/instances",
+      "elbv2/load_balancers", "elbv2/listeners", "elbv2/target_groups", "elb/classic_load_balancers",
+      "route53/hosted_zones", "route53resolver/endpoints", "route53resolver/rules", "route53resolver/rule_associations",
+      "iam/roles", "iam/instance_profiles"
+    ]
+  },
+  "coverage": {
+    "_help": "After an account syncs, AWS's own lists are compared with what was downloaded. tagged: every tagged resource, any service, per region. config_counts: every resource type AWS Config records (only where Config is on). A listed resource matches the inventory by ARN or by its id. arn_services and config_services map names that differ from the service names above. ignore_arn_types are parts of resources already saved inside another one. A type AWS lists that nothing above covers is added to resources (after asking) as new_resource, a Cloud Control command, when cfn_types says Cloud Control supports it.",
+    "tagged": {"command": ["resourcegroupstaggingapi", "get-resources"], "query": "ResourceTagMappingList[].ResourceARN"},
+    "config_counts": {"command": ["configservice", "get-discovered-resource-counts"], "query": "resourceCounts"},
+    "arn_services": {
+      "elasticloadbalancing": ["elbv2", "elb"], "states": ["stepfunctions"], "es": ["opensearch"],
+      "elasticfilesystem": ["efs"], "execute-api": ["apigateway", "apigatewayv2"], "ses": ["sesv2"],
+      "elasticmapreduce": ["emr"]
+    },
+    "config_services": {
+      "elasticloadbalancingv2": ["elbv2"], "elasticloadbalancing": ["elb"],
+      "opensearchservice": ["opensearch"], "elasticsearch": ["opensearch"], "kinesisfirehose": ["firehose"],
+      "msk": ["kafka"], "amazonmq": ["mq"], "directoryservice": ["ds"], "cognito": ["cognito-idp"],
+      "networkfirewall": ["network-firewall"], "acmpca": ["acm-pca"], "ses": ["sesv2"], "vpclattice": ["vpc-lattice"]
+    },
+    "ignore_arn_types": ["ec2:security-group-rule"],
+    "ignore_config_type_patterns": ["Association$", "Attachment$", "Ingress$", "Egress$"],
+    "cfn_types": [
+      {"command": ["cloudformation", "list-types", "--visibility", "PUBLIC", "--type", "RESOURCE", "--provisioning-type", "FULLY_MUTABLE"], "query": "TypeSummaries[].TypeName"},
+      {"command": ["cloudformation", "list-types", "--visibility", "PUBLIC", "--type", "RESOURCE", "--provisioning-type", "IMMUTABLE"], "query": "TypeSummaries[].TypeName"}
+    ],
+    "new_resource": {"command": ["cloudcontrol", "list-resources", "--type-name", "{cfn_type}"], "query": "ResourceDescriptions", "id": "Identifier"},
+    "global_services": ["iam", "cloudfront", "route53", "organizations", "globalaccelerator"]
+  },
   "volatile_keys": [
     "_lookup",
     "RoleLastUsed", "PasswordLastUsed", "LastUsedDate", "LastAccessedDate",
