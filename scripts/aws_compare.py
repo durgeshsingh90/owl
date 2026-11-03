@@ -554,6 +554,7 @@ def run(args):
     words = []
     for i, (side, given) in enumerate(zip(sides, (args.env_source, args.env_target))):
         found, examples = found_words(side["entries"], cfg)
+        side["found_words"] = {w: {"count": n, "example": examples[w]} for w, n in found.most_common()}
         default = (given.split(",") if given else remembered.get(pair_key, {}).get("words", [None, None])[i]
                    or main_words(found) or [w for w in cfg["env_words"]
                                             if re.search(rf"(?<![a-z0-9]){w}(?![a-z0-9])", side["profile"].lower())])
@@ -576,8 +577,8 @@ def run(args):
         since_keys = changed_since_db(db, src_id, args.since) if db else changed_since(sides[0]["dir"], args.since)
     report = compare(sides[0], sides[1], cfg, catalog, commands.get("volatile_keys", []), since_keys)
     report["blind_spots"] = blind_spots(report, sides, db)
-    report = {"source": {k: sides[0][k] for k in ("profile", "account", "synced")} | {"env_words": words[0]},
-              "target": {k: sides[1][k] for k in ("profile", "account", "synced")} | {"env_words": words[1]},
+    report = {"source": {k: sides[0][k] for k in ("profile", "account", "synced", "found_words")} | {"env_words": words[0]},
+              "target": {k: sides[1][k] for k in ("profile", "account", "synced", "found_words")} | {"env_words": words[1]},
               "since": args.since, "compared_at": inv.iso(inv.utc_now()), "read_from": "database" if db else "files",
               **report}
     stamp = inv.utc_now().strftime("%Y%m%dT%H%M%SZ")

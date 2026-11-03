@@ -28,6 +28,7 @@ merged, again written piece by piece:
     inventory/<account_id>/global/route53/hosted_zones/<zone>.json   records with nslookup answers
     inventory/<account_id>/_changelog.jsonl                    every change ever seen
     inventory/_runs/<run>/summary.json, changes.json, run.log
+    inventory/_runs/live.json          the running (or last) sync's progress, for the OWL app
     inventory/_history/<run>/<account_id>/...                  previous versions of changed files
 
 After each account, AWS's own lists (the Tagging API's tagged resources, and AWS
@@ -184,6 +185,18 @@ def write_json(path, data):
         json.dump(data, f, indent=2, sort_keys=True, default=str)
         f.write("\n")
     os.replace(tmp, path)
+
+
+def live_status(out, reset=False, **fields):
+    """inventory/_runs/live.json: what the running sync is doing, for the OWL app to follow.
+    reset: start a new one; else these fields are merged into it."""
+    path = out / "_runs" / "live.json"
+    status = {} if reset else (read_json(path, {}) or {})
+    status.update(fields, updated=iso(utc_now()))
+    try:
+        write_json(path, status)
+    except OSError:
+        pass  # never stop a sync over its status file
 
 
 def safe_name(value):
@@ -663,6 +676,7 @@ class Progress:
             os.system("")  # lets the Windows console move the cursor up (ANSI codes)
         self.every = 1 if self.tty else settings["status_seconds"]
         self.drawn = False
+        self.status = None  # called with numbers() every 2s: the OWL app's live.json
         self.halt = threading.Event()
         self.thread = threading.Thread(target=self.loop, name="progress", daemon=True)
 
@@ -687,7 +701,8 @@ class Progress:
         with self.lock:
             self.accounts_done += 1
 
-    def lines(self):
+    def numbers(self):
+        """Where the run is: list and save done/total, ETAs (seconds, None while estimating)."""
         now = time.monotonic()
         total = max(self.total, self.done)
         listed = total and self.done >= total
@@ -705,7 +720,17 @@ class Progress:
         left = work_total - self.work_done
         save_eta = 0 if not left else (left / work_rate if work_rate else None)
         etas = [e for e in (list_eta, save_eta) if e is not None]
-        total_eta = hms(max(etas)) if len(etas) == 2 or (etas and listed) else "estimating"
+        return {"list": {"done": self.done, "total": total, "eta": list_eta},
+                "save": {"done": self.work_done, "total": work_total, "estimated": not listed, "eta": save_eta},
+                "eta": max(etas) if len(etas) == 2 or (etas and listed) else None, "elapsed": now - self.started,
+                "accounts": {"done": self.accounts_done, "total": self.accounts_total, "running": self.accounts_running},
+                "workers": {"active": self.gate.active, "limit": self.gate.limit}, "stopping": self.stopping}
+
+    def lines(self):
+        n = self.numbers()
+        total, listed, list_eta = n["list"]["total"], not n["save"]["estimated"], n["list"]["eta"]
+        work_total = n["save"]["total"]
+        total_eta = hms(n["eta"]) if n["eta"] is not None else "estimating"
 
         list_text = (f"{self.done:,}/{total:,} {self.done / total if total else 0:5.0%}"
                      f"  accounts {self.accounts_done}/{self.accounts_total}"
@@ -713,7 +738,7 @@ class Progress:
                      f"  ETA {hms(list_eta) if list_eta is not None else 'estimating'}")
         save_text = (f"{self.work_done:,}/{'' if listed else '~'}{work_total:,}"
                      f" {self.work_done / work_total if work_total else 0:5.0%}"
-                     f"  elapsed {hms(now - self.started)}  total ETA {total_eta}"
+                     f"  elapsed {hms(n['elapsed'])}  total ETA {total_eta}"
                      + ("  stopping" if self.stopping else ""))
         columns = shutil.get_terminal_size((120, 20)).columns - 1
         size = max(10, min(32, columns - max(len(list_text), len(save_text)) - 9))
@@ -747,12 +772,24 @@ class Progress:
                 self.show()
             sys.stderr.flush()
 
+    def write_status(self):
+        if self.status:
+            with self.lock:
+                numbers = self.numbers()
+            self.status(numbers)
+
     def loop(self):
-        while not self.halt.wait(self.every):
-            self.show()
+        ticks = 0
+        while not self.halt.wait(1):
+            ticks += 1
+            if ticks % max(1, int(self.every)) == 0:
+                self.show()
+            if ticks % 2 == 0:
+                self.write_status()
 
     def start(self):
         self.show()
+        self.write_status()
         self.thread.start()
 
     def finish(self):
@@ -764,6 +801,7 @@ class Progress:
             if self.tty:
                 sys.stderr.write("\n")
                 self.drawn = False
+        self.write_status()
 
 
 class ProgressHandler(logging.Handler):
@@ -1850,6 +1888,32 @@ def check_accounts(settings, commands, accounts, profiles, unresolved):
 
 
 def cmd_sync(args):
+    """sync, with inventory/_runs/live.json telling the OWL app how far it is and how it ended."""
+    out = (HERE / load_accounts()["settings"]["output_dir"]).resolve()
+    earlier = []
+    if getattr(args, "follow_up", False):  # the types the coverage check added: keep the main sync's result
+        before = read_json(out / "_runs" / "live.json", {}) or {}
+        earlier = before.get("earlier", []) + [{k: before.get(k) for k in ("run", "message")}]
+    live_status(out, reset=True, phase="sign-in", pid=os.getpid(), started=iso(utc_now()),
+                command=["sync"] + [a for a in sys.argv[2:]], earlier=earlier,
+                follow_up=bool(getattr(args, "follow_up", False)))
+    code, message = 1, None
+    try:
+        code = sync(args, out)
+    except KeyboardInterrupt:
+        code = 130
+        raise
+    except SystemExit as e:
+        code, message = (e.code, None) if isinstance(e.code, int) or e.code is None else (1, str(e.code))
+        raise
+    finally:
+        fields = {"phase": "done" if not code else "stopped" if code == 130 else "failed",
+                  "finished": iso(utc_now()), "code": code or 0}
+        live_status(out, **fields, **({"message": message} if message else {}))
+    return code
+
+
+def sync(args, out):
     data = load_accounts()
     commands = load_commands()
     accounts = data["accounts"]
@@ -1865,6 +1929,7 @@ def cmd_sync(args):
     conns, ready = check_accounts(data["settings"], commands, accounts, profiles, getattr(args, "unresolved", []))
     if not ready:
         print("No account can sign in; nothing to sync.")
+        live_status(out, message="No account can sign in; nothing to sync.")
         return 1
     if not args.yes and ask(f"Continue with {len(ready)} account(s)? [Y/n] ").lower() in ("n", "no"):
         print("Nothing synced.")
@@ -1875,6 +1940,8 @@ def cmd_sync(args):
         sys.exit("No resource types match --services/--types.")
     logs = args.logs or run.settings["logs"]
     progress = run.progress = Progress(run.settings, len(ready), run.gate, run.tuner)
+    progress.status = lambda numbers: live_status(run.out, phase="sync", run=run.id, **numbers,
+                                                  current=sorted(run.running))
     setup_logging(logs, run.run_dir / "run.log" if logs else None, progress)
     for p in profiles:
         if conns[p]["status"] != "ok":
@@ -2015,19 +2082,23 @@ def cmd_sync(args):
                f"{problems} error(s)" + (f", {len(not_ready)} not ready" if not_ready else "") + ".")
     log.info(message)
     print(message, file=sys.stderr)
+    live_status(run.out, message=message, stopped=stopped, not_ready=sorted(not_ready))
     for line in coverage_summary(run, results):
         log.info(line)
         print(line, file=sys.stderr)
     print(f"Files in {os.path.relpath(run.out)}{os.sep}. See: aws_inventory.py changes, permissions", file=sys.stderr)
-    if not stopped and not getattr(args, "follow_up", False):
-        follow_up = add_missing_types(run, args, results)
-        if follow_up is not None:
-            return follow_up  # that sync writes the database at its end
     if stopped:
         if run.settings["write_db"]:
             print("Database not updated (stopped): the next run catches up, or run aws_db.py.", file=sys.stderr)
         return 130
-    return write_database(run, results, summary)
+    # This run goes into the database first, so it is there with its summary even when the
+    # follow-up for the types the coverage check found (which writes the database again) is stopped.
+    code = write_database(run, results, summary)
+    if not code and not getattr(args, "follow_up", False):
+        follow_up = add_missing_types(run, args, results)
+        if follow_up is not None:
+            return follow_up
+    return code
 
 
 def write_database(run, results, summary):
@@ -2039,7 +2110,8 @@ def write_database(run, results, summary):
     accounts = [run.out / r["account_id"] for r in results.values()
                 if r.get("account_id") and (run.out / r["account_id"] / "_account.json").exists()]
     try:
-        aws_db.update(run.out / run.settings["db_file"], run.out, accounts, run=summary)
+        aws_db.update(run.out / run.settings["db_file"], run.out, accounts, run=summary,
+                      status=lambda numbers: live_status(run.out, phase="database", database=numbers))
     except KeyboardInterrupt:
         print("\nStopped writing the database: accounts written so far are in it; the next run continues.",
               file=sys.stderr)
@@ -2365,7 +2437,7 @@ def main():
     p.add_argument("--types", nargs="+", help="only these types, e.g. ec2/instances")
     p.add_argument("--regions", nargs="+", help="regions for this run only")
     p.add_argument("--full", action="store_true", help="repeat every detail call, even for unchanged resources")
-    p.add_argument("--sweep", action="store_true", help="list every type, also those empty or without permission before")
+    p.add_argument("--sweep", action="store_true", help="list every type, also those empty before (no-permission ones stay skipped until `permissions --retry`)")
     p.add_argument("-y", "--yes", action="store_true", help="do not ask before syncing the accounts that can sign in")
     p.add_argument("-v", "--logs", action="store_true", help="show log lines and write _runs/<run>/run.log")
     p.set_defaults(func=cmd_sync)
@@ -2385,6 +2457,10 @@ def main():
     p.set_defaults(func=cmd_changes)
 
     args = parser.parse_args()
+    # Ctrl+C stops cleanly, also when started in the background (which ignores it) or by the OWL app.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, signal.default_int_handler)  # Windows: the OWL app's stop is a Ctrl+Break
     try:
         code = args.func(args) or 0
     except KeyboardInterrupt:

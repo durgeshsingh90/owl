@@ -415,15 +415,16 @@ def stale_accounts(db, out):
 class Bar:
     """One console line for this step: DB [###---] done/total, accounts, elapsed, ETA."""
 
-    def __init__(self, total, accounts):
+    def __init__(self, total, accounts, status=None):
         self.total, self.done, self.accounts, self.accounts_done = total, 0, accounts, 0
+        self.status = status  # called with the numbers on each show (the OWL app's live.json)
         self.started = time.monotonic()
         self.tty = sys.stderr.isatty()
         self.shown = 0.0
 
     def tick(self):
         self.done += 1
-        if time.monotonic() - self.shown >= (0.5 if self.tty else 30):
+        if time.monotonic() - self.shown >= (0.5 if self.tty else 2 if self.status else 30):
             self.show()
 
     def show(self, end=False):
@@ -437,6 +438,9 @@ class Bar:
         columns = shutil.get_terminal_size((120, 20)).columns - 1
         size = max(10, min(32, columns - len(text) - 9))
         line = f"DB    [{'#' * int(size * share)}{'-' * (size - int(size * share))}]  {text}"[:columns]
+        if self.status:
+            self.status({"done": self.done, "total": self.total, "accounts": self.accounts,
+                         "accounts_done": self.accounts_done, "elapsed": elapsed, "eta": eta})
         if self.tty:
             sys.stderr.write("\r\x1b[2K" + line + ("\n" if end else ""))
         else:
@@ -444,10 +448,10 @@ class Bar:
         sys.stderr.flush()
 
 
-def update(db_path, out, accounts=None, run=None, rebuild=False, only=False, quiet=False):
+def update(db_path, out, accounts=None, run=None, rebuild=False, only=False, quiet=False, status=None):
     """Bring the database up to date for these account folders and every stale one (only: just
     these), and record the run. quiet: say nothing when nothing changed. Returns (accounts
-    written, resources written or deleted)."""
+    written, resources written or deleted). status: called with the progress numbers."""
     if rebuild and db_path.exists():
         for suffix in ("", "-wal", "-shm"):
             Path(str(db_path) + suffix).unlink(missing_ok=True)
@@ -457,7 +461,7 @@ def update(db_path, out, accounts=None, run=None, rebuild=False, only=False, qui
         dirs.update({d.name: d for d in accounts or []})
         dirs = [dirs[k] for k in sorted(dirs)]
         plans = [(d, account_plan(db, d)) for d in dirs]
-        bar = Bar(sum(len(w) + len(x) for _, (w, x) in plans), len(plans))
+        bar = Bar(sum(len(w) + len(x) for _, (w, x) in plans), len(plans), status)
         if bar.total:
             print(f"Writing {bar.total:,} change(s) for {len(plans)} account(s) to {os.path.relpath(db_path)}. "
                   "Ctrl+C to stop.", file=sys.stderr)

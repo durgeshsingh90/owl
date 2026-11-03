@@ -207,11 +207,12 @@ class Net:
         for acl in self.nacls.values():
             for a in acl.get("Associations") or []:
                 self.subnet_nacl[a.get("SubnetId")] = acl
-        self.eni_by_ip, self.instance_enis = {}, collections.defaultdict(list)
+        # Private IPs repeat across accounts (nonp and prod often use the same CIDR): ip -> [ENIs].
+        self.enis_by_ip, self.instance_enis = collections.defaultdict(list), collections.defaultdict(list)
         for eni in self.enis.values():
-            for ip in [eni.get("PrivateIpAddress")] + [p.get("PrivateIpAddress") for p in eni.get("PrivateIpAddresses") or []]:
+            for ip in dict.fromkeys([eni.get("PrivateIpAddress")] + [p.get("PrivateIpAddress") for p in eni.get("PrivateIpAddresses") or []]):
                 if ip:
-                    self.eni_by_ip[ip] = eni
+                    self.enis_by_ip[ip].append(eni)
             if (eni.get("Attachment") or {}).get("InstanceId"):
                 self.instance_enis[eni["Attachment"]["InstanceId"]].append(eni)
         self.vpc_attachment = {}
@@ -231,6 +232,16 @@ class Net:
             if clb.get("DNSName"):
                 self.lb_by_dns[clb["DNSName"].lower().rstrip(".")] = clb
         self.attachments = {**self.tgw_atts, **self.tgw_vpc_atts}
+
+    def eni_at(self, ip, vpcs=(), account=None):
+        """The network interface with this private IP: in one of these VPCs, else in this account,
+        else the only one there is (None when it is ambiguous or unknown)."""
+        found = self.enis_by_ip.get(ip) or []
+        for test in (lambda e: e.get("VpcId") in vpcs, lambda e: e["_acct"] == account):
+            near = [e for e in found if test(e)]
+            if near:
+                return near[0]
+        return found[0] if len(found) == 1 else None
 
     def rtb_of(self, subnet_id):
         subnet = self.subnets.get(subnet_id) or {}
@@ -528,18 +539,19 @@ def lb_targets(net, lb):
     return out
 
 
-def target_eni(net, target):
+def target_eni(net, target, lb=None):
     target_id = str(target.get("Id") or "")
     if target_id.startswith("i-"):
         enis = net.instance_enis.get(target_id) or []
         return enis[0] if enis else None
-    return net.eni_by_ip.get(target_id)
+    lb = lb or {}
+    return net.eni_at(target_id, {lb.get("VpcId")}, lb.get("_acct"))  # an IP target sits in (or next to) the LB's VPC
 
 
 def lb_to_target_hops(net, lb, target, port, cfg, client_ip=INTERNET_IP):
     """From a load balancer to one of its targets; client_ip is who called the load balancer."""
     hops = []
-    eni = target_eni(net, target)
+    eni = target_eni(net, target, lb)
     if not eni:
         return [hop("target found in the inventory", UNKNOWN, f"target {target.get('Id')} is not a known network interface")], None
     t_subnet, t_ip = eni.get("SubnetId"), eni.get("PrivateIpAddress")
@@ -875,6 +887,8 @@ def forward_checks(net, ep, targets):
 
 
 def record_target(net, cfg, zone, private, rec):
+    # An answer's IP is looked up in the VPCs the private zone serves, then in the zone's account.
+    vpcs = {v.get("VPCId") for v in ((zone.get("_details") or {}).get("Zone") or {}).get("VPCs") or []}
     name = rec.get("Name", "").replace("\\052", "*").rstrip(".")
     alias = ((rec.get("AliasTarget") or {}).get("DNSName") or "").lower().rstrip(".")
     values = [v.get("Value") for v in rec.get("ResourceRecords") or []]
@@ -897,12 +911,12 @@ def record_target(net, cfg, zone, private, rec):
         lb = net.lb_by_dns.get(host)
         target, kind = (f"load balancer {label(lb)}", "load balancer") if lb else (f"CNAME {host}", "cname")
     elif values:
-        owners = [eni_owner(net, net.eni_by_ip[v], cfg) for v in values if v in net.eni_by_ip]
+        owners = [eni_owner(net, eni, cfg) for eni in (net.eni_at(v, vpcs, zone.get("_acct")) for v in values) if eni]
         target, kind = (", ".join(f"{o[0]} {o[1]}" for o in owners), "address") if owners else (", ".join(values), "address")
     lookup = rec.get("_lookup") or {}
     seen = []
     for address in lookup.get("addresses") or []:
-        eni = net.eni_by_ip.get(address)
+        eni = net.eni_at(address, vpcs, zone.get("_acct"))
         seen.append({"ip": address, "owner": " ".join(eni_owner(net, eni, cfg)) if eni else "not in the inventory"})
     note = None
     if lookup.get("status") in ("nxdomain", "timeout", "servfail", "no_answer"):
