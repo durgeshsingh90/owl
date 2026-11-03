@@ -202,3 +202,6 @@ details.change > :not(summary){margin-top:10px}
   .narrow label{flex-wrap:wrap}.narrow select{max-width:100%}
   .setting{grid-template-columns:1fr}
   .rail-foot span{display:none}}
+
+.mini-bar{display:inline-block;width:120px;height:6px;border-radius:3px;background:var(--line-soft);overflow:hidden;vertical-align:middle;margin-right:8px}
+.mini-bar span{display:block;height:100%;background:var(--accent)}

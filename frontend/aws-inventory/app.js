@@ -617,11 +617,29 @@
       <section class="tiles" aria-label="Progress">
         <div class="tile"><span>Elapsed</span><strong class="num">${clock(elapsed)}</strong><small>started ${esc(when(s.started))}</small></div>
         <div class="tile"><span>Total ETA</span><strong class="num">${s.phase === "sync" ? eta(s.eta) : "—"}</strong><small>from the last commands' pace</small></div>
-        <div class="tile"><span>Accounts</span><strong class="num">${number(A.done)} / ${number(A.total)}</strong><small>${number(A.running)} running now</small></div>
+        <div class="tile"><span>Accounts finished</span><strong class="num">${number(A.done)} / ${number(A.total)}</strong><small>${number(A.running)} syncing at the same time${A.total - A.done - A.running > 0 ? `, ${number(A.total - A.done - A.running)} waiting` : ""}</small></div>
         <div class="tile"><span>AWS workers</span><strong class="num">${W.limit ? `${number(W.active)} / ${number(W.limit)}` : "—"}</strong><small>more when the PC is free, fewer when busy</small></div>
       </section>
-      ${(s.current || []).length ? `<section class="card"><h2>Running now</h2><div class="chips">${s.current.map(p => `<span class="chip">${esc(p)}</span>`).join("")}</div></section>` : ""}
+      ${nowRunning(s.current || [], W)}
       ${output(data)}`;
+  }
+
+  // The accounts syncing in parallel, each with its own share of the list commands and resources.
+  function nowRunning(current, W) {
+    if (!current.length) return "";
+    const rows = current.map(c => typeof c === "string" ? {profile: c} : c);
+    return `<section class="card">
+      <div class="card-head"><h2>${plural(rows.length, "account")} syncing at the same time</h2>
+        <span class="muted">in parallel, sharing the ${W.limit ? number(W.limit) + " " : ""}AWS workers; the bars above add them all up</span></div>
+      <div class="table-box"><table><thead><tr><th>Account</th><th>List commands</th><th>Resources saved</th><th>Running for</th></tr></thead><tbody>
+        ${rows.map(c => `<tr>
+          <td><a href="#/accounts/${encodeURIComponent(c.profile)}"><strong>${esc(c.profile)}</strong></a></td>
+          <td>${c.total ? `<div class="mini-bar" role="progressbar" aria-label="${esc(c.profile)} list commands" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(Math.min(1, c.done / c.total) * 100)}"><span style="width:${(Math.min(1, c.done / c.total) * 100).toFixed(1)}%"></span></div>
+            <span class="num">${number(c.done)}/${number(c.total)}</span>` : "—"}</td>
+          <td class="num">${c.found != null ? `${number(c.saved)} of ${number(c.found)} found` : "—"}</td>
+          <td class="num">${c.seconds != null ? clock(c.seconds) : "—"}${c.usual ? ` <span class="muted">usually ${clock(c.usual)}</span>` : ""}</td>
+        </tr>`).join("")}
+      </tbody></table></div></section>`;
   }
 
   function output(data) {

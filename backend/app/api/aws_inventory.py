@@ -483,6 +483,9 @@ def sync_status():
     return {"running": running, "status": status}
 
 
+BAR_LINE = re.compile(r"^(?:List|Save|DB)\s+\[[#-]*\]")
+
+
 def tail(path, lines=60):
     try:
         with open(path, "rb") as f:
@@ -491,7 +494,10 @@ def tail(path, lines=60):
             text = f.read().decode("utf-8", "replace")
     except FileNotFoundError:
         return []
-    return [re.sub(r"\x1b\[[0-9;]*[A-Za-z]|\r", "", line) for line in text.splitlines()[-lines:]]
+    lines_ = (re.sub(r"\x1b\[[0-9;]*[A-Za-z]|\r", "", line) for line in text.splitlines())
+    # The List and Save bars are printed again every status_seconds when not in a terminal; the
+    # page draws them live above, so the output keeps the messages only.
+    return [line for line in lines_ if not BAR_LINE.match(line)][-lines:]
 
 
 @router.get("/sync")

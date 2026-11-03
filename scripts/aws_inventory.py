@@ -663,7 +663,9 @@ class Progress:
         self.window = collections.deque(maxlen=settings["eta_window"] + 1)
         self.work_total = 0
         self.work_done = 0
-        self.samples = collections.deque(maxlen=15)  # (time, work_done), one per redraw
+        self.samples = collections.deque()  # (time, work_done) over the last 5 minutes, for the save rate
+        # Per account, for the OWL app's "Running now": list commands done/total, resources found and saved.
+        self.per_account = collections.defaultdict(lambda: {"done": 0, "total": 0, "found": 0, "saved": 0})
         self.started = time.monotonic()
         self.accounts_total = accounts_total
         self.accounts_done = 0
@@ -680,22 +682,30 @@ class Progress:
         self.halt = threading.Event()
         self.thread = threading.Thread(target=self.loop, name="progress", daemon=True)
 
-    def add_total(self, n):
+    def add_total(self, n, profile=None):
         with self.lock:
             self.total += n
+            if profile:
+                self.per_account[profile]["total"] += n
 
-    def tick(self):
+    def tick(self, profile=None):
         with self.lock:
             self.done += 1
             self.window.append(time.monotonic())
+            if profile:
+                self.per_account[profile]["done"] += 1
 
-    def add_work(self, n):
+    def add_work(self, n, profile=None):
         with self.lock:
             self.work_total += n
+            if profile:
+                self.per_account[profile]["found"] += n
 
-    def tick_work(self, n=1):
+    def tick_work(self, n=1, profile=None):
         with self.lock:
             self.work_done += n
+            if profile:
+                self.per_account[profile]["saved"] += n
 
     def account_done(self):
         with self.lock:
@@ -712,6 +722,8 @@ class Progress:
         list_eta = 0 if listed else ((total - self.done) / rate if rate else None)
 
         self.samples.append((now, self.work_done))
+        while len(self.samples) > 2 and self.samples[0][0] < now - 300:
+            self.samples.popleft()
         (t0, w0), (t1, w1) = self.samples[0], self.samples[-1]
         work_rate = (w1 - w0) / (t1 - t0) if t1 > t0 and w1 > w0 else None
         # Work still to come from the commands not listed yet, at the work per command so far.
@@ -1170,7 +1182,7 @@ def scan_scope(run, aws, account, label, region, rtypes):
                         errors.append({"scope": label, "type": rt["key"], "status": status, "code": "ParentFailed",
                                        "message": f"{parent} could not be listed"})
                         if run.progress:
-                            run.progress.tick()
+                            run.progress.tick(account["profile"])
                         continue
                     if run.stop.is_set():
                         raise Stopped()
@@ -1186,12 +1198,12 @@ def scan_scope(run, aws, account, label, region, rtypes):
                 for f in finished:
                     rt, path = running.pop(f)
                     if run.progress and not isinstance(f.exception(), Stopped):
-                        run.progress.tick()
+                        run.progress.tick(account["profile"])
                     try:
                         count, denials[rt["key"]] = f.result()
                         done[rt["key"]] = path
                         if run.progress:
-                            run.progress.add_work(count)
+                            run.progress.add_work(count, account["profile"])
                     except AwsError as e:
                         status = error_status(e.code)
                         errors.append({"scope": label, "type": rt["key"], "status": status, "code": e.code, "message": e.message[:500]})
@@ -1240,7 +1252,7 @@ def save_scope(run, account, label, manifest, manifest_path, done, errors, denia
                 add_dns_lookups(run, {rid: item})
             entries[rid] = save_resource(run, account, label, rt, rid, item, line["detail_ts"], prev.get(rid), now, changes)
             if run.progress:
-                run.progress.tick_work()
+                run.progress.tick_work(profile=account["profile"])
         for rid in set(prev) - set(entries):
             archive(run, account, prev[rid]["file"])
             (acct_dir / prev[rid]["file"]).unlink(missing_ok=True)
@@ -1301,7 +1313,7 @@ def scan_account(run, profile, account_cfg, conn):
         if account_id in run.seen_accounts:
             result["duplicate_of"] = run.seen_accounts[account_id]
             if run.progress:
-                run.progress.add_total(-run.planned.get(profile, 0))
+                run.progress.add_total(-run.planned.get(profile, 0), profile)
             return result
         run.seen_accounts[account_id] = profile
         started = run.running[profile] = time.monotonic()
@@ -1321,7 +1333,7 @@ def scan_account(run, profile, account_cfg, conn):
         scopes, result["skipped_types"], result["denied_skipped"], sweep = account_plan(run, account_id, regions, retry)
         result["sweep"] = sweep
         if run.progress:
-            run.progress.add_total(sum(len(s[2]) for s in scopes) - run.planned.get(profile, 0))
+            run.progress.add_total(sum(len(s[2]) for s in scopes) - run.planned.get(profile, 0), profile)
 
         with cf.ThreadPoolExecutor(run.settings["region_workers"]) as pool:
             futures = {pool.submit(scan_scope, run, aws, account, *s): s[0] for s in scopes}
@@ -1940,8 +1952,15 @@ def sync(args, out):
         sys.exit("No resource types match --services/--types.")
     logs = args.logs or run.settings["logs"]
     progress = run.progress = Progress(run.settings, len(ready), run.gate, run.tuner)
-    progress.status = lambda numbers: live_status(run.out, phase="sync", run=run.id, **numbers,
-                                                  current=sorted(run.running))
+    def status(numbers):
+        # The accounts syncing at the same time, each with its own progress.
+        with run.lock:
+            started = dict(run.running)
+        now = time.monotonic()
+        current = [{"profile": p, "seconds": round(now - t), "usual": accounts.get(p, {}).get("avg_seconds"),
+                    **progress.per_account[p]} for p, t in sorted(started.items())]
+        live_status(run.out, phase="sync", run=run.id, **numbers, current=current)
+    progress.status = status
     setup_logging(logs, run.run_dir / "run.log" if logs else None, progress)
     for p in profiles:
         if conns[p]["status"] != "ok":
@@ -1960,7 +1979,7 @@ def sync(args, out):
         skipped_types += skipped
         denied_types += denied
         sweeps += sweep
-        progress.add_total(run.planned[p])
+        progress.add_total(run.planned[p], p)
 
     def overall():
         """Average sync time over every account that has one."""

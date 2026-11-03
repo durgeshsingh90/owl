@@ -331,6 +331,19 @@ class AwsInventoryTests(unittest.TestCase):
             self.assertIn("AWS Inventory", page.text)
 
 
+class SyncOutputTests(unittest.TestCase):
+    def test_bars_are_left_out_of_the_output(self):
+        from app.api.aws_inventory import tail
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "app-sync.log"
+            log.write_text("Syncing 2 account(s): 10 list commands.\n"
+                           "List  [###-----]  3/10   30%  accounts 0/2  workers 4/8  ETA 00:00:20\n"
+                           "Save  [--------]  1/~40    2%  elapsed 00:00:03  total ETA estimating\n"
+                           "\x1b[2KDone in 00:00:09: 2/2 accounts.\n"
+                           "DB    [########]  45/45  100%  accounts 2/2  elapsed 00:00:00  ETA 00:00:00\n")
+            self.assertEqual(tail(log), ["Syncing 2 account(s): 10 list commands.", "Done in 00:00:09: 2/2 accounts."])
+
+
 class SuffixAliasTests(unittest.TestCase):
     """aws_compare.py reads an EKS cluster's differing random suffix as the same name."""
 
